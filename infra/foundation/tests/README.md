@@ -14,8 +14,9 @@ only the variables and outputs that the issue defines.
 - Terraform `>= 1.14.0` and [TFLint](https://github.com/terraform-linters/tflint) for `0.static.sh`.
 - For `1.e2e.sh` also the AWS CLI v2, `kubectl`, and Helm `>= 3.8` (OCI charts).
 - An S3 bucket for the Terraform state.
+- The EC2 Spot service-linked role in the account. It exists once spot has been used in the account; otherwise create it once with `aws iam create-service-linked-role --aws-service-name spot.amazonaws.com`.
 - An IAM principal that can create a VPC, an EKS cluster, IAM roles, an SQS queue and EventBridge rules, and send messages to SQS. The test passes this principal as the cluster admin, so `ADMIN_PRINCIPAL_ARN` must be the principal that runs the test (for an assumed role, the IAM role ARN).
-- A Region where the account has no cell with the same `NAME`, and spot capacity for at least one of the instance types in `E2E_INSTANCE_TYPES`.
+- A `NAME` that no other cell in the account uses, in any Region (IAM role and policy names include it and are global to the account), and spot capacity for at least one of the instance types in `E2E_INSTANCE_TYPES`.
 
 `1.e2e.sh` creates billable resources (EKS control plane, two `m7i.large` system nodes, one NAT gateway, one or two small spot instances) and removes them at the end, also when a step fails.
 
@@ -60,7 +61,7 @@ cd infra/foundation/tests
 ./1.e2e.sh 2>&1 | tee "/tmp/foundation-e2e-$(date +%Y%m%d%H%M%S).log"
 ```
 
-The state is stored under the key `distai-platform/${NAME}/foundation`.
+The state is stored under the key `distai-platform/${AWS_REGION}/${NAME}/foundation`.
 
 Optional variables:
 
