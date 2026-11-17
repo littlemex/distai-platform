@@ -26,7 +26,7 @@ locals {
       source      = "aws.ec2"
       detail_type = "EC2 Instance State-change Notification"
     }
-    "capacity-reservation-interruption" = {
+    "capacity-reservation" = {
       source      = "aws.ec2"
       detail_type = "EC2 Capacity Reservation Instance Interruption Warning"
     }
@@ -138,6 +138,26 @@ data "aws_iam_policy_document" "karpenter_controller_assume" {
       test     = "StringEquals"
       variable = "aws:SourceAccount"
       values   = [local.account_id]
+    }
+
+    # EKS Pod Identity sets these session tags; only the Karpenter service
+    # account of this cluster can assume the role.
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/eks-cluster-arn"
+      values   = [local.cluster_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/kubernetes-namespace"
+      values   = [local.karpenter_namespace]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/kubernetes-service-account"
+      values   = [local.karpenter_service_account]
     }
   }
 }
@@ -514,7 +534,7 @@ resource "aws_iam_policy" "karpenter_controller" {
   for_each = local.karpenter_controller_policies
 
   name        = "${var.name}-karpenter-${each.key}"
-  description = "Karpenter v1.15 controller permissions (${each.key}) for cluster ${var.name}"
+  description = "Karpenter controller permissions (${each.key}) for cluster ${var.name}"
   policy      = each.value
 }
 

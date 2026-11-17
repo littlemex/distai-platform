@@ -53,7 +53,7 @@ export TF_DATA_DIR="${WORK_DIR}/.terraform"
 export KUBECONFIG="${WORK_DIR}/kubeconfig"
 export TF_IN_AUTOMATION=1
 
-STATE_KEY="distai-platform/${NAME}/foundation"
+STATE_KEY="distai-platform/${AWS_REGION}/${NAME}/foundation"
 RUN_ID="e2e-$(date -u +%Y%m%d%H%M%S)"
 TEST_TAG_KEY="distai-platform-e2e"
 NODEPOOL="e2e-spot"
@@ -259,6 +259,7 @@ tf init -input=false -reconfigure \
   -backend-config="bucket=${STATE_BUCKET}" \
   -backend-config="key=${STATE_KEY}" \
   -backend-config="region=${STATE_REGION}" \
+  -backend-config="use_lockfile=true" \
   || fail "terraform init with the S3 backend (key ${STATE_KEY})"
 pass "terraform init with the S3 backend, key ${STATE_KEY}"
 

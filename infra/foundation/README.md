@@ -18,34 +18,36 @@
 - AWS CLI v2 and `bash` on the machine that runs `terraform destroy` (the teardown guard calls the AWS CLI), and `kubectl` to use the cluster.
 - AWS credentials allowed to create VPC, EC2, EKS, IAM, SQS, EventBridge and CloudWatch Logs resources in the target account and Region.
 - An S3 bucket for Terraform state, in a Region of your choice. State locking uses the S3 lock file (`use_lockfile`), so no DynamoDB table is needed.
+- A cell name that no other cell in the account uses, in any Region. IAM role and policy names include it, and IAM names are global to the account.
+- The EC2 Spot service-linked role, if Karpenter is to launch spot instances. It exists once spot has been used in the account; otherwise create it once with `aws iam create-service-linked-role --aws-service-name spot.amazonaws.com`. The Karpenter controller role is not allowed to create it.
 - For the Argo CD capability only: an IAM Identity Center instance and the IDs of the groups that become Argo CD admins.
 
 ## Usage
 
-Set the values for your environment first. `API_CIDR` is the network allowed to reach the public Kubernetes API endpoint (here: the public address of this machine). `ADMIN_ROLE_ARN` is the IAM role you are signed in with, which gets cluster admin through an access entry; Terraform does not give its own identity access implicitly. If you use an IAM user, set `ADMIN_ROLE_ARN` to the user ARN instead.
+Set the values for your environment first. `MY_CIDR` is the network allowed to reach the public Kubernetes API endpoint (here: the public address of this machine). `ADMIN_PRINCIPAL_ARN` is the IAM role you are signed in with, which gets cluster admin through an access entry; Terraform does not give its own identity access implicitly. If you use an IAM user, set `ADMIN_PRINCIPAL_ARN` to the user ARN instead.
 
 ```bash
-export CELL_NAME=example-cell
+export NAME=example-cell
 export AWS_REGION=us-east-1
-export TF_STATE_BUCKET=example-terraform-state-bucket
-export TF_STATE_REGION=us-east-1
-export API_CIDR="$(curl -fsS https://checkip.amazonaws.com)/32"
+export STATE_BUCKET=example-terraform-state-bucket
+export STATE_REGION=us-east-1
+export MY_CIDR="$(curl -fsS https://checkip.amazonaws.com)/32"
 export ADMIN_ROLE_NAME="$(aws sts get-caller-identity --query Arn --output text | cut -d/ -f2)"
-export ADMIN_ROLE_ARN="$(aws iam get-role --role-name "$ADMIN_ROLE_NAME" --query Role.Arn --output text)"
+export ADMIN_PRINCIPAL_ARN="$(aws iam get-role --role-name "$ADMIN_ROLE_NAME" --query Role.Arn --output text)"
 ```
 
-From the repository root, pass the values to Terraform as variables and initialize the S3 backend. The state key is `distai-platform/<name>/foundation`.
+From the repository root, pass the values to Terraform as variables and initialize the S3 backend. The state key is `distai-platform/<region>/<name>/foundation`.
 
 ```bash
-export TF_VAR_name="$CELL_NAME"
+export TF_VAR_name="$NAME"
 export TF_VAR_region="$AWS_REGION"
-export TF_VAR_endpoint_public_access_cidrs="[\"${API_CIDR}\"]"
-export TF_VAR_admin_principal_arns="[\"${ADMIN_ROLE_ARN}\"]"
+export TF_VAR_endpoint_public_access_cidrs="[\"${MY_CIDR}\"]"
+export TF_VAR_admin_principal_arns="[\"${ADMIN_PRINCIPAL_ARN}\"]"
 cd infra/foundation
 terraform init \
-  -backend-config="bucket=${TF_STATE_BUCKET}" \
-  -backend-config="key=distai-platform/${CELL_NAME}/foundation" \
-  -backend-config="region=${TF_STATE_REGION}" \
+  -backend-config="bucket=${STATE_BUCKET}" \
+  -backend-config="key=distai-platform/${AWS_REGION}/${NAME}/foundation" \
+  -backend-config="region=${STATE_REGION}" \
   -backend-config="use_lockfile=true"
 ```
 
@@ -58,10 +60,10 @@ terraform apply
 Connect to the cluster and check that two system nodes are Ready and the four add-ons are `ACTIVE`.
 
 ```bash
-aws eks update-kubeconfig --name "$CELL_NAME" --region "$AWS_REGION"
+aws eks update-kubeconfig --name "$NAME" --region "$AWS_REGION"
 kubectl get nodes
 for addon in vpc-cni kube-proxy eks-pod-identity-agent coredns; do
-  aws eks describe-addon --cluster-name "$CELL_NAME" --region "$AWS_REGION" \
+  aws eks describe-addon --cluster-name "$NAME" --region "$AWS_REGION" \
     --addon-name "$addon" --query 'addon.[addonName,status]' --output text
 done
 ```
@@ -77,9 +79,9 @@ Instead of `TF_VAR_*` variables you can keep the values in a `terraform.tfvars` 
 | `kubernetes_version` | `string` | `"1.37"` | EKS version; must have an entry in `local.addon_versions` in `eks.tf` |
 | `vpc_cidr` | `string` | `"10.0.0.0/16"` | VPC CIDR, prefix length /16 to /20 |
 | `single_nat_gateway` | `bool` | `true` | One NAT gateway for the VPC (test cells) instead of one per Availability Zone |
-| `endpoint_public_access_cidrs` | `list(string)` | (required) | IPv4 CIDRs allowed to reach the public API endpoint; must not be empty and must not contain `0.0.0.0/0` |
+| `endpoint_public_access_cidrs` | `list(string)` | (required) | IPv4 CIDRs allowed to reach the public API endpoint; must not be empty, and each entry must be a network address with prefix length `/8` or longer |
 | `admin_principal_arns` | `list(string)` | `[]` | IAM role or user ARNs given `AmazonEKSClusterAdminPolicy` through access entries |
-| `system_node_group` | `object({ instance_types = optional(list(string), ["m7i.large"]), size = optional(number, 2) })` | `{}` | System node group; `size` is the fixed node count (1 to 10) |
+| `system_node_group` | `object({ instance_types = optional(list(string), ["m7i.large"]), size = optional(number, 2) })` | `{}` | System node group; x86_64 instance types only (the AMI type is `AL2023_x86_64_STANDARD`); `size` is the fixed node count (1 or more) |
 | `argocd` | `object({ idc_instance_arn = string, idc_region = string, admin_group_ids = list(string) })` | `null` | Create the managed Argo CD capability when set |
 | `tags` | `map(string)` | `{}` | Tags for every resource, applied through the provider's `default_tags` |
 
@@ -110,10 +112,10 @@ terraform destroy
 Run it with the same variables as `apply`. Karpenter is installed outside Terraform, so the instances it launches are not in this state, and if they are still running when the network is destroyed, their network interfaces block the deletion of the subnets and of the cluster security group. The teardown guard (`teardown.tf`, `scripts/teardown-guard.sh`) handles this during `terraform destroy` in this order:
 
 1. Terraform detaches the permission policies of the Karpenter controller role, so a running Karpenter can no longer launch instances.
-2. The guard terminates every instance in the cell's VPC that has the tag `karpenter.sh/nodepool` and the tag `eks:eks-cluster-name = <name>`, waits until they are terminated (repeating up to five rounds), and then deletes detached VPC CNI network interfaces in the VPC (description `aws-K8S-*`), launch templates tagged `karpenter.k8s.aws/cluster = <name>`, and the instance profiles Karpenter created for the node role.
+2. The guard terminates every instance in the cell's VPC that has the tag `karpenter.sh/nodepool` and the tag `eks:eks-cluster-name = <name>`, waits until they are terminated (repeating up to five rounds), and then deletes detached VPC CNI network interfaces in the VPC (description `aws-K8S-*`), launch templates tagged `karpenter.k8s.aws/cluster = <name>`, and the instance profiles that hold the node role and carry Karpenter's tag `kubernetes.io/cluster/<name> = owned`.
 3. Terraform destroys the cluster, the node role and the network.
 
-If the guard fails, `terraform destroy` stops before any network resource is removed; fix the cause and run `terraform destroy` again. The guard runs with the credentials of the caller, which need `ec2:DescribeInstances`, `ec2:TerminateInstances`, `ec2:DescribeNetworkInterfaces`, `ec2:DeleteNetworkInterface`, `ec2:DescribeLaunchTemplates`, `ec2:DeleteLaunchTemplate`, `iam:ListInstanceProfilesForRole`, `iam:RemoveRoleFromInstanceProfile` and `iam:DeleteInstanceProfile`.
+If the guard fails, `terraform destroy` stops before any network resource is removed; fix the cause and run `terraform destroy` again. The guard first checks that the AWS CLI acts on the same account as Terraform and stops otherwise. It runs with the credentials of the caller, which need `sts:GetCallerIdentity`, `ec2:DescribeInstances`, `ec2:TerminateInstances`, `ec2:DescribeNetworkInterfaces`, `ec2:DeleteNetworkInterface`, `ec2:DescribeLaunchTemplates`, `ec2:DeleteLaunchTemplate`, `iam:ListInstanceProfilesForRole`, `iam:ListInstanceProfileTags`, `iam:RemoveRoleFromInstanceProfile` and `iam:DeleteInstanceProfile`.
 
 The guard removes only what Karpenter leaves in AWS. Resources that in-cluster controllers create from Kubernetes objects (load balancers from `Service` or `Ingress` objects, EBS volumes from `PersistentVolumeClaim` objects) belong to the layers that create those objects and must be removed there before the foundation is destroyed.
 
@@ -123,7 +125,7 @@ The guard removes only what Karpenter leaves in AWS. Resources that in-cluster c
 - **Control plane placement.** The control plane and the system node group use the private subnets except those in Availability Zones that EKS does not support for the control plane (`use1-az3`, `usw1-az2`, `cac1-az3`, from the Amazon EKS User Guide). Karpenter can still use every private subnet.
 - **Add-on order.** The cluster is created with `bootstrap_self_managed_addons = false`, so every add-on is an EKS managed add-on owned by this layer. `vpc-cni`, `kube-proxy` and `eks-pod-identity-agent` are installed before the system node group so that its nodes become Ready; `coredns` is installed after it because it needs nodes to schedule on.
 - **Security group.** Nodes use the cluster security group that EKS creates; it allows all traffic between nodes and the control plane. Karpenter selects it through the discovery tag added by `aws_ec2_tag`.
-- **IAM.** The controller policies are those of the Karpenter v1.15 reference CloudFormation template, split into six customer managed policies. The interruption queue accepts messages only from the five EventBridge rules of this cell (`aws:SourceArn`) and only over TLS. The system and Karpenter node roles have `AmazonEKSWorkerNodePolicy`, `AmazonEKS_CNI_Policy`, `AmazonEC2ContainerRegistryPullOnly` and `AmazonSSMManagedInstanceCore` (access through Session Manager instead of SSH).
+- **IAM.** The controller policies are those of the Karpenter v1.15 reference CloudFormation template, split into six customer managed policies. The interruption queue accepts messages from EventBridge only for the five rules of this cell (`aws:SourceArn`), and only over TLS; IAM principals of the account that have `sqs:SendMessage` in their own policies can still send to it (the end-to-end test does). The system and Karpenter node roles have `AmazonEKSWorkerNodePolicy`, `AmazonEKS_CNI_Policy`, `AmazonEC2ContainerRegistryPullOnly` and `AmazonSSMManagedInstanceCore` (access through Session Manager instead of SSH).
 - **Instance metadata.** Nodes use AL2023 AMIs, which require IMDSv2.
 - **Argo CD.** `aws_eks_capability` with type `ARGOCD`, signing in through IAM Identity Center; `admin_group_ids` map to the Argo CD `ADMIN` role. The capability role has no permission policies; EKS gives the capability access to its own cluster.
 

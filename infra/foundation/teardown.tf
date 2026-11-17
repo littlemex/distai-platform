@@ -23,6 +23,7 @@
 resource "terraform_data" "teardown_guard" {
   input = {
     cluster_name   = aws_eks_cluster.this.name
+    account_id     = local.account_id
     region         = var.region
     vpc_id         = aws_vpc.this.id
     node_role_name = aws_iam_role.karpenter_node.name
@@ -37,6 +38,7 @@ resource "terraform_data" "teardown_guard" {
     environment = {
       GUARD_SCRIPT   = self.input.script
       CLUSTER_NAME   = self.input.cluster_name
+      ACCOUNT_ID     = self.input.account_id
       AWS_REGION     = self.input.region
       VPC_ID         = self.input.vpc_id
       NODE_ROLE_NAME = self.input.node_role_name

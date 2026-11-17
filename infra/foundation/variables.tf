@@ -47,7 +47,7 @@ variable "single_nat_gateway" {
 }
 
 variable "endpoint_public_access_cidrs" {
-  description = "IPv4 CIDRs allowed to reach the public Kubernetes API endpoint. Required and non-empty; 0.0.0.0/0 is rejected. Authentication still goes through IAM and EKS access entries."
+  description = "IPv4 CIDRs allowed to reach the public Kubernetes API endpoint. Required and non-empty; each entry must be a network address with prefix length /8 or longer, so 0.0.0.0/0 is rejected. Authentication still goes through IAM and EKS access entries."
   type        = list(string)
 
   validation {
@@ -61,8 +61,11 @@ variable "endpoint_public_access_cidrs" {
   }
 
   validation {
-    condition     = !contains(var.endpoint_public_access_cidrs, "0.0.0.0/0")
-    error_message = "endpoint_public_access_cidrs must not contain 0.0.0.0/0; list the networks that need the API."
+    condition = alltrue([
+      for c in var.endpoint_public_access_cidrs :
+      try(tonumber(split("/", c)[1]) >= 8 && cidrsubnet(c, 0, 0) == c, false)
+    ])
+    error_message = "Every entry of endpoint_public_access_cidrs must be a network address with a prefix length of /8 or longer (0.0.0.0/0 and other very wide ranges are rejected); list the networks that need the API."
   }
 }
 
@@ -83,7 +86,7 @@ variable "admin_principal_arns" {
 }
 
 variable "system_node_group" {
-  description = "System managed node group for controllers (Karpenter, CoreDNS and other critical add-ons). Nodes carry the taint CriticalAddonsOnly=true:NoSchedule."
+  description = "System managed node group for controllers (Karpenter, CoreDNS and other critical add-ons). Nodes carry the taint CriticalAddonsOnly=true:NoSchedule. x86_64 instance types only (AMI type AL2023_x86_64_STANDARD)."
   type = object({
     instance_types = optional(list(string), ["m7i.large"])
     size           = optional(number, 2)
@@ -97,8 +100,8 @@ variable "system_node_group" {
   }
 
   validation {
-    condition     = var.system_node_group.size >= 1 && var.system_node_group.size <= 10 && floor(var.system_node_group.size) == var.system_node_group.size
-    error_message = "system_node_group.size must be a whole number between 1 and 10."
+    condition     = var.system_node_group.size >= 1 && floor(var.system_node_group.size) == var.system_node_group.size
+    error_message = "system_node_group.size must be a whole number of at least 1."
   }
 }
 
