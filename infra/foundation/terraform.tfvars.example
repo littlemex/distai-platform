@@ -1,0 +1,32 @@
+# Copy to terraform.tfvars and replace every value. The values below are
+# documentation placeholders (RFC 5737 addresses, the 111122223333 example
+# account), not working values.
+name   = "example-cell"
+region = "us-east-1"
+
+endpoint_public_access_cidrs = ["192.0.2.0/24"]
+
+admin_principal_arns = [
+  "arn:aws:iam::111122223333:role/ExampleAdmin",
+]
+
+# Optional.
+# kubernetes_version = "1.37"
+# vpc_cidr           = "10.0.0.0/16"
+# single_nat_gateway = true
+#
+# system_node_group = {
+#   instance_types = ["m7i.large"]
+#   size           = 2
+# }
+#
+# Hub cells only: create the managed Argo CD capability.
+# argocd = {
+#   idc_instance_arn = "arn:aws:sso:::instance/ssoins-0123456789abcdef"
+#   idc_region       = "us-east-1"
+#   admin_group_ids  = ["00000000-0000-0000-0000-000000000000"]
+# }
+
+tags = {
+  "distai-platform/cell" = "example-cell"
+}
