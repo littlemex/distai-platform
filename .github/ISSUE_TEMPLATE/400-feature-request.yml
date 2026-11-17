@@ -6,8 +6,8 @@ body:
   - type: markdown
     attributes:
       value: >
-        Thank you for suggesting a feature! For major changes that affect the platform's
-        architecture, state layout or conventions, please use the
+        Thank you for suggesting a feature! For major changes that affect the project's
+        architecture or direction, please consider using the
         [RFC template](https://github.com/littlemex/distai-platform/issues/new?template=600-RFC.yml) instead.
   - type: textarea
     id: description
@@ -15,7 +15,7 @@ body:
       label: Feature Description & Motivation
       description: Describe the feature you'd like and why it would be useful.
       placeholder: |
-        What problem does this feature solve? Who would benefit from it? If it came from a measurement, link the evidence.
+        What problem does this feature solve? Who would benefit from it?
     validations:
       required: true
   - type: dropdown
@@ -24,36 +24,15 @@ body:
       label: Category
       description: What category best describes this feature request?
       options:
-        - Cluster foundation (VPC, EKS, Karpenter)
-        - Node pools and accelerators (GPU, Neuron, EFA, Capacity Blocks)
-        - Storage
-        - Identity and access
-        - Observability
-        - Scheduling (Kueue, training operators)
-        - Probes and validation
-        - Workshop
-        - Deep-dive documentation
+        - New architecture reference
+        - New test case
+        - Enhancement to existing test case
+        - AMI / container image
+        - Validation / observability tooling
+        - Micro-benchmark
+        - Documentation
         - CI/CD improvement
         - Other
-    validations:
-      required: true
-  - type: dropdown
-    id: default
-    attributes:
-      label: Default State
-      description: Should the feature be always on, or optional? If optional, on or off by default?
-      options:
-        - Always on
-        - Optional, on by default
-        - Optional, off by default
-        - Not sure
-    validations:
-      required: true
-  - type: textarea
-    id: acceptance
-    attributes:
-      label: Acceptance Criteria
-      description: What must be true, and verified on a real cluster, for this to be done?
     validations:
       required: true
   - type: textarea

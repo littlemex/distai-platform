@@ -8,7 +8,7 @@ body:
     attributes:
       label: Failing Workflow
       description: Name of the failing GitHub Actions workflow.
-      placeholder: e.g., "Terraform checks" or "Close inactive issues"
+      placeholder: e.g., "Run Tests" or "Build and Push Container"
     validations:
       required: true
   - type: textarea
@@ -16,7 +16,7 @@ body:
     attributes:
       label: Failing Job / Matrix Entry
       description: Which specific job or matrix configuration is failing?
-      placeholder: e.g., "terraform-validate (infra/eks)"
+      placeholder: e.g., "test (ubuntu-latest, python-3.10)" or "build-container / p5"
     validations:
       required: true
   - type: input

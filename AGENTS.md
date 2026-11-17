@@ -12,9 +12,20 @@
 
 All work, including small fixes, is tracked by an issue and lands through a
 pull request against `main`. There is no hotfix exception and no direct push
-to `main`. The issue states the motivation and the acceptance criteria; the
-orchestrator adds the roles (section 2) once the maintainer has agreed to the
-plan. The pull request links the issue with `Fixes #<n>` or `Relates to #<n>`.
+to `main`. Issues and pull requests use the repository's templates as they
+are. The issue states the motivation and the acceptance criteria in its
+description field and the alternatives in `Alternatives Considered`; the
+orchestrator adds the roles (section 2) under `Additional Context` once the
+maintainer has agreed to the plan. The pull request links the issue with
+`Fixes #<n>` or `Relates to #<n>`.
+
+### Writing `## Changes`
+
+Each item under `## Changes` gives, for one decision: **What** changed,
+**Why** it is needed, the **Caveat** a user has to know, and the
+**Alternative** that was weighed, with its pro and con. A reviewer must be
+able to see from the pull request alone which other designs were considered
+and why this one was chosen.
 
 ### Duplicate-work checks
 
@@ -133,8 +144,8 @@ Real-machine verification runs on the test cluster, which may be destroyed
 and recreated. It never runs on a shared cluster unless the maintainer has
 agreed to it in the issue.
 
-Defaults for new features follow one rule, recorded as the issue's
-**Default State**:
+Defaults for new features follow one rule; the issue states which row
+applies:
 
 | Kind of feature | Default | Example |
 | --- | --- | --- |

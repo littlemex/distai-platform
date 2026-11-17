@@ -33,18 +33,11 @@ body:
       label: Impact & Scope
       description: What parts of the project are affected? Are there any breaking changes?
       placeholder: |
-        - Affected areas: [e.g., infra/eks state layout, node pools, workshop, CI]
+        - Affected areas: [e.g., test cases, architectures, CI/CD]
         - Breaking changes: [yes/no — describe if yes]
         - Migration needed: [yes/no — describe if yes]
     validations:
       required: false
-  - type: textarea
-    id: acceptance
-    attributes:
-      label: Acceptance Criteria
-      description: What must be true, and verified on a real cluster, for this to be done?
-    validations:
-      required: true
   - type: textarea
     id: alternatives
     attributes:

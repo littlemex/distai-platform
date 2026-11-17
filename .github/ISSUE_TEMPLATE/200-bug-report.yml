@@ -9,9 +9,8 @@ body:
         #### Before submitting a bug report, please make sure you have searched [existing issues](https://github.com/littlemex/distai-platform/issues).
 
 
-        **IMPORTANT:** Please redact any access keys, secret keys, session tokens, account IDs,
-        IP addresses, cluster names or other sensitive information from your bug report and log output.
-        Report security vulnerabilities privately as described in [SECURITY.md](https://github.com/littlemex/distai-platform/blob/main/SECURITY.md), not in an issue.
+        **IMPORTANT:** Please redact any access keys, secret keys, session tokens,
+        or other sensitive information from your bug report and log output.
   - type: checkboxes
     id: prerequisites
     attributes:
@@ -28,15 +27,16 @@ body:
       description: >
         Provide details about your environment. Fill in the relevant fields below.
       value: |
-        - Commit or tag of this repository: [e.g., v0.1.0 or a commit SHA]
-        - AWS Region: [e.g., ap-northeast-1]
-        - Amazon EKS version: [e.g., 1.35]
-        - Terraform version: [e.g., 1.14.0]
-        - Karpenter version: [e.g., 1.8.0]
-        - Node pool and instance type: [e.g., gpu-l40s / g6e.12xlarge]
-        - Number of nodes: [e.g., 2]
-        - Accelerator stack (if applicable): [e.g., GPU Operator 25.x, Neuron SDK 2.x, EFA installer 1.x]
-        - Workload and container image (if applicable): [e.g., vLLM 0.x, pinned image digest]
+        - AWS Service: [e.g., SageMaker HyperPod / ParallelCluster / EKS / EC2]
+        - Instance type: [e.g., p5.48xlarge]
+        - Number of nodes: [e.g., 4]
+        - OS / AMI: [e.g., DLAmI Ubuntu 22.04]
+        - Training framework: [e.g., PyTorch 2.3, Megatron-LM, NeMo, DeepSpeed]
+        - CUDA / Driver version: [e.g., CUDA 12.4 / Driver 550.xx]
+        - NCCL version: [e.g., 2.21.5]
+        - EFA installer version: [e.g., 1.30.0]
+        - Container image (if applicable): [e.g., nvcr.io/nvidia/pytorch:24.04-py3]
+        - Scheduler (if applicable): [e.g., Slurm 23.11]
     validations:
       required: true
   - type: textarea
@@ -56,16 +56,9 @@ body:
       label: Steps to Reproduce
       description: Provide the steps to reproduce the bug.
       placeholder: |
-        1. Run ...
+        1. Run script ...
         2. With configuration ...
         3. See error ...
-    validations:
-      required: true
-  - type: textarea
-    id: acceptance
-    attributes:
-      label: Acceptance Criteria
-      description: What must be true, and verified on a real cluster, for this to be done?
     validations:
       required: true
   - type: textarea

@@ -1,6 +1,6 @@
 ## Purpose
 
-<!-- Link related issues using "Fixes #123" or "Relates to #123". Every pull request starts from an issue. -->
+<!-- Link related issues using "Fixes #123" or "Relates to #123" -->
 
 ## Changes
 
@@ -10,13 +10,12 @@
 
 ## Test Plan
 
-<!-- Describe how you tested these changes. Commands must be copy-pasteable: set environment values with export at the top and refer to them as variables. -->
+<!-- Describe how you tested these changes -->
 
 **Environment:**
 
-- AWS Region:
-- Amazon EKS version:
-- Node pool and instance type:
+- AWS Service:
+- Instance type:
 - Number of nodes:
 
 **Test commands:**
@@ -29,42 +28,42 @@
 
 <!--
 REQUIRED for functional changes: paste evidence of an end-to-end run on a
-real AWS environment (apply output, workload output, metrics, relevant logs).
-Validate, plan, unit tests and mocks are supporting checks, not a real run.
-Redact account IDs, ARNs, cluster names, endpoints and IP addresses.
-
-Until the verifier has run, keep the pull request a draft and write:
-pending verification
+real AWS environment (job output, benchmark numbers, relevant logs).
 
 For changes with no functional impact, replace this section's content with
 the single word: docs-only
 -->
 
-## Layout
+## Directory Structure
 
-<!-- If adding a component or a document, ensure it follows the layout below. -->
+<!-- If adding or updating an example, ensure it follows the expected layout below. -->
 
 ```text
 infra/
-└── eks/                        # Terraform root, Helm charts, scripts
+└── eks/                        # Terraform root of the platform
     ├── *.tf                    # One file per concern
     ├── charts/<name>/          # Helm charts, each with its own README
-    ├── scripts/                # Numbered in usage order when run by hand
-    └── docs/                   # Design records (ADRs) for the platform
+    ├── scripts/                # Scripts run by hand, numbered in usage order
+    └── docs/                   # Design records (ADRs)
 docs/
 ├── workshop/                   # Hands-on chapters, English / Japanese
 └── deep-dives/
     └── NNNNN-<slug>.html       # Self-contained explainer, English / Japanese
 ```
 
+- `infra/eks/` holds the platform; a new concern extends an existing file
+  before adding a new one (see [AGENTS.md](https://github.com/littlemex/distai-platform/blob/main/AGENTS.md) for placement rules).
+- `docs/workshop/` holds the hands-on chapters and `docs/deep-dives/` the
+  long-form explainers; both provide English and Japanese.
+- Not all directories are touched by every change — include only the ones relevant to your change.
+
 ## Checklist
 
-- [ ] I have read the [contributing guidelines](https://github.com/littlemex/distai-platform/blob/main/CONTRIBUTING.md) and [AGENTS.md](https://github.com/littlemex/distai-platform/blob/main/AGENTS.md).
+- [ ] I have read the [contributing guidelines](https://github.com/littlemex/distai-platform/blob/main/CONTRIBUTING.md).
 - [ ] I am working against the latest `main` branch.
 - [ ] I have searched existing open and recently merged PRs to confirm this is not a duplicate.
-- [ ] The change is self-contained with documentation and scripts.
-- [ ] External dependencies are pinned to a specific version, tag or digest (no `latest`).
-- [ ] No credentials or environment-specific values (account IDs, cluster names, endpoints, IP addresses, resource IDs) are committed or pasted, including in Test Results.
-- [ ] New IAM permissions, network exposure or disabled safeguards are called out and justified in this description.
+- [ ] The contribution is self-contained with documentation and scripts.
+- [ ] External dependencies are pinned to a specific version or tag (no `latest`).
 - [ ] A README is included or updated with prerequisites, instructions, and known issues.
+- [ ] New test cases follow the [expected directory structure](#directory-structure).
 - [ ] Test Results above contain e2e evidence from a real AWS run (or this PR is marked `docs-only`).
