@@ -14,9 +14,10 @@ All work, including small fixes, is tracked by an issue and lands through a
 pull request against `main`. There is no hotfix exception and no direct push
 to `main`. Issues and pull requests use the repository's templates as they
 are. The issue states the motivation and the acceptance criteria in its
-description field and the alternatives in `Alternatives Considered`; the
-orchestrator adds the roles (section 2) under `Additional Context` once the
-maintainer has agreed to the plan. The pull request links the issue with
+description field (with a `Default state:` line for features, see
+section 4) and the alternatives in `Alternatives Considered`. The
+orchestrator posts the roles (section 2) as a comment on the issue, so that
+the issue body keeps the template's fields. The pull request links the issue with
 `Fixes #<n>` or `Relates to #<n>`.
 
 ### Writing `## Changes`
