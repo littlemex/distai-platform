@@ -276,9 +276,16 @@ for o in cluster_name cluster_endpoint cluster_certificate_authority_data region
   [[ -n "${v}" ]] || fail "output ${o} is empty"
 done
 [[ "$(tf output -json private_subnet_ids)" == *subnet-* ]] || fail "output private_subnet_ids has no subnet"
-argocd_arn_json="$(tf output -json argocd_capability_arn)" || fail "output argocd_capability_arn is missing"
+# Terraform omits a root output from state entirely when its value is exactly
+# null (confirmed on 1.17.2), so `terraform output -json <name>` then fails
+# with "Output ... not found" instead of printing null. outputs.tf uses
+# try(aws_eks_capability.argocd[0].arn, null), matching the README contract
+# ("null when not created"), so that failure means the same thing as null here.
+argocd_arn_json="$(tf output -json argocd_capability_arn 2>/dev/null)" || argocd_arn_json="null"
 if [[ "${ARGOCD_JSON}" == "null" ]]; then
   [[ "${argocd_arn_json}" == "null" ]] || fail "argocd_capability_arn is not null while argocd is unset"
+else
+  [[ "${argocd_arn_json}" != "null" ]] || fail "argocd_capability_arn is missing while argocd is set"
 fi
 pass "all eleven outputs present"
 
