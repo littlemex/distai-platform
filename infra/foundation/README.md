@@ -8,7 +8,7 @@
 | Amazon EKS cluster (default 1.37), `authentication_mode = "API"`, control plane logs (`api`, `audit`, `authenticator`) with 30 days retention, access entries for `admin_principal_arns` | Kueue, JobSet, Trainer, LeaderWorkerSet |
 | System managed node group (default 2 x `m7i.large`, AL2023, taint `CriticalAddonsOnly=true:NoSchedule`) | Device plugins and DRA drivers |
 | EKS managed add-ons `vpc-cni`, `kube-proxy`, `eks-pod-identity-agent`, `coredns` with pinned versions | Capacity reservations |
-| Karpenter prerequisites: controller IAM role associated with `kube-system/karpenter` through EKS Pod Identity, node IAM role with an `EC2_LINUX` access entry, encrypted interruption SQS queue and four EventBridge rules | Observability stack |
+| Karpenter prerequisites: controller IAM role associated with `kube-system/karpenter` through EKS Pod Identity, node IAM role with an `EC2_LINUX` access entry, encrypted interruption SQS queue and five EventBridge rules | Observability stack |
 | Optional managed Argo CD capability (hub cells) | Anything that needs a running Karpenter |
 | Teardown guard that removes Karpenter-launched instances before the network is destroyed | |
 
@@ -123,14 +123,13 @@ The guard removes only what Karpenter leaves in AWS. Resources that in-cluster c
 - **Control plane placement.** The control plane and the system node group use the private subnets except those in Availability Zones that EKS does not support for the control plane (`use1-az3`, `usw1-az2`, `cac1-az3`, from the Amazon EKS User Guide). Karpenter can still use every private subnet.
 - **Add-on order.** The cluster is created with `bootstrap_self_managed_addons = false`, so every add-on is an EKS managed add-on owned by this layer. `vpc-cni`, `kube-proxy` and `eks-pod-identity-agent` are installed before the system node group so that its nodes become Ready; `coredns` is installed after it because it needs nodes to schedule on.
 - **Security group.** Nodes use the cluster security group that EKS creates; it allows all traffic between nodes and the control plane. Karpenter selects it through the discovery tag added by `aws_ec2_tag`.
-- **IAM.** The controller policies are those of the Karpenter v1.15 reference CloudFormation template, split into six customer managed policies. The interruption queue accepts messages only from the four EventBridge rules of this cell (`aws:SourceArn`) and only over TLS. The system and Karpenter node roles have `AmazonEKSWorkerNodePolicy`, `AmazonEKS_CNI_Policy`, `AmazonEC2ContainerRegistryPullOnly` and `AmazonSSMManagedInstanceCore` (access through Session Manager instead of SSH).
+- **IAM.** The controller policies are those of the Karpenter v1.15 reference CloudFormation template, split into six customer managed policies. The interruption queue accepts messages only from the five EventBridge rules of this cell (`aws:SourceArn`) and only over TLS. The system and Karpenter node roles have `AmazonEKSWorkerNodePolicy`, `AmazonEKS_CNI_Policy`, `AmazonEC2ContainerRegistryPullOnly` and `AmazonSSMManagedInstanceCore` (access through Session Manager instead of SSH).
 - **Instance metadata.** Nodes use AL2023 AMIs, which require IMDSv2.
 - **Argo CD.** `aws_eks_capability` with type `ARGOCD`, signing in through IAM Identity Center; `admin_group_ids` map to the Argo CD `ADMIN` role. The capability role has no permission policies; EKS gives the capability access to its own cluster.
 
 ## Known limits
 
 - Add-on versions are pinned for Kubernetes 1.37 only. Another `kubernetes_version` is rejected at plan time until an entry is added to `local.addon_versions` in `eks.tf` (`aws eks describe-addon-versions --kubernetes-version <version>` lists the versions).
-- The EventBridge rules cover the four events Karpenter needs for spot and on-demand capacity: spot interruption warning, rebalance recommendation, instance state change and AWS Health scheduled change. The Capacity Reservation interruption warning, which Karpenter also handles, is not routed yet.
 - The guard is a destroy-time provisioner. It does not run if `teardown.tf` is removed from the configuration or the `terraform_data.teardown_guard` resource is removed from the state before `terraform destroy`.
 - The control plane log group keeps logs for 30 days and is deleted with the cell.
 - IPv4 only.
