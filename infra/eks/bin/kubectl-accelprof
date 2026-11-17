@@ -1,0 +1,656 @@
+#!/usr/bin/env bash
+# kubectl-accelprof — submit a profiled run to the cluster, and find its recording afterwards.
+#
+# Install by putting this file on PATH as "kubectl-accelprof"; kubectl then exposes it
+# as `kubectl accelprof ...`. It needs nothing but kubectl: no repository checkout, no Helm, no Python.
+# Everything the platform knows — region, trace bucket, MLflow tracking server, platform image — is
+# read from the accelprof-config ConfigMap that the installer publishes into each namespace.
+#
+#   kubectl accelprof run --alias team1-lora-sweep --image <your image> -- python train.py --lr 3e-4
+#   kubectl accelprof get                      the run submitted last, and its run id
+#   kubectl accelprof runs --alias team1-lora-sweep
+#
+# run submits and returns immediately. Recording happens in the cluster, so nothing local needs to
+# stay alive; --wait is available when watching one short run is more convenient.
+#
+# get with no workload id means "the newest run here", resolved from the cluster's own record of it
+# rather than from anything this machine remembers: a file of last-run-id would be a lie the moment
+# you open another terminal, switch context, or come back tomorrow. It always prints which run it
+# resolved. That convenience is deliberately limited to the commands that only read, so that a
+# future destructive subcommand cannot ever act on a run you did not name.
+#
+# run options:
+#   --alias NAME          required. The experiment campaign, named {tenant}-{series}. It is the unit
+#                         of deletion, retention and visibility, so use one per campaign and vary
+#                         --param/--tag inside it instead of minting an alias per run.
+#   --image URI           required. The workload's own image.
+#   -- COMMAND...         required. Everything after -- is the command, verbatim.
+#   --namespace NS        default: the current context's namespace.
+#   --gpu N               request N GPUs and tolerate the GPU pool.
+#   --neuron N            request N Neuron devices and tolerate the Neuron pool.
+#   --profile MODE        nsys (default) | neuron | none. "none" still records the run, so a baseline
+#                         sits beside its profiled siblings in the same experiment.
+#   --profile-ranks R     "0" (default) | comma-separated list | "all". Profiling one rank is a
+#                         sampling choice: a straggler or a skewed shard hides from rank 0.
+#   --nsys-args ARGS      replace the profiler options entirely.
+#   --no-inject-nsys      the image already ships nsys; skip copying it in.
+#   --env K=V             passed to the workload (repeatable).
+#   --param K=V           recorded as a free-form param (repeatable).
+#   --tag K=V             recorded as a free-form tag (repeatable).
+#   --ttl SECONDS         how long the finished Job is kept (default 172800, two days). The run
+#                         outlives it; this only bounds the Kubernetes object.
+#   --recorder-timeout S  how long the recorder waits for the workload (default 86400, one day).
+#                         On expiry it records what is on disk with status=unknown, so a run longer
+#                         than this must raise it or the recording lands before the workload ends.
+#   --patch FILE          a strategic-merge patch applied to the Job, for anything without a flag
+#                         (volumes, affinity, imagePullSecrets, sidecars).
+#   --discard-on-fail     do not record a failed run. It is recorded by default, tagged status=failed,
+#                         because a slow or crashing run is usually the one worth profiling.
+#   --wait                wait for the recording to exist and print its run id. The Job reaching
+#                         Complete is not the end: the recorder writes the id onto it afterwards, so
+#                         this waits for the id, with a grace period after the Job finishes
+#                         (WAIT_RECORDER_GRACE_SECONDS, default 120) before reporting without one.
+#   -o id | run-id        print only that value on stdout, for use in a shell variable. Everything
+#                         else goes to stderr. "run-id" implies --wait, since a run id does not
+#                         exist until the recorder has written it; "id" answers as soon as the run is
+#                         submitted and therefore cannot be combined with --wait.
+#   --dry-run             print the manifest and exit. With ACCELPROF_PLATFORM_IMAGE set, this
+#                         needs no cluster at all, which is how the golden manifest is produced.
+#
+# get options:
+#   <workload-id>         optional. Without it, the newest run in the namespace is used.
+#   --last                what leaving the id out already does, said out loud.
+#   --alias NAME          restrict "newest" to one campaign, for when several run side by side.
+#   --namespace NS        default: the current context's namespace.
+#   -o id | run-id        print only that value on stdout.
+#
+# runs options:
+#   --alias NAME          restrict the listing to one campaign.
+#   --namespace NS        default: the current context's namespace.
+#
+set -euo pipefail
+
+# An exported but empty AWS_PROFILE is not "no profile" to the AWS CLI: it looks for a profile named ""
+# and fails, and what it prints is usually about credentials or the resource being read rather than
+# about the empty string, so the symptom lands far from the cause. Treat it as unset, which is what a
+# shell that ran `export AWS_PROFILE=` meant. AWS_DEFAULT_PROFILE is the same variable for the v1 CLI
+# and for boto3, so it gets the same treatment rather than becoming the next occurrence of this.
+[ -n "${AWS_PROFILE:-}" ] || unset AWS_PROFILE
+[ -n "${AWS_DEFAULT_PROFILE:-}" ] || unset AWS_DEFAULT_PROFILE
+
+self="$(basename "$0")"
+say() { printf '\n==> %s\n' "$*"; }
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+# The help text is the header comment itself, up to the first line that is not a comment, so that
+# adding an option cannot leave the help behind or spill code into it.
+usage() { sed -n '2,${/^[^#]/q;p;}' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+# The Job shape is embedded here rather than read from a neighbouring file, because this script is
+# meant to be copied onto PATH as a kubectl plugin: a file-relative template stops resolving the
+# moment that happens, and a client and a template that travel separately drift apart. Set
+# KUBECTL_ACCELPROF_TEMPLATE to a path to override it while developing the shape.
+job_template() {
+  if [ -n "${KUBECTL_ACCELPROF_TEMPLATE:-}" ]; then
+    cat "${KUBECTL_ACCELPROF_TEMPLATE}"
+    return
+  fi
+  cat <<'TEMPLATE'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "@JOB_NAME@"
+  namespace: "@NAMESPACE@"
+  labels:
+    app.kubernetes.io/name: profiling-producer
+    accelprof.io/alias: "@ALIAS@"
+    accelprof.io/workload-id: "@WORKLOAD_ID@"
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: @TTL_SECONDS@
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: profiling-producer
+        accelprof.io/alias: "@ALIAS@"
+        accelprof.io/workload-id: "@WORKLOAD_ID@"
+    spec:
+      restartPolicy: Never
+      serviceAccountName: "@SERVICE_ACCOUNT@"
+      volumes:
+        - name: accelprof
+          emptyDir: {}
+      initContainers:
+        - name: tools
+          image: "@PLATFORM_IMAGE@"
+          command: ["sh", "-c", "@TOOLS_SCRIPT@"]
+          volumeMounts:
+            - { name: accelprof, mountPath: /accelprof }
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+      containers:
+        - name: workload
+          image: "@WORKLOAD_IMAGE@"
+          command: ["/accelprof/tools/entry.sh"]
+          args: @COMMAND_JSON@
+          env:
+            - { name: ACCELPROF_OUT, value: "/accelprof/out" }
+            - { name: ACCELPROF_TOOLS, value: "/accelprof/tools" }
+            - { name: ACCELPROF_PROFILE_MODE, value: "@PROFILE_MODE@" }
+            - { name: ACCELPROF_PROFILE_RANKS, value: "@PROFILE_RANKS@" }
+            - { name: ACCELPROF_NSYS_ARGS, value: "@NSYS_ARGS@" }
+            - name: ACCELPROF_POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+          volumeMounts:
+            - { name: accelprof, mountPath: /accelprof }
+        - name: recorder
+          image: "@PLATFORM_IMAGE@"
+          command: ["python3", "/opt/accelprof/recorder.py"]
+          env:
+            - { name: ACCELPROF_OUT, value: "/accelprof/out" }
+            - { name: ACCELPROF_ALIAS, value: "@ALIAS@" }
+            - { name: ACCELPROF_CHIP, value: "@CHIP@" }
+            - { name: ACCELPROF_WORKLOAD_ID, value: "@WORKLOAD_ID@" }
+            - { name: ACCELPROF_JOB_NAME, value: "@JOB_NAME@" }
+            - { name: ACCELPROF_PROFILE_MODE, value: "@PROFILE_MODE@" }
+            - { name: ACCELPROF_PROFILE_RANKS, value: "@PROFILE_RANKS@" }
+            - { name: ACCELPROF_RECORD_ON_FAILURE, value: "@RECORD_ON_FAILURE@" }
+            - { name: ACCELPROF_RECORDER_TIMEOUT, value: "@RECORDER_TIMEOUT@" }
+            - name: ACCELPROF_POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: ACCELPROF_POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+          envFrom:
+            # region, trace bucket and tracking server, published into this namespace by the installer
+            - configMapRef:
+                name: accelprof-config
+          volumeMounts:
+            - { name: accelprof, mountPath: /accelprof }
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits: { memory: "1Gi" }
+TEMPLATE
+}
+
+# Replaces every literal occurrence of needle in haystack with replacement, treating both as plain
+# text. This exists instead of bash's own "${haystack//needle/replacement}" because what that
+# operator does with the replacement changed under it: '&' means the matched text, and a backslash
+# escapes it, only from bash 5.2. Before that the replacement goes in verbatim, so escaping written
+# for 5.2 leaves the escape itself behind — the tools script's own "&&" arrived as "\&\&" and
+# kubectl rejected the manifest as invalid YAML. Which behaviour a reader gets is decided by whichever
+# bash /usr/bin/env finds: 3.2 on a stock macOS machine, 5.1 on Ubuntu 22.04, 5.2 or newer elsewhere,
+# and the two older ones are the common case. So the substitution happens here, where no version
+# reinterprets anything: prefix and suffix removal (%% and #) take a glob pattern rather than a
+# replacement string, and quoting the needle makes the match literal.
+replace_literal() {
+  local haystack="$1" needle="$2" replacement="$3" out="" chunk
+  while true; do
+    case "${haystack}" in
+      *"${needle}"*)
+        chunk="${haystack%%"${needle}"*}"
+        out="${out}${chunk}${replacement}"
+        haystack="${haystack#*"${needle}"}"
+        ;;
+      *) out="${out}${haystack}"; break ;;
+    esac
+  done
+  printf '%s' "${out}"
+}
+
+json_string() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\n'/\\n}"
+  printf '"%s"' "$s"
+}
+
+k() { kubectl ${KUBE_CONTEXT:+--context "${KUBE_CONTEXT}"} "$@"; }
+
+# Which cluster a message is about: with several clusters in one kubeconfig, the namespace alone does
+# not say where the client looked. Named for what k actually uses rather than for kubectl's
+# current-context, which an explicit KUBE_CONTEXT overrides.
+effective_context() {
+  printf '%s' "${KUBE_CONTEXT:-$(kubectl config current-context 2>/dev/null || printf 'unknown')}"
+}
+
+# How to tell the reader to run this again. The file is installed as kubectl-accelprof and the
+# documented interface is the plugin form, so the hint has to be the plugin form — printing the
+# file name would hand out a command that only works if the file happens to be on PATH under it.
+invocation() {
+  case "${self}" in
+    kubectl-*) printf 'kubectl %s' "${self#kubectl-}" ;;
+    *) printf '%s' "${self}" ;;
+  esac
+}
+
+# The namespace only needs naming in a hint when it is not the one the command would pick anyway.
+namespace_opt() {
+  local ns="$1"
+  [ "${ns}" = "$(resolve_namespace "")" ] || printf ' -n %s' "${ns}"
+}
+
+resolve_namespace() {
+  local ns="$1"
+  if [ -z "${ns}" ]; then
+    ns="$(k config view --minify -o jsonpath='{..namespace}' 2>/dev/null || true)"
+    ns="${ns:-default}"
+  fi
+  printf '%s' "${ns}"
+}
+
+# The newest run in a namespace, decided by the API server's clock rather than by the timestamp the
+# client baked into the workload id: two people submitting from two laptops have two clocks, and the
+# one that matters is the cluster's.
+#
+# Every workload sharing the newest timestamp is printed, not just one of them. creationTimestamp has
+# a resolution of one second, so two submissions can tie, and picking one of them by name would be
+# deterministic without being right. The caller refuses to guess and asks for a name instead.
+latest_workloads() {
+  local namespace="$1" alias_name="$2" selector="app.kubernetes.io/name=profiling-producer"
+  local rows="" newest=""
+  [ -n "${alias_name}" ] && selector="${selector},accelprof.io/alias=${alias_name}"
+  rows="$(k get jobs -n "${namespace}" -l "${selector}" -o go-template='{{range .items}}{{.metadata.creationTimestamp}} {{index .metadata.labels "accelprof.io/workload-id"}}{{"\n"}}{{end}}' 2>/dev/null || true)"
+  # awk rather than grep for dropping blank lines: with no runs at all, grep finds nothing, exits 1,
+  # and under pipefail that would abort the caller before it can say "there are no runs here".
+  newest="$(printf '%s\n' "${rows}" | awk 'NF == 2 { print $1 }' | sort | tail -1)"
+  [ -n "${newest}" ] || return 0
+  printf '%s\n' "${rows}" | awk -v t="${newest}" 'NF == 2 && $1 == t { print $2 }' | sort
+}
+
+platform_image() {
+  local ns="$1" image
+  # An explicit override lets the manifest be rendered without a cluster, which is what makes
+  # --dry-run usable offline and in CI (the golden file under tests/golden is produced this way).
+  if [ -n "${ACCELPROF_PLATFORM_IMAGE:-}" ]; then
+    printf '%s' "${ACCELPROF_PLATFORM_IMAGE}"
+    return
+  fi
+  # Discarding the error here would report an unreachable cluster, an expired login and an RBAC denial
+  # all as "not wired", which sends the reader to the platform owner for a problem in their own shell.
+  # --ignore-not-found is what separates the two: an absent ConfigMap becomes empty output and exit 0,
+  # so a non-zero exit is left meaning only that the namespace could not be read at all. A namespace
+  # that does not exist at all also exits 0 (measured against kubectl 1.35), which is why the message
+  # below offers a mistyped namespace as one reading. The error goes to a file rather than through a
+  # command substitution, which would assign image in a subshell.
+  local err_file
+  # A failed mktemp would turn the redirect below into a redirect to the empty string, and the die
+  # would then blame kubectl for a bash error printed above it.
+  err_file="$(mktemp)" || die "cannot create a temporary file under ${TMPDIR:-/tmp}"
+  if ! image="$(k get configmap accelprof-config -n "${ns}" --ignore-not-found \
+      -o jsonpath='{.data.ACCELPROF_PLATFORM_IMAGE}' 2>"${err_file}")"; then
+    cat "${err_file}" >&2; rm -f "${err_file}"
+    die "cannot read the accelprof-config ConfigMap in namespace ${ns} (context $(effective_context)). The error above is from kubectl: fix the connection, the login or the permission first."
+  fi
+  rm -f "${err_file}"
+  [ -n "${image}" ] ||
+    die "namespace ${ns} is not wired for profiling (no accelprof-config ConfigMap, or no ACCELPROF_PLATFORM_IMAGE in it; context $(effective_context)). If this is not the namespace you meant, pass --namespace or set it on the context. Otherwise ask the platform owner to add it to PRODUCER_NAMESPACES and re-run infra/scripts/install-profiling.sh."
+  printf '%s' "${image}"
+}
+
+# Where the recordings can be read in a browser. The URL is published in the contract, not assembled
+# here: the two shapes of SageMaker MLflow are served from different hosts and one of those hosts
+# carries the app's id, so reassembling it in the client would put AWS's hostname layout in the place
+# furthest from the data layer that knows which MLflow this is. Older contracts have no such key, and a
+# link is not worth failing over, so its absence is silent.
+mlflow_experiment_url() {
+  local ns="$1" pair url arn
+  # One read, because both values come from the same ConfigMap, and --ignore-not-found for the same
+  # reason as in platform_image: silence should mean "the contract does not carry this", not "the read
+  # failed". A failed read still says so, on stderr, without failing the command it decorates.
+  pair="$(k get configmap accelprof-config -n "${ns}" --ignore-not-found \
+    -o jsonpath='{.data.ACCELPROF_MLFLOW_UI_URL}{"\n"}{.data.ACCELPROF_TRACKING_URI}')" || {
+    printf 'warning: could not read the MLflow link from the contract in namespace %s\n' "${ns}" >&2
+    return 0
+  }
+  url="$(printf '%s' "${pair}" | sed -n 1p)"
+  arn="$(printf '%s' "${pair}" | sed -n 2p)"
+  [ -n "${url}" ] || return 0
+  printf '%s  (%s)\n' "${url}" "${arn##*:}"
+}
+
+cmd_run() {
+  local alias_name="" image="" namespace="" profile="nsys" ranks="0" nsys_args="-t cuda,nvtx,osrt"
+  local gpus="" neurons="" ttl="172800" patch_file="" inject="true" record_on_fail="true"
+  local wait_for="false" dry_run="false" recorder_timeout="86400" out=""
+  local -a envs=() params=() tags=() command=()
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --alias) alias_name="$2"; shift 2 ;;
+      --image) image="$2"; shift 2 ;;
+      --namespace|-n) namespace="$2"; shift 2 ;;
+      --profile) profile="$2"; shift 2 ;;
+      --profile-ranks) ranks="$2"; shift 2 ;;
+      --nsys-args) nsys_args="$2"; shift 2 ;;
+      --no-inject-nsys) inject="false"; shift ;;
+      --gpu) gpus="$2"; shift 2 ;;
+      --neuron) neurons="$2"; shift 2 ;;
+      --env) envs+=("$2"); shift 2 ;;
+      --param) params+=("$2"); shift 2 ;;
+      --tag) tags+=("$2"); shift 2 ;;
+      --ttl) ttl="$2"; shift 2 ;;
+      --recorder-timeout) recorder_timeout="$2"; shift 2 ;;
+      --patch) patch_file="$2"; shift 2 ;;
+      --discard-on-fail) record_on_fail="false"; shift ;;
+      --wait) wait_for="true"; shift ;;
+      -o|--output) out="$2"; shift 2 ;;
+      --dry-run) dry_run="true"; shift ;;
+      -h|--help) usage 0 ;;
+      --) shift; command=("$@"); break ;;
+      *) die "unknown argument: $1 (the workload command goes after --)" ;;
+    esac
+  done
+
+  [ -n "${alias_name}" ] || die "--alias is required"
+  [ -n "${image}" ] || die "--image is required"
+  [ ${#command[@]} -gt 0 ] || die "the workload command is required, after --"
+  case "${profile}" in nsys|neuron|none) : ;; *) die "--profile must be nsys, neuron or none" ;; esac
+  # The alias is a bucket prefix and an MLflow experiment name at once, so it is constrained here and
+  # again in the recorder: an old copy of this client must not be the only thing enforcing it.
+  printf '%s' "${alias_name}" | grep -Eq '^[a-z0-9][a-z0-9-]{1,62}$' ||
+    die "--alias must match ^[a-z0-9][a-z0-9-]{1,62}$ (it becomes an S3 prefix and an MLflow experiment name)"
+
+  # Validated before anything is submitted. Checked after the Job exists, a typo in -o both starts a
+  # run and reports failure: the caller's variable is empty while the cluster is busy with work nobody
+  # is waiting for.
+  case "${out}" in
+    "" | id) ;;
+    run-id) wait_for="true" ;;
+    *) die "-o takes id or run-id, not '${out}'" ;;
+  esac
+  # -o id answers as soon as the Job exists, so it cannot also be a request to wait for the recording.
+  if [ "${out}" = "id" ] && [ "${wait_for}" = "true" ]; then
+    die "--wait and -o id ask for different things: -o id answers as soon as the run is submitted. Use -o run-id to wait for the recording."
+  fi
+
+  namespace="$(resolve_namespace "${namespace}")"
+
+  # The chip a run is filed under is the one it asked for. It is a label the reader searches with
+  # (alias + chip resolves a run when the id is not at hand) and reads in the output, so it has to
+  # match what they typed, not where the scheduler happened to put the Pod: a CPU job that lands on
+  # a GPU node borrowed for the day is still a CPU run. Asking for the neuron profiler counts as asking
+  # for neuron, because a profiler mode that only exists for one chip is itself a request for it.
+  local chip="cpu"
+  [ -z "${gpus}" ] || chip="gpu"
+  [ -z "${neurons}" ] || chip="neuron"
+  [ "${profile}" != "neuron" ] || chip="neuron"
+
+  local platform workload_id job_name
+  platform="$(platform_image "${namespace}")"
+  workload_id="wl-$(date +%y%m%d%H%M%S)-$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  job_name="$(printf 'profile-%s' "${workload_id}")"
+
+  # The profiler is a large tree, so it is only copied when it is going to be used; the shim is a few
+  # kilobytes and always is.
+  local tools_script="mkdir -p /accelprof/tools /accelprof/out && cp /opt/accelprof/entry.sh /accelprof/tools/entry.sh"
+  if [ "${inject}" = "true" ] && [ "${profile}" = "nsys" ]; then
+    tools_script="${tools_script} && cp -a /opt/nvidia/nsight-systems-cli/*/. /accelprof/tools/nsys/ 2>/dev/null || cp -a /opt/nvidia/nsight-systems-cli /accelprof/tools/nsys"
+  fi
+
+  local command_json="["
+  local first=1 arg
+  for arg in "${command[@]}"; do
+    [ ${first} -eq 1 ] || command_json="${command_json}, "
+    command_json="${command_json}$(json_string "${arg}")"
+    first=0
+  done
+  command_json="${command_json}]"
+
+  local manifest
+  manifest="$(job_template)"
+  local key value
+  for kv in \
+    "JOB_NAME=${job_name}" "NAMESPACE=${namespace}" "ALIAS=${alias_name}" \
+    "WORKLOAD_ID=${workload_id}" "TTL_SECONDS=${ttl}" "SERVICE_ACCOUNT=mcp-producer" \
+    "PLATFORM_IMAGE=${platform}" "WORKLOAD_IMAGE=${image}" "TOOLS_SCRIPT=${tools_script}" \
+    "PROFILE_MODE=${profile}" "PROFILE_RANKS=${ranks}" "NSYS_ARGS=${nsys_args}" \
+    "CHIP=${chip}" \
+    "RECORD_ON_FAILURE=${record_on_fail}" "RECORDER_TIMEOUT=${recorder_timeout}"; do
+    key="${kv%%=*}"; value="${kv#*=}"
+    manifest="$(replace_literal "${manifest}" "@${key}@" "${value}")"
+  done
+  manifest="$(replace_literal "${manifest}" "@COMMAND_JSON@" "${command_json}")"
+
+  # Optional pieces arrive as one strategic-merge patch so that the template carries no placeholder
+  # for every possible Pod field, and so that anything without a flag is still reachable via --patch.
+  # It has to be a single document: two concatenated patches would each start a "spec" key and the
+  # later one would silently win.
+  local overlay="" containers="" tolerations=""
+  if [ -n "${gpus}" ] || [ -n "${neurons}" ] || [ ${#envs[@]} -gt 0 ]; then
+    containers="${containers}
+        - name: workload"
+    if [ -n "${gpus}" ] || [ -n "${neurons}" ]; then
+      containers="${containers}
+          resources:
+            limits:"
+      [ -n "${gpus}" ] && containers="${containers}
+              nvidia.com/gpu: ${gpus}"
+      [ -n "${neurons}" ] && containers="${containers}
+              aws.amazon.com/neuron: ${neurons}"
+      tolerations="
+      tolerations:"
+      [ -n "${gpus}" ] && tolerations="${tolerations}
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }"
+      [ -n "${neurons}" ] && tolerations="${tolerations}
+        - { key: aws.amazon.com/neuron, operator: Exists, effect: NoSchedule }"
+    fi
+    if [ ${#envs[@]} -gt 0 ]; then
+      containers="${containers}
+          env:"
+      for kv in "${envs[@]}"; do
+        containers="${containers}
+            - name: ${kv%%=*}
+              value: $(json_string "${kv#*=}")"
+      done
+    fi
+  fi
+  if [ ${#params[@]} -gt 0 ] || [ ${#tags[@]} -gt 0 ]; then
+    local params_json="{" tags_json="{" sep=""
+    for kv in ${params[@]+"${params[@]}"}; do
+      params_json="${params_json}${sep}$(json_string "${kv%%=*}"): $(json_string "${kv#*=}")"; sep=", "
+    done
+    params_json="${params_json}}"; sep=""
+    for kv in ${tags[@]+"${tags[@]}"}; do
+      tags_json="${tags_json}${sep}$(json_string "${kv%%=*}"): $(json_string "${kv#*=}")"; sep=", "
+    done
+    tags_json="${tags_json}}"
+    containers="${containers}
+        - name: recorder
+          env:
+            - name: ACCELPROF_PARAMS
+              value: $(json_string "${params_json}")
+            - name: ACCELPROF_TAGS
+              value: $(json_string "${tags_json}")"
+  fi
+  if [ -n "${containers}" ]; then
+    overlay="spec:
+  template:
+    spec:
+      containers:${containers}${tolerations}"
+  fi
+
+  if [ -n "${overlay}" ]; then
+    manifest="$(printf '%s' "${manifest}" |
+      k patch --local -f - --type strategic -p "${overlay}" -o yaml)"
+  fi
+  if [ -n "${patch_file}" ]; then
+    manifest="$(printf '%s' "${manifest}" |
+      k patch --local -f - --type strategic -p "$(cat "${patch_file}")" -o yaml)"
+  fi
+
+  if [ "${dry_run}" = "true" ]; then
+    printf '%s\n' "${manifest}"
+    exit 0
+  fi
+
+  printf '%s' "${manifest}" | k apply -f - >/dev/null
+  # In machine-readable mode the prose moves to stderr, so that the reader still sees what happened
+  # while stdout carries exactly the one value a shell variable is being filled with.
+  local prose=1
+  [ -z "${out}" ] || prose=2
+  {
+    say "submitted ${job_name} in ${namespace} (alias ${alias_name}, profile ${profile})"
+    printf '    workload_id: %s\n' "${workload_id}"
+    printf '    logs:        kubectl -n %s logs -f job/%s -c workload\n' "${namespace}" "${job_name}"
+    # The id is named even though `get` alone would usually resolve to this same run: usually is not
+    # always. Another submission in this namespace — a colleague's, or this shell's twin — becomes the
+    # newest, and a hint that reads someone else's status as yours is worse than a longer line.
+    printf '    run id:      %s get %s%s\n' "$(invocation)" "${workload_id}" "$(namespace_opt "${namespace}")"
+  } >&"${prose}"
+
+  [ "${out}" != "id" ] || { printf '%s\n' "${workload_id}"; exit 0; }
+
+  [ "${wait_for}" = "true" ] || exit 0
+  say "waiting for the run" >&"${prose}"
+  # What --wait is for is the run id, so that is what it waits for. Waiting only for the Job to reach
+  # Complete returns too early: the recorder writes the id onto the Job as its last act, and the Job
+  # is already Complete by the time it does. Reporting "not recorded yet" from a command whose whole
+  # purpose was to hand back the id is a promise the flag does not keep.
+  #
+  # The id is therefore the condition, with the Job's own terminal state as the fallback: a run that
+  # fails before the recorder runs at all would otherwise be waited on until the timeout. Once the Job
+  # has finished, the recorder is given a grace period to catch up before the answer is reported
+  # without an id.
+  local deadline conditions run_id grace_deadline="" timed_out="true"
+  deadline=$(( $(date +%s) + ${WAIT_TIMEOUT_SECONDS:-86400} ))
+  while [ "$(date +%s)" -lt "${deadline}" ]; do
+    run_id="$(k get job "${job_name}" -n "${namespace}" \
+      -o jsonpath='{.metadata.annotations.accelprof\.io/run-id}' 2>/dev/null || true)"
+    [ -z "${run_id}" ] || { timed_out="false"; break; }
+    conditions="$(k get job "${job_name}" -n "${namespace}" \
+      -o jsonpath='{range .status.conditions[?(@.status=="True")]}{.type} {end}' 2>/dev/null || true)"
+    case "${conditions}" in
+      *Complete* | *SuccessCriteriaMet* | *Failed*)
+        [ -n "${grace_deadline}" ] ||
+          grace_deadline=$(( $(date +%s) + ${WAIT_RECORDER_GRACE_SECONDS:-120} ))
+        [ "$(date +%s)" -lt "${grace_deadline}" ] || break
+        ;;
+    esac
+    sleep 5
+  done
+  # A wait that gave up is a failure, not a report. Exiting zero would tell a script the recording
+  # exists when the whole reason for waiting was that it did not.
+  if [ "${timed_out}" = "true" ]; then
+    if [ "${out}" != "run-id" ]; then
+      cmd_get "${workload_id}" -n "${namespace}" || true
+    fi
+    die "the recording for ${workload_id} did not appear before this gave up. Look at the recorder: kubectl -n ${namespace} logs job/${job_name} -c recorder"
+  fi
+
+  if [ "${out}" = "run-id" ]; then
+    cmd_get "${workload_id}" -n "${namespace}" -o run-id
+  else
+    cmd_get "${workload_id}" -n "${namespace}"
+  fi
+}
+
+cmd_get() {
+  local workload_id="" namespace="" alias_name="" out="" asked_last="false"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --namespace|-n) namespace="$2"; shift 2 ;;
+      --alias) alias_name="$2"; shift 2 ;;
+      # --last is what leaving the id out already does. It exists so that a script, or a page in a
+      # book, can say out loud which run it means instead of relying on an absence.
+      --last) asked_last="true"; shift ;;
+      -o|--output) out="$2"; shift 2 ;;
+      -h|--help) usage 0 ;;
+      -*) die "unknown option: $1" ;;
+      *) workload_id="$1"; shift ;;
+    esac
+  done
+  case "${out}" in ""|id|run-id) ;; *) die "-o takes id or run-id, not '${out}'" ;; esac
+  [ "${asked_last}" = "false" ] || [ -z "${workload_id}" ] ||
+    die "--last and an explicit workload id ask for different runs; drop one"
+  namespace="$(resolve_namespace "${namespace}")"
+
+  # Resolved here rather than defaulted anywhere else, and announced, so that the answer to "which
+  # run am I looking at" is never left to the reader's memory of what they submitted.
+  local resolved_latest="false"
+  if [ -z "${workload_id}" ]; then
+    local candidates count
+    candidates="$(latest_workloads "${namespace}" "${alias_name}")"
+    count="$(printf '%s\n' "${candidates}" | awk 'NF { n++ } END { print n + 0 }')"
+    if [ "${count}" -gt 1 ]; then
+      say "more than one run in ${namespace}${alias_name:+ for alias ${alias_name}} was created in the same second, so there is no newest one. Name the one you mean:" >&2
+      printf '%s\n' "${candidates}" | awk -v cmd="$(invocation)" -v ns="$(namespace_opt "${namespace}")" \
+        'NF { printf "      %s get %s%s\n", cmd, $1, ns }' >&2
+      exit 1
+    fi
+    workload_id="${candidates}"
+    if [ -z "${workload_id}" ]; then
+      say "no runs in ${namespace}${alias_name:+ for alias ${alias_name}}. Jobs are kept only until their TTL expires (two days by default), so a run from earlier may be gone from the cluster while its recording is permanent." >&2
+      printf '    list what is left:  %s runs%s\n' "$(invocation)" "$(namespace_opt "${namespace}")" >&2
+      mlflow_experiment_url "${namespace}" >&2
+      exit 1
+    fi
+    resolved_latest="true"
+  fi
+
+  local job run_id status
+  job="$(k get jobs -n "${namespace}" -l "accelprof.io/workload-id=${workload_id}" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [ -z "${job}" ]; then
+    [ -z "${out}" ] || die "no Job for workload ${workload_id} in ${namespace}"
+    say "no Job for workload ${workload_id} in ${namespace}; it may have been cleaned up after its TTL"
+    say "the recording is permanent — find it in MLflow by alias and workload id"
+    mlflow_experiment_url "${namespace}"
+    exit 0
+  fi
+  run_id="$(k get job "${job}" -n "${namespace}" \
+    -o jsonpath='{.metadata.annotations.accelprof\.io/run-id}' 2>/dev/null || true)"
+  status="$(k get job "${job}" -n "${namespace}" \
+    -o jsonpath='{range .status.conditions[?(@.status=="True")]}{.type} {end}' 2>/dev/null || true)"
+
+  # Machine-readable mode prints one value and nothing else, so that a shell variable can be filled
+  # without the caller having to cut a field out of prose that may change.
+  case "${out}" in
+    id) printf '%s\n' "${workload_id}"; exit 0 ;;
+    run-id)
+      [ -n "${run_id}" ] || die "workload ${workload_id} has no run id yet (status ${status:-running})"
+      printf '%s\n' "${run_id}"; exit 0 ;;
+  esac
+
+  if [ "${resolved_latest}" = "true" ]; then
+    say "newest run in ${namespace}${alias_name:+ for alias ${alias_name}}: ${workload_id}"
+  else
+    say "workload ${workload_id} in ${namespace}"
+  fi
+  printf '    job:         %s\n' "${job}"
+  printf '    status:      %s\n' "${status:-running}"
+  if [ -n "${run_id}" ]; then
+    printf '    run_id:      %s\n' "${run_id}"
+    printf '    analyse it:  call stage_run then analyze with this run id on the analysis MCP server\n'
+  else
+    printf '    run_id:      not recorded yet\n'
+    printf '    recorder:    kubectl -n %s logs job/%s -c recorder\n' "${namespace}" "${job}"
+  fi
+}
+
+cmd_runs() {
+  local alias_name="" namespace=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --alias) alias_name="$2"; shift 2 ;;
+      --namespace|-n) namespace="$2"; shift 2 ;;
+      -h|--help) usage 0 ;;
+      *) die "unknown argument: $1" ;;
+    esac
+  done
+  namespace="$(resolve_namespace "${namespace}")"
+  local selector="app.kubernetes.io/name=profiling-producer"
+  [ -n "${alias_name}" ] && selector="${selector},accelprof.io/alias=${alias_name}"
+  k get jobs -n "${namespace}" -l "${selector}" \
+    -o custom-columns='WORKLOAD-ID:.metadata.labels.accelprof\.io/workload-id,ALIAS:.metadata.labels.accelprof\.io/alias,RUN-ID:.metadata.annotations.accelprof\.io/run-id,COMPLETIONS:.status.succeeded,FAILED:.status.failed,AGE:.metadata.creationTimestamp'
+  say "Jobs are kept only until their TTL expires; the recordings are permanent"
+  mlflow_experiment_url "${namespace}"
+}
+
+case "${1:-}" in
+  run) shift; cmd_run "$@" ;;
+  get) shift; cmd_get "$@" ;;
+  runs|list) shift; cmd_runs "$@" ;;
+  ""|-h|--help|help) usage 0 ;;
+  *) die "unknown subcommand: $1 (expected run, get or runs). Forwarding the MCP servers moved to kubectl distai-mcp." ;;
+esac

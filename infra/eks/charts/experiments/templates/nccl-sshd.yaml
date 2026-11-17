@@ -1,0 +1,131 @@
+{{- /*
+nccl-sshd — two-node NVIDIA NCCL all_reduce bench over EFA (sshd + mpirun).
+
+Two pods on two different GPU nodes (podAntiAffinity), each with all GPUs + all EFA ENIs
+and persistent sshd on port 2222. sshd MUST be PID-1 subordinate (started from command);
+`kubectl exec`-started sshd gets SIGTERM on exec exit.
+
+The mpirun launcher needs passwordless SSH between the two pods. The keypair is generated HERE
+(genPrivateKey/derivePublicKey at render time), shipped as a Secret, and mounted into both pods,
+so there is NO manual `kubectl exec` key-copying step: as soon as both pods are Running the
+bench is runnable. Hand-distributing keys was the single most error-prone step of this workload
+and is not reproducible in a script, which is why it is gone. Note the keypair is regenerated on
+every `helm template` invocation — render ONCE into a file (or pipe straight to kubectl apply) so
+both pods get the same key; a second render would give the client a key the server does not have.
+
+Render + apply (gpuCount/efaCount are per-instance facts — read them off a live node):
+  POOL=<accelerator_pools key>
+  GPU=$(kubectl get nodes -l node-role=$POOL -o jsonpath="{.items[0].status.allocatable['nvidia\.com/gpu']}")
+  EFA=$(kubectl get nodes -l node-role=$POOL -o jsonpath="{.items[0].status.allocatable['vpc\.amazonaws\.com/efa']}")
+  helm template exp ./charts/experiments -n $NS --set namespace=$NS \
+    --set ncclSshd.enabled=true --set ncclSshd.nodeRole=$POOL \
+    --set ncclSshd.gpuCount=$GPU --set ncclSshd.efaCount=$EFA | kubectl apply -f -
+
+Then run the bench from the server pod (N = gpuCount):
+  mpirun --allow-run-as-root -np $((2*N)) -H $SERVER_IP:N,$CLIENT_IP:N \
+    --mca plm_rsh_args '-p 2222' -x FI_PROVIDER=efa -x LD_LIBRARY_PATH -x PATH \
+    /opt/nccl-tests/build/all_reduce_perf -b 512M -e 1G -f 2 -g 1
+EFA is active when the log shows "NET/OFI Selected provider is efa (found <N> nics)", where N
+matches `terraform output accelerator_pool_efa_schedulable` for the pool.
+*/ -}}
+{{- if .Values.ncclSshd.enabled }}
+{{- $v := .Values.ncclSshd }}
+{{- $key := genPrivateKey "rsa" }}
+{{- if not $v.nodeRole }}{{ fail "ncclSshd.nodeRole is required — set it to the accelerator_pools key of the target GPU pool (Karpenter labels its nodes node-role=<pool key>). Selecting on nvidia.com/gpu.product instead does NOT work: that label is applied by the GPU Operator only AFTER a node is up, so Karpenter cannot use it to decide which instance type to launch and refuses the pod with \"label nvidia.com/gpu.product does not have known values\" — the pods then stay Pending forever." }}{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nccl-sshd-key
+  namespace: {{ include "experiments.namespace" . }}
+type: Opaque
+stringData:
+  # One PEM private key, shared by both pods. Each pod derives the matching OpenSSH public key
+  # locally with `ssh-keygen -y` and writes it to its own authorized_keys, so the pair both
+  # authenticates outbound and accepts inbound — mpirun reaches the peer (and itself) with no
+  # interactive step. Only the private key is templated: Sprig can generate a PEM key but has no
+  # helper that emits the OpenSSH "ssh-rsa AAAA..." public-key format that authorized_keys needs.
+  id_rsa: |
+{{ $key | indent 4 }}
+{{- range $role := (list "server" "client") }}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nccl-{{ $role }}
+  namespace: {{ include "experiments.namespace" $ }}
+  labels:
+    app: nccl-bench
+    role: {{ $role }}
+spec:
+  hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
+  restartPolicy: Never
+  # node-role (not nvidia.com/gpu.product): Karpenter stamps node-role=<pool key> at launch
+  # (karpenter-resources.tf), so it is a requirement Karpenter can satisfy by PROVISIONING a
+  # node. nvidia.com/gpu.product only exists after the GPU Operator labels a running node, so
+  # using it here makes Karpenter reject the pod and the second node never launches.
+  nodeSelector:
+    node-role: {{ $v.nodeRole }}
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels: { app: nccl-bench }
+          topologyKey: kubernetes.io/hostname
+  tolerations:
+    {{- include "experiments.gpuBenchTolerations" . | nindent 4 }}
+  containers:
+    - name: bench
+      image: {{ $v.image }}
+      command:
+        - bash
+        - -lc
+        - |
+          mkdir -p /run/sshd /root/.ssh && chmod 700 /root/.ssh
+          ssh-keygen -A
+          # Copy (not symlink) out of the read-only Secret mount: ssh refuses a private key
+          # whose mode is not 0600, and a projected Secret volume cannot be chmod-ed in place.
+          install -m 600 /etc/nccl-sshd-key/id_rsa /root/.ssh/id_rsa
+          ssh-keygen -y -f /root/.ssh/id_rsa > /root/.ssh/authorized_keys
+          chmod 600 /root/.ssh/authorized_keys
+          printf 'StrictHostKeyChecking no\nUserKnownHostsFile /dev/null\n' > /root/.ssh/config
+          chmod 600 /root/.ssh/config
+          exec /usr/sbin/sshd -D -p 2222
+      securityContext:
+        privileged: true   # Required for EFA device access.
+      env:
+        - { name: FI_PROVIDER,            value: "efa" }
+        - { name: FI_EFA_USE_DEVICE_RDMA, value: "1" }
+        - { name: FI_EFA_FORK_SAFE,       value: "1" }
+        - { name: NCCL_SOCKET_IFNAME,     value: {{ include "experiments.ncclSocketIfname" (dict "w" $v "root" $) | quote }} }
+        - { name: NCCL_DEBUG,             value: "INFO" }
+      resources:
+        limits:
+          nvidia.com/gpu:        {{ $v.gpuCount | quote }}
+          vpc.amazonaws.com/efa: {{ $v.efaCount | quote }}
+          hugepages-2Mi:         {{ $v.hugepages }}
+          memory:                {{ $v.memory }}
+        requests:
+          cpu:           {{ $v.cpu | quote }}
+          memory:        {{ $v.memory }}
+          hugepages-2Mi: {{ $v.hugepages }}
+      volumeMounts:
+        {{- if $v.gdrcopy }}
+        - { name: gdrdrv, mountPath: /dev/gdrdrv }
+        {{- end }}
+        - { name: sshkey, mountPath: /etc/nccl-sshd-key, readOnly: true }
+        - { name: shm,    mountPath: /dev/shm }
+  volumes:
+    {{- /* gdrdrv is OPT-IN. The GPU Operator installs gdrcopy only when
+       gpu_operator_enable_gdrcopy=true (gpu-addons.tf keeps it OFF by default, since gdrcopy is
+       a GPUDirect latency optimization that NCCL does not require). Without that module there is
+       no /dev/gdrdrv, and an unconditional hostPath with type: CharDevice makes the kubelet
+       retry "hostPath type check failed: /dev/gdrdrv is not a character device" forever — the
+       pod never starts. Only mount it when the cluster actually has it. */ -}}
+    {{- if $v.gdrcopy }}
+    - { name: gdrdrv, hostPath: { path: /dev/gdrdrv, type: CharDevice } }
+    {{- end }}
+    - { name: sshkey, secret: { secretName: nccl-sshd-key, defaultMode: 0600 } }
+    - { name: shm,    emptyDir: { medium: Memory, sizeLimit: {{ $v.shmSize }} } }
+{{- end }}
+{{- end }}

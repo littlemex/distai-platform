@@ -1,0 +1,360 @@
+# Usage Guide
+
+A task-oriented walkthrough for operating this EKS + accelerator environment.
+The [README](./README.md) is the reference (every variable, every design
+decision); this guide is the "how do I actually do X" companion. All commands
+are copy-paste ready — replace `<angle-bracket>` placeholders with your values.
+
+**Conventions**
+
+- Shell commands run from `infra/eks/` unless stated otherwise.
+- Nothing here contains account IDs, cluster names, or IPs — set your own in
+  `terraform.tfvars`.
+- If you use a named AWS profile, either `export AWS_PROFILE=<name>` once or add
+  `aws_profile = "<name>"` to `terraform.tfvars`. Use the SAME profile for
+  `terraform apply` and for `aws eks update-kubeconfig` — if they resolve to
+  different IAM principals, `kubectl` gets `Unauthorized` (the cluster grants admin
+  only to the principal that applied).
+
+---
+
+## 1. First-time setup
+
+You need Terraform 1.9+, AWS CLI 2.15+, kubectl 1.29+, and helm 3.14+. Confirm
+you are pointed at the right AWS account **before** creating anything:
+
+```bash
+aws sts get-caller-identity          # is this the account you meant?
+cd infra/eks
+cp terraform.tfvars.example terraform.tfvars
+```
+
+Open `terraform.tfvars` and set at least `region`, `azs`, `cluster_name`, and
+one entry in `accelerator_pools`. The smallest useful starting point is a single
+On-Demand GPU pool:
+
+```hcl
+accelerator_pools = {
+  gpu-dev = {
+    instance_types = ["g6e.12xlarge"]  # L40S x4, no Capacity Block needed
+    device_plugin  = "nvidia"
+    capacity_type  = "on-demand"
+    zone           = "us-east-2a"
+  }
+}
+```
+
+> If Karpenter reports `InsufficientInstanceCapacity` / `UnfulfillableCapacity`
+> for every AZ in `zone`, the instance type is temporarily out of capacity in
+> that AZ. Either try a different `zone` from `var.azs`, or list alternate
+> sizes in `instance_types` (e.g. add `"g6e.24xlarge"`) — Karpenter tries all
+> of them.
+
+Then bring the cluster up:
+
+```bash
+terraform init
+terraform apply                      # ~15 minutes for the control plane + system nodes
+# Pass the SAME profile you applied with (or export AWS_PROFILE) — drop --profile
+# only if [default] already is the applying principal. See the note in Conventions.
+aws eks update-kubeconfig --name "$(terraform output -raw cluster_name)" \
+  --region <region> --profile <same-as-tfvars>
+kubectl get nodes                    # you should see the system nodes
+```
+
+No GPU node exists yet — Karpenter creates one on demand (next section).
+
+> **Always verify your kubectl context** before running cluster commands,
+> especially if your account has more than one cluster:
+> ```bash
+> kubectl config current-context     # must be YOUR cluster
+> ```
+
+### Preflight before an accelerated test case
+
+Before deploying a test case that schedules on GPU/EFA/FSx (e.g. `3.test_cases/pytorch/miles`
+or `pytorch/slime`), run the readiness check so a missing cluster piece is a named error rather
+than a silent `Pending` / mount failure:
+
+```bash
+./scripts/preflight.sh          # from infra/eks, after apply (reads cluster id + EFA SG from tf outputs)
+```
+
+It confirms the `node-role` placement labels, `nvidia.com/gpu` and `vpc.amazonaws.com/efa`
+advertisement, the storage CSI drivers and static PVs, and the EFA security group's
+self-referencing egress rule (the one a CIDR-only egress does not cover; see `sg.tf`).
+`terraform output accelerator_pool_placement` prints the node-role/EFA values to paste into a
+test case's `env_vars`.
+
+---
+
+## 2. Run something on a GPU
+
+Karpenter provisions a GPU node the moment a Pod requests `nvidia.com/gpu`.
+Try it with a one-shot CUDA check — the resource request has to be on the
+**container**, not just the Pod spec, so `--overrides` needs the full
+container block:
+
+```bash
+kubectl run gpu-smoke --restart=Never \
+    --image=nvidia/cuda:12.4.1-base-ubuntu22.04 \
+    --overrides='{"spec":{"tolerations":[{"key":"nvidia.com/gpu","operator":"Exists","effect":"NoSchedule"}],"containers":[{"name":"gpu-smoke","image":"nvidia/cuda:12.4.1-base-ubuntu22.04","command":["nvidia-smi"],"resources":{"limits":{"nvidia.com/gpu":"1"}}}]}}'
+```
+
+The first run takes a few minutes while Karpenter launches the node and the GPU
+Operator advertises `nvidia.com/gpu`. Watch it happen, then read the result:
+
+```bash
+kubectl get nodeclaims -w           # a gpu-dev claim appears, then Ready
+kubectl get nodes -l karpenter.sh/nodepool=gpu-dev
+kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/gpu-smoke --timeout=5m
+kubectl logs gpu-smoke              # nvidia-smi output — confirms the driver + GPU
+kubectl delete pod gpu-smoke
+```
+
+After the Pod is deleted, Karpenter scales the empty GPU node back down once it
+has been idle past `consolidateAfter` (5 minutes by default for on-demand/spot
+pools). Watch it disappear with `kubectl get nodeclaims -w`.
+
+For anything past a one-shot smoke test — multi-node NCCL/EFA benches, Neuron
+DDP, torchrun/PyTorchJob training, vLLM serving — use the **`charts/experiments`**
+Helm chart instead of hand-writing manifests. See `charts/experiments/README.md`
+for the workload catalog, prerequisites, and known issues.
+
+---
+
+## 3. How much EFA can a Pod request?
+
+For pools on EFA-capable instances (p5/p5en/trn2), **do not guess** the EFA
+count — the module computes the schedulable value for you:
+
+```bash
+terraform output accelerator_pool_efa_schedulable
+# {
+#   "gpu-p5en" = 15     # 16 network cards, but card 0 carries the node IP
+# }
+```
+
+Request that number in your Pod (never more, or it will never schedule):
+
+```yaml
+resources:
+  limits:
+    nvidia.com/gpu: 8
+    vpc.amazonaws.com/efa: 15
+```
+
+Also add the accelerator toleration and the NCCL/EFA environment your framework
+expects (see the multi-node examples — `ncclSshd` for NVIDIA/NCCL, `neuronDdp`
+for Neuron — in `charts/experiments`).
+
+---
+
+## 4. Use GDRCopy without a privileged Pod
+
+By default, `/dev/gdrdrv` (the GDRCopy kernel device) is either absent, or present on
+the host but not reachable from an unprivileged container — a hostPath mount grants
+the file's inode, not the container's device-cgroup permission, so `gdr_open()` still
+fails with `EPERM`. `aws-ofi-nccl` handles this today by logging a benign warning and
+falling back to a loopback copy, so most workloads never notice.
+
+To let a Pod use GDRCopy directly, without `privileged: true`:
+
+1. Set `gdrcopy_device_plugin_enabled = true` in `terraform.tfvars` and apply. This
+   installs a device plugin that advertises `/dev/gdrdrv` as an extended resource on
+   every GPU node (see `gdrcopy_extended_resource_name`, `gdrcopy_device_plugin_count`
+   in `variables.tf` for the knobs). It has no effect on any Pod that does not opt in.
+2. Request the resource in your Pod, alongside the GPUs:
+
+```yaml
+resources:
+  limits:
+    nvidia.com/gpu: 1
+    gdrcopy/gdrdrv: 1
+```
+
+No other securityContext change is required. Verify with the tools the AWS EFA
+installer already ships in the image:
+
+```bash
+gdrcopy_sanity
+gdrcopy_copybw
+```
+
+A Pod that requests `gdrcopy/gdrdrv` on a node where `/dev/gdrdrv` is not loaded stays
+`Pending` with an `Insufficient gdrcopy/gdrdrv` scheduling event — the same class of
+outcome as requesting more EFA than a node has — rather than starting and failing
+inside the container.
+
+---
+
+## 5. Use a Capacity Block (H200 / H100 / Trainium)
+
+Capacity Blocks reserve scarce accelerator capacity for a fixed window. The
+workflow:
+
+```bash
+# a. See what is offered for your instance type, duration, and AZ.
+./scripts/00-check-cb-offerings.sh
+
+# b. Purchase it (prints the price and asks to confirm — needs budget approval).
+./scripts/01-purchase-cb.sh --offering-id <id> --instance-type p5en.48xlarge --instance-count 2
+
+# c. Turn the reservation into a pool block you can paste into terraform.tfvars.
+./scripts/02-post-purchase.sh --cr-id cr-<hex> --end-date <RFC3339> \
+      --instance-type p5en.48xlarge --zone <az> --pool gpu-p5en
+```
+
+Paste the printed block into `accelerator_pools`, then apply. Karpenter is
+demand-driven, so `terraform apply` alone launches nothing — the reserved
+NodePool exists but stays at zero nodes until a Pod requests it:
+
+```bash
+terraform apply
+kubectl run cb-smoke --restart=Never --image=nvidia/cuda:12.4.1-base-ubuntu22.04 \
+    --overrides='{"spec":{"tolerations":[{"key":"nvidia.com/gpu","operator":"Exists","effect":"NoSchedule"},{"key":"capacity-reservation","operator":"Exists","effect":"NoSchedule"}],"containers":[{"name":"cb-smoke","image":"nvidia/cuda:12.4.1-base-ubuntu22.04","command":["nvidia-smi"],"resources":{"limits":{"nvidia.com/gpu":"8"}}}]}}'
+kubectl get nodes -l karpenter.sh/capacity-type=reserved   # CB node appears once the Pod is scheduled
+```
+
+> Capacity Block nodes carry both the accelerator taint (`nvidia.com/gpu` or
+> `aws.amazon.com/neuron`) and a `capacity-reservation` taint — tolerate both,
+> with `operator: Exists` since the reservation-specific value varies.
+
+Set `cb_end_date` on the pool to get an SNS alert one hour before the
+reservation expires (subscribe an email via `cb_alert_email_addresses`). When
+the block ends, AWS reclaims the node — drain your workload before then.
+
+Verify the fabric before a real multi-node run. GPU/EFA counts are per-instance facts (the
+schedulable EFA count is physical cards minus one, since card 0 carries the node IP), so read
+them off a live node instead of hardcoding:
+
+```bash
+POOL=<accelerator_pools key>
+GPU=$(kubectl get nodes -l node-role=$POOL -o jsonpath="{.items[0].status.allocatable['nvidia\.com/gpu']}")
+EFA=$(kubectl get nodes -l node-role=$POOL -o jsonpath="{.items[0].status.allocatable['vpc\.amazonaws\.com/efa']}")
+
+helm template exp ./charts/experiments -n $NS --set namespace=$NS \
+  --set ncclSshd.enabled=true --set ncclSshd.nodeRole=$POOL \
+  --set ncclSshd.gpuCount=$GPU --set ncclSshd.efaCount=$EFA | kubectl apply -f -
+
+# Both pods share a rendered SSH keypair, so mpirun works as soon as they are Running.
+kubectl -n $NS exec nccl-server -- mpirun --allow-run-as-root -np $((2*GPU)) \
+  -H <server-ip>:$GPU,<client-ip>:$GPU --mca plm_rsh_args '-p 2222' \
+  -x FI_PROVIDER=efa -x LD_LIBRARY_PATH -x PATH \
+  /opt/nccl-tests/build/all_reduce_perf -b 512M -e 1G -f 2 -g 1
+# Look for "NET/OFI Selected provider is efa (found $EFA nics)" and a high busbw.
+```
+
+---
+
+## 6. Run on Trainium / Inferentia (Neuron)
+
+Add a pool with `device_plugin = "neuron"` and the Neuron AMI:
+
+```hcl
+trn2 = {
+  instance_types    = ["trn2.48xlarge"]
+  device_plugin     = "neuron"
+  capacity_type     = "reserved"
+  zone              = "us-east-2b"
+  cb_reservation_id = "cr-<hex>"
+  ami_ssm_parameter = "/aws/service/eks/optimized-ami/1.35/amazon-linux-2023/x86_64/neuron/recommended/image_id"
+}
+```
+
+Pods request whole devices with `aws.amazon.com/neuron: "<n>"`. For
+tensor-parallel serving across many chips, set `neuron_enable_scheduler = true`
+so device IDs are allocated contiguously. See
+`charts/experiments` (`neuronServingVllm` workload).
+
+---
+
+## 7. Shared storage
+
+The default storage set is two single-AZ FSx layers (the awsome-distributed-ai
+design), matching a cluster that pins every accelerator pool to one AZ. All
+three CSI drivers (OpenZFS, Lustre, EFS) install unconditionally as permanent
+infrastructure; the `*_enabled` flags gate only whether each filesystem and its
+static PV are created (see the base-layer invariant in the README).
+
+- **FSx for OpenZFS** (`openzfs_enabled = true`, on by default): single-AZ NFS
+  home/shared layer, mounted at `/shared` by the training samples. Handles many
+  small files without the IOPS saturation Lustre hits on that pattern. A static
+  PV named `openzfs-shared` is created for you. Bills for its provisioned
+  capacity continuously.
+- **FSx for Lustre** (`fsx_enabled = true`, on by default): single-AZ,
+  high-throughput scratch/checkpoints. Bills for the full provisioned capacity
+  continuously. Set `fsx_subnet_index` to match the AZ of the pool that will use
+  it. A static PV named `fsx-training` is created for you (no dynamic
+  StorageClass — the CSI driver can only create brand-new filesystems, not
+  attach to an existing one, so this module always uses a fixed PV).
+- **EFS** (`efs_enabled = true`, off by default): regional, multi-AZ,
+  ReadWriteMany. Demoted to opt-in: a multi-AZ filesystem is the anomaly in a
+  single-AZ cluster, so it earns its place only for the one case that needs
+  cross-AZ RWX — a compiled-model / Hugging Face cache that must survive a Pod
+  rescheduled into another AZ when Karpenter replaces a node. A static PV named
+  `efs-neuron-workspace` is created when enabled.
+
+For a compute-only cluster with no shared storage, set `openzfs_enabled=false`
+and `fsx_enabled=false` (the CSI drivers remain, but no filesystem is billed).
+
+---
+
+## 8. Expose a service to the internet (demo)
+
+A CloudFront → ALB → EKS path is included as a sample, off by default. It is a
+**two-phase** apply because the ALB must exist before CloudFront can point at
+it:
+
+```bash
+terraform apply -var enable_demo_app=true                              # phase 1: ALB Controller + demo app + ALB
+terraform apply -var enable_demo_app=true -var enable_cloudfront=true  # phase 2: CloudFront + SG lock-down
+terraform output cloudfront_domain_name
+```
+
+This is a demo, not a production endpoint — see [Production
+hardening](./README.md#production-hardening) in the README before relying on
+it.
+
+---
+
+## 9. Tear it down
+
+Stop paying for the cluster when you are done:
+
+```bash
+./scripts/04-teardown.sh            # drain the accelerator pools (keep the cluster)
+./scripts/04-teardown.sh --destroy  # destroy everything
+```
+
+If `terraform destroy` stalls on a subnet that "has dependencies", it is almost
+always a leftover ENI from a Karpenter node or a load balancer that Terraform
+does not manage. Delete those first:
+
+```bash
+kubectl delete nodepool --all       # Karpenter drains its nodes
+kubectl delete ingress --all -A     # removes ALBs created by the LB controller
+# wait a minute for the ALB/ENIs to disappear, then re-run destroy
+```
+
+> **Teardown deletes data.** FSx and EFS are created without `prevent_destroy`
+> so the environment is disposable. Back up anything you cannot regenerate
+> first.
+
+---
+
+## 10. Troubleshooting quick reference
+
+| You see… | Do this |
+|---|---|
+| GPU Pod stays `Pending`, "no instance type has enough resources" | You probably requested more EFA than schedulable — check `terraform output accelerator_pool_efa_schedulable` and request ≤ that. |
+| Karpenter never launches a reserved node | The Capacity Block slot may not be free yet (previous instance still terminating), or `cb_reservation_id` is wrong. Confirm the reservation is `active`. |
+| GPU Pod runs but `nvidia-smi` shows nothing | The GPU Operator may still be initializing on a fresh node; give it 2–3 minutes and check `kubectl -n gpu-operator get pods`. |
+| NCCL is slow / not using EFA | Set `NCCL_SOCKET_IFNAME=^lo,docker,veth` (exclusion pattern) and confirm `FI_PROVIDER=efa`; look for `NET/OFI Selected provider is efa` in logs. |
+| `kubectl` / `update-kubeconfig`: `Unauthorized` | The principal `kubectl` uses differs from the one that applied — pass the SAME `--profile` as `aws_profile` (or `export AWS_PROFILE`) and verify with `aws sts get-caller-identity`; if the ARNs already match, the admin access entry is still propagating, so wait a minute and retry. |
+| `kubectl` commands hit the wrong cluster | `kubectl config current-context` — run `aws eks update-kubeconfig` for the intended cluster. |
+| Hugging Face downloads fail with `429` | Your egress IP is rate-limited. Set `HF_HUB_DISABLE_XET=1`, and for multi-rank jobs pre-stage the tokenizer/dataset to shared storage and load from the local path. |
+| `terraform apply` fails once on a Karpenter CRD, succeeds on retry | Known first-apply timing with the Kubernetes provider; just re-run `terraform apply`. |
+
+For the full list of subtle failure modes and their root causes, see the
+**Gotchas** section of the [README](./README.md#gotchas).

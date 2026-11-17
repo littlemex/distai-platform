@@ -1,0 +1,103 @@
+{{- /*
+torchrun-train — single-node MNIST MLP DistributedDataParallel run via `torchrun`
+(batch/v1 Job, zero operator). Backend gloo (CPU) or nccl (GPU). Reuses the ddp-sample image
+(ddp.py baked in) so one image covers both this and trainjob-train. This is the "what can you
+do with NO operator" single-node step; trainjob-train (Kubeflow Trainer v2) is the multi-node
+step above it.
+
+Requires sharedStorage.existingClaimName (apply manifests/shared-pvc.yaml once per namespace
+first — see that file's header for why this is not created by the chart) and
+torchrunTrain.image set.
+
+GPU note: nprocPerNode MUST equal gpu.count — torchrun spawns one proc per nproc and each
+grabs one GPU; a mismatch makes procs contend for a GPU with no error.
+
+Render + apply (CPU):
+  helm template exp ./charts/experiments --set namespace=$NS \
+    --set torchrunTrain.image=$IMG --set torchrunTrain.enabled=true \
+    --set sharedStorage.existingClaimName=shared-claim | kubectl apply -f -
+Render + apply (longer run, to actually watch progress — 3 default epochs finish in seconds):
+  helm template exp ./charts/experiments --set namespace=$NS \
+    --set torchrunTrain.image=$IMG --set torchrunTrain.enabled=true \
+    --set sharedStorage.existingClaimName=shared-claim \
+    --set torchrunTrain.totalEpochs=100 | kubectl apply -f -
+Render + apply (GPU, 1 g5 GPU):
+  helm template exp ./charts/experiments --set namespace=$NS \
+    --set torchrunTrain.enabled=true --set torchrunTrain.image=$IMG \
+    --set torchrunTrain.backend=nccl --set torchrunTrain.nodeRole=gpu-g5 \
+    --set torchrunTrain.nprocPerNode=1 \
+    --set torchrunTrain.gpu.enabled=true --set torchrunTrain.gpu.count=1 \
+    --set sharedStorage.existingClaimName=shared-claim | kubectl apply -f -
+Verify:
+  kubectl -n $NS logs -f job/ddp-torchrun
+*/ -}}
+{{- if .Values.torchrunTrain.enabled }}
+{{- $v := .Values.torchrunTrain }}
+{{- if not $v.image }}{{ fail "torchrunTrain.image is required (the ddp-sample image URI)" }}{{- end }}
+{{- include "experiments.failOnStrayDdpKnobs" (dict "root" $ "enabled" "torchrunTrain" "other" "trainjobTrain") }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ddp-torchrun
+  namespace: {{ include "experiments.namespace" . }}
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: { app: ddp-torchrun }
+      # The CPU NodePool consolidates underutilized nodes after 30s and can evict this Pod
+      # mid-training; do-not-disrupt pins it. Harmless on the GPU pools (WhenEmpty).
+      annotations:
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        node-role: {{ $v.nodeRole }}
+      tolerations:
+        - { key: capacity-reservation, operator: Exists, effect: NoSchedule }
+        {{- if $v.gpu.enabled }}
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+        {{- end }}
+      # No fix-perms initContainer: the ddp-sample image runs as root (uid 0), and every shared
+      # backend hands root a writable mount — FSx OpenZFS exports no_root_squash (openzfs.tf),
+      # FSx Lustre mounts as root, and the EFS Access Point pins posixUser 0 (efs.tf) — so writes
+      # are owned correctly. ddp.py creates the MNIST data / output / snapshot dirs on first
+      # write (os.makedirs).
+      containers:
+        - name: train
+          image: {{ $v.image }}
+          command:
+            - torchrun
+            - --standalone
+            - --nproc_per_node={{ $v.nprocPerNode }}
+            - /workspace/ddp.py
+          env:
+            # OUTPUT_DIR stays inline: it is the one ddp.py env that is genuinely per-workload
+            # (the backend label keeps gloo and nccl runs from resuming each other's snapshot).
+            # Every other ddp.py knob comes from the shared experiments.ddpEnv helper, so
+            # torchrunTrain and trainjobTrain cannot drift apart again — see that helper's
+            # header for the drift this replaced.
+            #
+            # ddp.py's own default (3 epochs) finishes in well under a minute — too fast to
+            # watch the log or a rollout in real time. Set torchrunTrain.totalEpochs for a
+            # longer run. ddp.py checkpoints every SAVE_EVERY epochs (default 1) on rank 0
+            # alone, so a Job killed mid-run keeps the snapshot from its last COMPLETED epoch
+            # — not from a partial one, since the write happens after _run_epoch returns.
+            - { name: OUTPUT_DIR, value: /shared/output/torchrun-{{ $v.backend }} }
+            {{- include "experiments.ddpEnv" $v | trim | nindent 12 }}
+          resources:
+            limits:
+              {{- if $v.gpu.enabled }}
+              nvidia.com/gpu: {{ $v.gpu.count | quote }}
+              {{- end }}
+              memory: {{ $v.memory }}
+            requests:
+              cpu: {{ $v.cpu | quote }}
+              memory: {{ $v.memory }}
+          volumeMounts:
+            - { name: shared, mountPath: /shared }
+            - { name: shm, mountPath: /dev/shm }
+      volumes:
+        - { name: shared, persistentVolumeClaim: { claimName: {{ include "experiments.sharedClaimName" . }} } }
+        - { name: shm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
+{{- end }}

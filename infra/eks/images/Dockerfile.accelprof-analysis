@@ -1,0 +1,38 @@
+# Deployment image for the accelprof analysis MCP, hosted by the mcp-host chart. The package is
+# published to PyPI and is the source of truth; this image installs it (with the [mcp] extra) at a
+# pinned version and runs the console script. Owning the image — the version pin and any layered
+# analyzer tools — is the deployment's responsibility; the accelprof repo ships the package and its
+# own reference Dockerfile.
+#
+# This base carries only the builtin 'inventory' analyzer. To register a real tool (e.g. `nsys stats`
+# for GPU or `neuron-explorer` for Neuron), layer FROM this image, add the tool, and set the entry's
+# MCP_ANALYZERS — kept out of the base so it stays small and tool-agnostic.
+#
+# Build (context = infra/eks/images):
+#   finch build --platform linux/amd64 -f Dockerfile.accelprof-analysis -t $ECR/accelprof:v1 .
+FROM python:3.12-slim
+# The pin is a build argument so that a candidate can be verified on a cluster before it is released:
+# a pre-release lives behind a git ref, and editing this line to try one would mean the image that was
+# verified is not the image this file describes. The default is the released version, and moving it is
+# how a release reaches a cluster.
+ARG ACCELPROF_SPEC="accelprof[mcp,sagemaker]==0.1.3"
+RUN pip install --no-cache-dir "${ACCELPROF_SPEC}"
+# The producer side of the platform travels with this image, not with the workload's: the shim that
+# wraps a command under the profiler, and the recorder that turns the files it leaves behind into one
+# MLflow run. They live here rather than in a per-run ConfigMap so that the code and the accelprof
+# version it calls are pinned by a single image digest, and rather than in the accelprof package
+# because they encode this cluster's contract (how the profiler is invoked, where the shared
+# directory is mounted, how a Pod reads its own status) which is the platform's concern.
+#
+# The init container of a producer Job copies entry.sh into the shared volume so that an ordinary
+# training image can run it without carrying anything itself.
+COPY entry.sh /opt/accelprof/entry.sh
+COPY recorder.py /opt/accelprof/recorder.py
+COPY orphan-check.py /opt/accelprof/orphan-check.py
+RUN chmod 0755 /opt/accelprof/entry.sh /opt/accelprof/recorder.py /opt/accelprof/orphan-check.py
+RUN useradd -u 1000 -m mcp
+ENV HOME=/tmp MCP_PORT=8080
+USER 1000
+EXPOSE 8080
+# The mcp-host chart sets command=["accelprof-analysis-mcp"]; this CMD is for standalone runs.
+CMD ["accelprof-analysis-mcp"]
