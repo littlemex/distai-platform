@@ -1,0 +1,5 @@
+# See https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Requests a review from the maintainer on every pull request. Enforcement comes from the
+# branch ruleset on main, not from this file.
+* @littlemex

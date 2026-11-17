@@ -1,0 +1,26 @@
+name: Close inactive issues
+on:
+  schedule:
+    - cron: "30 1 * * *"
+
+permissions: {}
+
+jobs:
+  close-issues:
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+      # actions/stale keeps its state in the Actions cache and deletes the previous entry.
+      actions: write
+    steps:
+      - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
+        with:
+          days-before-issue-stale: 90
+          days-before-issue-close: 60
+          stale-issue-label: "stale"
+          stale-issue-message: "This issue is stale because it has had no activity for 90 days. Comment on it to keep it open."
+          close-issue-message: "This issue was closed because it has been inactive for 60 days since being marked as stale."
+          exempt-issue-labels: "RFC,security,bug,help wanted,status: ready,status: in progress,status: in review,status: verifying"
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
