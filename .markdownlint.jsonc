@@ -1,0 +1,11 @@
+{
+  "default": true,
+  // Files may start with SPDX/license comments instead of a heading.
+  "MD041": false,
+  // Prose and wide tables are not wrapped at a fixed width.
+  "MD013": false,
+  // Inline HTML is allowed (<br> in tables, <details> blocks).
+  "MD033": false,
+  // Table pipe alignment is cosmetic; GitHub renders unaligned tables fine.
+  "MD060": false
+}

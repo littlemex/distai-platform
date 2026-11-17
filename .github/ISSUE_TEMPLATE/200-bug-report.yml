@@ -1,0 +1,80 @@
+name: "Bug Report"
+description: Report a bug to help us improve.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        #### Before submitting a bug report, please make sure you have searched [existing issues](https://github.com/littlemex/distai-platform/issues).
+
+
+        **IMPORTANT:** Please redact any access keys, secret keys, session tokens, account IDs,
+        IP addresses, cluster names or other sensitive information from your bug report and log output.
+        Report security vulnerabilities privately as described in [SECURITY.md](https://github.com/littlemex/distai-platform/blob/main/SECURITY.md), not in an issue.
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Prerequisites
+      options:
+        - label: I have searched existing issues to make sure this bug has not already been reported.
+          required: true
+        - label: I have verified the issue against the latest `main` branch.
+          required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: >
+        Provide details about your environment. Fill in the relevant fields below.
+      value: |
+        - Commit or tag of this repository: [e.g., v0.1.0 or a commit SHA]
+        - AWS Region: [e.g., ap-northeast-1]
+        - Amazon EKS version: [e.g., 1.35]
+        - Terraform version: [e.g., 1.14.0]
+        - Karpenter version: [e.g., 1.8.0]
+        - Node pool and instance type: [e.g., gpu-l40s / g6e.12xlarge]
+        - Number of nodes: [e.g., 2]
+        - Accelerator stack (if applicable): [e.g., GPU Operator 25.x, Neuron SDK 2.x, EFA installer 1.x]
+        - Workload and container image (if applicable): [e.g., vLLM 0.x, pinned image digest]
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: Describe the bug. Include what you expected to happen and what actually happened.
+      placeholder: |
+        **Expected behavior:**
+
+        **Actual behavior:**
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Provide the steps to reproduce the bug.
+      placeholder: |
+        1. Run ...
+        2. With configuration ...
+        3. See error ...
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: What must be true, and verified on a real cluster, for this to be done?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Log Output
+      description: >
+        Paste any relevant log output here. This will be automatically formatted as code.
+        **Remember to redact sensitive information.**
+      render: shell
+    validations:
+      required: false
