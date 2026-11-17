@@ -69,7 +69,7 @@ Optional variables:
 | `TERRAFORM` | `terraform` | Terraform binary |
 | `KARPENTER_VERSION` | `1.15.2` | Karpenter chart version, must be `1.15.x` |
 | `E2E_INSTANCE_TYPES` | `m7i.large,m6i.large,m5.large` | Instance types the spot NodePool may use; several types let Karpenter find a replacement after the interruption |
-| `E2E_AMI_ALIAS` | `al2023@latest` | EC2NodeClass AMI alias; set a version such as `al2023@v20261112` to pin it |
+| `E2E_AMI_ALIAS` | `al2023@v20261112` | EC2NodeClass AMI alias, pinned to a released EKS-optimized AL2023 version for Kubernetes 1.37 |
 | `E2E_WORK_DIR` | a new `mktemp -d` directory | Generated tfvars, kubeconfig, manifests and the Terraform data directory |
 | `E2E_KEEP_ON_FAILURE` | `0` | `1` leaves the cell in place after a failure, for debugging; the script prints the destroy command |
 | `E2E_LEFTOVER_GRACE_SECONDS` | `600` | How long to wait for terminating instances and deleting volumes or NAT gateways to disappear after destroy |
