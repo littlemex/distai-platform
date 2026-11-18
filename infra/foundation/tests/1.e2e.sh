@@ -4,11 +4,19 @@
 # It uses only the variables and outputs of infra/foundation:
 #   1. init with the S3 backend, apply with a generated tfvars file;
 #   2. two Ready system nodes, four add-ons ACTIVE, outputs present;
-#   3. Karpenter v1.15.x installed by Helm from the outputs only;
-#   4. a spot CPU NodePool launches an instance for a pending pod;
-#   5. a synthetic spot interruption sent to the queue is handled;
-#   6. terraform destroy with the NodePool and Karpenter still in place;
-#   7. nothing tagged for the cluster is left (instance, ENI, NAT, EBS).
+#   3. a pod without host networking on a system node cannot obtain an
+#      IMDSv2 token, and the system nodes require IMDSv2 with a hop limit
+#      of 1;
+#   4. the Karpenter node role and the system node role carry no
+#      AmazonEKS_CNI_Policy, aws-node has a Pod Identity association, and a
+#      pod without host networking still gets an IP address;
+#   5. a deny-all NetworkPolicy blocks pod-to-pod traffic that worked before
+#      the policy was applied;
+#   6. Karpenter v1.15.x installed by Helm from the outputs only;
+#   7. a spot CPU NodePool launches an instance for a pending pod;
+#   8. a synthetic spot interruption sent to the queue is handled;
+#   9. terraform destroy with the NodePool and Karpenter still in place;
+#  10. nothing tagged for the cluster is left (instance, ENI, NAT, EBS).
 #
 # Every check prints PASS or FAIL. The script exits non-zero on the first
 # failed step and always attempts to destroy what it created (EXIT trap).
@@ -22,7 +30,9 @@
 #   E2E_AMI_ALIAS (al2023@v20261112), E2E_WORK_DIR (mktemp -d),
 #   E2E_KEEP_ON_FAILURE (0), E2E_LEFTOVER_GRACE_SECONDS (600),
 #   ARGOCD_IDC_INSTANCE_ARN, ARGOCD_IDC_REGION, ARGOCD_ADMIN_GROUP_IDS
-#   (all three set: also create and check the Argo CD capability).
+#   (all three set: also create the Argo CD capability with one ADMIN role
+#   mapping, and check it), ARGOCD_VIEWER_GROUP_IDS (with the three above
+#   also set: add a second, VIEWER role mapping, and check it too).
 set -euo pipefail
 
 : "${AWS_PROFILE:?export AWS_PROFILE}"
@@ -43,6 +53,12 @@ E2E_LEFTOVER_GRACE_SECONDS="${E2E_LEFTOVER_GRACE_SECONDS:-600}"
 ARGOCD_IDC_INSTANCE_ARN="${ARGOCD_IDC_INSTANCE_ARN:-}"
 ARGOCD_IDC_REGION="${ARGOCD_IDC_REGION:-}"
 ARGOCD_ADMIN_GROUP_IDS="${ARGOCD_ADMIN_GROUP_IDS:-}"
+ARGOCD_VIEWER_GROUP_IDS="${ARGOCD_VIEWER_GROUP_IDS:-}"
+
+# Images pinned by digest (see tests/README.md "Pinned images" for how these
+# digests were resolved).
+IMDS_CURL_IMAGE="docker.io/curlimages/curl@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
+NETPOL_BUSYBOX_IMAGE="public.ecr.aws/docker/library/busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -59,6 +75,8 @@ TEST_TAG_KEY="distai-platform-e2e"
 NODEPOOL="e2e-spot"
 NODECLASS="e2e-cpu"
 APP="e2e-inflate"
+IMDS_POD="e2e-imds-check"
+NETPOL_NS="e2e-netpol-${RUN_ID#e2e-}"
 ADDONS=(vpc-cni coredns kube-proxy eks-pod-identity-agent)
 
 APPLY_ATTEMPTED=0
@@ -113,6 +131,10 @@ require_bin() {
   command -v "$1" >/dev/null 2>&1 || fail "prerequisite: $1 not found"
 }
 
+instance_of_node() {
+  kubectl get node "$1" -o jsonpath='{.spec.providerID}' | awk -F/ '{print $NF}'
+}
+
 # -------------------------------------------------------- cleanup (trap)
 
 cleanup() {
@@ -127,6 +149,8 @@ cleanup() {
       if kubectl get nodes >/dev/null 2>&1; then
         kubectl delete deployment "${APP}" --ignore-not-found --wait=false >/dev/null 2>&1
         kubectl delete nodepool "${NODEPOOL}" --ignore-not-found --timeout=300s >/dev/null 2>&1
+        kubectl delete pod "${IMDS_POD}" --ignore-not-found --wait=false >/dev/null 2>&1
+        kubectl delete namespace "${NETPOL_NS}" --ignore-not-found --wait=false >/dev/null 2>&1
       fi
       tf destroy -auto-approve -input=false -var-file="${TFVARS}"
       local destroy_rc=$?
@@ -237,10 +261,19 @@ info "run ${RUN_ID}, work dir ${WORK_DIR}"
 
 # ------------------------------------------------- 1. init and apply
 
+csv_to_json_array() {
+  printf '%s' "$1" | awk -F, '{for(i=1;i<=NF;i++){printf "%s\"%s\"", (i>1?",":""), $i}}'
+}
+
 ARGOCD_JSON="null"
 if [[ -n "${ARGOCD_IDC_INSTANCE_ARN}" && -n "${ARGOCD_IDC_REGION}" && -n "${ARGOCD_ADMIN_GROUP_IDS}" ]]; then
-  groups_json="$(printf '%s' "${ARGOCD_ADMIN_GROUP_IDS}" | awk -F, '{for(i=1;i<=NF;i++){printf "%s\"%s\"", (i>1?",":""), $i}}')"
-  ARGOCD_JSON="{\"idc_instance_arn\":\"${ARGOCD_IDC_INSTANCE_ARN}\",\"idc_region\":\"${ARGOCD_IDC_REGION}\",\"admin_group_ids\":[${groups_json}]}"
+  admin_groups_json="$(csv_to_json_array "${ARGOCD_ADMIN_GROUP_IDS}")"
+  role_mappings_json="{\"role\":\"ADMIN\",\"group_ids\":[${admin_groups_json}]}"
+  if [[ -n "${ARGOCD_VIEWER_GROUP_IDS}" ]]; then
+    viewer_groups_json="$(csv_to_json_array "${ARGOCD_VIEWER_GROUP_IDS}")"
+    role_mappings_json="${role_mappings_json},{\"role\":\"VIEWER\",\"group_ids\":[${viewer_groups_json}]}"
+  fi
+  ARGOCD_JSON="{\"idc_instance_arn\":\"${ARGOCD_IDC_INSTANCE_ARN}\",\"idc_region\":\"${ARGOCD_IDC_REGION}\",\"role_mappings\":[${role_mappings_json}]}"
   info "argocd is set: the Argo CD capability is created and checked"
 fi
 
@@ -349,16 +382,249 @@ if [[ "${ARGOCD_JSON}" != "null" ]]; then
   }
   wait_until 1200 30 "Argo CD capability ACTIVE" argocd_active || fail "Argo CD capability is not ACTIVE"
   pass "Argo CD capability ACTIVE"
+
+  ARGOCD_CAPABILITY_NAME="$(aws eks list-capabilities --cluster-name "${CLUSTER}" \
+    --query "capabilities[?arn=='${ARGOCD_ARN}'].capabilityName | [0]" --output text)" \
+    || fail "aws eks list-capabilities --cluster-name ${CLUSTER}"
+  [[ -n "${ARGOCD_CAPABILITY_NAME}" && "${ARGOCD_CAPABILITY_NAME}" != "None" ]] \
+    || fail "no capability with arn ${ARGOCD_ARN} in list-capabilities"
+
+  # var.argocd.role_mappings is {role, group_ids}; the Terraform resource has
+  # no identity source other than IAM Identity Center groups, so each
+  # group_id becomes one identity of type SSO_GROUP in the capability's
+  # configuration (aws eks describe-capability). This checks role name plus
+  # the set of SSO_GROUP identity IDs under it, not the group's type field
+  # directly (kept out of this contract-only test).
+  sorted_csv() {
+    printf '%s' "$1" | tr ',' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//'
+  }
+  role_mapping_group_ids() {
+    aws eks describe-capability --cluster-name "${CLUSTER}" --capability-name "${ARGOCD_CAPABILITY_NAME}" \
+      --query "capability.configuration.argoCd.rbacRoleMappings[?role=='$1'].identities[].id" --output text 2>/dev/null \
+      | tr '\t' '\n' | awk 'NF' | sort -u | tr '\n' ' ' | sed 's/ $//'
+  }
+  expect_role_mapping() {
+    local role="$1" want_csv="$2" got want
+    want="$(sorted_csv "${want_csv}")"
+    got="$(role_mapping_group_ids "${role}")" \
+      || fail "aws eks describe-capability ${ARGOCD_CAPABILITY_NAME} (role ${role})"
+    [[ "${got}" == "${want}" ]] \
+      || fail "Argo CD role mapping ${role}: capability has [${got}], expected [${want}]"
+  }
+  expect_role_mapping ADMIN "${ARGOCD_ADMIN_GROUP_IDS}"
+  pass "Argo CD capability lists the ADMIN role mapping (${ARGOCD_ADMIN_GROUP_IDS})"
+  if [[ -n "${ARGOCD_VIEWER_GROUP_IDS}" ]]; then
+    expect_role_mapping VIEWER "${ARGOCD_VIEWER_GROUP_IDS}"
+    pass "Argo CD capability lists the VIEWER role mapping (${ARGOCD_VIEWER_GROUP_IDS})"
+  fi
 fi
+
+# ------------------------------------------------------- 3b. IMDS hop limit
+
+SYSTEM_NODE_NAMES=()
+while IFS= read -r n; do SYSTEM_NODE_NAMES+=("${n}"); done \
+  < <(kubectl get nodes -l eks.amazonaws.com/nodegroup -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+[[ "${#SYSTEM_NODE_NAMES[@]}" -ge 1 ]] || fail "no system nodes found for the IMDS and CNI checks"
+SYSTEM_NODEGROUP_LABEL="$(kubectl get node "${SYSTEM_NODE_NAMES[0]}" \
+  -o jsonpath='{.metadata.labels.eks\.amazonaws\.com/nodegroup}')"
+[[ -n "${SYSTEM_NODEGROUP_LABEL}" ]] \
+  || fail "system node ${SYSTEM_NODE_NAMES[0]} has no eks.amazonaws.com/nodegroup label"
+
+cat >"${WORK_DIR}/imds-check.yaml" <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${IMDS_POD}
+  labels:
+    ${TEST_TAG_KEY}: ${RUN_ID}
+spec:
+  restartPolicy: Never
+  hostNetwork: false
+  nodeSelector:
+    eks.amazonaws.com/nodegroup: ${SYSTEM_NODEGROUP_LABEL}
+  tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists
+  containers:
+    - name: curl
+      image: ${IMDS_CURL_IMAGE}
+      command: ["sh", "-c"]
+      args:
+        - |
+          set +e
+          TOKEN="\$(curl -s -m 3 -X PUT http://169.254.169.254/latest/api/token \
+            -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')"
+          printf 'IMDS_TOKEN_LEN=%s\n' "\${#TOKEN}"
+          exit 0
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+YAML
+kubectl apply -f "${WORK_DIR}/imds-check.yaml" || fail "kubectl apply the IMDS check pod"
+
+imds_pod_done() {
+  local p
+  p="$(kubectl get pod "${IMDS_POD}" -o jsonpath='{.status.phase}' 2>/dev/null)"
+  [[ "${p}" == "Succeeded" || "${p}" == "Failed" ]]
+}
+wait_until 180 10 "IMDS check pod finished" imds_pod_done \
+  || fail "IMDS check pod ${IMDS_POD} did not finish: $(kubectl get pod "${IMDS_POD}" -o jsonpath='{.status}' 2>&1)"
+IMDS_POD_IP="$(kubectl get pod "${IMDS_POD}" -o jsonpath='{.status.podIP}' 2>/dev/null)"
+IMDS_LOG="$(kubectl logs "${IMDS_POD}" 2>/dev/null)"
+kubectl delete pod "${IMDS_POD}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+[[ "${IMDS_LOG}" == *"IMDS_TOKEN_LEN=0"* ]] \
+  || fail "a pod without host networking obtained an IMDSv2 token: ${IMDS_LOG}"
+pass "a pod without host networking on a system node could not obtain an IMDSv2 token"
+
+SYSTEM_INSTANCE_IDS=()
+for n in "${SYSTEM_NODE_NAMES[@]}"; do
+  SYSTEM_INSTANCE_IDS+=("$(instance_of_node "${n}")")
+done
+bad_metadata_options="$(aws ec2 describe-instances --instance-ids "${SYSTEM_INSTANCE_IDS[@]}" \
+  --query 'Reservations[].Instances[].[InstanceId,MetadataOptions.HttpTokens,MetadataOptions.HttpPutResponseHopLimit]' \
+  --output text | awk '$2!="required" || $3!="1" {print}')" \
+  || fail "aws ec2 describe-instances --instance-ids ${SYSTEM_INSTANCE_IDS[*]}"
+[[ -z "${bad_metadata_options}" ]] \
+  || fail "system node instance metadata options are not locked down: ${bad_metadata_options}"
+pass "system nodes require IMDSv2 (HttpTokens=required) with HttpPutResponseHopLimit=1"
+
+# --------------------------------------------- 3c. no CNI permissions on
+# --------------------------------------------- node roles, aws-node via Pod
+# --------------------------------------------- Identity, pods still get IPs
+
+SYSTEM_NODEGROUP_NAME="$(aws eks list-nodegroups --cluster-name "${CLUSTER}" --query 'nodegroups[0]' --output text)" \
+  || fail "aws eks list-nodegroups --cluster-name ${CLUSTER}"
+[[ -n "${SYSTEM_NODEGROUP_NAME}" && "${SYSTEM_NODEGROUP_NAME}" != "None" ]] \
+  || fail "no managed node group found on cluster ${CLUSTER}"
+SYSTEM_NODE_ROLE_ARN="$(aws eks describe-nodegroup --cluster-name "${CLUSTER}" \
+  --nodegroup-name "${SYSTEM_NODEGROUP_NAME}" --query 'nodegroup.nodeRole' --output text)" \
+  || fail "aws eks describe-nodegroup --cluster-name ${CLUSTER} --nodegroup-name ${SYSTEM_NODEGROUP_NAME}"
+SYSTEM_NODE_ROLE="${SYSTEM_NODE_ROLE_ARN##*/}"
+
+role_has_cni_policy() {
+  aws iam list-attached-role-policies --role-name "$1" \
+    --query "length(AttachedPolicies[?PolicyName=='AmazonEKS_CNI_Policy'])" --output text
+}
+for role in "${NODE_ROLE}" "${SYSTEM_NODE_ROLE}"; do
+  n="$(role_has_cni_policy "${role}")" || fail "aws iam list-attached-role-policies --role-name ${role}"
+  [[ "${n}" == "0" ]] || fail "role ${role} still has AmazonEKS_CNI_Policy attached"
+done
+pass "neither the Karpenter node role nor the system node role (${SYSTEM_NODE_ROLE}) has AmazonEKS_CNI_Policy"
+
+aws_node_pia_count="$(aws eks list-pod-identity-associations --cluster-name "${CLUSTER}" \
+  --namespace kube-system --service-account aws-node --query 'length(associations)' --output text)" \
+  || fail "aws eks list-pod-identity-associations --cluster-name ${CLUSTER}"
+[[ "${aws_node_pia_count}" -ge 1 ]] || fail "no EKS Pod Identity association for kube-system/aws-node"
+pass "kube-system/aws-node has an EKS Pod Identity association (its own role carries AmazonEKS_CNI_Policy)"
+
+[[ -n "${IMDS_POD_IP}" ]] \
+  || fail "pod ${IMDS_POD} (no host networking, no node role) never got a pod IP from the CNI"
+pass "a pod without host networking still got a pod IP (${IMDS_POD_IP}) from the CNI"
+
+# --------------------------------------------------------- 3d. NetworkPolicy
+
+cat >"${WORK_DIR}/netpol-check.yaml" <<YAML
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${NETPOL_NS}
+  labels:
+    ${TEST_TAG_KEY}: ${RUN_ID}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: netpol-server
+  namespace: ${NETPOL_NS}
+  labels:
+    role: netpol-server
+spec:
+  containers:
+    - name: httpd
+      image: ${NETPOL_BUSYBOX_IMAGE}
+      command: ["sh", "-c", "mkdir -p /www && echo ok >/www/index.html && httpd -f -p 8080 -h /www"]
+      ports:
+        - containerPort: 8080
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: netpol-client
+  namespace: ${NETPOL_NS}
+  labels:
+    role: netpol-client
+spec:
+  containers:
+    - name: busybox
+      image: ${NETPOL_BUSYBOX_IMAGE}
+      command: ["sh", "-c", "sleep 3600"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+YAML
+kubectl apply -f "${WORK_DIR}/netpol-check.yaml" || fail "kubectl apply the NetworkPolicy test namespace"
+kubectl wait --for=condition=Ready pod/netpol-server pod/netpol-client \
+  -n "${NETPOL_NS}" --timeout=120s \
+  || fail "netpol-server or netpol-client did not become Ready in ${NETPOL_NS}"
+
+NETPOL_SERVER_IP="$(kubectl get pod netpol-server -n "${NETPOL_NS}" -o jsonpath='{.status.podIP}')"
+[[ -n "${NETPOL_SERVER_IP}" ]] || fail "netpol-server has no pod IP"
+
+client_reaches_server() {
+  kubectl exec -n "${NETPOL_NS}" netpol-client -- \
+    wget -q -O /dev/null -T 3 "http://${NETPOL_SERVER_IP}:8080/" >/dev/null 2>&1
+}
+wait_until 60 5 "client reaches server before any NetworkPolicy" client_reaches_server \
+  || fail "netpol-client cannot reach netpol-server before any NetworkPolicy is applied"
+pass "client pod reaches the server pod before any NetworkPolicy is applied"
+
+cat >"${WORK_DIR}/netpol-deny.yaml" <<YAML
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-ingress
+  namespace: ${NETPOL_NS}
+spec:
+  podSelector:
+    matchLabels:
+      role: netpol-server
+  policyTypes:
+    - Ingress
+YAML
+kubectl apply -f "${WORK_DIR}/netpol-deny.yaml" || fail "kubectl apply the deny-all ingress NetworkPolicy"
+
+client_blocked() { ! client_reaches_server; }
+wait_until 60 5 "deny-all NetworkPolicy blocks client-to-server traffic" client_blocked \
+  || fail "netpol-client still reaches netpol-server after a deny-all ingress NetworkPolicy was applied"
+pass "a deny-all ingress NetworkPolicy blocks traffic that worked before it was applied"
+
+kubectl delete namespace "${NETPOL_NS}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
 
 # ------------------------------------- 4. Karpenter from the outputs only
 
+# The Karpenter controller tolerates CriticalAddonsOnly and runs on a system
+# node, which (3b above) now rejects a hop count beyond 1, so the controller
+# can no longer reach IMDS to discover its own Region the way it does by
+# default. The chart's "Additional environment variables for the controller
+# pod" field is controller.env (values.yaml ships it commented out as
+# `# - name: AWS_REGION` / `#   value: eu-west-1`); set it explicitly instead
+# of relying on IMDS.
 cat >"${WORK_DIR}/karpenter-values.yaml" <<YAML
 serviceAccount:
   name: karpenter
 settings:
   clusterName: ${CLUSTER}
   interruptionQueue: ${QUEUE_NAME}
+controller:
+  env:
+    - name: AWS_REGION
+      value: ${AWS_REGION}
 tolerations:
   - key: CriticalAddonsOnly
     operator: Exists
@@ -367,7 +633,7 @@ helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
   --version "${KARPENTER_VERSION}" --namespace kube-system \
   --values "${WORK_DIR}/karpenter-values.yaml" --wait --timeout 10m \
   || fail "helm install karpenter ${KARPENTER_VERSION}"
-pass "Karpenter ${KARPENTER_VERSION} installed in kube-system with service account karpenter"
+pass "Karpenter ${KARPENTER_VERSION} installed in kube-system with service account karpenter, controller.env AWS_REGION=${AWS_REGION}"
 
 types_yaml="$(printf '%s' "${E2E_INSTANCE_TYPES}" | tr ',' '\n' | sed 's/^/            - /')"
 cat >"${WORK_DIR}/karpenter-nodes.yaml" <<YAML
@@ -464,10 +730,6 @@ app_node() {
 }
 app_running() { [[ -n "$(app_node)" ]]; }
 app_running_elsewhere() { local n; n="$(app_node)"; [[ -n "${n}" && "${n}" != "${NODE1}" ]]; }
-
-instance_of_node() {
-  kubectl get node "$1" -o jsonpath='{.spec.providerID}' | awk -F/ '{print $NF}'
-}
 
 # Checks that NODE comes from the test NodePool and is a spot instance; sets
 # LAST_INSTANCE_ID and records it for the post-destroy check.
