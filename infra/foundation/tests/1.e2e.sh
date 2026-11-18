@@ -209,6 +209,9 @@ list_leftover() {
         volume)
           aws ec2 describe-volumes --filters "${filter}" \
             --query 'Volumes[].VolumeId' --output text ;;
+        launch-template)
+          aws ec2 describe-launch-templates --filters "${filter}" \
+            --query 'LaunchTemplates[].LaunchTemplateId' --output text ;;
       esac
     done < <(tag_filters)
     if [[ -n "${VPC_ID}" ]]; then
@@ -224,7 +227,7 @@ list_leftover() {
           aws ec2 describe-nat-gateways --filter "Name=vpc-id,Values=${VPC_ID}" \
             "Name=state,Values=pending,available,deleting" \
             --query 'NatGateways[].NatGatewayId' --output text ;;
-        volume) : ;;
+        volume | launch-template) : ;;
       esac
     fi
   } 2>/dev/null | tr '\t' '\n' | grep -v '^None$' | grep -v '^$' | sort -u || true
@@ -235,7 +238,7 @@ no_leftover() { [[ -z "$(list_leftover "$1")" ]]; }
 # report_leftovers GRACE_SECONDS: PASS/FAIL per kind, returns 1 if any remains.
 report_leftovers() {
   local grace="$1" kind ids bad=0
-  for kind in instance eni nat volume; do
+  for kind in instance eni nat volume launch-template; do
     if wait_until "${grace}" 20 "no ${kind} left" no_leftover "${kind}"; then
       pass "no ${kind} tagged for the cluster remains"
     else

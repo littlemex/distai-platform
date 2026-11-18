@@ -90,9 +90,13 @@ for eni in $enis; do
   tolerate_not_found aws ec2 delete-network-interface --network-interface-id "$eni"
 done
 
-# 3. Launch templates Karpenter created for this cluster.
+# 3. Launch templates Karpenter created for this cluster. Karpenter v1 tags
+#    them with eks:eks-cluster-name (v1.EKSClusterNameTagKey, which its own
+#    launch template provider filters on) and karpenter.k8s.aws/ec2nodeclass;
+#    requiring both leaves templates of other tools alone.
 lts="$(aws ec2 describe-launch-templates \
-  --filters "Name=tag:karpenter.k8s.aws/cluster,Values=${CLUSTER_NAME}" \
+  --filters "Name=tag:eks:eks-cluster-name,Values=${CLUSTER_NAME}" \
+  "Name=tag-key,Values=karpenter.k8s.aws/ec2nodeclass" \
   --query 'LaunchTemplates[].LaunchTemplateId' --output text)"
 for lt in $lts; do
   log "deleting launch template ${lt}"
