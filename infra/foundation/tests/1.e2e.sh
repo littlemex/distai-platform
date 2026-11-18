@@ -540,6 +540,11 @@ metadata:
   labels:
     role: netpol-server
 spec:
+  nodeSelector:
+    eks.amazonaws.com/nodegroup: ${SYSTEM_NODEGROUP_LABEL}
+  tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists
   containers:
     - name: httpd
       image: ${NETPOL_BUSYBOX_IMAGE}
@@ -559,6 +564,11 @@ metadata:
   labels:
     role: netpol-client
 spec:
+  nodeSelector:
+    eks.amazonaws.com/nodegroup: ${SYSTEM_NODEGROUP_LABEL}
+  tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists
   containers:
     - name: busybox
       image: ${NETPOL_BUSYBOX_IMAGE}
