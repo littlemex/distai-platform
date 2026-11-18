@@ -1,0 +1,52 @@
+# RFC #25 Decision 6: `stable` is the one moving tag a cell's own
+# root Application targetRevision (gitops/bootstrap/root-application.yaml,
+# applied by gitops/bootstrap/bootstrap.sh) and every Application it
+# delivers are pinned to. This job is the only thing that re-points it,
+# immediately after a merge lands on main - never on a pull request, so a
+# fork's own workflow run can never move it (no pull_request or
+# pull_request_target trigger exists in this file at all).
+#
+# "Only by CI" is enforced by a GitHub tag protection ruleset naming this
+# job's own actor, which a maintainer with Administration access configures
+# once, outside this workflow's reach (RFC #25 Decision 6 Residual risks;
+# this repository's fine-grained token has no Administration scope either -
+# see the distai-platform skill, section 3).
+#
+# No marketplace action is used, so there is nothing to pin by commit SHA:
+# the GitHub CLI (gh) that ships on the hosted runner image is the only
+# tool this job calls, authenticated with the workflow's own
+# repository-scoped GITHUB_TOKEN.
+name: Move stable tag
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: move-stable-tag
+  cancel-in-progress: false
+
+jobs:
+  move-stable:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Move (or create) the stable tag at this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${REPO}/git/refs/tags/stable" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/${REPO}/git/refs/tags/stable" \
+              -f "sha=${SHA}" -F "force=true"
+            echo "moved existing tag stable -> ${SHA}"
+          else
+            gh api --method POST "repos/${REPO}/git/refs" \
+              -f "ref=refs/tags/stable" -f "sha=${SHA}"
+            echo "created tag stable -> ${SHA}"
+          fi
