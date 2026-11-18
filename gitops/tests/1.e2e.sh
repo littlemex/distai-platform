@@ -290,24 +290,24 @@ argocd_active() {
 wait_until 1200 30 "Argo CD capability ACTIVE" argocd_active || fail "Argo CD capability is not ACTIVE"
 pass "Argo CD capability ACTIVE (from ${GITOPS_BASE_REF})"
 
-# Find the capability's own access entry by elimination, the same way
-# infra/foundation/tests/1.e2e.sh now does (no output exposes this role's
-# ARN, decision 1): the one STANDARD entry that is neither
-# ADMIN_PRINCIPAL_ARN nor a node role (every node/Karpenter role embeds NAME).
+# Find the capability's own access entry. gitops/tests/README.md's own
+# caveat documented this as elimination over list-access-entries (the one
+# STANDARD entry that is neither ADMIN_PRINCIPAL_ARN nor a node role), on
+# the assumption that only node/Karpenter roles embed NAME -- but
+# infra/foundation/argocd.tf names the capability's own IAM role
+# "${var.name}-argocd-capability", which embeds NAME too, so that
+# elimination always skipped the very entry this check needs and silently
+# matched some unrelated STANDARD entry instead (confirmed on a real
+# cluster: both the "before" and "after" queries returned the same three
+# policies, which this PR's access-policy-association never touches).
+# DescribeCapability's own response shape carries the capability's roleArn
+# directly (no elimination needed, and the exact "less ambiguous signal"
+# gitops/tests/README.md already flagged as the fix if elimination ever
+# broke) -- decision 1 only says no Terraform *output* exposes this ARN,
+# never that the AWS API itself doesn't.
 find_capability_role_arn() {
-  local all_entries entry entry_type
-  all_entries="$(aws eks list-access-entries --cluster-name "${CLUSTER}" --query 'accessEntries' --output text)" \
-    || return 1
-  for entry in ${all_entries}; do
-    [[ "${entry}" == "${ADMIN_PRINCIPAL_ARN}" ]] && continue
-    [[ "${entry}" == *":role/"*"${NAME}"* ]] && continue
-    entry_type="$(aws eks describe-access-entry --cluster-name "${CLUSTER}" --principal-arn "${entry}" \
-      --query 'accessEntry.type' --output text 2>/dev/null)"
-    [[ "${entry_type}" == "STANDARD" ]] || continue
-    printf '%s' "${entry}"
-    return 0
-  done
-  return 1
+  aws eks describe-capability --cluster-name "${CLUSTER}" --capability-name argocd \
+    --query 'capability.roleArn' --output text
 }
 CAPABILITY_ROLE_ARN="$(find_capability_role_arn)" \
   || fail "could not find the Argo CD capability's own access entry"
