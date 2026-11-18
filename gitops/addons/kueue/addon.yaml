@@ -1,0 +1,39 @@
+# Kueue's controller and webhook. Lands in the same "controllers" step as
+# karpenter, since neither depends on the other, and both must be Healthy
+# before the "capacity" step (cells.ApplicationSet.yaml) can create a
+# NodePool/EC2NodeClass (needs karpenter-crd) or a
+# ResourceFlavor/ClusterQueue/LocalQueue (needs this chart's own kinds) -
+# a retry-based dependency (RFC #25 Decision 4), not an intra-Application
+# wave, since the admin smoke queue is a separate Application in a
+# separate ApplicationSet.
+#
+# syncOptions is a sibling of values (sets spec.syncPolicy.syncOptions on
+# the generated Application, never a chart value): ServerSideApply=true
+# matches Kueue's own install docs (kubectl apply --server-side), consistent
+# with - not stated as caused by - its CRDs exceeding the client-side
+# last-applied-configuration annotation's size limit; CreateNamespace=true
+# because this chart's own namespace (below) does not exist until Argo CD
+# creates it.
+#
+# deviceClassMappings is left unset here: it is Kueue's own cluster-wide
+# setting for admitting DRA-shaped quota, and #19's accelerator add-ons are
+# not delivered by this PR. Whichever PR adds them must keep this value in
+# sync with the DeviceClass names #19's accel-* releases create - ordering
+# cannot enforce that, only content review can (RFC #25 Decision 4).
+#
+# Chart source: https://github.com/kubernetes-sigs/kueue (tag v0.20.6).
+# Version and digest confirmed against the chart's own OCI manifest,
+# 2026-11-19:
+#   oci://registry.k8s.io/kueue/charts/kueue:0.20.6
+#   sha256:4be51d90efc40114c232ddda68f660639640586545e86119cdb3c21621449110
+# (see karpenter-crd/addon.yaml for why this is a comment, not an enforced
+# pin: Argo CD's Application CRD has no OCI-digest field for Helm sources.)
+addon: kueue
+chart: kueue
+repoURL: registry.k8s.io/kueue/charts
+version: "0.20.6"
+wave: controllers
+namespace: kueue-system
+syncOptions:
+  - ServerSideApply=true
+  - CreateNamespace=true
