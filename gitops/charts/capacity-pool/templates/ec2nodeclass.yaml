@@ -1,0 +1,27 @@
+# EC2NodeClass selects the cell's own subnets and security group by the
+# karpenter.sh/discovery tag the foundation layer already sets on them
+# (infra/foundation/vpc.tf, infra/foundation/eks.tf) - never a hand-picked
+# subnet or security group ID. metadataOptions is set explicitly (IMDSv2
+# required, hop limit 1) rather than left to Karpenter's own default, per
+# the foundation README's own note that every EC2NodeClass should do this
+# rather than rely on the default staying what it is today.
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: {{ required "pool.name is required" .Values.pool.name | quote }}
+spec:
+  role: {{ required "nodeRole is required (distai.dev.annotations/karpenter-node-role)" .Values.nodeRole | quote }}
+  amiFamily: {{ .Values.amiFamily }}
+  amiSelectorTerms:
+{{ toYaml .Values.amiSelectorTerms | indent 4 }}
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ required "clusterName is required" .Values.clusterName | quote }}
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ .Values.clusterName | quote }}
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 1
+    httpTokens: required

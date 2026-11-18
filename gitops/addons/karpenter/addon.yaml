@@ -1,0 +1,54 @@
+# Karpenter's controller. Tolerates CriticalAddonsOnly and runs on the
+# foundation's system node group, since no Karpenter-launched NodePool
+# exists until the "capacity" step (cells.ApplicationSet.yaml) runs after
+# this. serviceAccount.name stays the literal "karpenter" (never templated):
+# the foundation's Pod Identity association for the controller role is
+# bound to kube-system/karpenter specifically (infra/foundation/karpenter.tf),
+# so a cell-specific service account name would silently break credentials.
+# AWS_REGION is set explicitly because the system node group's IMDSv2 hop
+# limit of 1 (infra/foundation, Facts checked) stops the controller from
+# discovering its own Region from instance metadata the way it does by
+# default.
+#
+# skipCrds is a sibling of values (sets spec.source.helm.skipCrds on the
+# generated Application itself, a field the chart's own values can never
+# reach): this chart ships the same five CRDs as karpenter-crd a second
+# time, in its own crds/ folder, so skipping them here is what lets both
+# Applications exist without fighting over the same CustomResourceDefinition
+# objects (RFC #25, Facts checked).
+#
+# Chart source: https://github.com/aws/karpenter-provider-aws (tag v1.15.2).
+# Version and digest confirmed against the chart's own OCI manifest,
+# 2026-11-19:
+#   oci://public.ecr.aws/karpenter/karpenter:1.15.2
+#   sha256:fe0155bd92b9c491afce246e7ec600d56e03fe8c04a2bd92becaf4c960b72c90
+# (see karpenter-crd/addon.yaml for why this is a comment, not an enforced
+# pin: Argo CD's Application CRD has no OCI-digest field for Helm sources.)
+#
+# A PR bumping this version must bump karpenter-crd/addon.yaml's version to
+# match, and vice versa (RFC #25 Decision 6) - checked mechanically by the
+# upgrade e2e's version-pair check, not by anything in this file.
+addon: karpenter
+chart: karpenter
+repoURL: public.ecr.aws/karpenter
+version: "1.15.2"
+wave: controllers
+namespace: kube-system
+skipCrds: true
+values:
+  serviceAccount:
+    name: karpenter
+  controller:
+    env:
+      - name: AWS_REGION
+        value: ""
+  tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists
+valuesFrom:
+  - helmKey: settings.clusterName
+    param: name
+  - helmKey: settings.interruptionQueue
+    annotationKey: distai.dev.annotations/karpenter-interruption-queue
+  - helmKey: controller.env[0].value
+    annotationKey: distai.dev.annotations/region
