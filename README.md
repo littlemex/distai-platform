@@ -9,7 +9,7 @@ This is not an official AWS project. Its contribution workflow follows the conve
 | Path | Contents |
 | --- | --- |
 | `infra/foundation/` | Terraform root for one cell: network, EKS cluster and the IAM that Karpenter needs ([#20](https://github.com/littlemex/distai-platform/issues/20)) |
-| `gitops/` | What Argo CD delivers to each cell (planned, [#17](https://github.com/littlemex/distai-platform/issues/17)) |
+| `gitops/` | What the managed Argo CD capability delivers to each cell: bootstrap, `ApplicationSet`s, add-ons, shared chart templates, per-cell parameter files ([#25](https://github.com/littlemex/distai-platform/issues/25)) |
 | `docs/workshop/` | Hands-on workshop, English and Japanese (planned, [#3](https://github.com/littlemex/distai-platform/issues/3)) |
 | `docs/deep-dives/` | Explainer pages with figures and demos, English and Japanese (planned, [#4](https://github.com/littlemex/distai-platform/issues/4)) |
 
@@ -17,7 +17,7 @@ The full layout is defined in [AGENTS.md](./AGENTS.md#3-repository-layout--where
 
 ## Getting started
 
-Start with [`infra/foundation/README.md`](./infra/foundation/README.md) to build a cell. The workshop will live in `docs/workshop/`.
+Start with [`infra/foundation/README.md`](./infra/foundation/README.md) to build a cell, then [`gitops/README.md`](./gitops/README.md) to bootstrap its Argo CD capability and deliver Karpenter, Kueue and a capacity pool to it. The workshop will live in `docs/workshop/`.
 
 ## Contributing
 
