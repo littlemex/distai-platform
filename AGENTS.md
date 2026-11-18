@@ -111,9 +111,8 @@ judgment alone.
 
 | Directory | Contents |
 | --- | --- |
-| `infra/eks/` | Terraform root for the EKS platform, Helm charts under `charts/`, operational scripts under `scripts/`, design records under `docs/` |
-| `infra/data-layer/` | Optional data-layer stack |
-| `infra/scripts/` | Installers and release helpers |
+| `infra/foundation/` | Terraform root for one cell: VPC, EKS cluster, system node group, Karpenter IAM and interruption queue, optional Argo CD capability. Tests under `tests/`, helper scripts under `scripts/` |
+| `gitops/` | Manifests and Helm charts that Argo CD delivers to cells: node pools, queues, device advertisers (planned, [#17](https://github.com/littlemex/distai-platform/issues/17)) |
 | `docs/workshop/` | Hands-on workshop chapters, English and Japanese |
 | `docs/deep-dives/` | Self-contained explainer pages `NNNNN-<slug>.html` (numbered from `00000`), English and Japanese |
 | `.github/` | Issue and pull request templates, workflows |
