@@ -139,8 +139,14 @@ if [[ "${#literal_yaml_files[@]}" -eq 0 ]]; then
   echo "FAIL no literal YAML files found to lint"
   failures=$((failures + 1))
 else
+  # yamllint>=1.38.0 requires Python>=3.10 (its own packaging metadata);
+  # the runner image's own system Python (AL2023's dnf-provided 3.9) does
+  # not satisfy that, so `uv run` must ask for a newer interpreter
+  # explicitly - uv then downloads and caches a standalone build itself,
+  # the same way it resolves any other `--with` dependency, rather than
+  # failing resolution against whichever Python happened to be on PATH.
   run_check "yamllint ${#literal_yaml_files[@]} file(s)" \
-    "${UV}" run --no-project -q --with "yamllint==${YAMLLINT_VERSION}" \
+    "${UV}" run --no-project -q --python 3.12 --with "yamllint==${YAMLLINT_VERSION}" \
     yamllint -c "${SCRIPT_DIR}/.yamllint.yaml" --strict "${literal_yaml_files[@]}"
 fi
 
