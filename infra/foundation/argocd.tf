@@ -4,6 +4,25 @@
 # (ADMIN, EDITOR or VIEWER). Per-team AppProjects, which turn that role into
 # access to one team's applications rather than all of them, are the tenancy
 # layer's.
+#
+# Issue #25 (the delivery layer) adds the one AWS-API call that closes the
+# gap this comment used to describe: the capability's own access entry
+# starts with no Kubernetes RBAC (an EKS access policy association below
+# grants it), and gitops/bootstrap/bootstrap.sh (run once per cell, outside
+# Terraform) still has to write the three in-cluster objects that let the
+# capability discover its own cluster and have something to deliver. The
+# "argo_cd.namespace" argument is set explicitly rather than left to default,
+# so this layer's own output (argocd_namespace) never has to guess what the
+# capability chose.
+
+locals {
+  # Matches every published AWS example of this capability (see
+  # docs.aws.amazon.com/eks/latest/userguide/argocd-register-clusters.html);
+  # set explicitly because the provider's "namespace" argument is Optional,
+  # not Computed, so leaving it unset would make this layer's own
+  # argocd_namespace output unable to read back what AWS actually used.
+  argocd_namespace = "argocd"
+}
 
 data "aws_iam_policy_document" "argocd_assume" {
   count = var.argocd == null ? 0 : 1
@@ -39,6 +58,8 @@ resource "aws_eks_capability" "argocd" {
 
   configuration {
     argo_cd {
+      namespace = local.argocd_namespace
+
       aws_idc {
         idc_instance_arn = var.argocd.idc_instance_arn
         idc_region       = var.argocd.idc_region
@@ -61,5 +82,28 @@ resource "aws_eks_capability" "argocd" {
         }
       }
     }
+  }
+}
+
+# Issue #25 Decision 1: the access entry EKS creates for the capability role
+# carries no Kubernetes RBAC by default (Facts checked). This association is
+# itself a direct AWS API call (never a Kubernetes object), so it stays in
+# Terraform, alongside the capability it grants access for, exactly like the
+# admin_principal_arns association in eks.tf. Full cluster-admin is used
+# because neither AmazonEKSEditPolicy nor AmazonEKSAdminPolicy can create a
+# CustomResourceDefinition, ClusterRole/ClusterRoleBinding or Namespace, all
+# of which gitops/bootstrap/bootstrap.sh and the add-ons it bootstraps
+# (Karpenter, Kueue and later ones) create; the real tenant boundary is the
+# tenancy layer's per-team AppProjects and admission bundle, not this role's
+# own IAM-side permissions.
+resource "aws_eks_access_policy_association" "argocd" {
+  count = var.argocd == null ? 0 : 1
+
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = aws_iam_role.argocd[0].arn
+  policy_arn    = "arn:${local.partition}:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+  access_scope {
+    type = "cluster"
   }
 }
