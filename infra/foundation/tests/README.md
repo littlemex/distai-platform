@@ -8,7 +8,7 @@ variables and outputs that the issue defines.
 
 | Script | What it checks | Needs AWS | Duration |
 | --- | --- | --- | --- |
-| `0.static.sh` | `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`, `tflint` | No | About 1 minute |
+| `0.static.sh` | `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`, `tflint`, and `terraform test` with `variables.tftest.hcl` (input validation against a mocked AWS provider: accepted and rejected `argocd` role mappings and public endpoint CIDRs) | No | About 1 minute |
 | `1.e2e.sh` | Apply, cluster shape, IMDS hop limit, CNI permissions, NetworkPolicy enforcement, Karpenter from the outputs, spot launch, interruption handling, destroy with Karpenter still running, nothing left behind | Yes | About 45 to 70 minutes |
 
 ## Prerequisites

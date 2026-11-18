@@ -475,7 +475,26 @@ IMDS_LOG="$(kubectl logs "${IMDS_POD}" 2>/dev/null)"
 kubectl delete pod "${IMDS_POD}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
 [[ "${IMDS_LOG}" == *"IMDS_TOKEN_LEN=0"* ]] \
   || fail "a pod without host networking obtained an IMDSv2 token: ${IMDS_LOG}"
-pass "a pod without host networking on a system node could not obtain an IMDSv2 token"
+
+# Control: the same pod on the host network (one hop) must get a token, which
+# shows that the empty token above comes from the hop limit and not from a
+# broken check (no curl, no route, wrong address).
+IMDS_HOST_POD="${IMDS_POD}-host"
+sed -e "s/name: ${IMDS_POD}\$/name: ${IMDS_HOST_POD}/" -e 's/hostNetwork: false/hostNetwork: true/' \
+  "${WORK_DIR}/imds-check.yaml" > "${WORK_DIR}/imds-check-host.yaml"
+kubectl apply -f "${WORK_DIR}/imds-check-host.yaml" || fail "kubectl apply the host-network IMDS control pod"
+imds_host_pod_done() {
+  local p
+  p="$(kubectl get pod "${IMDS_HOST_POD}" -o jsonpath='{.status.phase}' 2>/dev/null)"
+  [[ "${p}" == "Succeeded" || "${p}" == "Failed" ]]
+}
+wait_until 180 10 "host-network IMDS control pod finished" imds_host_pod_done \
+  || fail "host-network IMDS control pod ${IMDS_HOST_POD} did not finish"
+IMDS_HOST_LOG="$(kubectl logs "${IMDS_HOST_POD}" 2>/dev/null)"
+kubectl delete pod "${IMDS_HOST_POD}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+[[ "${IMDS_HOST_LOG}" == *"IMDS_TOKEN_LEN="* && "${IMDS_HOST_LOG}" != *"IMDS_TOKEN_LEN=0"* ]] \
+  || fail "control failed: a host-network pod got no IMDSv2 token either (${IMDS_HOST_LOG}); the check cannot tell blocked from broken"
+pass "a pod without host networking on a system node could not obtain an IMDSv2 token, while a host-network pod on the same node could"
 
 SYSTEM_INSTANCE_IDS=()
 for n in "${SYSTEM_NODE_NAMES[@]}"; do
@@ -515,8 +534,24 @@ pass "neither the Karpenter node role nor the system node role (${SYSTEM_NODE_RO
 aws_node_pia_count="$(aws eks list-pod-identity-associations --cluster-name "${CLUSTER}" \
   --namespace kube-system --service-account aws-node --query 'length(associations)' --output text)" \
   || fail "aws eks list-pod-identity-associations --cluster-name ${CLUSTER}"
-[[ "${aws_node_pia_count}" -ge 1 ]] || fail "no EKS Pod Identity association for kube-system/aws-node"
-pass "kube-system/aws-node has an EKS Pod Identity association (its own role carries AmazonEKS_CNI_Policy)"
+[[ "${aws_node_pia_count}" == "1" ]] || fail "expected one EKS Pod Identity association for kube-system/aws-node, found ${aws_node_pia_count}"
+aws_node_pia_id="$(aws eks list-pod-identity-associations --cluster-name "${CLUSTER}" \
+  --namespace kube-system --service-account aws-node --query 'associations[0].associationId' --output text)" \
+  || fail "aws eks list-pod-identity-associations (association id)"
+aws_node_role_arn="$(aws eks describe-pod-identity-association --cluster-name "${CLUSTER}" \
+  --association-id "${aws_node_pia_id}" --query 'association.roleArn' --output text)" \
+  || fail "aws eks describe-pod-identity-association ${aws_node_pia_id}"
+aws_node_role="${aws_node_role_arn##*/}"
+aws_node_policies="$(aws iam list-attached-role-policies --role-name "${aws_node_role}" \
+  --query 'AttachedPolicies[].PolicyName' --output text)" \
+  || fail "aws iam list-attached-role-policies --role-name ${aws_node_role}"
+aws_node_inline="$(aws iam list-role-policies --role-name "${aws_node_role}" --query 'length(PolicyNames)' --output text)" \
+  || fail "aws iam list-role-policies --role-name ${aws_node_role}"
+[[ "${aws_node_policies}" == "AmazonEKS_CNI_Policy" && "${aws_node_inline}" == "0" ]] \
+  || fail "the aws-node role ${aws_node_role} should carry exactly AmazonEKS_CNI_Policy, has '${aws_node_policies}' and ${aws_node_inline} inline policies"
+[[ "${aws_node_role}" != "${NODE_ROLE}" && "${aws_node_role}" != "${SYSTEM_NODE_ROLE}" ]] \
+  || fail "kube-system/aws-node is associated with a node role (${aws_node_role})"
+pass "kube-system/aws-node has one EKS Pod Identity association, to its own role that carries exactly AmazonEKS_CNI_Policy"
 
 [[ -n "${IMDS_POD_IP}" ]] \
   || fail "pod ${IMDS_POD} (no host networking, no node role) never got a pod IP from the CNI"

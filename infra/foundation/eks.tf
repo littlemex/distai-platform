@@ -200,7 +200,7 @@ data "aws_iam_policy_document" "node_assume" {
 locals {
   # AmazonEKS_CNI_Policy is not here: a pod on a node with this role cannot
   # attach or detach ENIs, because that permission now lives only on the
-  # vpc-cni Pod Identity role below, bound to kube-system/aws-node.
+  # vpc-cni Pod Identity role above, bound to kube-system/aws-node.
   node_managed_policies = [
     "AmazonEKSWorkerNodePolicy",
     "AmazonEC2ContainerRegistryPullOnly",
@@ -269,9 +269,9 @@ resource "aws_eks_addon" "vpc_cni" {
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
 
-  # Enables the vpc-cni network policy agent (node_managed_policies carries no
-  # CNI permission to configure); NetworkPolicy objects are the tenancy
-  # layer's, this only turns on enforcement so they take effect once added.
+  # Turns on NetworkPolicy enforcement in the vpc-cni network policy agent.
+  # The NetworkPolicy objects are the tenancy layer's; with none, traffic is
+  # unchanged, and a policy takes effect as soon as it is added.
   configuration_values = jsonencode({
     enableNetworkPolicy = "true"
   })

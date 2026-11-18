@@ -52,6 +52,7 @@ run_check "terraform init" "${TERRAFORM}" -chdir="${ROOT}" init -backend=false -
 run_check "terraform validate" "${TERRAFORM}" -chdir="${ROOT}" validate
 run_check "tflint init" "${TFLINT}" --chdir="${ROOT}" --init
 run_check "tflint" "${TFLINT}" --chdir="${ROOT}"
+run_check "terraform test (input validation, mocked provider)" "${TERRAFORM}" -chdir="${ROOT}" test
 
 echo
 if [[ "${failures}" -eq 0 ]]; then

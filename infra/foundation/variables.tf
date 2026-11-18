@@ -106,7 +106,7 @@ variable "system_node_group" {
 }
 
 variable "argocd" {
-  description = "Create the EKS managed Argo CD capability (hub cells only) when set. idc_instance_arn and idc_region identify the IAM Identity Center instance; role_mappings gives each Identity Center group one of the Argo CD roles (ADMIN, EDITOR or VIEWER) so that a team can be given read or edit access without being a cluster admin."
+  description = "Create the EKS managed Argo CD capability (hub cells only) when set. idc_instance_arn and idc_region identify the IAM Identity Center instance; role_mappings gives each listed Identity Center group one of the Argo CD roles (ADMIN, EDITOR or VIEWER) across all applications of the capability; scoping a team to its own applications is done by per-team AppProjects in the tenancy layer."
   type = object({
     idc_instance_arn = string
     idc_region       = string
