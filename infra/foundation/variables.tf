@@ -99,6 +99,33 @@ variable "system_node_group" {
     error_message = "system_node_group.instance_types must contain at least one instance type."
   }
 
+  # AWS instance type names follow <family letters><generation digits>
+  # [processor/capability letters].<size> (EC2 User Guide, "Instance type
+  # names"). When a processor letter is present it comes right after the
+  # generation digits: "a" for AMD, "i" for Intel, "g" for AWS Graviton
+  # (Arm64), optionally followed by other capability letters such as
+  # d (local NVMe storage), n (network/EBS optimized), e (extra memory) -
+  # for example c7gn, x2gd, im4gn, is4gen. A bare "g" with no digits before
+  # it, as in g5 or g6e, is the Graphics-instance family letter, not the
+  # processor letter, and must stay accepted (verified below). The one
+  # Graviton family that predates this convention is a1 (Graviton1), which
+  # carries no "g" at all and is matched as a separate literal.
+  #
+  # Verified with `terraform console` against a mix of real type names:
+  # rejected (Graviton/Arm) - m7g.large, c7gn.xlarge, t4g.medium,
+  #   x2gd.xlarge, im4gn.xlarge, is4gen.xlarge, r8g.xlarge, m6g.large,
+  #   g5g.xlarge, a1.medium
+  # accepted (x86_64) - m7i.large, g5.xlarge, g6e.xlarge, m6idn.large,
+  #   c5a.large, c5ad.2xlarge, x2iedn.xlarge, trn1.2xlarge, inf2.xlarge,
+  #   dl1.24xlarge
+  validation {
+    condition = alltrue([
+      for t in var.system_node_group.instance_types :
+      !can(regex("^(a1|[a-z]+[0-9]+g[a-z]*)\\.", t))
+    ])
+    error_message = "system_node_group.instance_types must be x86_64 (Intel or AMD) instance types; one or more entries look like an AWS Graviton (Arm64) instance type, which the AL2023_x86_64_STANDARD AMI type for this node group does not support."
+  }
+
   validation {
     condition     = var.system_node_group.size >= 1 && floor(var.system_node_group.size) == var.system_node_group.size
     error_message = "system_node_group.size must be a whole number of at least 1."

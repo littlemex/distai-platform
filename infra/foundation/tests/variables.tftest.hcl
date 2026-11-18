@@ -130,3 +130,15 @@ run "endpoint_rejects_empty_list" {
 
   expect_failures = [var.endpoint_public_access_cidrs]
 }
+
+run "system_node_group_rejects_graviton_instance_types" {
+  command = plan
+
+  variables {
+    system_node_group = {
+      instance_types = ["m7i.large", "m7g.large"]
+    }
+  }
+
+  expect_failures = [var.system_node_group]
+}

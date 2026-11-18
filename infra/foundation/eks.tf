@@ -256,12 +256,16 @@ resource "aws_eks_addon" "before_nodes" {
 # vpc-cni, after eks-pod-identity-agent: aws-node and eks-pod-identity-agent
 # are both DaemonSets, and a fresh node runs them at essentially the same
 # time. aws-node needs the agent's local credential endpoint to be reachable
-# to get its AWS credentials through Pod Identity; if its DaemonSet object
-# reached the API server after aws-node's, a node could race aws-node ahead
-# of the agent. Depending on eks-pod-identity-agent reaching ACTIVE removes
-# that race at the add-on level: the agent's DaemonSet exists in the cluster
-# before vpc-cni's does, for every node that joins afterwards (the system
-# node group, created later still, and any Karpenter node).
+# to get its AWS credentials through Pod Identity. This dependency only
+# orders the two aws_eks_addon objects, not the pods each DaemonSet puts on
+# a given node: depending on eks-pod-identity-agent reaching ACTIVE makes
+# sure its DaemonSet object exists in the cluster before vpc-cni's does, for
+# every node that joins afterwards (the system node group, created later
+# still, and any Karpenter node), so the agent's pod is always scheduled on
+# a node no later than aws-node's. It does not guarantee the agent's pod is
+# already Ready first; aws-node tolerates that by retrying until the local
+# credential endpoint answers, so a node still comes up correctly even if
+# its aws-node pod starts fetching credentials before the agent pod is up.
 resource "aws_eks_addon" "vpc_cni" {
   cluster_name                = aws_eks_cluster.this.name
   addon_name                  = "vpc-cni"
