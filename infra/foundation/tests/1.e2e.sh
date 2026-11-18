@@ -2,7 +2,8 @@
 # End-to-end test of the foundation layer on a real AWS account.
 #
 # It uses only the variables and outputs of infra/foundation:
-#   1. init with the S3 backend, apply with a generated tfvars file;
+#   1. init with the S3 backend, check the state has no resources yet, apply
+#      with a generated tfvars file;
 #   2. two Ready system nodes, four add-ons ACTIVE, outputs present;
 #   3. a pod without host networking on a system node cannot obtain an
 #      IMDSv2 token, and the system nodes require IMDSv2 with a hop limit
@@ -31,8 +32,9 @@
 #   E2E_KEEP_ON_FAILURE (0), E2E_LEFTOVER_GRACE_SECONDS (600),
 #   ARGOCD_IDC_INSTANCE_ARN, ARGOCD_IDC_REGION, ARGOCD_ADMIN_GROUP_IDS
 #   (all three set: also create the Argo CD capability with one ADMIN role
-#   mapping, and check it), ARGOCD_VIEWER_GROUP_IDS (with the three above
-#   also set: add a second, VIEWER role mapping, and check it too).
+#   mapping, and check it), ARGOCD_VIEWER_GROUP_IDS, ARGOCD_EDITOR_GROUP_IDS
+#   (with the three above also set: add a VIEWER and/or an EDITOR role
+#   mapping, each independently, and check every mapping that was added).
 set -euo pipefail
 
 : "${AWS_PROFILE:?export AWS_PROFILE}"
@@ -54,6 +56,7 @@ ARGOCD_IDC_INSTANCE_ARN="${ARGOCD_IDC_INSTANCE_ARN:-}"
 ARGOCD_IDC_REGION="${ARGOCD_IDC_REGION:-}"
 ARGOCD_ADMIN_GROUP_IDS="${ARGOCD_ADMIN_GROUP_IDS:-}"
 ARGOCD_VIEWER_GROUP_IDS="${ARGOCD_VIEWER_GROUP_IDS:-}"
+ARGOCD_EDITOR_GROUP_IDS="${ARGOCD_EDITOR_GROUP_IDS:-}"
 
 # Images pinned by digest (see tests/README.md "Pinned images" for how these
 # digests were resolved).
@@ -131,6 +134,35 @@ require_bin() {
   command -v "$1" >/dev/null 2>&1 || fail "prerequisite: $1 not found"
 }
 
+# aws_text CMD ARGS...: runs an AWS CLI read call and prints its stdout.
+# A "*.NotFound*"-shaped error (for example InvalidVpcID.NotFound or
+# InvalidInstanceID.NotFound, returned when the call names an ID that no
+# longer exists) means "the thing is gone": prints nothing and returns 0, the
+# same as a successful call that matched nothing. Any other non-zero exit
+# (expired credentials, throttling, a typo in the call) is a hard failure:
+# prints the command and the AWS CLI's error text and returns 1, so a caller
+# capturing this with `out="$(aws_text ...)"; rc=$?` gets the error text in
+# `out` and a non-zero `rc`, and must fail() rather than treat it as "found
+# nothing".
+aws_text() {
+  local out err errfile ok=1
+  errfile="$(mktemp)"
+  if ! out="$("$@" 2>"${errfile}")"; then
+    ok=0
+  fi
+  err="$(cat "${errfile}")"
+  rm -f "${errfile}"
+  if [[ "${ok}" -eq 1 ]]; then
+    printf '%s' "${out}"
+    return 0
+  fi
+  if [[ "${err}" == *".NotFound"* || "${err}" == *"NotFoundException"* ]]; then
+    return 0
+  fi
+  printf '%s: %s' "$*" "${err}"
+  return 1
+}
+
 instance_of_node() {
   kubectl get node "$1" -o jsonpath='{.spec.providerID}' | awk -F/ '{print $NF}'
 }
@@ -190,50 +222,69 @@ tag_filters() {
 }
 
 # Prints the IDs of one resource kind that still exist for the cell.
+# Each underlying AWS call goes through aws_text (see above), so a hard
+# failure of any single call (not a "not found") stops this function
+# immediately: it prints the error text instead of an ID list and returns 1.
 list_leftover() {
-  local kind="$1" filter
-  {
-    while IFS= read -r filter; do
-      case "${kind}" in
-        instance)
-          aws ec2 describe-instances --filters "${filter}" \
-            "Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped" \
-            --query 'Reservations[].Instances[].InstanceId' --output text ;;
-        eni)
-          aws ec2 describe-network-interfaces --filters "${filter}" \
-            --query 'NetworkInterfaces[].NetworkInterfaceId' --output text ;;
-        nat)
-          aws ec2 describe-nat-gateways --filter "${filter}" \
-            "Name=state,Values=pending,available,deleting" \
-            --query 'NatGateways[].NatGatewayId' --output text ;;
-        volume)
-          aws ec2 describe-volumes --filters "${filter}" \
-            --query 'Volumes[].VolumeId' --output text ;;
-        launch-template)
-          aws ec2 describe-launch-templates --filters "${filter}" \
-            --query 'LaunchTemplates[].LaunchTemplateId' --output text ;;
-      esac
-    done < <(tag_filters)
-    if [[ -n "${VPC_ID}" ]]; then
-      case "${kind}" in
-        instance)
-          aws ec2 describe-instances --filters "Name=vpc-id,Values=${VPC_ID}" \
-            "Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped" \
-            --query 'Reservations[].Instances[].InstanceId' --output text ;;
-        eni)
-          aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=${VPC_ID}" \
-            --query 'NetworkInterfaces[].NetworkInterfaceId' --output text ;;
-        nat)
-          aws ec2 describe-nat-gateways --filter "Name=vpc-id,Values=${VPC_ID}" \
-            "Name=state,Values=pending,available,deleting" \
-            --query 'NatGateways[].NatGatewayId' --output text ;;
-        volume | launch-template) : ;;
-      esac
+  local kind="$1" filter out all=""
+  while IFS= read -r filter; do
+    if ! case "${kind}" in
+      instance)
+        out="$(aws_text aws ec2 describe-instances --filters "${filter}" \
+          "Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped" \
+          --query 'Reservations[].Instances[].InstanceId' --output text)" ;;
+      eni)
+        out="$(aws_text aws ec2 describe-network-interfaces --filters "${filter}" \
+          --query 'NetworkInterfaces[].NetworkInterfaceId' --output text)" ;;
+      nat)
+        out="$(aws_text aws ec2 describe-nat-gateways --filter "${filter}" \
+          "Name=state,Values=pending,available,deleting" \
+          --query 'NatGateways[].NatGatewayId' --output text)" ;;
+      volume)
+        out="$(aws_text aws ec2 describe-volumes --filters "${filter}" \
+          --query 'Volumes[].VolumeId' --output text)" ;;
+      launch-template)
+        out="$(aws_text aws ec2 describe-launch-templates --filters "${filter}" \
+          --query 'LaunchTemplates[].LaunchTemplateId' --output text)" ;;
+    esac; then
+      printf '%s' "${out}"
+      return 1
     fi
-  } 2>/dev/null | tr '\t' '\n' | grep -v '^None$' | grep -v '^$' | sort -u || true
+    all+="${out}"$'\n'
+  done < <(tag_filters)
+  if [[ -n "${VPC_ID}" ]]; then
+    if ! case "${kind}" in
+      instance)
+        out="$(aws_text aws ec2 describe-instances --filters "Name=vpc-id,Values=${VPC_ID}" \
+          "Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped" \
+          --query 'Reservations[].Instances[].InstanceId' --output text)" ;;
+      eni)
+        out="$(aws_text aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=${VPC_ID}" \
+          --query 'NetworkInterfaces[].NetworkInterfaceId' --output text)" ;;
+      nat)
+        out="$(aws_text aws ec2 describe-nat-gateways --filter "Name=vpc-id,Values=${VPC_ID}" \
+          "Name=state,Values=pending,available,deleting" \
+          --query 'NatGateways[].NatGatewayId' --output text)" ;;
+      volume | launch-template) out="" ;;
+    esac; then
+      printf '%s' "${out}"
+      return 1
+    fi
+    all+="${out}"$'\n'
+  fi
+  printf '%s' "${all}" | tr '\t' '\n' | grep -v '^None$' | grep -v '^$' | sort -u || true
 }
 
-no_leftover() { [[ -z "$(list_leftover "$1")" ]]; }
+# no_leftover KIND: true if nothing of KIND remains. A hard AWS failure
+# inside list_leftover is not "nothing remains": it calls fail() with the
+# error text and stops the whole script, the same as any other check here.
+no_leftover() {
+  local out
+  if ! out="$(list_leftover "$1")"; then
+    fail "checking for leftover $1: ${out}"
+  fi
+  [[ -z "${out}" ]]
+}
 
 # report_leftovers GRACE_SECONDS: PASS/FAIL per kind, returns 1 if any remains.
 report_leftovers() {
@@ -242,8 +293,10 @@ report_leftovers() {
     if wait_until "${grace}" 20 "no ${kind} left" no_leftover "${kind}"; then
       pass "no ${kind} tagged for the cluster remains"
     else
-      ids="$(list_leftover "${kind}" | tr '\n' ' ')"
-      log "FAIL ${kind} left after destroy: ${ids}"
+      if ! ids="$(list_leftover "${kind}")"; then
+        fail "checking for leftover ${kind}: ${ids}"
+      fi
+      log "FAIL ${kind} left after destroy: $(tr '\n' ' ' <<<"${ids}")"
       bad=1
     fi
   done
@@ -276,6 +329,10 @@ if [[ -n "${ARGOCD_IDC_INSTANCE_ARN}" && -n "${ARGOCD_IDC_REGION}" && -n "${ARGO
     viewer_groups_json="$(csv_to_json_array "${ARGOCD_VIEWER_GROUP_IDS}")"
     role_mappings_json="${role_mappings_json},{\"role\":\"VIEWER\",\"group_ids\":[${viewer_groups_json}]}"
   fi
+  if [[ -n "${ARGOCD_EDITOR_GROUP_IDS}" ]]; then
+    editor_groups_json="$(csv_to_json_array "${ARGOCD_EDITOR_GROUP_IDS}")"
+    role_mappings_json="${role_mappings_json},{\"role\":\"EDITOR\",\"group_ids\":[${editor_groups_json}]}"
+  fi
   ARGOCD_JSON="{\"idc_instance_arn\":\"${ARGOCD_IDC_INSTANCE_ARN}\",\"idc_region\":\"${ARGOCD_IDC_REGION}\",\"role_mappings\":[${role_mappings_json}]}"
   info "argocd is set: the Argo CD capability is created and checked"
 fi
@@ -298,6 +355,24 @@ tf init -input=false -reconfigure \
   -backend-config="use_lockfile=true" \
   || fail "terraform init with the S3 backend (key ${STATE_KEY})"
 pass "terraform init with the S3 backend, key ${STATE_KEY}"
+
+# ------------------------------------------- 1b. state empty before apply
+#
+# A state that already has resources means this run would apply new code
+# over an old cell instead of building a fresh one (for example after a
+# previous run left its cell in place with E2E_KEEP_ON_FAILURE=1, or NAME
+# collides with another cell's state key). `terraform state list` exits 0
+# with empty output for an empty state; for a backend that has no state
+# object at all yet it prints "No state file was found!" to stderr and
+# exits non-zero, which this test also treats as empty.
+if ! existing_state="$(tf state list 2>&1)"; then
+  [[ "${existing_state}" == *"No state file"* ]] \
+    || fail "terraform state list (key ${STATE_KEY}): ${existing_state}"
+  existing_state=""
+fi
+[[ -z "${existing_state}" ]] \
+  || fail "state at key ${STATE_KEY} already has resources, refusing to apply over it: $(tr '\n' ' ' <<<"${existing_state}")"
+pass "state at key ${STATE_KEY} has no resources before apply"
 
 APPLY_ATTEMPTED=1
 apply_start="$(date +%s)"
@@ -419,6 +494,10 @@ if [[ "${ARGOCD_JSON}" != "null" ]]; then
   if [[ -n "${ARGOCD_VIEWER_GROUP_IDS}" ]]; then
     expect_role_mapping VIEWER "${ARGOCD_VIEWER_GROUP_IDS}"
     pass "Argo CD capability lists the VIEWER role mapping (${ARGOCD_VIEWER_GROUP_IDS})"
+  fi
+  if [[ -n "${ARGOCD_EDITOR_GROUP_IDS}" ]]; then
+    expect_role_mapping EDITOR "${ARGOCD_EDITOR_GROUP_IDS}"
+    pass "Argo CD capability lists the EDITOR role mapping (${ARGOCD_EDITOR_GROUP_IDS})"
   fi
 fi
 
@@ -891,10 +970,17 @@ pass "terraform destroy completed without manual steps ($(($(date +%s) - destroy
 
 # ------------------------------------------------- 7. nothing left behind
 
+# An ID this old can also fall out of EC2's own retention window and come
+# back as InvalidInstanceID.NotFound; aws_text treats that the same as an
+# empty result (the instance is gone), while any other failure (expired
+# credentials, throttling) must not be read as "terminated".
 instances_terminated() {
-  local states
-  states="$(aws ec2 describe-instances --instance-ids "${KARPENTER_INSTANCE_IDS[@]}" \
-    --query 'Reservations[].Instances[].State.Name' --output text 2>/dev/null | tr '\t' '\n' | sort -u)"
+  local out states
+  if ! out="$(aws_text aws ec2 describe-instances --instance-ids "${KARPENTER_INSTANCE_IDS[@]}" \
+    --query 'Reservations[].Instances[].State.Name' --output text)"; then
+    fail "checking Karpenter instance state: ${out}"
+  fi
+  states="$(printf '%s' "${out}" | tr '\t' '\n' | grep -v '^None$' | grep -v '^$' | sort -u || true)"
   [[ -z "${states}" || "${states}" == "terminated" ]]
 }
 wait_until "${E2E_LEFTOVER_GRACE_SECONDS}" 20 "Karpenter instances terminated" instances_terminated \
@@ -904,7 +990,12 @@ pass "Karpenter instance(s) ${KARPENTER_INSTANCE_IDS[*]} terminated"
 report_leftovers "${E2E_LEFTOVER_GRACE_SECONDS}" \
   || fail "resources tagged for the cluster remain after destroy"
 
-if aws ec2 describe-vpcs --vpc-ids "${VPC_ID}" >/dev/null 2>&1; then
+# describe-vpcs on a gone VPC returns InvalidVpcID.NotFound (empty text,
+# success); any other failure must not be read as "the VPC is gone".
+if ! vpc_check_out="$(aws_text aws ec2 describe-vpcs --vpc-ids "${VPC_ID}" --query 'Vpcs[0].VpcId' --output text)"; then
+  fail "checking whether VPC ${VPC_ID} still exists: ${vpc_check_out}"
+fi
+if [[ -n "${vpc_check_out}" && "${vpc_check_out}" != "None" ]]; then
   fail "VPC ${VPC_ID} still exists after destroy"
 fi
 pass "VPC removed"
