@@ -24,7 +24,10 @@ admin_principal_arns = [
 # argocd = {
 #   idc_instance_arn = "arn:aws:sso:::instance/ssoins-0123456789abcdef"
 #   idc_region       = "us-east-1"
-#   admin_group_ids  = ["00000000-0000-0000-0000-000000000000"]
+#   role_mappings = [
+#     { role = "ADMIN", group_ids = ["00000000-0000-0000-0000-000000000000"] },
+#     { role = "VIEWER", group_ids = ["11111111-1111-1111-1111-111111111111"] },
+#   ]
 # }
 
 tags = {

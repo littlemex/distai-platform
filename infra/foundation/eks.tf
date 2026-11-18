@@ -11,8 +11,11 @@ locals {
   }
 
   # DaemonSet add-ons are installed before the system node group so that its
-  # nodes become Ready; CoreDNS (a Deployment) is installed after it.
-  addons_before_nodes = ["vpc-cni", "kube-proxy", "eks-pod-identity-agent"]
+  # nodes become Ready; CoreDNS (a Deployment) is installed after it. vpc-cni
+  # is not in this set: it is created on its own, after eks-pod-identity-agent,
+  # because aws-node now gets its AWS credentials through Pod Identity (see
+  # aws_eks_addon.vpc_cni below).
+  addons_before_nodes = ["kube-proxy", "eks-pod-identity-agent"]
   addons_after_nodes  = ["coredns"]
 
   # Control plane and system nodes use the private subnets in the Availability
@@ -122,6 +125,65 @@ resource "aws_eks_access_policy_association" "admin" {
   }
 }
 
+# --- vpc-cni Pod Identity role -----------------------------------------------
+#
+# aws-node gets AWS credentials through EKS Pod Identity instead of through
+# the node role, so AmazonEKS_CNI_Policy is on this role, scoped to
+# kube-system/aws-node, and not on any node role (see local.node_managed_policies
+# below). Trust conditions follow the same pattern as the Karpenter controller
+# role in karpenter.tf: EKS Pod Identity sets these session tags, so only the
+# aws-node service account of this cluster can assume the role.
+
+locals {
+  vpc_cni_namespace       = "kube-system"
+  vpc_cni_service_account = "aws-node"
+}
+
+data "aws_iam_policy_document" "vpc_cni_assume" {
+  statement {
+    actions = ["sts:AssumeRole", "sts:TagSession"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["pods.eks.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [local.account_id]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/eks-cluster-arn"
+      values   = [local.cluster_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/kubernetes-namespace"
+      values   = [local.vpc_cni_namespace]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/kubernetes-service-account"
+      values   = [local.vpc_cni_service_account]
+    }
+  }
+}
+
+resource "aws_iam_role" "vpc_cni" {
+  name               = "${var.name}-vpc-cni"
+  assume_role_policy = data.aws_iam_policy_document.vpc_cni_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "vpc_cni" {
+  role       = aws_iam_role.vpc_cni.name
+  policy_arn = "arn:${local.partition}:iam::aws:policy/AmazonEKS_CNI_Policy"
+}
+
 # --- System node group -------------------------------------------------------
 
 data "aws_iam_policy_document" "node_assume" {
@@ -136,9 +198,11 @@ data "aws_iam_policy_document" "node_assume" {
 }
 
 locals {
+  # AmazonEKS_CNI_Policy is not here: a pod on a node with this role cannot
+  # attach or detach ENIs, because that permission now lives only on the
+  # vpc-cni Pod Identity role below, bound to kube-system/aws-node.
   node_managed_policies = [
     "AmazonEKSWorkerNodePolicy",
-    "AmazonEKS_CNI_Policy",
     "AmazonEC2ContainerRegistryPullOnly",
     "AmazonSSMManagedInstanceCore",
   ]
@@ -156,6 +220,29 @@ resource "aws_iam_role_policy_attachment" "system_node" {
   policy_arn = "arn:${local.partition}:iam::aws:policy/${each.value}"
 }
 
+# IMDSv2 only, one hop: a pod on a system node that does not use the host
+# network is at least two hops from the instance metadata service (one hop
+# out of the pod network namespace, one more into the instance), so it gets
+# no token and cannot reach IMDS at all. aws-node (host network) and the
+# kubelet are one hop away and are unaffected. No image_id or instance_type
+# here: ami_type stays on the node group below, and with no user_data in the
+# template either, EKS still generates the AL2023 nodeadm bootstrap config
+# for that ami_type. update_default_version keeps this template's own
+# "$Default" pointer current for anything that references it outside this
+# node group.
+resource "aws_launch_template" "system_node" {
+  name        = "${var.name}-system-node"
+  description = "IMDSv2 hardening for the system node group"
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
+
+  update_default_version = true
+}
+
 resource "aws_eks_addon" "before_nodes" {
   for_each = toset(local.addons_before_nodes)
 
@@ -166,6 +253,40 @@ resource "aws_eks_addon" "before_nodes" {
   resolve_conflicts_on_update = "OVERWRITE"
 }
 
+# vpc-cni, after eks-pod-identity-agent: aws-node and eks-pod-identity-agent
+# are both DaemonSets, and a fresh node runs them at essentially the same
+# time. aws-node needs the agent's local credential endpoint to be reachable
+# to get its AWS credentials through Pod Identity; if its DaemonSet object
+# reached the API server after aws-node's, a node could race aws-node ahead
+# of the agent. Depending on eks-pod-identity-agent reaching ACTIVE removes
+# that race at the add-on level: the agent's DaemonSet exists in the cluster
+# before vpc-cni's does, for every node that joins afterwards (the system
+# node group, created later still, and any Karpenter node).
+resource "aws_eks_addon" "vpc_cni" {
+  cluster_name                = aws_eks_cluster.this.name
+  addon_name                  = "vpc-cni"
+  addon_version               = local.addon_versions[var.kubernetes_version]["vpc-cni"]
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+
+  # Enables the vpc-cni network policy agent (node_managed_policies carries no
+  # CNI permission to configure); NetworkPolicy objects are the tenancy
+  # layer's, this only turns on enforcement so they take effect once added.
+  configuration_values = jsonencode({
+    enableNetworkPolicy = "true"
+  })
+
+  pod_identity_association {
+    service_account = local.vpc_cni_service_account
+    role_arn        = aws_iam_role.vpc_cni.arn
+  }
+
+  depends_on = [
+    aws_eks_addon.before_nodes,
+    aws_iam_role_policy_attachment.vpc_cni,
+  ]
+}
+
 resource "aws_eks_node_group" "system" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = "system"
@@ -174,6 +295,11 @@ resource "aws_eks_node_group" "system" {
   ami_type        = "AL2023_x86_64_STANDARD"
   capacity_type   = "ON_DEMAND"
   instance_types  = var.system_node_group.instance_types
+
+  launch_template {
+    id      = aws_launch_template.system_node.id
+    version = aws_launch_template.system_node.latest_version
+  }
 
   scaling_config {
     desired_size = var.system_node_group.size
@@ -194,6 +320,7 @@ resource "aws_eks_node_group" "system" {
   depends_on = [
     aws_iam_role_policy_attachment.system_node,
     aws_eks_addon.before_nodes,
+    aws_eks_addon.vpc_cni,
   ]
 }
 

@@ -106,11 +106,14 @@ variable "system_node_group" {
 }
 
 variable "argocd" {
-  description = "Create the EKS managed Argo CD capability (hub cells only) when set. idc_instance_arn and idc_region identify the IAM Identity Center instance; admin_group_ids are Identity Center group IDs mapped to the Argo CD ADMIN role."
+  description = "Create the EKS managed Argo CD capability (hub cells only) when set. idc_instance_arn and idc_region identify the IAM Identity Center instance; role_mappings gives each Identity Center group one of the Argo CD roles (ADMIN, EDITOR or VIEWER) so that a team can be given read or edit access without being a cluster admin."
   type = object({
     idc_instance_arn = string
     idc_region       = string
-    admin_group_ids  = list(string)
+    role_mappings = list(object({
+      role      = string
+      group_ids = list(string)
+    }))
   })
   default = null
 
@@ -125,8 +128,23 @@ variable "argocd" {
   }
 
   validation {
-    condition     = var.argocd == null || length(var.argocd.admin_group_ids) > 0
-    error_message = "argocd.admin_group_ids must contain at least one Identity Center group ID."
+    condition     = var.argocd == null || length(var.argocd.role_mappings) > 0
+    error_message = "argocd.role_mappings must contain at least one role mapping."
+  }
+
+  validation {
+    condition     = var.argocd == null || alltrue([for m in var.argocd.role_mappings : contains(["ADMIN", "EDITOR", "VIEWER"], m.role)])
+    error_message = "Every argocd.role_mappings[*].role must be one of ADMIN, EDITOR or VIEWER."
+  }
+
+  validation {
+    condition     = var.argocd == null || alltrue([for m in var.argocd.role_mappings : length(m.group_ids) > 0])
+    error_message = "Every argocd.role_mappings[*].group_ids must contain at least one Identity Center group ID."
+  }
+
+  validation {
+    condition     = var.argocd == null || length(distinct([for m in var.argocd.role_mappings : m.role])) == length(var.argocd.role_mappings)
+    error_message = "argocd.role_mappings must not map the same role twice; list every group for a role in that one entry's group_ids."
   }
 }
 

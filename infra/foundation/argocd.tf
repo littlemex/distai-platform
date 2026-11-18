@@ -1,6 +1,9 @@
 # Optional EKS managed Argo CD capability, created only when var.argocd is set
-# (hub cells). Users sign in through IAM Identity Center; the groups in
-# var.argocd.admin_group_ids get the Argo CD ADMIN role.
+# (hub cells). Users sign in through IAM Identity Center; each entry of
+# var.argocd.role_mappings gives its Identity Center groups one Argo CD role
+# (ADMIN, EDITOR or VIEWER). Per-team AppProjects, which turn that role into
+# access to one team's applications rather than all of them, are the tenancy
+# layer's.
 
 data "aws_iam_policy_document" "argocd_assume" {
   count = var.argocd == null ? 0 : 1
@@ -41,15 +44,19 @@ resource "aws_eks_capability" "argocd" {
         idc_region       = var.argocd.idc_region
       }
 
-      rbac_role_mapping {
-        role = "ADMIN"
+      dynamic "rbac_role_mapping" {
+        for_each = { for m in var.argocd.role_mappings : m.role => m }
 
-        dynamic "identity" {
-          for_each = toset(var.argocd.admin_group_ids)
+        content {
+          role = rbac_role_mapping.value.role
 
-          content {
-            id   = identity.value
-            type = "SSO_GROUP"
+          dynamic "identity" {
+            for_each = toset(rbac_role_mapping.value.group_ids)
+
+            content {
+              id   = identity.value
+              type = "SSO_GROUP"
+            }
           }
         }
       }
