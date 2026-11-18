@@ -4,7 +4,10 @@
 # It uses only the variables and outputs of infra/foundation:
 #   1. init with the S3 backend, check the state has no resources yet, apply
 #      with a generated tfvars file;
-#   2. two Ready system nodes, four add-ons ACTIVE, outputs present;
+#   2. two Ready system nodes, four add-ons ACTIVE, outputs present
+#      (including cluster_arn/argocd_namespace, issue #25 decision 1); with
+#      argocd set, the capability's own IAM role has an AmazonEKSClusterAdminPolicy
+#      access-policy association (issue #25 decision 1);
 #   3. a pod without host networking on a system node cannot obtain an
 #      IMDSv2 token, and the system nodes require IMDSv2 with a hop limit
 #      of 1;
@@ -13,22 +16,27 @@
 #      pod without host networking still gets an IP address;
 #   5. a deny-all NetworkPolicy blocks pod-to-pod traffic that worked before
 #      the policy was applied;
-#   6. Karpenter v1.15.x installed by Helm from the outputs only;
-#   7. a spot CPU NodePool launches an instance for a pending pod;
-#   8. a synthetic spot interruption sent to the queue is handled;
-#   9. terraform destroy with the NodePool and Karpenter still in place;
-#  10. nothing tagged for the cluster is left (instance, ENI, NAT, EBS).
+#   6. terraform destroy;
+#   7. nothing tagged for the cluster is left (instance, ENI, NAT, EBS).
 #
 # Every check prints PASS or FAIL. The script exits non-zero on the first
 # failed step and always attempts to destroy what it created (EXIT trap).
+#
+# Karpenter itself is not installed by this test. Issue #25 (the delivery
+# layer) moved "Karpenter healthy, a NodePool launches a node" to
+# gitops/tests/1.e2e.sh, which installs Karpenter through the managed Argo
+# CD capability instead of a stand-in `helm install` here (Decision 9: "the
+# foundation e2e's stand-in Karpenter install is removed"). This script still
+# proves the foundation layer's own contract: the outputs Karpenter will
+# need (karpenter_node_role_name, karpenter_interruption_queue_name) exist
+# and are well-formed, and the node role carries no CNI permissions,
+# independent of anything that later runs on top of it.
 #
 # Required environment (export before running):
 #   AWS_PROFILE, AWS_REGION, NAME, STATE_BUCKET, STATE_REGION,
 #   ADMIN_PRINCIPAL_ARN, MY_CIDR
 # Optional environment:
-#   TERRAFORM (terraform), KARPENTER_VERSION (1.15.2),
-#   E2E_INSTANCE_TYPES (m7i.large,m6i.large,m5.large),
-#   E2E_AMI_ALIAS (al2023@v20261112), E2E_WORK_DIR (mktemp -d),
+#   TERRAFORM (terraform), E2E_WORK_DIR (mktemp -d),
 #   E2E_KEEP_ON_FAILURE (0), E2E_LEFTOVER_GRACE_SECONDS (600),
 #   ARGOCD_IDC_INSTANCE_ARN, ARGOCD_IDC_REGION, ARGOCD_ADMIN_GROUP_IDS
 #   (all three set: also create the Argo CD capability with one ADMIN role
@@ -47,9 +55,6 @@ set -euo pipefail
 export AWS_PROFILE AWS_REGION
 
 TERRAFORM="${TERRAFORM:-terraform}"
-KARPENTER_VERSION="${KARPENTER_VERSION:-1.15.2}"
-E2E_INSTANCE_TYPES="${E2E_INSTANCE_TYPES:-m7i.large,m6i.large,m5.large}"
-E2E_AMI_ALIAS="${E2E_AMI_ALIAS:-al2023@v20261112}"
 E2E_KEEP_ON_FAILURE="${E2E_KEEP_ON_FAILURE:-0}"
 E2E_LEFTOVER_GRACE_SECONDS="${E2E_LEFTOVER_GRACE_SECONDS:-600}"
 ARGOCD_IDC_INSTANCE_ARN="${ARGOCD_IDC_INSTANCE_ARN:-}"
@@ -71,24 +76,10 @@ TFVARS="${WORK_DIR}/e2e.tfvars.json"
 export TF_DATA_DIR="${WORK_DIR}/.terraform"
 export KUBECONFIG="${WORK_DIR}/kubeconfig"
 export TF_IN_AUTOMATION=1
-# Isolate Helm's OCI registry credential store from the operator's own
-# (global, machine-wide) one: public.ecr.aws needs no login for anonymous
-# pulls, but if the operator previously ran `helm registry login` for it and
-# that stored token later expired, Helm prefers the stale stored credential
-# over an anonymous pull and every chart pull fails with "authorization
-# token has expired", unrelated to anything this test does. Pointing
-# HELM_REGISTRY_CONFIG at an empty file scoped to this run's WORK_DIR avoids
-# depending on, or mutating, whatever is cached on the machine that runs
-# this script.
-export HELM_REGISTRY_CONFIG="${WORK_DIR}/helm-registry-config.json"
-echo '{}' >"${HELM_REGISTRY_CONFIG}"
 
 STATE_KEY="distai-platform/${AWS_REGION}/${NAME}/foundation"
 RUN_ID="e2e-$(date -u +%Y%m%d%H%M%S)"
 TEST_TAG_KEY="distai-platform-e2e"
-NODEPOOL="e2e-spot"
-NODECLASS="e2e-cpu"
-APP="e2e-inflate"
 IMDS_POD="e2e-imds-check"
 NETPOL_NS="e2e-netpol-${RUN_ID#e2e-}"
 ADDONS=(vpc-cni coredns kube-proxy eks-pod-identity-agent)
@@ -97,7 +88,6 @@ APPLY_ATTEMPTED=0
 DESTROYED=0
 FAILED_STEP=""
 VPC_ID=""
-KARPENTER_INSTANCE_IDS=()
 
 # ---------------------------------------------------------------- helpers
 
@@ -190,8 +180,6 @@ cleanup() {
     else
       info "cleanup: the test did not reach a successful destroy; cleaning up"
       if kubectl get nodes >/dev/null 2>&1; then
-        kubectl delete deployment "${APP}" --ignore-not-found --wait=false >/dev/null 2>&1
-        kubectl delete nodepool "${NODEPOOL}" --ignore-not-found --timeout=300s >/dev/null 2>&1
         kubectl delete pod "${IMDS_POD}" --ignore-not-found --wait=false >/dev/null 2>&1
         kubectl delete namespace "${NETPOL_NS}" --ignore-not-found --wait=false >/dev/null 2>&1
       fi
@@ -316,12 +304,10 @@ report_leftovers() {
 
 # ------------------------------------------------------------ preflight
 
-for b in "${TERRAFORM}" aws kubectl helm; do require_bin "${b}"; done
-[[ "${KARPENTER_VERSION}" =~ ^1\.15\.[0-9]+$ ]] \
-  || fail "KARPENTER_VERSION must be a pinned 1.15.x version, got ${KARPENTER_VERSION}"
+for b in "${TERRAFORM}" aws kubectl; do require_bin "${b}"; done
 [[ "${MY_CIDR}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]] \
   || fail "MY_CIDR must be an IPv4 CIDR, got ${MY_CIDR}"
-ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)" \
+aws sts get-caller-identity --query Account --output text >/dev/null \
   || fail "aws sts get-caller-identity (check AWS_PROFILE and credentials)"
 pass "preflight: tools present, credentials valid"
 info "run ${RUN_ID}, work dir ${WORK_DIR}"
@@ -394,7 +380,8 @@ pass "terraform apply ($(($(date +%s) - apply_start))s)"
 
 for o in cluster_name cluster_endpoint cluster_certificate_authority_data region \
   vpc_id node_security_group_id karpenter_controller_role_arn \
-  karpenter_node_role_name karpenter_interruption_queue_name; do
+  karpenter_node_role_name karpenter_interruption_queue_name \
+  cluster_arn argocd_namespace; do
   v="$(tf_out "${o}" 2>/dev/null)" || fail "output ${o} is missing"
   [[ -n "${v}" ]] || fail "output ${o} is empty"
 done
@@ -410,12 +397,19 @@ if [[ "${ARGOCD_JSON}" == "null" ]]; then
 else
   [[ "${argocd_arn_json}" != "null" ]] || fail "argocd_capability_arn is missing while argocd is set"
 fi
-pass "all eleven outputs present"
+pass "all thirteen outputs present"
+
+# cluster_arn (issue #25 decision 1) is the value the delivery layer's
+# bootstrap script writes verbatim into the registration Secret's `server`
+# field: it must be the cluster's own ARN, never an API server URL.
+CLUSTER_ARN="$(tf_out cluster_arn)"
+[[ "${CLUSTER_ARN}" =~ ^arn:[^:]+:eks:${AWS_REGION}:[0-9]{12}:cluster/${NAME}$ ]] \
+  || fail "output cluster_arn (${CLUSTER_ARN}) is not an EKS cluster ARN for ${AWS_REGION}/${NAME}"
+pass "output cluster_arn is a well-formed EKS cluster ARN for ${AWS_REGION}/${NAME}"
 
 CLUSTER="$(tf_out cluster_name)"
 VPC_ID="$(tf_out vpc_id)"
 NODE_ROLE="$(tf_out karpenter_node_role_name)"
-QUEUE_NAME="$(tf_out karpenter_interruption_queue_name)"
 [[ "${CLUSTER}" == "${NAME}" ]] || fail "cluster_name (${CLUSTER}) differs from var.name (${NAME})"
 [[ "$(tf_out region)" == "${AWS_REGION}" ]] || fail "output region differs from var.region"
 pass "cluster_name and region match the inputs"
@@ -510,6 +504,35 @@ if [[ "${ARGOCD_JSON}" != "null" ]]; then
     expect_role_mapping EDITOR "${ARGOCD_EDITOR_GROUP_IDS}"
     pass "Argo CD capability lists the EDITOR role mapping (${ARGOCD_EDITOR_GROUP_IDS})"
   fi
+
+  # Issue #25 decision 1: this layer's argocd.tf also creates one
+  # aws_eks_access_policy_association binding the capability's own IAM role
+  # to AmazonEKSClusterAdminPolicy at type=cluster, since AWS does not grant
+  # the capability's access entry any RBAC by default. No output exposes the
+  # capability role's ARN (the association is a direct Terraform resource
+  # reference the RFC says nothing else needs to read), so this test finds
+  # the role the same way a human would: it is the one STANDARD access entry
+  # on the cluster that is neither ADMIN_PRINCIPAL_ARN nor a node role.
+  all_entries="$(aws eks list-access-entries --cluster-name "${CLUSTER}" --query 'accessEntries' --output text)" \
+    || fail "aws eks list-access-entries --cluster-name ${CLUSTER}"
+  capability_role_arn=""
+  for entry in ${all_entries}; do
+    [[ "${entry}" == "${ADMIN_PRINCIPAL_ARN}" ]] && continue
+    [[ "${entry}" == *":role/"*"${NAME}"* ]] && continue # node / Karpenter roles embed NAME
+    entry_type="$(aws eks describe-access-entry --cluster-name "${CLUSTER}" --principal-arn "${entry}" \
+      --query 'accessEntry.type' --output text 2>/dev/null)"
+    [[ "${entry_type}" == "STANDARD" ]] || continue
+    capability_role_arn="${entry}"
+    break
+  done
+  [[ -n "${capability_role_arn}" ]] \
+    || fail "could not find the Argo CD capability's own access entry among: ${all_entries}"
+  capability_policies="$(aws eks list-associated-access-policies --cluster-name "${CLUSTER}" \
+    --principal-arn "${capability_role_arn}" --query 'associatedAccessPolicies[].policyArn' --output text)" \
+    || fail "aws eks list-associated-access-policies --principal-arn ${capability_role_arn}"
+  [[ "${capability_policies}" == *"AmazonEKSClusterAdminPolicy"* ]] \
+    || fail "capability role ${capability_role_arn} has no AmazonEKSClusterAdminPolicy association: [${capability_policies}]"
+  pass "Argo CD capability role has an AmazonEKSClusterAdminPolicy access-policy association"
 fi
 
 # ------------------------------------------------------- 3b. IMDS hop limit
@@ -744,259 +767,20 @@ pass "a deny-all ingress NetworkPolicy blocks traffic that worked before it was 
 
 kubectl delete namespace "${NETPOL_NS}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
 
-# ------------------------------------- 4. Karpenter from the outputs only
-
-# The Karpenter controller tolerates CriticalAddonsOnly and runs on a system
-# node, which (3b above) now rejects a hop count beyond 1, so the controller
-# can no longer reach IMDS to discover its own Region the way it does by
-# default. The chart's "Additional environment variables for the controller
-# pod" field is controller.env (values.yaml ships it commented out as
-# `# - name: AWS_REGION` / `#   value: eu-west-1`); set it explicitly instead
-# of relying on IMDS.
-cat >"${WORK_DIR}/karpenter-values.yaml" <<YAML
-serviceAccount:
-  name: karpenter
-settings:
-  clusterName: ${CLUSTER}
-  interruptionQueue: ${QUEUE_NAME}
-controller:
-  env:
-    - name: AWS_REGION
-      value: ${AWS_REGION}
-tolerations:
-  - key: CriticalAddonsOnly
-    operator: Exists
-YAML
-helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
-  --version "${KARPENTER_VERSION}" --namespace kube-system \
-  --values "${WORK_DIR}/karpenter-values.yaml" --wait --timeout 10m \
-  || fail "helm install karpenter ${KARPENTER_VERSION}"
-pass "Karpenter ${KARPENTER_VERSION} installed in kube-system with service account karpenter, controller.env AWS_REGION=${AWS_REGION}"
-
-types_yaml="$(printf '%s' "${E2E_INSTANCE_TYPES}" | tr ',' '\n' | sed 's/^/            - /')"
-cat >"${WORK_DIR}/karpenter-nodes.yaml" <<YAML
-apiVersion: karpenter.k8s.aws/v1
-kind: EC2NodeClass
-metadata:
-  name: ${NODECLASS}
-spec:
-  role: ${NODE_ROLE}
-  amiSelectorTerms:
-    - alias: ${E2E_AMI_ALIAS}
-  subnetSelectorTerms:
-    - tags:
-        karpenter.sh/discovery: ${CLUSTER}
-  securityGroupSelectorTerms:
-    - tags:
-        karpenter.sh/discovery: ${CLUSTER}
-  tags:
-    ${TEST_TAG_KEY}: ${RUN_ID}
----
-apiVersion: karpenter.sh/v1
-kind: NodePool
-metadata:
-  name: ${NODEPOOL}
-spec:
-  template:
-    spec:
-      nodeClassRef:
-        group: karpenter.k8s.aws
-        kind: EC2NodeClass
-        name: ${NODECLASS}
-      requirements:
-        - key: karpenter.sh/capacity-type
-          operator: In
-          values: ["spot"]
-        - key: kubernetes.io/arch
-          operator: In
-          values: ["amd64"]
-        - key: node.kubernetes.io/instance-type
-          operator: In
-          values:
-${types_yaml}
-      expireAfter: 720h
-  limits:
-    cpu: "16"
-  disruption:
-    consolidationPolicy: WhenEmpty
-    consolidateAfter: 1h
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: ${APP}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: ${APP}
-  template:
-    metadata:
-      labels:
-        app: ${APP}
-    spec:
-      terminationGracePeriodSeconds: 0
-      nodeSelector:
-        karpenter.sh/nodepool: ${NODEPOOL}
-      containers:
-        - name: pause
-          image: public.ecr.aws/eks-distro/kubernetes/pause:3.10
-          resources:
-            requests:
-              cpu: 500m
-              memory: 256Mi
-YAML
-kubectl apply -f "${WORK_DIR}/karpenter-nodes.yaml" || fail "kubectl apply EC2NodeClass, NodePool, Deployment"
-
-nodeclass_ready() {
-  [[ "$(kubectl get ec2nodeclass "${NODECLASS}" \
-    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" == "True" ]]
-}
-wait_until 300 10 "EC2NodeClass Ready" nodeclass_ready \
-  || fail "EC2NodeClass ${NODECLASS} not Ready: $(kubectl get ec2nodeclass "${NODECLASS}" -o jsonpath='{.status.conditions}')"
-sg_count="$(kubectl get ec2nodeclass "${NODECLASS}" -o jsonpath='{.status.securityGroups[*].id}' | wc -w | tr -d ' ')"
-subnet_count="$(kubectl get ec2nodeclass "${NODECLASS}" -o jsonpath='{.status.subnets[*].id}' | wc -w | tr -d ' ')"
-[[ "${sg_count}" -ge 1 && "${subnet_count}" -ge 1 ]] \
-  || fail "discovery tags matched ${subnet_count} subnet(s) and ${sg_count} security group(s)"
-pass "EC2NodeClass Ready: discovery tags select ${subnet_count} subnet(s), ${sg_count} security group(s)"
-
-# app_node: name of the node running the Ready app pod, empty if none.
-app_node() {
-  kubectl get pods -l "app=${APP}" \
-    -o jsonpath='{range .items[*]}{.spec.nodeName}{" "}{.status.conditions[?(@.type=="Ready")].status}{" "}{.metadata.deletionTimestamp}{"\n"}{end}' \
-    | awk '$2=="True" && $3=="" && !found {print $1; found=1}'
-}
-app_running() { [[ -n "$(app_node)" ]]; }
-app_running_elsewhere() { local n; n="$(app_node)"; [[ -n "${n}" && "${n}" != "${NODE1}" ]]; }
-
-# Checks that NODE comes from the test NodePool and is a spot instance; sets
-# LAST_INSTANCE_ID and records it for the post-destroy check.
-LAST_INSTANCE_ID=""
-check_karpenter_spot_node() {
-  local node="$1" iid lifecycle
-  [[ "$(kubectl get node "${node}" -o jsonpath='{.metadata.labels.karpenter\.sh/nodepool}')" == "${NODEPOOL}" ]] \
-    || fail "node ${node} is not from NodePool ${NODEPOOL}"
-  iid="$(instance_of_node "${node}")"
-  lifecycle="$(aws ec2 describe-instances --instance-ids "${iid}" \
-    --query 'Reservations[0].Instances[0].InstanceLifecycle' --output text)"
-  [[ "${lifecycle}" == "spot" ]] || fail "instance ${iid} lifecycle is ${lifecycle}, expected spot"
-  KARPENTER_INSTANCE_IDS+=("${iid}")
-  LAST_INSTANCE_ID="${iid}"
-}
-
-wait_until 900 15 "pending pod running on a Karpenter node" app_running \
-  || fail "pod ${APP} did not run on a Karpenter node: $(kubectl get nodeclaims -o wide 2>&1)"
-NODE1="$(app_node)"
-check_karpenter_spot_node "${NODE1}"
-INSTANCE1="${LAST_INSTANCE_ID}"
-pass "pending pod runs on Karpenter spot node ${NODE1} ($(kubectl get node "${NODE1}" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}'))"
-
-# --------------------------------------- 5. synthetic spot interruption
-
-QUEUE_URL="$(aws sqs get-queue-url --queue-name "${QUEUE_NAME}" --query QueueUrl --output text)" \
-  || fail "aws sqs get-queue-url ${QUEUE_NAME}"
-NODECLAIM1="$(kubectl get nodeclaims \
-  -o jsonpath="{range .items[?(@.status.nodeName==\"${NODE1}\")]}{.metadata.name}{end}")"
-[[ -n "${NODECLAIM1}" ]] || fail "no NodeClaim for node ${NODE1}"
-
-# EventBridge envelope as Karpenter parses it: version "0", source aws.ec2,
-# detail-type "EC2 Spot Instance Interruption Warning", detail.instance-id.
-cat >"${WORK_DIR}/spot-interruption.json" <<JSON
-{
-  "version": "0",
-  "id": "$(new_uuid)",
-  "detail-type": "EC2 Spot Instance Interruption Warning",
-  "source": "aws.ec2",
-  "account": "${ACCOUNT_ID}",
-  "time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "region": "${AWS_REGION}",
-  "resources": ["arn:aws:ec2:${AWS_REGION}:${ACCOUNT_ID}:instance/${INSTANCE1}"],
-  "detail": {
-    "instance-id": "${INSTANCE1}",
-    "instance-action": "terminate"
-  }
-}
-JSON
-aws sqs send-message --queue-url "${QUEUE_URL}" \
-  --message-body "file://${WORK_DIR}/spot-interruption.json" >/dev/null \
-  || fail "aws sqs send-message to the interruption queue"
-info "sent a spot interruption warning for ${INSTANCE1} to ${QUEUE_NAME}"
-
-INTERRUPTION_EVIDENCE=""
-interruption_handled() {
-  local dt logs
-  if ! kubectl get nodeclaim "${NODECLAIM1}" >/dev/null 2>&1; then
-    INTERRUPTION_EVIDENCE="NodeClaim ${NODECLAIM1} deleted"
-    return 0
-  fi
-  dt="$(kubectl get nodeclaim "${NODECLAIM1}" -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null)"
-  if [[ -n "${dt}" ]]; then
-    INTERRUPTION_EVIDENCE="NodeClaim ${NODECLAIM1} marked for deletion at ${dt}"
-    return 0
-  fi
-  if kubectl get events -A --field-selector reason=SpotInterrupted -o name 2>/dev/null | grep -q .; then
-    INTERRUPTION_EVIDENCE="event SpotInterrupted recorded"
-    return 0
-  fi
-  logs="$(kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter --tail=-1 2>/dev/null)"
-  if grep 'initiating delete from interruption message' <<<"${logs}" | grep -q spot_interrupted; then
-    INTERRUPTION_EVIDENCE="Karpenter log: initiating delete from interruption message (spot_interrupted)"
-    return 0
-  fi
-  return 1
-}
-wait_until 300 10 "Karpenter handles the interruption message" interruption_handled \
-  || fail "Karpenter did not react to the interruption message within 300s"
-pass "Karpenter received the interruption message: ${INTERRUPTION_EVIDENCE}"
-kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter --tail=-1 2>/dev/null \
-  | grep -E 'interruption|SpotInterrupted' | tail -n 5 || true
-
-# The Deployment brings the pod back on a replacement spot instance, so a
-# Karpenter instance is running when terraform destroy starts.
-wait_until 900 15 "pod running on a replacement Karpenter node" app_running_elsewhere \
-  || fail "no replacement Karpenter node ran the pod after the interruption"
-NODE2="$(app_node)"
-check_karpenter_spot_node "${NODE2}"
-INSTANCE2="${LAST_INSTANCE_ID}"
-pass "replacement Karpenter spot node ${NODE2} runs the pod"
-
-# ------------------------------- 6. destroy with Karpenter still running
-
-running_karpenter="$(aws ec2 describe-instances \
-  --filters "Name=tag:karpenter.sh/nodepool,Values=${NODEPOOL}" \
-  "Name=tag-key,Values=kubernetes.io/cluster/${CLUSTER}" \
-  "Name=instance-state-name,Values=running" \
-  --query 'Reservations[].Instances[].InstanceId' --output text)"
-[[ "${running_karpenter}" == *"${INSTANCE2}"* ]] \
-  || fail "Karpenter instance ${INSTANCE2} is not running before destroy"
-kubectl get nodepool "${NODEPOOL}" >/dev/null || fail "NodePool ${NODEPOOL} vanished before destroy"
-helm status karpenter -n kube-system >/dev/null || fail "Karpenter release vanished before destroy"
-pass "before destroy: NodePool, Karpenter release and instance(s) ${running_karpenter} in place"
+# ------------------------------------------------------- 4. terraform destroy
+#
+# No Karpenter-launched node exists in this test (Issue #25 moved that
+# coverage to gitops/tests/1.e2e.sh), so destroy only has to remove the
+# foundation's own resources: the system node group, add-ons, VPC, IAM
+# roles and the interruption queue/EventBridge rules.
 
 destroy_start="$(date +%s)"
 tf destroy -auto-approve -input=false -var-file="${TFVARS}" \
-  || fail "terraform destroy with the NodePool and Karpenter still in place"
+  || fail "terraform destroy"
 DESTROYED=1
 pass "terraform destroy completed without manual steps ($(($(date +%s) - destroy_start))s)"
 
-# ------------------------------------------------- 7. nothing left behind
-
-# An ID this old can also fall out of EC2's own retention window and come
-# back as InvalidInstanceID.NotFound; aws_text treats that the same as an
-# empty result (the instance is gone), while any other failure (expired
-# credentials, throttling) must not be read as "terminated".
-instances_terminated() {
-  local out states
-  if ! out="$(aws_text aws ec2 describe-instances --instance-ids "${KARPENTER_INSTANCE_IDS[@]}" \
-    --query 'Reservations[].Instances[].State.Name' --output text)"; then
-    fail "checking Karpenter instance state: ${out}"
-  fi
-  states="$(printf '%s' "${out}" | tr '\t' '\n' | grep -v '^None$' | grep -v '^$' | sort -u || true)"
-  [[ -z "${states}" || "${states}" == "terminated" ]]
-}
-wait_until "${E2E_LEFTOVER_GRACE_SECONDS}" 20 "Karpenter instances terminated" instances_terminated \
-  || fail "Karpenter instance(s) ${KARPENTER_INSTANCE_IDS[*]} not terminated after destroy"
-pass "Karpenter instance(s) ${KARPENTER_INSTANCE_IDS[*]} terminated"
+# ------------------------------------------------- 5. nothing left behind
 
 report_leftovers "${E2E_LEFTOVER_GRACE_SECONDS}" \
   || fail "resources tagged for the cluster remain after destroy"
