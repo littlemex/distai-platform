@@ -77,7 +77,7 @@ spec:
         helm:
           {{- if .values }}
           valuesObject:
-{{ .values | toYaml | indent 12 }}
+            {{- toYaml .values | nindent 12 }}
           {{- end }}
           {{- if .valuesFrom }}
           parameters:
