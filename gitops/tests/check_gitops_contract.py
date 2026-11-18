@@ -258,7 +258,7 @@ def main(root: str) -> int:
             step_labels: set[str] = set()
             for step in steps:
                 for m in step.get("matchExpressions", []):
-                    if m.get("key") == "wave":
+                    if m.get("key") == "distai.dev/wave":
                         step_labels.update(m.get("values", []))
             check(
                 f"{rel}'s RollingSync steps match the expected wave labels {sorted(expected_steps)} (decision 4)",
