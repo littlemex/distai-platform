@@ -71,6 +71,17 @@ TFVARS="${WORK_DIR}/e2e.tfvars.json"
 export TF_DATA_DIR="${WORK_DIR}/.terraform"
 export KUBECONFIG="${WORK_DIR}/kubeconfig"
 export TF_IN_AUTOMATION=1
+# Isolate Helm's OCI registry credential store from the operator's own
+# (global, machine-wide) one: public.ecr.aws needs no login for anonymous
+# pulls, but if the operator previously ran `helm registry login` for it and
+# that stored token later expired, Helm prefers the stale stored credential
+# over an anonymous pull and every chart pull fails with "authorization
+# token has expired", unrelated to anything this test does. Pointing
+# HELM_REGISTRY_CONFIG at an empty file scoped to this run's WORK_DIR avoids
+# depending on, or mutating, whatever is cached on the machine that runs
+# this script.
+export HELM_REGISTRY_CONFIG="${WORK_DIR}/helm-registry-config.json"
+echo '{}' >"${HELM_REGISTRY_CONFIG}"
 
 STATE_KEY="distai-platform/${AWS_REGION}/${NAME}/foundation"
 RUN_ID="e2e-$(date -u +%Y%m%d%H%M%S)"
