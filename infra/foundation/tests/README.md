@@ -9,7 +9,7 @@ variables and outputs that the issue defines.
 | Script | What it checks | Needs AWS | Duration |
 | --- | --- | --- | --- |
 | `0.static.sh` | `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`, `tflint`, and `terraform test` with `variables.tftest.hcl` (input validation against a mocked AWS provider: accepted and rejected `argocd` role mappings and public endpoint CIDRs) | No | About 1 minute |
-| `1.e2e.sh` | Apply, cluster shape, IMDS hop limit, CNI permissions, NetworkPolicy enforcement, Karpenter from the outputs, spot launch, interruption handling, destroy with Karpenter still running, nothing left behind | Yes | About 45 to 70 minutes |
+| `1.e2e.sh` | State is empty before apply, cluster shape, IMDS hop limit, CNI permissions, NetworkPolicy enforcement, Karpenter from the outputs, spot launch, interruption handling, destroy with Karpenter still running, nothing left behind | Yes | About 30 to 35 minutes |
 
 ## Prerequisites
 
@@ -72,6 +72,7 @@ PASS terraform init
 PASS terraform validate
 PASS tflint init
 PASS tflint
+PASS terraform test (input validation, mocked provider)
 
 RESULT PASS: all static checks passed
 ```
@@ -104,13 +105,14 @@ Optional variables:
 | `E2E_KEEP_ON_FAILURE` | `0` | `1` leaves the cell in place after a failure, for debugging; the script prints the destroy command |
 | `E2E_LEFTOVER_GRACE_SECONDS` | `600` | How long to wait for terminating instances and deleting volumes or NAT gateways to disappear after destroy |
 | `ARGOCD_IDC_INSTANCE_ARN`, `ARGOCD_IDC_REGION`, `ARGOCD_ADMIN_GROUP_IDS` | unset | When all three are set (group IDs comma separated), the test sets `argocd` with one `role_mappings` entry (`role = "ADMIN"`, those group IDs) and waits for the capability to become `ACTIVE` |
-| `ARGOCD_VIEWER_GROUP_IDS` | unset | With the three above also set, adds a second `role_mappings` entry (`role = "VIEWER"`, these group IDs, comma separated) |
+| `ARGOCD_VIEWER_GROUP_IDS` | unset | With the three above also set, adds a `role_mappings` entry (`role = "VIEWER"`, these group IDs, comma separated), independently of `ARGOCD_EDITOR_GROUP_IDS` |
+| `ARGOCD_EDITOR_GROUP_IDS` | unset | With the three above also set, adds a `role_mappings` entry (`role = "EDITOR"`, these group IDs, comma separated), independently of `ARGOCD_VIEWER_GROUP_IDS` |
 
 ### What the test does
 
-1. Writes a tfvars file with `name`, `region`, `endpoint_public_access_cidrs = [MY_CIDR]`, `admin_principal_arns = [ADMIN_PRINCIPAL_ARN]`, `argocd` and a run tag in `tags`; runs `terraform init` with the S3 backend and `terraform apply`.
+1. Writes a tfvars file with `name`, `region`, `endpoint_public_access_cidrs = [MY_CIDR]`, `admin_principal_arns = [ADMIN_PRINCIPAL_ARN]`, `argocd` and a run tag in `tags`; runs `terraform init` with the S3 backend, checks that the state at that key has no resources yet (so the run cannot apply new code over an old cell), and runs `terraform apply`.
 2. Checks that all eleven outputs exist, that `argocd_capability_arn` is null when `argocd` is unset, and that `cluster_name` and `region` match the inputs.
-3. Checks the cluster: EKS 1.37, authentication mode `API`, public endpoint limited to `MY_CIDR`, `kubectl` access through the access entry, two Ready nodes of the managed node group with the taint `CriticalAddonsOnly=true:NoSchedule`, and the add-ons `vpc-cni`, `coredns`, `kube-proxy` and `eks-pod-identity-agent` `ACTIVE`. With `argocd` set, also waits for the capability to be `ACTIVE` and checks, through `aws eks describe-capability`, that its `rbacRoleMappings` list the ADMIN role mapping (and the VIEWER one, if `ARGOCD_VIEWER_GROUP_IDS` was set) with the expected group IDs.
+3. Checks the cluster: EKS 1.37, authentication mode `API`, public endpoint limited to `MY_CIDR`, `kubectl` access through the access entry, two Ready nodes of the managed node group with the taint `CriticalAddonsOnly=true:NoSchedule`, and the add-ons `vpc-cni`, `coredns`, `kube-proxy` and `eks-pod-identity-agent` `ACTIVE`. With `argocd` set, also waits for the capability to be `ACTIVE` and checks, through `aws eks describe-capability`, that its `rbacRoleMappings` list the ADMIN role mapping (and the VIEWER and/or EDITOR ones, for whichever of `ARGOCD_VIEWER_GROUP_IDS` and `ARGOCD_EDITOR_GROUP_IDS` were set) with the expected group IDs.
 4. Runs a short-lived pod with no host networking on a system node (tolerating `CriticalAddonsOnly`) that tries to `PUT` an IMDSv2 token from `169.254.169.254`; the check passes when no token comes back. Also checks, with `aws ec2 describe-instances`, that every system node instance has `MetadataOptions.HttpTokens = required` and `MetadataOptions.HttpPutResponseHopLimit = 1`.
 5. Checks, with `aws iam list-attached-role-policies`, that neither the Karpenter node role (`karpenter_node_role_name`) nor the system node group's node role (found with `aws eks describe-nodegroup`) has `AmazonEKS_CNI_Policy` attached; checks, with `aws eks list-pod-identity-associations`, that `kube-system`/`aws-node` has an association; and checks that the pod from the previous step, which has no host networking and no node role, still got a pod IP from the CNI.
 6. Creates a namespace with a server pod (BusyBox `httpd`) and a client pod (BusyBox), and checks that the client reaches the server. Applies a deny-all ingress `NetworkPolicy` on the server and checks that the same request from the client now fails (retried for up to a minute, to allow time for the policy to take effect). Deletes the namespace.
@@ -118,47 +120,61 @@ Optional variables:
 8. Applies an EC2NodeClass (AMI alias, subnets and security groups selected by `karpenter.sh/discovery = NAME`, role `karpenter_node_role_name`) and a spot-only NodePool, then a one-replica Deployment that only fits on that NodePool. It waits until the pod runs on a Karpenter node and checks that the instance is spot.
 9. Sends an EventBridge-shaped `EC2 Spot Instance Interruption Warning` for that instance to the interruption queue and waits until Karpenter reacts: the NodeClaim is deleted or marked for deletion, a `SpotInterrupted` event is recorded, or the controller logs `initiating delete from interruption message`. The Deployment then brings the pod back on a replacement spot instance.
 10. With the NodePool, the Karpenter release and the replacement instance still in place, runs `terraform destroy` and requires it to succeed.
-11. Requires every Karpenter instance of the run to be terminated, and no instance, ENI, NAT gateway or EBS volume to remain that carries the run tag, `karpenter.sh/discovery`, `kubernetes.io/cluster/NAME`, `eks:cluster-name`, `eks:eks-cluster-name` or `cluster.k8s.amazonaws.com/name`, or that sits in the cell's VPC. Finally the VPC must be gone.
+11. Requires every Karpenter instance of the run to be terminated, and no instance, ENI, NAT gateway, EBS volume or launch template (Karpenter v1 tags the ones it creates with `eks:eks-cluster-name` and `karpenter.k8s.aws/ec2nodeclass`) to remain that carries the run tag, `karpenter.sh/discovery`, `kubernetes.io/cluster/NAME`, `eks:cluster-name`, `eks:eks-cluster-name` or `cluster.k8s.amazonaws.com/name`, or (for instance, ENI and NAT gateway) that sits in the cell's VPC. Each of these checks fails loudly, with the AWS CLI's error text, if the underlying `aws ec2 describe-*` call itself fails for a reason other than the resource being gone (for example expired credentials or throttling); it never reports "nothing left" for a call that did not actually succeed. Finally the VPC must be gone (the same distinction applies to the `aws ec2 describe-vpcs` call).
 
 Expected output (abridged, IDs redacted):
 
 ```text
 PASS preflight: tools present, credentials valid
-PASS terraform init with the S3 backend, key distai-platform/dp-e2e/foundation
-PASS terraform apply (1100s)
+PASS terraform init with the S3 backend, key distai-platform/us-east-2/dp-e2e/foundation
+PASS state at key distai-platform/us-east-2/dp-e2e/foundation has no resources before apply
+PASS terraform apply (676s)
 PASS all eleven outputs present
+PASS cluster_name and region match the inputs
 PASS EKS 1.37, authentication mode API, public endpoint limited to MY_CIDR
+PASS kubectl reaches the cluster through the access entry
 PASS kubectl get nodes: 2 Ready system nodes
+PASS system nodes carry the CriticalAddonsOnly=true:NoSchedule taint
 PASS add-on vpc-cni ACTIVE (...)
-PASS a pod without host networking on a system node could not obtain an IMDSv2 token
+PASS add-on coredns ACTIVE (...)
+PASS add-on kube-proxy ACTIVE (...)
+PASS add-on eks-pod-identity-agent ACTIVE (...)
+PASS a pod without host networking on a system node could not obtain an IMDSv2 token, while a host-network pod on the same node could
 PASS system nodes require IMDSv2 (HttpTokens=required) with HttpPutResponseHopLimit=1
 PASS neither the Karpenter node role nor the system node role (...) has AmazonEKS_CNI_Policy
-PASS kube-system/aws-node has an EKS Pod Identity association (its own role carries AmazonEKS_CNI_Policy)
+PASS kube-system/aws-node has one EKS Pod Identity association, to its own role that carries exactly AmazonEKS_CNI_Policy
 PASS a pod without host networking still got a pod IP (...) from the CNI
 PASS client pod reaches the server pod before any NetworkPolicy is applied
 PASS a deny-all ingress NetworkPolicy blocks traffic that worked before it was applied
 PASS Karpenter 1.15.2 installed in kube-system with service account karpenter, controller.env AWS_REGION=us-east-2
+PASS EC2NodeClass Ready: discovery tags select ... subnet(s), ... security group(s)
 PASS pending pod runs on Karpenter spot node ... (m7i.large)
 PASS Karpenter received the interruption message: NodeClaim ... marked for deletion at ...
 PASS replacement Karpenter spot node ... runs the pod
-PASS terraform destroy completed without manual steps (900s)
+PASS before destroy: NodePool, Karpenter release and instance(s) ... in place
+PASS terraform destroy completed without manual steps (859s)
+PASS Karpenter instance(s) ... terminated
 PASS no instance tagged for the cluster remains
 PASS no eni tagged for the cluster remains
 PASS no nat tagged for the cluster remains
 PASS no volume tagged for the cluster remains
+PASS no launch-template tagged for the cluster remains
 PASS VPC removed
 
 RESULT PASS: all checks passed (run e2e-..., work dir ...)
 ```
 
-With `ARGOCD_IDC_INSTANCE_ARN`, `ARGOCD_IDC_REGION` and `ARGOCD_ADMIN_GROUP_IDS` set (`ARGOCD_VIEWER_GROUP_IDS` optional), the output also has, after `PASS Argo CD capability ACTIVE`:
+(measured on a real run: `terraform apply` 676s, `terraform destroy` 859s, the whole script end to end about 32 minutes)
+
+With `ARGOCD_IDC_INSTANCE_ARN`, `ARGOCD_IDC_REGION` and `ARGOCD_ADMIN_GROUP_IDS` set (`ARGOCD_VIEWER_GROUP_IDS` and `ARGOCD_EDITOR_GROUP_IDS` optional, independently of each other), the output also has, after `PASS Argo CD capability ACTIVE`:
 
 ```text
 PASS Argo CD capability lists the ADMIN role mapping (...)
 PASS Argo CD capability lists the VIEWER role mapping (...)
+PASS Argo CD capability lists the EDITOR role mapping (...)
 ```
 
-(the second line only when `ARGOCD_VIEWER_GROUP_IDS` was set).
+(the VIEWER line only when `ARGOCD_VIEWER_GROUP_IDS` was set, the EDITOR line only when `ARGOCD_EDITOR_GROUP_IDS` was set; each checks, through `aws eks describe-capability`, that the capability's `rbacRoleMappings` lists that role with its group IDs).
 
 The script exits with status 0 only when every check passed. On the first failed check it prints `FAIL` with the reason, deletes the test Deployment, NodePool, the IMDS check pod and the NetworkPolicy namespace, runs `terraform destroy`, lists anything that is left, and exits non-zero.
 
