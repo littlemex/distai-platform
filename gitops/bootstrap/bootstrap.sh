@@ -188,10 +188,16 @@ EOF
 # __CLUSTER_NAME__ and __ARGOCD_NAMESPACE__ are the only placeholders, so a
 # --revision-only re-run updates targetRevision here and the Secret's
 # annotation above together (Decision 1 Acceptance Criteria).
+# "|" delimiter, not "/": REVISION is a git ref, and this repository's own
+# branch naming convention (feat/..., test/..., fix/...) always contains a
+# "/" -- a "/"-delimited s/// breaks ("unknown option to `s'") the instant
+# REVISION has one, which is every real --revision this script is ever
+# run with before a PR merges (Decision 6). Git ref names cannot contain
+# "|", so it is a safe delimiter for all three placeholders here.
 sed \
-  -e "s/__REVISION__/${REVISION}/g" \
-  -e "s/__CLUSTER_NAME__/${CLUSTER_NAME}/g" \
-  -e "s/__ARGOCD_NAMESPACE__/${ARGOCD_NAMESPACE}/g" \
+  -e "s|__REVISION__|${REVISION}|g" \
+  -e "s|__CLUSTER_NAME__|${CLUSTER_NAME}|g" \
+  -e "s|__ARGOCD_NAMESPACE__|${ARGOCD_NAMESPACE}|g" \
   "${SCRIPT_DIR}/root-application.yaml" \
   | kubectl apply -n "${ARGOCD_NAMESPACE}" -f -
 
