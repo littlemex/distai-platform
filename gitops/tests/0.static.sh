@@ -166,7 +166,15 @@ mkdir -p "${RENDERED_DIR}"
 # input to each chart lives (decision 2: "static values: for anything not
 # cell-specific"); extracting it keeps this test from inventing a second,
 # untracked set of example values that could drift from what a real cell
-# renders.
+# renders. A parameter file's `valuesFrom:` entries (decision 2) are
+# resolved only by cells.ApplicationSet.yaml's templatePatch, from the
+# Cluster generator's own params or the registration Secret's annotations
+# - neither exists outside a real cluster, so this check cannot supply the
+# real value. It fills each entry's own `helmKey` path with an inert
+# placeholder instead of leaving it unset, so `helm template` still
+# exercises the chart's structure (its `required()` guards, selectors and
+# so on) rather than this check silently skipping every chart that happens
+# to need a cell-specific input.
 extract_values() {
   "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" python3 - "$1" "$2" <<'PY'
 import sys
@@ -174,7 +182,19 @@ import yaml
 path, out = sys.argv[1], sys.argv[2]
 with open(path, encoding="utf-8") as f:
     doc = yaml.safe_load(f)
-values = (doc or {}).get("values", {})
+doc = doc or {}
+values = doc.get("values", {}) or {}
+
+def set_path(d, dotted_key, value):
+    parts = dotted_key.split(".")
+    cur = d
+    for p in parts[:-1]:
+        cur = cur.setdefault(p, {})
+    cur[parts[-1]] = value
+
+for entry in doc.get("valuesFrom", []) or []:
+    set_path(values, entry["helmKey"], "static-check-placeholder")
+
 with open(out, "w", encoding="utf-8") as f:
     yaml.safe_dump(values, f)
 PY
