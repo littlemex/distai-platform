@@ -30,6 +30,29 @@
 #      EC2NodeClass/instance instead of deleting them, and bootstrap.sh
 #      re-adopts them without duplicating; destroy still removes every
 #      instance directly.
+#   8. (issue #28, only with GITOPS_RUN_ACCEL_E2E=1) the `accelerators`
+#      step: on this script's own cell (the GPU cell) and on a second,
+#      separately built Trainium cell, the device-plugin release reaches
+#      Healthy+Synced, the method-labeled NodePool launches a real spot
+#      node, a Layer 1 pod requesting one whole device (nvidia.com/gpu: 1,
+#      aws.amazon.com/neuron: 1 -- never neuroncore) runs, `nvidia-smi -L`
+#      / `neuron-ls` inside it report exactly one device, and no pod of the
+#      other method's advertiser DaemonSet runs on that node; both cells
+#      are destroyed with the same tagged-leftover sweep.
+#
+# GITOPS_RUN_ACCEL_E2E=1 coupling: this script's existing single cell
+# (NAME) IS the GPU accelerator cell. NAME must equal dp-a19-gpu
+# (ACCEL_GPU_CELL_NAME) for the checked-in gitops/cells/dp-a19-gpu/ fixture
+# to apply, and every existing step (1-15) then runs unchanged against that
+# cell's own single `gpu` NodePool and smoke queue; the preflight refuses
+# any other NAME. The GPU cell's Region is AWS_REGION (g7.2xlarge spot is
+# widely available; the issue's capacity survey names us-east-1). The
+# Trainium cell is a second foundation cell (same infra/foundation module,
+# same bootstrap.sh flow, own state key, TF_DATA_DIR and kubeconfig under
+# E2E_WORK_DIR) in ACCEL_TRN_REGION, built after the GPU cell is destroyed
+# (steps 16-19), reusing this run's ARGOCD_IDC_* inputs and temporary
+# Identity Center group (Identity Center stays in ARGOCD_IDC_REGION while
+# the cluster lives in ACCEL_TRN_REGION).
 #
 # Step 11b also covers issue #27 (the capacity-pool chart's -rsv/-od/-flex
 # pools) on the same cell:
@@ -95,7 +118,26 @@
 #   bypass, since their own acceptance criteria need exactly this write),
 #   E2E_RSV_INSTANCE_TYPE (m7i.large -- the instance type of step 11b's
 #   one-instance Capacity Reservation; must satisfy the capacity-pool
-#   chart's default requirements: amd64, category c/m/r, generation > 5).
+#   chart's default requirements: amd64, category c/m/r, generation > 5),
+#   GITOPS_RUN_ACCEL_E2E (0 -- set to 1 to add issue #28's accelerator
+#   checks, item 8 above; 0 leaves this script's #25/#17 behavior
+#   unchanged).
+# Required only when GITOPS_RUN_ACCEL_E2E=1:
+#   ACCEL_GPU_TEST_IMAGE -- an image with `nvidia-smi` on PATH (e.g. a
+#   CUDA base image; the NVIDIA container runtime injects the binary for
+#   images that request the `utility` driver capability) and `sleep`; no
+#   repository file pins one, so this test does not guess a tag;
+#   ACCEL_TRN_TEST_IMAGE -- an image with `neuron-ls` (aws-neuronx-tools)
+#   on PATH and `sleep`, e.g. a Neuron deep learning container; same
+#   reason for having no default.
+# Optional when GITOPS_RUN_ACCEL_E2E=1:
+#   ACCEL_GPU_CELL_NAME (dp-a19-gpu-r3 -- NAME must equal it),
+#   ACCEL_TRN_CELL_NAME (dp-a19-trn-r3 -- the second cell's name; must have
+#   a checked-in gitops/cells/<name>/capacity-pool/ fixture),
+#   ACCEL_TRN_REGION (ap-southeast-4 -- where trn2.3xlarge spot is
+#   available), ACCEL_POD_TIMEOUT_SECONDS (1800 -- how long a Layer 1 pod
+#   may take to reach Running, spot launch and driver/plugin start
+#   included).
 set -euo pipefail
 
 : "${AWS_PROFILE:?export AWS_PROFILE}"
@@ -132,6 +174,13 @@ GITOPS_TEST_REPO_URL="${GITOPS_TEST_REPO_URL:-https://github.com/littlemex/dista
 GITOPS_TEST_TOKEN_SSM_PARAM="${GITOPS_TEST_TOKEN_SSM_PARAM:-/relay/github/distai-platform}"
 GITOPS_TEST_TOKEN_SSM_REGION="${GITOPS_TEST_TOKEN_SSM_REGION:-us-east-1}"
 E2E_RSV_INSTANCE_TYPE="${E2E_RSV_INSTANCE_TYPE:-m7i.large}"
+GITOPS_RUN_ACCEL_E2E="${GITOPS_RUN_ACCEL_E2E:-0}"
+ACCEL_GPU_CELL_NAME="${ACCEL_GPU_CELL_NAME:-dp-a19-gpu-r3}"
+ACCEL_TRN_CELL_NAME="${ACCEL_TRN_CELL_NAME:-dp-a19-trn-r3}"
+ACCEL_TRN_REGION="${ACCEL_TRN_REGION:-ap-southeast-4}"
+ACCEL_POD_TIMEOUT_SECONDS="${ACCEL_POD_TIMEOUT_SECONDS:-1800}"
+ACCEL_GPU_TEST_IMAGE="${ACCEL_GPU_TEST_IMAGE:-}"
+ACCEL_TRN_TEST_IMAGE="${ACCEL_TRN_TEST_IMAGE:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GITOPS_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -177,6 +226,21 @@ BROKEN_BRANCHES=()
 CELL_FIXTURE_BRANCH=""
 RSV_ID=""
 RSV_CANCELLED=0
+
+# Issue #28: the second (Trainium) cell's own state, parallel to the first
+# cell's TFVARS/APPLY_ATTEMPTED/DESTROYED/VPC_ID/BOOTSTRAP_RAN above. Its
+# own TF_DATA_DIR and kubeconfig keep the first cell's untouched: the two
+# cells are never driven through one Terraform data dir or one kubeconfig.
+ACCEL_TEST_NS="distai-accel-e2e"
+TRN_STATE_KEY="distai-platform/${ACCEL_TRN_REGION}/${ACCEL_TRN_CELL_NAME}/foundation"
+TRN_TF_DATA_DIR="${WORK_DIR}/.terraform-trn"
+TRN_KUBECONFIG="${WORK_DIR}/kubeconfig-trn"
+TRN_TFVARS="${WORK_DIR}/e2e-trn.tfvars.json"
+TRN_APPLY_ATTEMPTED=0
+TRN_DESTROYED=0
+TRN_BOOTSTRAP_RAN=0
+TRN_VPC_ID=""
+TRN_ARGOCD_NS=""
 
 # ---------------------------------------------------------------- helpers
 
@@ -575,6 +639,7 @@ cleanup() {
       info "cleanup: the test did not reach a successful destroy; cleaning up"
       if [[ "${BOOTSTRAP_RAN}" -eq 1 ]] && k get ns "${ARGOCD_NS:-}" >/dev/null 2>&1; then
         k delete job canary --ignore-not-found --wait=false >/dev/null 2>&1
+        k delete namespace "${ACCEL_TEST_NS}" --ignore-not-found --wait=false >/dev/null 2>&1
         k delete application root -n "${ARGOCD_NS}" --cascade=background --ignore-not-found >/dev/null 2>&1
       fi
       tf "${DESTROY_FROM_ROOT}" destroy -auto-approve -input=false -var-file="${TFVARS}"
@@ -583,6 +648,26 @@ cleanup() {
         log "FAIL cleanup: terraform destroy exited ${destroy_rc}; remove the cell by hand"
       else
         info "cleanup: terraform destroy completed"
+      fi
+    fi
+  fi
+  if [[ "${TRN_APPLY_ATTEMPTED}" -eq 1 && "${TRN_DESTROYED}" -eq 0 ]]; then
+    if [[ "${E2E_KEEP_ON_FAILURE}" == "1" ]]; then
+      info "E2E_KEEP_ON_FAILURE=1: leaving the Trainium cell ${ACCEL_TRN_CELL_NAME} in place; destroy it with:"
+      info "TF_DATA_DIR=${TRN_TF_DATA_DIR} AWS_REGION=${ACCEL_TRN_REGION} ${TERRAFORM} -chdir=${FOUNDATION_ROOT} destroy -var-file=${TRN_TFVARS}"
+    else
+      info "cleanup: the Trainium cell ${ACCEL_TRN_CELL_NAME} did not reach a successful destroy; cleaning up"
+      if [[ "${TRN_BOOTSTRAP_RAN}" -eq 1 ]] && KUBECONFIG="${TRN_KUBECONFIG}" k get ns "${TRN_ARGOCD_NS:-}" >/dev/null 2>&1; then
+        KUBECONFIG="${TRN_KUBECONFIG}" k delete namespace "${ACCEL_TEST_NS}" --ignore-not-found --wait=false >/dev/null 2>&1
+        KUBECONFIG="${TRN_KUBECONFIG}" k delete application root -n "${TRN_ARGOCD_NS}" --cascade=background --ignore-not-found >/dev/null 2>&1
+      fi
+      TF_DATA_DIR="${TRN_TF_DATA_DIR}" AWS_REGION="${ACCEL_TRN_REGION}" \
+        tf "${FOUNDATION_ROOT}" destroy -auto-approve -input=false -var-file="${TRN_TFVARS}"
+      local trn_destroy_rc=$?
+      if [[ "${trn_destroy_rc}" -ne 0 ]]; then
+        log "FAIL cleanup: terraform destroy of the Trainium cell exited ${trn_destroy_rc}; remove it by hand"
+      else
+        info "cleanup: terraform destroy of the Trainium cell completed"
       fi
     fi
   fi
@@ -609,6 +694,21 @@ aws sts get-caller-identity --query Account --output text >/dev/null \
   || fail "aws sts get-caller-identity (check AWS_PROFILE and credentials)"
 [[ -x "${GITOPS_ROOT}/bootstrap/bootstrap.sh" ]] || fail "gitops/bootstrap/bootstrap.sh is missing or not executable"
 pass "preflight: tools present, credentials valid, bootstrap.sh present"
+if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
+  [[ "${NAME}" == "${ACCEL_GPU_CELL_NAME}" ]] \
+    || fail "GITOPS_RUN_ACCEL_E2E=1: NAME (${NAME}) must equal ACCEL_GPU_CELL_NAME (${ACCEL_GPU_CELL_NAME}) -- this script's own cell is the GPU accelerator cell, and only gitops/cells/${ACCEL_GPU_CELL_NAME}/ carries its method-labeled pool"
+  [[ "${ACCEL_GPU_CELL_NAME}" == "dp-a19-gpu" && "${ACCEL_TRN_CELL_NAME}" == "dp-a19-trn" ]] \
+    || fail "GITOPS_RUN_ACCEL_E2E=1: issue #28's fixtures are gitops/cells/dp-a19-gpu/ and gitops/cells/dp-a19-trn/; got ACCEL_GPU_CELL_NAME=${ACCEL_GPU_CELL_NAME} ACCEL_TRN_CELL_NAME=${ACCEL_TRN_CELL_NAME}"
+  for accel_cell in "${ACCEL_GPU_CELL_NAME}" "${ACCEL_TRN_CELL_NAME}"; do
+    compgen -G "${GITOPS_ROOT}/cells/${accel_cell}/capacity-pool/*.yaml" >/dev/null \
+      || fail "GITOPS_RUN_ACCEL_E2E=1: no gitops/cells/${accel_cell}/capacity-pool/*.yaml in this checkout"
+  done
+  [[ -n "${ACCEL_GPU_TEST_IMAGE}" ]] || fail "GITOPS_RUN_ACCEL_E2E=1: export ACCEL_GPU_TEST_IMAGE (an image with nvidia-smi on PATH)"
+  [[ -n "${ACCEL_TRN_TEST_IMAGE}" ]] || fail "GITOPS_RUN_ACCEL_E2E=1: export ACCEL_TRN_TEST_IMAGE (an image with neuron-ls on PATH)"
+  [[ "${ACCEL_TRN_REGION}" != "${AWS_REGION}" || "${ACCEL_TRN_CELL_NAME}" != "${NAME}" ]] \
+    || fail "GITOPS_RUN_ACCEL_E2E=1: the Trainium cell must differ from the GPU cell"
+  pass "preflight (GITOPS_RUN_ACCEL_E2E=1): GPU cell ${NAME} in ${AWS_REGION}, Trainium cell ${ACCEL_TRN_CELL_NAME} in ${ACCEL_TRN_REGION}, fixtures and test images present"
+fi
 info "run ${RUN_ID}, work dir ${WORK_DIR}, repo ${GITOPS_REPO_URL}"
 report_stale_disposable_branches
 
@@ -1032,6 +1132,163 @@ flavor_nodepool_label="$(k get resourceflavor "${RESOURCEFLAVOR}" \
 [[ "${flavor_nodepool_label}" == "${NODEPOOL}" ]] \
   || fail "ResourceFlavor ${RESOURCEFLAVOR}'s nodeLabels['karpenter.sh/nodepool'] (${flavor_nodepool_label}) does not join to NodePool ${NODEPOOL}"
 pass "NodePool/EC2NodeClass/ResourceFlavor are joined: ${NODEPOOL} -> ${NODECLASS}, ${RESOURCEFLAVOR}.nodeLabels['karpenter.sh/nodepool'] == ${NODEPOOL}"
+
+# ------------------------------- 10a. accelerators on the GPU cell (#28)
+#
+# Issue #28 acceptance criteria 2, 4 and 5, NVIDIA half: this cell (NAME =
+# dp-a19-gpu, enforced by the preflight) carries exactly one NodePool, the
+# `gpu` pool labeled distai.dev/nvidia-gpu-method=device-plugin, so step 10
+# above already found it as NODEPOOL.
+#
+# A bare Layer 1 pod, not a Kueue Job: the smoke ClusterQueue covers only
+# cpu/memory (gitops/charts/smoke), so a Job requesting nvidia.com/gpu
+# through it would never be admitted, and what these criteria are about is
+# the advertiser and the node, not Kueue admission (step 11 covers that).
+# The pod's nodeSelector names both the pool and the method label, so
+# Karpenter can only satisfy it from a NodePool whose node template carries
+# that label (#28 section C).
+#
+# check_accel_layer1 CELL NODEPOOL ADVERTISER_ADDON OTHER_ADDON LABEL RESOURCE IMAGE PROBE
+# runs against whichever cluster KUBECONFIG/ARGOCD_NS/AWS_REGION currently
+# name (the Trainium cell, step 18, calls it with those overridden for the
+# duration of the call), and sets ACCEL_NODE to the node the pod ran on.
+# PROBE is "nvidia" (nvidia-smi -L) or "neuron" (neuron-ls --json-output).
+ACCEL_NODE=""
+check_accel_layer1() {
+  local cell="$1" nodepool="$2" advertiser_addon="$3" other_addon="$4" label="$5" resource="$6" image="$7" probe="$8"
+  local app="${cell}-${advertiser_addon}" other_app="${cell}-${other_addon}"
+  local label_jp="${label//./\\.}" resource_jp="${resource//./\\.}"
+  local advertiser_ns other_ns wave np_label node node_label allocatable probe_out count pods_on_node
+
+  # Criterion 5: the accelerators step's device-plugin release is
+  # Healthy+Synced before anything is asserted about it.
+  wait_until 1200 15 "${app} Application Healthy and Synced" app_healthy_synced "${app}" \
+    || fail "${app} did not reach Healthy+Synced: health=$(app_health "${app}") sync=$(app_sync "${app}")"
+  wave="$(app_field "${app}" '{.metadata.labels.distai\.dev/wave}')"
+  [[ "${wave}" == "accelerators" ]] || fail "${app}'s distai.dev/wave label is '${wave}', not 'accelerators'"
+  pass "${app} (accelerators step) reached Healthy+Synced"
+
+  # Default state (#28): every accel-* release is always present; the
+  # other method's release exists too, it just matches no node here.
+  other_app_exists() { [[ -n "$(app_field "${other_app}" '{.metadata.name}')" ]]; }
+  wait_until 600 15 "${other_app} Application exists" other_app_exists \
+    || fail "${other_app} Application was never generated (every accel-* add-on is always present, #28 Default state)"
+  advertiser_ns="$(app_field "${app}" '{.spec.destination.namespace}')"
+  other_ns="$(app_field "${other_app}" '{.spec.destination.namespace}')"
+  [[ -n "${advertiser_ns}" && -n "${other_ns}" && "${advertiser_ns}" != "${other_ns}" ]] \
+    || fail "${app} and ${other_app} need two distinct destination namespaces, got '${advertiser_ns}' and '${other_ns}'"
+  pass "${other_app} exists alongside it (namespaces: ${advertiser_ns} vs ${other_ns})"
+
+  np_label="$(k get nodepool "${nodepool}" -o jsonpath="{.spec.template.metadata.labels.${label_jp}}")"
+  [[ "${np_label}" == "device-plugin" ]] \
+    || fail "NodePool ${nodepool}'s spec.template.metadata.labels['${label}'] is '${np_label}', not device-plugin (#28 section C)"
+  pass "NodePool ${nodepool} labels its nodes ${label}=device-plugin"
+
+  k delete namespace "${ACCEL_TEST_NS}" --ignore-not-found --wait=true --timeout=300s >/dev/null 2>&1 || true
+  cat >"${WORK_DIR}/accel-layer1-${cell}.yaml" <<YAML
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${ACCEL_TEST_NS}
+  labels:
+    ${TEST_TAG_KEY}: ${RUN_ID}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: accel-layer1
+  namespace: ${ACCEL_TEST_NS}
+  labels:
+    ${TEST_TAG_KEY}: ${RUN_ID}
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 0
+  nodeSelector:
+    karpenter.sh/nodepool: ${nodepool}
+    ${label}: device-plugin
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+    - key: aws.amazon.com/neuron
+      operator: Exists
+  containers:
+    - name: probe
+      image: ${image}
+      command: ["sleep", "3600"]
+      resources:
+        limits:
+          ${resource}: "1"
+YAML
+  k apply -f "${WORK_DIR}/accel-layer1-${cell}.yaml" || fail "kubectl apply the Layer 1 ${resource} pod on ${cell}"
+
+  accel_pod_running() { [[ "$(k get pod accel-layer1 -n "${ACCEL_TEST_NS}" -o jsonpath='{.status.phase}' 2>/dev/null)" == "Running" ]]; }
+  wait_until "${ACCEL_POD_TIMEOUT_SECONDS}" 20 "the Layer 1 ${resource} pod is Running" accel_pod_running \
+    || fail "Layer 1 pod requesting ${resource}: 1 never reached Running on ${cell}: $(k get pod accel-layer1 -n "${ACCEL_TEST_NS}" -o jsonpath='{.status}' 2>&1) nodeclaims: $(k get nodeclaims -o wide 2>&1)"
+  node="$(k get pod accel-layer1 -n "${ACCEL_TEST_NS}" -o jsonpath='{.spec.nodeName}')"
+  [[ -n "${node}" ]] || fail "Layer 1 pod is Running but has no spec.nodeName"
+  ACCEL_NODE="${node}"
+
+  [[ "$(k get node "${node}" -o jsonpath='{.metadata.labels.karpenter\.sh/nodepool}')" == "${nodepool}" ]] \
+    || fail "Layer 1 pod's node ${node} is not from NodePool ${nodepool}"
+  node_label="$(k get node "${node}" -o jsonpath="{.metadata.labels.${label_jp}}")"
+  [[ "${node_label}" == "device-plugin" ]] || fail "node ${node} carries ${label}='${node_label}', not device-plugin"
+  allocatable="$(k get node "${node}" -o jsonpath="{.status.allocatable.${resource_jp}}")"
+  [[ "${allocatable}" =~ ^[0-9]+$ && "${allocatable}" -ge 1 ]] \
+    || fail "node ${node} advertises ${resource} allocatable='${allocatable}' (expected >= 1)"
+  pass "Layer 1 pod scheduled on ${node} ($(k get node "${node}" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}'), ${label}=device-plugin, allocatable ${resource}=${allocatable})"
+
+  # Criteria 2/3: the device is usable from inside the pod.
+  case "${probe}" in
+    nvidia)
+      probe_out="$(k exec -n "${ACCEL_TEST_NS}" accel-layer1 -c probe -- nvidia-smi -L 2>&1)" \
+        || fail "kubectl exec nvidia-smi -L failed: ${probe_out}"
+      count="$(grep -cE '^GPU [0-9]+: ' <<<"${probe_out}" || true)"
+      ;;
+    neuron)
+      probe_out="$(k exec -n "${ACCEL_TEST_NS}" accel-layer1 -c probe -- neuron-ls --json-output 2>&1)" \
+        || fail "kubectl exec neuron-ls --json-output failed: ${probe_out}"
+      # neuron-ls --json-output prints one JSON entry per Neuron device the
+      # container can see; accept either a top-level list or an object
+      # wrapping one list, and print -1 for anything else so the
+      # assertion below fails with the raw output.
+      count="$(python3 -c '
+import json, sys
+try:
+    doc = json.loads(sys.stdin.read())
+except Exception:
+    print(-1); sys.exit(0)
+if isinstance(doc, dict):
+    lists = [v for v in doc.values() if isinstance(v, list)]
+    doc = lists[0] if len(lists) == 1 else None
+print(len(doc) if isinstance(doc, list) else -1)
+' <<<"${probe_out}")"
+      ;;
+    *) fail "check_accel_layer1: unknown probe '${probe}'" ;;
+  esac
+  [[ "${count}" == "1" ]] || fail "${probe} probe inside the Layer 1 pod reports ${count} device(s), expected exactly 1: ${probe_out}"
+  pass "${probe} probe inside the Layer 1 pod reports exactly one device: $(head -n1 <<<"${probe_out}")"
+
+  # Criterion 4: only the selected advertiser runs on this node. An
+  # advertiser is a DaemonSet pod; the other method's release may run a
+  # controller Deployment elsewhere, which advertises nothing.
+  pods_on_node="$(k get pods -A --field-selector "spec.nodeName=${node}" \
+    -o jsonpath='{range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"|"}{.metadata.ownerReferences[0].kind}{"|"}{.status.phase}{"\n"}{end}')" \
+    || fail "kubectl get pods on node ${node}"
+  awk -F'|' -v ns="${advertiser_ns}" '$1==ns && $3=="DaemonSet" && $4=="Running" {found=1} END{exit !found}' <<<"${pods_on_node}" \
+    || fail "no Running DaemonSet pod of ${app} (namespace ${advertiser_ns}) on node ${node}: $(tr '\n' ' ' <<<"${pods_on_node}")"
+  if awk -F'|' -v ns="${other_ns}" '$1==ns && $3=="DaemonSet" {found=1} END{exit !found}' <<<"${pods_on_node}"; then
+    fail "a DaemonSet pod of ${other_app} (namespace ${other_ns}) runs on node ${node} next to ${app}'s -- two advertisers for one device class: $(tr '\n' ' ' <<<"${pods_on_node}")"
+  fi
+  pass "node ${node} runs ${app}'s advertiser (${advertiser_ns}) and no DaemonSet pod of ${other_app} (${other_ns})"
+
+  k delete namespace "${ACCEL_TEST_NS}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+
+if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
+  check_accel_layer1 "${CLUSTER}" "${NODEPOOL}" accel-nvidia-device-plugin accel-nvidia-dra \
+    distai.dev/nvidia-gpu-method nvidia.com/gpu "${ACCEL_GPU_TEST_IMAGE}" nvidia
+  pass "GPU cell ${CLUSTER}: accelerators step verified on ${ACCEL_NODE} (#28 acceptance criteria 2, 4, 5)"
+fi
 
 # ------------------------------------------- 11. canary through the smoke queue
 #
@@ -1792,18 +2049,25 @@ pass "re-running bootstrap.sh re-adopted the same NodePool and EC2NodeClass (unc
 # infra/foundation/tests/1.e2e.sh used before issue #25 moved Karpenter
 # coverage here (see that file's own history).
 
+# tag_filters/list_leftover/no_leftover/report_leftovers take the cell's
+# own cluster name and VPC ID explicitly (issue #28 runs this sweep for two
+# cells, the Trainium one in its own Region via AWS_REGION for the call);
+# the first cell's own calls below pass NAME/VPC_ID, unchanged in effect.
+# tag_filters CLUSTER_NAME
 tag_filters() {
+  local cluster_name="$1"
   printf '%s\n' \
     "Name=tag:${TEST_TAG_KEY},Values=${RUN_ID}" \
-    "Name=tag:karpenter.sh/discovery,Values=${NAME}" \
-    "Name=tag-key,Values=kubernetes.io/cluster/${NAME}" \
-    "Name=tag:eks:cluster-name,Values=${NAME}" \
-    "Name=tag:eks:eks-cluster-name,Values=${NAME}" \
-    "Name=tag:cluster.k8s.amazonaws.com/name,Values=${NAME}"
+    "Name=tag:karpenter.sh/discovery,Values=${cluster_name}" \
+    "Name=tag-key,Values=kubernetes.io/cluster/${cluster_name}" \
+    "Name=tag:eks:cluster-name,Values=${cluster_name}" \
+    "Name=tag:eks:eks-cluster-name,Values=${cluster_name}" \
+    "Name=tag:cluster.k8s.amazonaws.com/name,Values=${cluster_name}"
 }
 
+# list_leftover KIND CLUSTER_NAME VPC_ID
 list_leftover() {
-  local kind="$1" filter out all=""
+  local kind="$1" cluster_name="$2" vpc_id="$3" filter out all=""
   while IFS= read -r filter; do
     if ! case "${kind}" in
       instance)
@@ -1828,18 +2092,18 @@ list_leftover() {
       return 1
     fi
     all+="${out}"$'\n'
-  done < <(tag_filters)
-  if [[ -n "${VPC_ID}" ]]; then
+  done < <(tag_filters "${cluster_name}")
+  if [[ -n "${vpc_id}" ]]; then
     if ! case "${kind}" in
       instance)
-        out="$(aws_text aws ec2 describe-instances --filters "Name=vpc-id,Values=${VPC_ID}" \
+        out="$(aws_text aws ec2 describe-instances --filters "Name=vpc-id,Values=${vpc_id}" \
           "Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped" \
           --query 'Reservations[].Instances[].InstanceId' --output text)" ;;
       eni)
-        out="$(aws_text aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=${VPC_ID}" \
+        out="$(aws_text aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=${vpc_id}" \
           --query 'NetworkInterfaces[].NetworkInterfaceId' --output text)" ;;
       nat)
-        out="$(aws_text aws ec2 describe-nat-gateways --filter "Name=vpc-id,Values=${VPC_ID}" \
+        out="$(aws_text aws ec2 describe-nat-gateways --filter "Name=vpc-id,Values=${vpc_id}" \
           "Name=state,Values=pending,available,deleting" \
           --query 'NatGateways[].NatGatewayId' --output text)" ;;
       volume | launch-template) out="" ;;
@@ -1852,19 +2116,21 @@ list_leftover() {
   printf '%s' "${all}" | tr '\t' '\n' | grep -v '^None$' | grep -v '^$' | sort -u || true
 }
 
+# no_leftover KIND CLUSTER_NAME VPC_ID
 no_leftover() {
   local out
-  if ! out="$(list_leftover "$1")"; then fail "checking for leftover $1: ${out}"; fi
+  if ! out="$(list_leftover "$1" "$2" "$3")"; then fail "checking for leftover $1: ${out}"; fi
   [[ -z "${out}" ]]
 }
 
+# report_leftovers GRACE_SECONDS CLUSTER_NAME VPC_ID
 report_leftovers() {
-  local grace="$1" kind ids bad=0
+  local grace="$1" cluster_name="$2" vpc_id="$3" kind ids bad=0
   for kind in instance eni nat volume launch-template; do
-    if wait_until "${grace}" 20 "no ${kind} left" no_leftover "${kind}"; then
-      pass "no ${kind} tagged for the cluster remains"
+    if wait_until "${grace}" 20 "no ${kind} left" no_leftover "${kind}" "${cluster_name}" "${vpc_id}"; then
+      pass "no ${kind} tagged for the cluster ${cluster_name} remains"
     else
-      if ! ids="$(list_leftover "${kind}")"; then fail "checking for leftover ${kind}: ${ids}"; fi
+      if ! ids="$(list_leftover "${kind}" "${cluster_name}" "${vpc_id}")"; then fail "checking for leftover ${kind}: ${ids}"; fi
       log "FAIL ${kind} left after destroy: $(tr '\n' ' ' <<<"${ids}")"
       bad=1
     fi
@@ -1902,12 +2168,139 @@ wait_until "${E2E_LEFTOVER_GRACE_SECONDS}" 20 "Karpenter instance terminated" in
   || fail "Karpenter instance ${CANARY_INSTANCE_ID} not terminated after destroy"
 pass "Karpenter instance ${CANARY_INSTANCE_ID} terminated (the foundation teardown guard acted regardless of the orphan/re-adopt history above)"
 
-report_leftovers "${E2E_LEFTOVER_GRACE_SECONDS}" || fail "resources tagged for the cluster remain after destroy"
+report_leftovers "${E2E_LEFTOVER_GRACE_SECONDS}" "${NAME}" "${VPC_ID}" || fail "resources tagged for the cluster remain after destroy"
 
 if ! vpc_check_out="$(aws_text aws ec2 describe-vpcs --vpc-ids "${VPC_ID}" --query 'Vpcs[0].VpcId' --output text)"; then
   fail "checking whether VPC ${VPC_ID} still exists: ${vpc_check_out}"
 fi
 [[ -z "${vpc_check_out}" || "${vpc_check_out}" == "None" ]] || fail "VPC ${VPC_ID} still exists after destroy"
 pass "VPC removed"
+
+# ------------------------- 16. Trainium cell: foundation (#28, opt-in)
+#
+# Issue #28 acceptance criteria 3, 4, 5 and 6, Neuron half. A second,
+# genuinely separate foundation cell in ACCEL_TRN_REGION, built after the
+# GPU cell above is gone (the two never need to coexist). Same module, same
+# init/apply/update-kubeconfig/ACTIVE/bootstrap.sh flow as steps 2-4, from
+# this checkout's own infra/foundation (no before/after RBAC experiment:
+# that is #25's criterion 2, already covered on the first cell). Every
+# Terraform and kubectl call for this cell is pointed at its own
+# TF_DATA_DIR, kubeconfig and Region for the duration of that one call
+# only, so nothing here can touch the first cell's state.
+
+if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
+  trn_tf() { TF_DATA_DIR="${TRN_TF_DATA_DIR}" AWS_REGION="${ACCEL_TRN_REGION}" tf "${FOUNDATION_ROOT}" "$@"; }
+  trn() { KUBECONFIG="${TRN_KUBECONFIG}" AWS_REGION="${ACCEL_TRN_REGION}" ARGOCD_NS="${TRN_ARGOCD_NS}" CLUSTER="${ACCEL_TRN_CELL_NAME}" "$@"; }
+
+  cat >"${TRN_TFVARS}" <<JSON
+{
+  "name": "${ACCEL_TRN_CELL_NAME}",
+  "region": "${ACCEL_TRN_REGION}",
+  "endpoint_public_access_cidrs": ["${MY_CIDR}"],
+  "admin_principal_arns": ["${ADMIN_PRINCIPAL_ARN}"],
+  "argocd": {
+    "idc_instance_arn": "${ARGOCD_IDC_INSTANCE_ARN}",
+    "idc_region": "${ARGOCD_IDC_REGION}",
+    "role_mappings": [{"role": "ADMIN", "group_ids": ["${IDC_GROUP_ID}"]}]
+  },
+  "tags": {"${TEST_TAG_KEY}": "${RUN_ID}"}
+}
+JSON
+
+  trn_tf init -input=false -reconfigure \
+    -backend-config="bucket=${STATE_BUCKET}" -backend-config="key=${TRN_STATE_KEY}" \
+    -backend-config="region=${STATE_REGION}" -backend-config="use_lockfile=true" \
+    || fail "terraform init (Trainium cell) with the S3 backend (key ${TRN_STATE_KEY})"
+  trn_existing_state="$(trn_tf state list 2>&1)" || trn_existing_state=""
+  [[ "${trn_existing_state}" != *"No state file"* ]] || trn_existing_state=""
+  [[ -z "${trn_existing_state}" ]] \
+    || fail "state at key ${TRN_STATE_KEY} already has resources, refusing to apply over it: $(tr '\n' ' ' <<<"${trn_existing_state}")"
+  pass "state at key ${TRN_STATE_KEY} has no resources before apply"
+
+  TRN_APPLY_ATTEMPTED=1
+  trn_tf apply -auto-approve -input=false -var-file="${TRN_TFVARS}" \
+    || fail "terraform apply (Trainium cell ${ACCEL_TRN_CELL_NAME} in ${ACCEL_TRN_REGION})"
+  pass "terraform apply of the Trainium cell ${ACCEL_TRN_CELL_NAME} in ${ACCEL_TRN_REGION} (Identity Center in ${ARGOCD_IDC_REGION})"
+
+  TRN_CLUSTER="$(trn_tf output -raw cluster_name)"
+  TRN_VPC_ID="$(trn_tf output -raw vpc_id)"
+  [[ "${TRN_CLUSTER}" == "${ACCEL_TRN_CELL_NAME}" ]] \
+    || fail "Trainium cell's cluster_name (${TRN_CLUSTER}) differs from ACCEL_TRN_CELL_NAME (${ACCEL_TRN_CELL_NAME})"
+
+  aws eks update-kubeconfig --name "${TRN_CLUSTER}" --region "${ACCEL_TRN_REGION}" --kubeconfig "${TRN_KUBECONFIG}" >/dev/null \
+    || fail "aws eks update-kubeconfig (Trainium cell)"
+
+  TRN_ARGOCD_ARN="$(trn_tf output -raw argocd_capability_arn)"
+  CLUSTER="${TRN_CLUSTER}" ARGOCD_ARN="${TRN_ARGOCD_ARN}" AWS_REGION="${ACCEL_TRN_REGION}" \
+    wait_until 1200 30 "Argo CD capability ACTIVE (Trainium cell)" argocd_active \
+    || fail "Argo CD capability of the Trainium cell is not ACTIVE"
+  pass "Argo CD capability ACTIVE on the Trainium cell"
+
+  TRN_ARGOCD_NS="$(trn_tf output -raw argocd_namespace)"
+  [[ -n "${TRN_ARGOCD_NS}" ]] || fail "Trainium cell's argocd_namespace output is empty"
+  TRN_TF_OUTPUTS_JSON="${WORK_DIR}/tf-outputs-trn.json"
+  trn_tf output -json >"${TRN_TF_OUTPUTS_JSON}" || fail "terraform output -json (Trainium cell)"
+
+  KUBECONFIG="${TRN_KUBECONFIG}" "${GITOPS_ROOT}/bootstrap/bootstrap.sh" \
+    --tf-outputs "${TRN_TF_OUTPUTS_JSON}" --revision "${GITOPS_REVISION}" \
+    || fail "bootstrap.sh (Trainium cell, --revision ${GITOPS_REVISION})"
+  TRN_BOOTSTRAP_RAN=1
+  pass "bootstrap.sh completed on the Trainium cell (--revision ${GITOPS_REVISION})"
+
+  # ---------------------------------- 17. Trainium cell: capacity (#28)
+  #
+  # Same shape as steps 8 and 10 on the first cell: the cell's one
+  # capacity-pool Application (cells/dp-a19-trn/capacity-pool/trn.yaml)
+  # Healthy+Synced, and exactly one NodePool to launch from.
+  trn wait_until 600 10 "a capacity-pool Application exists (Trainium cell)" discover_capacity_pool_app \
+    || fail "no Application named ${TRN_CLUSTER}-capacity-pool-<pool> appeared on the Trainium cell"
+  TRN_APP_CAPACITY_POOL="${APP_CAPACITY_POOL}"
+  trn wait_until 1200 15 "Trainium capacity-pool Application Healthy and Synced" app_healthy_synced "${TRN_APP_CAPACITY_POOL}" \
+    || fail "${TRN_APP_CAPACITY_POOL} did not reach Healthy+Synced: health=$(trn app_health "${TRN_APP_CAPACITY_POOL}") sync=$(trn app_sync "${TRN_APP_CAPACITY_POOL}")"
+  mapfile -t trn_nodepools < <(trn k get nodepools -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$')
+  [[ "${#trn_nodepools[@]}" -eq 1 ]] || fail "expected exactly 1 NodePool on the Trainium cell, found ${#trn_nodepools[@]}: ${trn_nodepools[*]:-none}"
+  TRN_NODEPOOL="${trn_nodepools[0]}"
+  pass "${TRN_APP_CAPACITY_POOL} reached Healthy+Synced; exactly one NodePool (${TRN_NODEPOOL}) on the Trainium cell"
+
+  # ------------------------------ 18. Trainium cell: accelerators (#28)
+  #
+  # aws.amazon.com/neuron (one whole device), never aws.amazon.com/neuroncore:
+  # #19 E4a found Karpenter estimates neuroncore: 8 for trn2.3xlarge where
+  # the node really has 4, so a neuroncore request is not a sound Layer 1
+  # probe of the device plugin.
+  trn check_accel_layer1 "${TRN_CLUSTER}" "${TRN_NODEPOOL}" accel-neuron-device-plugin accel-neuron-dra \
+    distai.dev/neuron-method aws.amazon.com/neuron "${ACCEL_TRN_TEST_IMAGE}" neuron
+  TRN_ACCEL_NODE="${ACCEL_NODE}"
+  TRN_ACCEL_INSTANCE_ID="$(trn instance_of_node "${TRN_ACCEL_NODE}")"
+  [[ -n "${TRN_ACCEL_INSTANCE_ID}" ]] || fail "could not resolve an instance ID for node ${TRN_ACCEL_NODE}"
+  pass "Trainium cell ${TRN_CLUSTER}: accelerators step verified on ${TRN_ACCEL_NODE} (${TRN_ACCEL_INSTANCE_ID}) (#28 acceptance criteria 3, 4, 5)"
+
+  # ---------------------------------- 19. Trainium cell: destroy (#28)
+  #
+  # Same teardown as step 15: terraform destroy with the Karpenter node
+  # still in place, the instance terminated by the foundation's teardown
+  # guard, then the same tagged-leftover sweep scoped to this cell's own
+  # name, VPC and Region.
+  trn k delete namespace "${ACCEL_TEST_NS}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  trn_destroy_start="$(date +%s)"
+  trn_tf destroy -auto-approve -input=false -var-file="${TRN_TFVARS}" \
+    || fail "terraform destroy of the Trainium cell with a Karpenter-launched instance still in place"
+  TRN_DESTROYED=1
+  pass "terraform destroy of the Trainium cell completed without manual steps ($(($(date +%s) - trn_destroy_start))s)"
+
+  CANARY_INSTANCE_ID="${TRN_ACCEL_INSTANCE_ID}" AWS_REGION="${ACCEL_TRN_REGION}" \
+    wait_until "${E2E_LEFTOVER_GRACE_SECONDS}" 20 "Trainium Karpenter instance terminated" instances_terminated \
+    || fail "Karpenter instance ${TRN_ACCEL_INSTANCE_ID} (Trainium cell) not terminated after destroy"
+  pass "Karpenter instance ${TRN_ACCEL_INSTANCE_ID} (Trainium cell) terminated"
+
+  AWS_REGION="${ACCEL_TRN_REGION}" report_leftovers "${E2E_LEFTOVER_GRACE_SECONDS}" "${TRN_CLUSTER}" "${TRN_VPC_ID}" \
+    || fail "resources tagged for the Trainium cell remain after destroy"
+
+  if ! trn_vpc_check_out="$(AWS_REGION="${ACCEL_TRN_REGION}" aws_text aws ec2 describe-vpcs --vpc-ids "${TRN_VPC_ID}" --query 'Vpcs[0].VpcId' --output text)"; then
+    fail "checking whether VPC ${TRN_VPC_ID} (Trainium cell) still exists: ${trn_vpc_check_out}"
+  fi
+  [[ -z "${trn_vpc_check_out}" || "${trn_vpc_check_out}" == "None" ]] || fail "VPC ${TRN_VPC_ID} (Trainium cell) still exists after destroy"
+  pass "Trainium cell VPC removed"
+fi
 
 git -C "${REPO_ROOT}" worktree remove --force "${BASE_WORKTREE}" >/dev/null 2>&1 || true
