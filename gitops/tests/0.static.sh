@@ -11,7 +11,8 @@
 #      1, 2, 3, 4, 6 and 8 of the issue (check_gitops_contract.py);
 #   5. `helm lint` and `helm template` of charts/capacity-pool and
 #      charts/smoke, each against one real cells/*/{capacity-pool,smoke}/*.yaml
-#      parameter file's own `values:`;
+#      parameter file's own `values:`; charts/accel-device-classes (#28)
+#      against its own chart defaults, since nothing in it varies per cell;
 #   5b. issue #27's values shapes, from tests/fixtures/<chart>/*.yaml:
 #      `helm lint` and `helm template` of each fixture; seven fixtures
 #      that must be refused (a reserved pool with no reservation tags, an
@@ -340,6 +341,16 @@ if [[ "${#cell_smoke_files[@]}" -ge 1 ]]; then
   extract_values "${cell_smoke_files[0]}" "${SMOKE_VALUES}"
   run_check "helm template charts/smoke (values from $(basename "${cell_smoke_files[0]}"))" \
     bash -c "'${HELM}' template smoke-e2e '${GITOPS_ROOT}/charts/smoke' -f '${SMOKE_VALUES}' > '${RENDERED_DIR}/smoke.yaml'"
+fi
+
+# charts/accel-device-classes (#28) has no cell-specific values (one
+# cluster-scoped DeviceClass, nothing varies per cell) and no
+# cells/*/*.yaml parameter file to extract values from -- helm lint/
+# template run against the chart's own defaults only.
+if [[ -f "${GITOPS_ROOT}/charts/accel-device-classes/Chart.yaml" ]]; then
+  run_check "helm lint charts/accel-device-classes" "${HELM}" lint "${GITOPS_ROOT}/charts/accel-device-classes"
+  run_check "helm template charts/accel-device-classes" \
+    bash -c "'${HELM}' template accel-device-classes-e2e '${GITOPS_ROOT}/charts/accel-device-classes' > '${RENDERED_DIR}/accel-device-classes.yaml'"
 fi
 
 # --------------------------------- 5b. issue #27 values shapes (fixtures)
