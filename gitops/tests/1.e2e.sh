@@ -627,10 +627,25 @@ canary_admitted() {
 }
 wait_until 300 10 "Kueue admits the canary Job" canary_admitted \
   || fail "canary Job was never admitted (still suspended): $(k get job canary -n "${SMOKE_NS}" -o jsonpath='{.status}')"
-admission_events="$(k get events -n "${SMOKE_NS}" --field-selector involvedObject.name=canary -o jsonpath='{range .items[*]}{.reason}{" "}{end}')"
+
+# Kueue's own QuotaReserved/Admitted events are recorded against the
+# Workload object it creates for the Job (confirmed against Kueue's own
+# source, tag v0.20.6: scheduler.go's recorder.Eventf(newWorkload, ...)
+# for both; workload_controller.go's reportAdmittedWorkload the same way)
+# -- never against the Job itself. The Job's own events
+# (Suspended/CreatedWorkload/SuccessfulCreate/Resumed, all confirmed on a
+# real cluster) are the Job controller's and Kueue's *job-integration*
+# events, not the admission events this check is actually about. Discover
+# the Workload the same way everything else cell-specific in this script
+# is discovered (its own name is Kueue's to choose, never this test's),
+# not assumed.
+mapfile -t canary_workloads < <(k get workloads -n "${SMOKE_NS}" -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$')
+[[ "${#canary_workloads[@]}" -eq 1 ]] || fail "expected exactly 1 Workload in ${SMOKE_NS} for the canary Job, found ${#canary_workloads[@]}: ${canary_workloads[*]:-none}"
+CANARY_WORKLOAD="${canary_workloads[0]}"
+admission_events="$(k get events -n "${SMOKE_NS}" --field-selector involvedObject.name="${CANARY_WORKLOAD}" -o jsonpath='{range .items[*]}{.reason}{" "}{end}')"
 [[ "${admission_events}" == *"Admitted"* || "${admission_events}" == *"QuotaReserved"* ]] \
-  || fail "no Kueue admission event (Admitted/QuotaReserved) recorded for the canary Job: events=[${admission_events}]"
-pass "Kueue admitted the canary Job (events: ${admission_events})"
+  || fail "no Kueue admission event (Admitted/QuotaReserved) recorded for Workload ${CANARY_WORKLOAD}: events=[${admission_events}]"
+pass "Kueue admitted the canary Job via Workload ${CANARY_WORKLOAD} (events: ${admission_events})"
 
 canary_node() {
   k get pods -n "${SMOKE_NS}" -l job-name=canary \
