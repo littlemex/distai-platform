@@ -96,6 +96,25 @@ resource "aws_eks_capability" "argocd" {
 # (Karpenter, Kueue and later ones) create; the real tenant boundary is the
 # tenancy layer's per-team AppProjects and admission bundle, not this role's
 # own IAM-side permissions.
+#
+# Explicit depends_on on aws_eks_capability.argocd, even though neither
+# argument above references it: the access entry this association targets
+# is the one EKS creates as a side effect of the capability itself, which
+# exists only once aws_eks_capability.argocd's own create has returned
+# (the provider's waiter blocks until the capability reaches ACTIVE --
+# confirmed against the provider source, internal/service/eks/capability.go,
+# waitCapabilityCreated). With no dependency edge, this resource has no
+# attribute pointing at aws_eks_capability.argocd, so Terraform's graph
+# schedules the two concurrently; on a single from-scratch apply this lets
+# AssociateAccessPolicy fire before EKS has created the access entry at
+# all, failing with ResourceNotFoundException (reproduced on the runner:
+# both resources logged "Creating..." in the same second, the association
+# failed immediately while the capability itself took 6m41s to reach
+# ACTIVE). A two-apply sequence (capability first, association added in a
+# later, separate apply -- gitops/tests/1.e2e.sh's own before/after RBAC
+# check) never races, since the capability is already long-ACTIVE by the
+# second apply; this depends_on makes a single apply safe the same way,
+# rather than relying on callers to always apply in two steps.
 resource "aws_eks_access_policy_association" "argocd" {
   count = var.argocd == null ? 0 : 1
 
@@ -106,4 +125,6 @@ resource "aws_eks_access_policy_association" "argocd" {
   access_scope {
     type = "cluster"
   }
+
+  depends_on = [aws_eks_capability.argocd]
 }
