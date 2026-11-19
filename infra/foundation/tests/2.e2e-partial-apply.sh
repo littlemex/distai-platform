@@ -15,12 +15,19 @@
 #      access entry is teardown_guard's own dependency, not a sibling of it,
 #      so terraform cannot create the guard no matter how the apply's
 #      resources happen to be scheduled;
-#   4. terraform destroy with the same inputs, which must succeed;
-#   5. nothing is left: the leftover kinds of 1.e2e.sh (instance, ENI, NAT,
-#      EBS, launch template), plus detached VPC CNI interfaces (aws-K8S-*)
-#      in the cell's VPC and security groups tagged
-#      aws:eks:cluster-name = NAME (the two leftovers of issue #26), then the
-#      cluster, its security group and the VPC are gone.
+#   4. plant a detached network interface (description aws-K8S-*) in a
+#      private subnet: whether the system node group's own deletion leaves
+#      one behind is a race this test must not depend on (in this minimal
+#      environment, with no pod load and no Karpenter running, it usually
+#      does not), so the test creates the exact artifact issue #26 describes
+#      directly, in the shape a Karpenter instance's own leftover interface
+#      would take;
+#   5. terraform destroy with the same inputs, which must succeed;
+#   6. nothing is left: the leftover kinds of 1.e2e.sh (instance, ENI, NAT,
+#      EBS, launch template), plus detached VPC CNI interfaces (aws-K8S-*,
+#      including the planted one) in the cell's VPC and security groups
+#      tagged aws:eks:cluster-name = NAME (the two leftovers of issue #26),
+#      then the cluster, its security group and the VPC are gone.
 #
 # Every check prints PASS or FAIL. The script exits non-zero on the first
 # failed step and always attempts to destroy what it created (EXIT trap).
@@ -303,6 +310,31 @@ info "partial state holds $(grep -c . <<<"${partial_state}" || true) resources; 
 cni_enis="$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=${VPC_ID}" \
   "Name=description,Values=aws-K8S-*" --query 'length(NetworkInterfaces)' --output text 2>/dev/null || true)"
 info "VPC CNI (aws-K8S-*) network interfaces in the VPC before destroy: ${cni_enis:-unknown}"
+
+# Whether the system node group's own deletion happens to leave a detached
+# VPC CNI interface behind is a race this test must not depend on (with no
+# real pod load and no Karpenter running, it usually does not). So the test
+# plants the exact artifact issue #26 describes directly: a detached network
+# interface in a private subnet of this cell's VPC, with the description
+# both guards filter on (Name=description,Values=aws-K8S-*). This is the
+# same shape of leftover a Karpenter-launched instance's secondary interface
+# becomes once that instance is terminated outside the normal node group
+# lifecycle; planting it this way removes the need to run Karpenter here,
+# and makes the cause-and-effect of this test deterministic: present at this
+# point whichever guard is or is not later in a position to remove it.
+if ! private_subnet="$(aws_text aws ec2 describe-subnets \
+  --filters "Name=vpc-id,Values=${VPC_ID}" "Name=tag:karpenter.sh/discovery,Values=${NAME}" \
+  --query 'Subnets[0].SubnetId' --output text)"; then
+  fail "aws ec2 describe-subnets (private, tag karpenter.sh/discovery=${NAME}): ${private_subnet}"
+fi
+[[ -n "${private_subnet}" && "${private_subnet}" != "None" ]] \
+  || fail "no private subnet (tag karpenter.sh/discovery=${NAME}) found in ${VPC_ID} to plant the test interface in"
+if ! planted_eni="$(aws_text aws ec2 create-network-interface \
+  --subnet-id "${private_subnet}" --description "aws-K8S-i-issue26testonly" \
+  --query 'NetworkInterface.NetworkInterfaceId' --output text)"; then
+  fail "aws ec2 create-network-interface (planting the issue #26 test artifact in ${private_subnet}): ${planted_eni}"
+fi
+pass "planted a detached network interface (${planted_eni}, aws-K8S-* description) in ${private_subnet}"
 
 # ------------------------------------ 4. destroy the partial state
 
