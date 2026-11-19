@@ -27,7 +27,6 @@ spec:
     httpProtocolIPv6: disabled
     httpPutResponseHopLimit: 1
     httpTokens: required
-
 ---
 # Source: capacity-pool/templates/nodepool.yaml
 # One NodePool per release of this chart (RFC #17: one NodePool per
@@ -70,7 +69,6 @@ spec:
   disruption:
     consolidationPolicy: WhenEmptyOrUnderutilized
     consolidateAfter: "60s"
-
 ---
 # Source: capacity-pool/templates/resourceflavor.yaml
 # Kueue's own kind, not Karpenter's; Karpenter labels every node it
