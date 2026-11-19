@@ -58,6 +58,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GITOPS_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${GITOPS_ROOT}/.." && pwd)"
 FOUNDATION_ROOT="${REPO_ROOT}/infra/foundation"
+# Used (never REPO_ROOT, a local filesystem path) to clone the two
+# disposable branches below: cloning from a local path makes the new
+# clone's own "origin" that same local path (git's own default for a
+# local-path clone source), so a later `git push origin` would land only
+# inside this run's own local checkout, never on GitHub -- where the
+# ApplicationSet's Git generator actually reads from (confirmed on a real
+# cluster in 1.e2e.sh's own identical bug).
+GITOPS_REPO_URL="${GITOPS_REPO_URL:-$(git -C "${REPO_ROOT}" remote get-url "${GITOPS_TEST_REMOTE}" 2>/dev/null | sed -e 's#^git@github.com:#https://github.com/#' -e 's#\.git$##')}"
+[[ -n "${GITOPS_REPO_URL}" ]] || { echo "FAIL could not infer GITOPS_REPO_URL; set it explicitly"; exit 1; }
 
 WORK_DIR="${E2E_WORK_DIR:-$(mktemp -d)}"
 mkdir -p "${WORK_DIR}"
@@ -190,7 +199,7 @@ info "run ${RUN_ID}, work dir ${WORK_DIR}, upgrading karpenter/karpenter-crd to 
 # 0.static.sh runs on every commit.
 
 MISMATCH_CLONE="${WORK_DIR}/mismatch"
-git clone --quiet --no-single-branch "${REPO_ROOT}" "${MISMATCH_CLONE}" || fail "git clone (mismatch)"
+git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${MISMATCH_CLONE}" || fail "git clone (mismatch)"
 git -C "${MISMATCH_CLONE}" checkout --quiet "${GITOPS_REVISION}" || fail "git checkout ${GITOPS_REVISION} (mismatch)"
 sed -i.bak -E "s/^(\\s*version:\\s*).*/\\1\"${UPGRADE_TO_KARPENTER_VERSION}\"/" \
   "${MISMATCH_CLONE}/gitops/addons/karpenter/addon.yaml" \
@@ -327,7 +336,7 @@ pass "canary Pod Running on node ${CANARY_NODE} (instance ${CANARY_INSTANCE_ID})
 
 UPGRADE_CLONE="${WORK_DIR}/upgrade-match"
 UPGRADE_BRANCH="e2e-upgrade-match-${RUN_ID#gitops-upgrade-}"
-git clone --quiet --no-single-branch "${REPO_ROOT}" "${UPGRADE_CLONE}" || fail "git clone (upgrade-match)"
+git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${UPGRADE_CLONE}" || fail "git clone (upgrade-match)"
 git -C "${UPGRADE_CLONE}" checkout --quiet -B "${UPGRADE_BRANCH}" "${GITOPS_REVISION}" || fail "git checkout (upgrade-match)"
 for f in addons/karpenter/addon.yaml addons/karpenter-crd/addon.yaml; do
   sed -i.bak -E "s/^(\\s*version:\\s*).*/\\1\"${UPGRADE_TO_KARPENTER_VERSION}\"/" "${UPGRADE_CLONE}/gitops/${f}" \
