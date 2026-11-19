@@ -59,6 +59,6 @@ output "cluster_arn" {
 }
 
 output "argocd_namespace" {
-  description = "Kubernetes namespace of the managed Argo CD capability's own objects (registration Secret, AppProject, root Application), or null when var.argocd is not set. No ApplicationSet or addon.yaml reads this directly; each generated Application inherits its destination namespace from the root Application this output's consumer (gitops/bootstrap/bootstrap.sh) writes."
+  description = "Kubernetes namespace of the managed Argo CD capability's own objects (registration Secret, AppProject, root Application), or null when var.argocd is not set. No ApplicationSet or addon.yaml reads this directly; each generated Application *object* (control-plane bookkeeping: where Argo CD stores it) inherits that namespace from the root Application this output's consumer (gitops/bootstrap/bootstrap.sh) writes, but each add-on's own *workload* namespace (where its chart's pods and other resources actually land) is a separate namespace: key in that add-on's own addon.yaml, never this output."
   value       = try(aws_eks_capability.argocd[0].configuration[0].argo_cd[0].namespace, null)
 }

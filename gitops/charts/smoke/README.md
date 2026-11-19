@@ -3,7 +3,7 @@
 Admin-owned fixture proving the delivery mechanism end to end before any
 team's own queue exists: one `Namespace`, one single-flavor Kueue
 `ClusterQueue` restricted to that namespace, and one `LocalQueue`. A
-canary workload (a `Pod` in `gitops/tests/1.e2e.sh` and `2.upgrade.sh`,
+canary workload (a `Job` in `gitops/tests/1.e2e.sh`, a bare `Pod` in `2.upgrade.sh`,
 created and deleted per e2e run, never stored in Git - RFC #25 Decision 9)
 targets this `LocalQueue`; the queue and namespace themselves are
 permanent.

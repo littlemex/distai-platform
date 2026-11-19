@@ -74,13 +74,20 @@
 #   GITOPS_REPO_URL (inferred from `git remote get-url origin` -- read-only
 #   clone source for every disposable branch below),
 #   GITOPS_TEST_REPO_URL (https://github.com/littlemex/distai-platform.git
-#   -- the push target for this test's own disposable branches; override
-#   to run against a fork you have write access to),
-#   GITOPS_TEST_TOKEN_SSM_PARAM (/relay/github/distai-platform) and
-#   GITOPS_TEST_TOKEN_SSM_REGION (us-east-1) -- a GitHub token with
-#   Contents: write on GITOPS_TEST_REPO_URL, read fresh from SSM Parameter
-#   Store (SecureString) at each push/delete, never written to disk,
-#   .git/config or a log (see push_disposable_branch()),
+#   -- the push target for this test's own disposable branches; every
+#   manifest this suite bootstraps hard-codes this same URL as its own
+#   Git source, so pointing this at a fork does not make Argo CD read
+#   the fork's branches -- there is no supported way to run this suite
+#   against a fork today),
+#   GITOPS_TEST_TOKEN_SSM_PARAM (a parameter you create; the default,
+#   /relay/github/distai-platform, is only this environment's own naming
+#   convention) and GITOPS_TEST_TOKEN_SSM_REGION (us-east-1) -- a GitHub
+#   token with Contents: write on GITOPS_TEST_REPO_URL, read fresh from
+#   SSM Parameter Store (SecureString) at each push/delete, never passed
+#   on a command line or in an environment variable, held only in
+#   mode-600 temporary files removed immediately after each use (never
+#   .git/config or a log; see push_disposable_branch() and
+#   report_stale_disposable_branches()),
 #   GITOPS_SKIP_ORDERING_EXPERIMENT (0 -- set to 1 to skip acceptance
 #   criterion 4 if this token cannot write to GITOPS_TEST_REPO_URL; the
 #   step 11b capacity-type pools, the step 13 generator-entry-loss
@@ -130,6 +137,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GITOPS_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${GITOPS_ROOT}/.." && pwd)"
 FOUNDATION_ROOT="${REPO_ROOT}/infra/foundation"
+# Which -chdir root cleanup()'s own destroy uses: whichever root this run's
+# apply was last attempted from (BASE_FOUNDATION_ROOT, then switched to
+# FOUNDATION_ROOT once the "after" apply starts), never hardcoded to
+# FOUNDATION_ROOT -- the same TF_DATA_DIR/state key is shared across both,
+# but if the "before" apply (BASE_FOUNDATION_ROOT) fails partway through,
+# cleanup must destroy from the root that was actually applied, not a
+# different checkout's config FOUNDATION_ROOT was never init'd from yet.
+DESTROY_FROM_ROOT="${FOUNDATION_ROOT}"
 GITOPS_REPO_URL="${GITOPS_REPO_URL:-$(git -C "${REPO_ROOT}" remote get-url origin 2>/dev/null | sed -e 's#^git@github.com:#https://github.com/#' -e 's#\.git$##')}"
 [[ -n "${GITOPS_REPO_URL}" ]] || { echo "FAIL could not infer GITOPS_REPO_URL; set it explicitly"; exit 1; }
 
@@ -138,9 +153,18 @@ mkdir -p "${WORK_DIR}"
 export TF_DATA_DIR="${WORK_DIR}/.terraform"
 export KUBECONFIG="${WORK_DIR}/kubeconfig"
 export TF_IN_AUTOMATION=1
+# Every GitHub-token-bearing temp file (the GIT_ASKPASS helper, the
+# curl -K config, the Python helper's token file) lives under this one
+# mode-700 directory, never the shared system /tmp. cleanup() below
+# removes it unconditionally, even on a signal that interrupts a
+# function before its own normal rm -f runs -- the per-use rm -f calls
+# stay too, so a file is gone immediately after use in the common case,
+# not only at the end of the whole run.
+SECRET_TMP_DIR="$(mktemp -d)"
+chmod 700 "${SECRET_TMP_DIR}"
 
 STATE_KEY="distai-platform/${AWS_REGION}/${NAME}/foundation"
-RUN_ID="gitops-e2e-$(date -u +%Y%m%d%H%M%S)"
+RUN_ID="gitops-e2e-${NAME}-$(date -u +%Y%m%d%H%M%S)-${RANDOM}"
 TEST_TAG_KEY="distai-platform-e2e"
 
 APPLY_ATTEMPTED=0
@@ -319,7 +343,7 @@ github_askpass_script() {
   token="$(aws ssm get-parameter --with-decryption --name "${GITOPS_TEST_TOKEN_SSM_PARAM}" \
     --region "${GITOPS_TEST_TOKEN_SSM_REGION}" --query Parameter.Value --output text 2>/dev/null)" || return 1
   [[ -n "${token}" && "${token}" != "None" ]] || return 1
-  askpass="$(mktemp)"
+  askpass="$(mktemp "${SECRET_TMP_DIR}/askpass.XXXXXX")"
   chmod 700 "${askpass}"
   { set +x
     {
@@ -445,7 +469,7 @@ report_stale_disposable_branches() {
   # from a -K config file, and the Python helper reads it from a file path
   # named by an env var, never the token itself. Both files are mode 600
   # and removed immediately after use.
-  curl_config="$(mktemp)"
+  curl_config="$(mktemp "${SECRET_TMP_DIR}/curl-config.XXXXXX")"
   chmod 600 "${curl_config}"
   { set +x
     printf 'header = "Authorization: Bearer %s"\n' "${token}"
@@ -454,7 +478,7 @@ report_stale_disposable_branches() {
   branches_json="$(curl -fsS -K "${curl_config}" \
     "https://api.github.com/repos/${api_repo}/branches?per_page=100" 2>/dev/null)" || branches_json="[]"
   rm -f "${curl_config}"
-  token_file="$(mktemp)"
+  token_file="$(mktemp "${SECRET_TMP_DIR}/token.XXXXXX")"
   chmod 600 "${token_file}"
   { set +x; printf '%s' "${token}" >"${token_file}"; } 2>/dev/null
   while IFS=$'\t' read -r name age_days; do
@@ -519,7 +543,18 @@ delete_broken_branches() {
 cleanup() {
   local rc=$?
   set +e
-  delete_broken_branches
+  rm -rf "${SECRET_TMP_DIR}"
+  # Keep a disposable fixture/break/upgrade branch alive when the cell
+  # itself is being kept for debugging (E2E_KEEP_ON_FAILURE=1) -- the
+  # kept cell's own root Application still points at it; deleting it
+  # unconditionally would leave that cell unable to sync anything. The
+  # Capacity Reservation (#27) is cancelled unconditionally either way:
+  # a kept cell has no use for a reservation this run itself created and
+  # tagged, and leaving it running is a real, billed resource, not a
+  # debugging aid.
+  if [[ "${E2E_KEEP_ON_FAILURE}" != "1" ]]; then
+    delete_broken_branches
+  fi
   if [[ "${RSV_CANCELLED}" -ne 1 ]]; then
     cancel_run_capacity_reservations \
       || info "cleanup: a Capacity Reservation tagged ${TEST_TAG_KEY}=${RUN_ID} is not cancelled (cancel it by hand)"
@@ -535,14 +570,14 @@ cleanup() {
   if [[ "${APPLY_ATTEMPTED}" -eq 1 && "${DESTROYED}" -eq 0 ]]; then
     if [[ "${E2E_KEEP_ON_FAILURE}" == "1" ]]; then
       info "E2E_KEEP_ON_FAILURE=1: leaving the cell in place; destroy it with:"
-      info "TF_DATA_DIR=${TF_DATA_DIR} ${TERRAFORM} -chdir=${FOUNDATION_ROOT} destroy -var-file=${TFVARS}"
+      info "TF_DATA_DIR=${TF_DATA_DIR} ${TERRAFORM} -chdir=${DESTROY_FROM_ROOT} destroy -var-file=${TFVARS}"
     else
       info "cleanup: the test did not reach a successful destroy; cleaning up"
       if [[ "${BOOTSTRAP_RAN}" -eq 1 ]] && k get ns "${ARGOCD_NS:-}" >/dev/null 2>&1; then
         k delete job canary --ignore-not-found --wait=false >/dev/null 2>&1
         k delete application root -n "${ARGOCD_NS}" --cascade=background --ignore-not-found >/dev/null 2>&1
       fi
-      tf "${FOUNDATION_ROOT}" destroy -auto-approve -input=false -var-file="${TFVARS}"
+      tf "${DESTROY_FROM_ROOT}" destroy -auto-approve -input=false -var-file="${TFVARS}"
       local destroy_rc=$?
       if [[ "${destroy_rc}" -ne 0 ]]; then
         log "FAIL cleanup: terraform destroy exited ${destroy_rc}; remove the cell by hand"
@@ -553,7 +588,11 @@ cleanup() {
   fi
   echo
   if [[ "${rc}" -eq 0 ]]; then
-    log "RESULT PASS: all checks passed (run ${RUN_ID}, work dir ${WORK_DIR})"
+    if [[ "${GITOPS_SKIP_ORDERING_EXPERIMENT}" == "1" ]]; then
+      log "RESULT PASS (acceptance criterion 4 skipped, GITOPS_SKIP_ORDERING_EXPERIMENT=1): run ${RUN_ID}, work dir ${WORK_DIR}"
+    else
+      log "RESULT PASS: all checks passed (run ${RUN_ID}, work dir ${WORK_DIR})"
+    fi
   else
     log "RESULT FAIL: ${FAILED_STEP:-exit ${rc}} (run ${RUN_ID}, work dir ${WORK_DIR})"
   fi
@@ -644,6 +683,7 @@ existing_state="$(tf "${BASE_FOUNDATION_ROOT}" state list 2>&1)" || existing_sta
 pass "state at key ${STATE_KEY} has no resources before apply"
 
 APPLY_ATTEMPTED=1
+DESTROY_FROM_ROOT="${BASE_FOUNDATION_ROOT}"
 tf "${BASE_FOUNDATION_ROOT}" apply -auto-approve -input=false -var-file="${TFVARS}" \
   || fail "terraform apply (base ref ${GITOPS_BASE_REF})"
 pass "terraform apply from ${GITOPS_BASE_REF} (pre-issue-#25 foundation code)"
@@ -703,6 +743,7 @@ tf "${FOUNDATION_ROOT}" init -input=false -reconfigure \
   -backend-config="bucket=${STATE_BUCKET}" -backend-config="key=${STATE_KEY}" \
   -backend-config="region=${STATE_REGION}" -backend-config="use_lockfile=true" \
   || fail "terraform init (this PR's foundation code) with the S3 backend (key ${STATE_KEY})"
+DESTROY_FROM_ROOT="${FOUNDATION_ROOT}"
 tf "${FOUNDATION_ROOT}" apply -auto-approve -input=false -var-file="${TFVARS}" \
   || fail "terraform apply (this PR's foundation code)"
 pass "terraform apply with this PR's own foundation code (adds cluster_arn, argocd_namespace, the access-policy association)"
@@ -857,6 +898,8 @@ fi
 rv_after_wrong="$(object_write_fingerprint)"
 [[ "${rv_before_wrong}" == "${rv_after_wrong}" ]] \
   || fail "bootstrap.sh wrote something before aborting on a cluster_arn mismatch: before=[${rv_before_wrong}] after=[${rv_after_wrong}]"
+grep -q "refusing to overwrite" "${WORK_DIR}/wrong-cluster.log" \
+  || fail "bootstrap.sh aborted for a reason other than the cluster_arn mismatch (see ${WORK_DIR}/wrong-cluster.log)"
 pass "bootstrap.sh aborts before any write when --tf-outputs names a different cluster_arn than the registered Secret"
 
 # 7b. The kubeconfig/cluster_endpoint check (decision 1's first condition,
@@ -1841,7 +1884,7 @@ running_karpenter="$(aws ec2 describe-instances \
 pass "before destroy: NodePool, EC2NodeClass and instance ${running_karpenter} in place"
 
 destroy_start="$(date +%s)"
-tf "${FOUNDATION_ROOT}" destroy -auto-approve -input=false -var-file="${TFVARS}" \
+tf "${DESTROY_FROM_ROOT}" destroy -auto-approve -input=false -var-file="${TFVARS}" \
   || fail "terraform destroy with Karpenter-launched instance(s) still in place"
 DESTROYED=1
 pass "terraform destroy completed without manual steps ($(($(date +%s) - destroy_start))s)"

@@ -45,8 +45,11 @@ that line is #22's own to add.
 ## Bootstrapping a cell (once, after `terraform apply`)
 
 A freshly-applied cell has a running Argo CD capability with zero
-registered clusters and zero Kubernetes RBAC beyond what
-`infra/foundation`'s `aws_eks_access_policy_association` grants. Run this
+registered clusters, and an access entry that carries only the two
+built-in Argo-CD-capability-management policies (letting the capability
+manage itself, never `AmazonEKSClusterAdminPolicy`) until
+`infra/foundation`'s `aws_eks_access_policy_association` grants that too.
+Run this
 once per cell, and again whenever a PR adds a new chart registry (see
 Versioning below):
 
@@ -76,11 +79,13 @@ cell's registration under the same name.
 Argo CD's own kind-ordering (CRDs before CRs) handles ordering **inside**
 one `Application`. Ordering **between** the `Application`s one
 `ApplicationSet` generates is `RollingSync` (ApplicationSet Progressive
-Syncs, Beta since Argo CD v3.3.0); whether the managed capability exposes
-it is unconfirmed as of this PR (RFC #25 Decision 4) - if it does not,
-every `Application` instead syncs independently with `automated.selfHeal`,
-and a later step's `Application` fails once and retries until an earlier
-one it depends on converges. Either way, ordering *between*
+Syncs, Beta since Argo CD v3.3.0) when available; confirmed on a real
+cluster (`gitops/tests/1.e2e.sh`, reading `platform.ApplicationSet`'s own
+`status.applicationStatus`), the managed capability does **not** expose
+it as of this PR - `status.applicationStatus` is empty, so every
+`Application` instead syncs independently with `automated.selfHeal`, and
+a later step's `Application` fails once and retries until an earlier one
+it depends on converges. Either way, ordering *between*
 `platform.ApplicationSet` and `cells.ApplicationSet` is always retry-based
 convergence, never a `RollingSync` guarantee: `RollingSync` cannot span two
 separate `ApplicationSet` objects.
@@ -97,12 +102,17 @@ separate `ApplicationSet` objects.
 ## Versioning
 
 Every chart is pinned to an exact version in its own `addon.yaml`
-(`chart`, `repoURL`, `version`). The platform repository's own Git ref
-that every `Application` is sourced from is the moving tag `stable`,
-re-pointed only by `.github/workflows/move-stable-tag.yml` immediately
-after a merge to `main` (never by a pull request - RFC #25 Decision 6). A
-version bump needs no re-run of `bootstrap.sh`: a cell picks it up once
-`stable` moves and Argo CD next polls. A PR adding a *new chart registry*
+(`chart`, `repoURL`, `version`) - a platform add-on `Application`
+(`karpenter`, `karpenter-crd`, `kueue`) is sourced from its own upstream
+chart registry at that pinned version, never from this platform
+repository, so it is never pinned to `stable`. The platform repository's
+own Git ref that the root Application and every `cells`-generated
+`Application` (sourced from this repository, never an upstream registry)
+are pinned to is instead the moving tag `stable`, re-pointed only by
+`.github/workflows/move-stable-tag.yml` immediately after a merge to
+`main` (never by a pull request - RFC #25 Decision 6). A chart version
+bump needs no re-run of `bootstrap.sh`: a cell picks it up once `stable`
+moves and Argo CD next polls. A PR adding a *new chart registry*
 (an `addon.yaml` whose `repoURL` no existing `addon.yaml` already uses)
 does need one: the `platform` `AppProject`'s `sourceRepos` is computed by
 `bootstrap.sh` from this checkout's own `gitops/addons/*/addon.yaml` every

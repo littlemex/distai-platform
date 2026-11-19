@@ -514,8 +514,11 @@ if [[ "${ARGOCD_JSON}" != "null" ]]; then
 
   # Issue #25 decision 1: this layer's argocd.tf also creates one
   # aws_eks_access_policy_association binding the capability's own IAM role
-  # to AmazonEKSClusterAdminPolicy at type=cluster, since AWS does not grant
-  # the capability's access entry any RBAC by default. No Terraform *output*
+  # to AmazonEKSClusterAdminPolicy at type=cluster, since the capability's
+  # access entry carries only the two built-in Argo-CD-capability-
+  # management policies by default (AmazonEKSArgoCDClusterPolicy,
+  # AmazonEKSArgoCDPolicy -- confirmed on a real cluster), never
+  # AmazonEKSClusterAdminPolicy. No Terraform *output*
   # exposes the capability role's ARN (the association is a direct Terraform
   # resource reference the RFC says nothing else needs to read) -- but
   # DescribeCapability's own response carries the capability's roleArn

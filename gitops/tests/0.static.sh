@@ -90,6 +90,7 @@ require_bin "${HELM}" HELM
 require_bin "${UV}" UV
 require_bin curl CURL
 require_bin sha256sum SHA256SUM
+require_bin shellcheck SHELLCHECK
 
 # ---------------------------------------------------- 1. required files
 
@@ -140,11 +141,7 @@ else
   for s in "${shell_scripts[@]}"; do
     run_check "bash -n $(basename "${s}")" bash -n "${s}"
   done
-  if command -v shellcheck >/dev/null 2>&1; then
-    run_check "shellcheck every *.sh under gitops/" shellcheck -x "${shell_scripts[@]}"
-  else
-    echo "INFO shellcheck not found on PATH; skipped (install it, e.g. the pinned runner image already has it)"
-  fi
+  run_check "shellcheck every *.sh under gitops/" shellcheck -x "${shell_scripts[@]}"
 fi
 
 # ---------------------------------------------------------- 3. yamllint
