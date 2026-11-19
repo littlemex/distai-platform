@@ -158,7 +158,17 @@ for n in ast.walk(tree):
         mods |= {a.name.split(".")[0] for a in n.names}
     elif isinstance(n, ast.ImportFrom) and n.module and n.level == 0:
         mods.add(n.module.split(".")[0])
-stdlib = set(getattr(sys, "stdlib_module_names", ()))
+# sys.stdlib_module_names needs Python 3.10+; this runner's python3 is 3.9,
+# where that attribute does not exist and getattr's () fallback would make
+# every single import look non-stdlib. Fall back to a fixed set of modules
+# that are stdlib in every CPython 3.x this chart's score.py is expected to
+# run under, rather than silently accepting anything.
+FALLBACK_STDLIB = {
+    "argparse", "dataclasses", "json", "math", "sys", "typing", "os", "re",
+    "io", "itertools", "functools", "collections", "statistics", "time",
+    "datetime", "pathlib", "textwrap", "enum", "abc", "copy", "csv",
+}
+stdlib = set(getattr(sys, "stdlib_module_names", ())) or FALLBACK_STDLIB
 extra = sorted(m for m in mods if m not in stdlib and m != "__future__")
 if extra and extra != ["numpy"]:
     print(f"non-stdlib imports: {extra}")
