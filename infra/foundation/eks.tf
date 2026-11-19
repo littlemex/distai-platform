@@ -89,9 +89,13 @@ resource "aws_eks_cluster" "this" {
     }
   }
 
+  # The network guard must be in the state before the cluster exists, so that
+  # terraform destroy after an apply that failed part-way still removes what
+  # the cluster and its nodes leave in the VPC (see teardown.tf).
   depends_on = [
     aws_iam_role_policy_attachment.cluster,
     aws_cloudwatch_log_group.cluster,
+    terraform_data.network_guard,
   ]
 }
 

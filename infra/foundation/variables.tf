@@ -181,3 +181,13 @@ variable "tags" {
   default     = {}
   nullable    = false
 }
+
+variable "test_invalid_karpenter_node_principal_arn" {
+  type        = string
+  default     = null
+  description = "Test-only. When set, used as the access entry's principal_arn for the Karpenter node role instead of its real ARN. EKS rejects an access entry for a principal that does not exist, so terraform_data.teardown_guard (which depends_on aws_eks_access_entry.karpenter_node) cannot be created, even though the cluster and the system node group already exist, letting a test force that specific partial-apply state (see issue #26). Must stay null outside tests."
+  validation {
+    condition     = var.test_invalid_karpenter_node_principal_arn == null || length(var.test_invalid_karpenter_node_principal_arn) > 0
+    error_message = "test_invalid_karpenter_node_principal_arn must not be an empty string; use null to disable."
+  }
+}
