@@ -531,12 +531,21 @@ pass "kueue and karpenter are Healthy on the system node group with zero Karpent
 
 # Acceptance criterion 1, second half: the Git file generator's revision:
 # field (templated from the Cluster generator's annotation in the same
-# Matrix) resolved -- evidenced by the generated Application's own
-# targetRevision matching what the annotation carries.
-karpenter_target_revision="$(app_field "${APP_KARPENTER}" '{.spec.source.targetRevision}')"
-[[ "${karpenter_target_revision}" == "${GITOPS_REVISION}" ]] \
-  || fail "${APP_KARPENTER}'s targetRevision (${karpenter_target_revision}) does not match the Secret's revision annotation (${GITOPS_REVISION})"
-pass "${APP_KARPENTER}'s targetRevision was templated from the Cluster generator's revision annotation, consumed by the Git file generator in the same Matrix"
+# Matrix) resolved -- evidenced by a generated Application's own
+# targetRevision matching what the annotation carries. This must be
+# APP_CAPACITY_POOL (cells.ApplicationSet), not APP_KARPENTER
+# (platform.ApplicationSet): decision 2's own template sets a registry
+# add-on's targetRevision to "{{ .version }}" (the chart's own SemVer,
+# "1.15.2" here) because its source is the chart registry, never this
+# platform repository -- confirmed on a real cluster, where it was
+# exactly "1.15.2", not GITOPS_REVISION. cells.ApplicationSet's own
+# template instead sets targetRevision directly from the revision
+# annotation (its source *is* this repository), which is the one real
+# evidence this criterion needs.
+capacity_pool_target_revision="$(app_field "${APP_CAPACITY_POOL}" '{.spec.source.targetRevision}')"
+[[ "${capacity_pool_target_revision}" == "${GITOPS_REVISION}" ]] \
+  || fail "${APP_CAPACITY_POOL}'s targetRevision (${capacity_pool_target_revision}) does not match the Secret's revision annotation (${GITOPS_REVISION})"
+pass "${APP_CAPACITY_POOL}'s targetRevision was templated from the Cluster generator's revision annotation, consumed by the Git file generator in the same Matrix"
 
 # Acceptance criterion 5: karpenter-crd and karpenter (skipCrds) report no
 # shared CRD, evidenced by each Application's own resource list.
