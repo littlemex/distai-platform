@@ -648,9 +648,18 @@ admission_events="$(k get events -n "${SMOKE_NS}" --field-selector involvedObjec
 pass "Kueue admitted the canary Job via Workload ${CANARY_WORKLOAD} (events: ${admission_events})"
 
 canary_node() {
+  # "|", never " ", between nodeName and phase: awk's default
+  # whitespace-splitting strips a line's leading blank before splitting
+  # into fields, so an empty nodeName ("" followed by a space, then
+  # "Pending") silently shifted the *phase* into $1 -- `$1!=""` was true
+  # the instant the pod existed, long before any node was ever assigned,
+  # and the bogus "Pending" was then used as a literal node name
+  # (`kubectl get node Pending` -> NotFound, uncaught under set -e,
+  # confirmed on a real cluster). A non-whitespace delimiter with -F
+  # keeps an empty first field empty.
   k get pods -n "${SMOKE_NS}" -l job-name=canary \
-    -o jsonpath='{range .items[*]}{.spec.nodeName}{" "}{.status.phase}{"\n"}{end}' \
-    | awk '$1!="" {print $1; found=1} END{exit !found}'
+    -o jsonpath='{range .items[*]}{.spec.nodeName}{"|"}{.status.phase}{"\n"}{end}' \
+    | awk -F'|' '$1!="" {print $1; found=1} END{exit !found}'
 }
 canary_running_on_node() { [[ -n "$(canary_node)" ]]; }
 wait_until 900 15 "a node launches for the canary Job" canary_running_on_node \
