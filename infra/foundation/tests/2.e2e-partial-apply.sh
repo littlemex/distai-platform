@@ -4,11 +4,17 @@
 # nothing behind, without manual steps.
 #
 #   1. init with the S3 backend, check the state has no resources yet;
-#   2. apply with test_invalid_coredns_version set to a version that does
-#      not exist, and require the apply to fail;
+#   2. apply with test_invalid_karpenter_node_principal_arn set to an IAM
+#      role ARN that does not exist, and require the apply to fail;
 #   3. require that it failed only after the EKS cluster and the system node
-#      group exist (checked through the EKS API, not the exit code) and
-#      that the coredns add-on is the step that failed;
+#      group exist (checked through the EKS API, not the exit code), that
+#      aws_eks_access_entry.karpenter_node is the resource that failed, and
+#      that terraform_data.teardown_guard (which depends_on that access
+#      entry) is, as a result, absent from the partial state - the exact
+#      state issue #26 is about, forced without depending on timing: the
+#      access entry is teardown_guard's own dependency, not a sibling of it,
+#      so terraform cannot create the guard no matter how the apply's
+#      resources happen to be scheduled;
 #   4. terraform destroy with the same inputs, which must succeed;
 #   5. nothing is left: the leftover kinds of 1.e2e.sh (instance, ENI, NAT,
 #      EBS, launch template), plus detached VPC CNI interfaces (aws-K8S-*)
@@ -25,7 +31,8 @@
 # Optional environment:
 #   TERRAFORM (terraform), E2E_WORK_DIR (mktemp -d),
 #   E2E_KEEP_ON_FAILURE (0), E2E_LEFTOVER_GRACE_SECONDS (600),
-#   E2E_INVALID_COREDNS_VERSION (v0.0.0-does-not-exist)
+#   E2E_INVALID_KARPENTER_NODE_PRINCIPAL_ARN (computed from the account ID
+#   and NAME if unset)
 set -euo pipefail
 
 : "${AWS_PROFILE:?export AWS_PROFILE}"
@@ -40,7 +47,6 @@ export AWS_PROFILE AWS_REGION
 TERRAFORM="${TERRAFORM:-terraform}"
 E2E_KEEP_ON_FAILURE="${E2E_KEEP_ON_FAILURE:-0}"
 E2E_LEFTOVER_GRACE_SECONDS="${E2E_LEFTOVER_GRACE_SECONDS:-600}"
-E2E_INVALID_COREDNS_VERSION="${E2E_INVALID_COREDNS_VERSION:-v0.0.0-does-not-exist}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -165,10 +171,15 @@ trap 'exit 130' INT TERM
 for b in "${TERRAFORM}" aws; do require_bin "${b}"; done
 [[ "${MY_CIDR}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]] \
   || fail "MY_CIDR must be an IPv4 CIDR, got ${MY_CIDR}"
-[[ -n "${E2E_INVALID_COREDNS_VERSION}" ]] \
-  || fail "E2E_INVALID_COREDNS_VERSION must not be empty"
-aws sts get-caller-identity --query Account --output text >/dev/null \
-  || fail "aws sts get-caller-identity (check AWS_PROFILE and credentials)"
+if ! ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"; then
+  fail "aws sts get-caller-identity (check AWS_PROFILE and credentials)"
+fi
+# The real principal of aws_eks_access_entry.karpenter_node once the cell is
+# up (karpenter.tf: aws_iam_role.karpenter_node.name = "${var.name}-karpenter-node");
+# the invalid ARN below must look like a role ARN but name a role that is
+# never created, so EKS rejects the access entry with that principal.
+KARPENTER_NODE_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${NAME}-karpenter-node"
+E2E_INVALID_KARPENTER_NODE_PRINCIPAL_ARN="${E2E_INVALID_KARPENTER_NODE_PRINCIPAL_ARN:-arn:aws:iam::${ACCOUNT_ID}:role/${NAME}-test-only-does-not-exist}"
 pass "preflight: tools present, credentials valid"
 info "run ${RUN_ID}, work dir ${WORK_DIR}"
 
@@ -181,7 +192,7 @@ cat >"${TFVARS}" <<JSON
   "endpoint_public_access_cidrs": ["${MY_CIDR}"],
   "admin_principal_arns": ["${ADMIN_PRINCIPAL_ARN}"],
   "argocd": null,
-  "test_invalid_coredns_version": "${E2E_INVALID_COREDNS_VERSION}",
+  "test_invalid_karpenter_node_principal_arn": "${E2E_INVALID_KARPENTER_NODE_PRINCIPAL_ARN}",
   "tags": {"${TEST_TAG_KEY}": "${RUN_ID}"}
 }
 JSON
@@ -210,7 +221,7 @@ pass "state at key ${STATE_KEY} has no resources before apply"
 APPLY_ATTEMPTED=1
 apply_start="$(date +%s)"
 if tf apply -auto-approve -input=false -var-file="${TFVARS}" 2>&1 | tee "${APPLY_LOG}"; then
-  fail "terraform apply succeeded with test_invalid_coredns_version=${E2E_INVALID_COREDNS_VERSION}; the test-only trigger did not make it fail"
+  fail "terraform apply succeeded with test_invalid_karpenter_node_principal_arn=${E2E_INVALID_KARPENTER_NODE_PRINCIPAL_ARN}; the test-only trigger did not make it fail"
 fi
 pass "terraform apply failed as intended ($(($(date +%s) - apply_start))s)"
 
@@ -220,8 +231,8 @@ pass "terraform apply failed as intended ($(($(date +%s) - apply_start))s)"
 # failed before the cluster and the system node group existed (a typo in the
 # inputs, a quota, a transient API error) leaves nothing for EKS or the VPC
 # CNI to have created, so it would not test issue #26 at all.
-grep -q 'coredns' "${APPLY_LOG}" \
-  || fail "terraform apply failed, but its output never mentions coredns: it failed somewhere other than the injected add-on version (see ${APPLY_LOG})"
+grep -q 'aws_eks_access_entry.karpenter_node' "${APPLY_LOG}" \
+  || fail "terraform apply failed, but its output never mentions aws_eks_access_entry.karpenter_node: it failed somewhere other than the injected principal ARN (see ${APPLY_LOG})"
 
 if ! cluster_status="$(aws_text aws eks describe-cluster --name "${NAME}" \
   --query 'cluster.status' --output text)"; then
@@ -245,14 +256,30 @@ fi
   || fail "after the failed apply node group ${nodegroup} is '${nodegroup_status}', expected ACTIVE"
 pass "after the failed apply the system node group ${nodegroup} exists and is ACTIVE"
 
-# The add-on named by the trigger must be the one that is missing.
-if ! coredns_status="$(aws_text aws eks describe-addon --cluster-name "${NAME}" \
-  --addon-name coredns --query 'addon.status' --output text)"; then
-  fail "aws eks describe-addon coredns: ${coredns_status}"
+# The access entry named by the trigger must be the one that is missing: EKS
+# never created one for the real Karpenter node role, because the apply gave
+# it the invalid ARN instead.
+if describe_out="$(aws eks describe-access-entry --cluster-name "${NAME}" \
+  --principal-arn "${KARPENTER_NODE_ROLE_ARN}" --query 'accessEntry.principalArn' --output text 2>&1)"; then
+  fail "access entry for ${KARPENTER_NODE_ROLE_ARN} exists (${describe_out}) although test_invalid_karpenter_node_principal_arn was set"
 fi
-[[ "${coredns_status}" != "ACTIVE" ]] \
-  || fail "the coredns add-on is ACTIVE although test_invalid_coredns_version was set"
-pass "the coredns add-on was not created (${coredns_status:-not found})"
+case "${describe_out}" in
+  *ResourceNotFoundException*) ;;
+  *) fail "aws eks describe-access-entry --principal-arn ${KARPENTER_NODE_ROLE_ARN}: ${describe_out}" ;;
+esac
+pass "no access entry for the real Karpenter node role exists"
+
+# terraform_data.teardown_guard depends_on aws_eks_access_entry.karpenter_node
+# (teardown.tf), so it cannot be in the partial state: this is the exact
+# condition issue #26 is about, and here it holds by construction, not by
+# how the apply's resources happened to be scheduled. Asserting this is not
+# coupling to the fix: teardown_guard and its depends_on list predate it
+# (PR #21) and are unchanged by it.
+partial_state="$(tf state list 2>/dev/null || true)"
+if grep -qx 'terraform_data.teardown_guard' <<<"${partial_state}"; then
+  fail "terraform_data.teardown_guard is in the partial state; the injected failure did not block it as expected, so this run does not test issue #26"
+fi
+pass "terraform_data.teardown_guard is absent from the partial state, as issue #26 requires"
 
 find_vpc_id || fail "${VPC_LOOKUP_ERROR}"
 [[ -n "${VPC_ID}" ]] || fail "no VPC is tagged ${TEST_TAG_KEY}=${RUN_ID} after the failed apply"
@@ -269,10 +296,9 @@ fi
 [[ "${CLUSTER_SG_ID}" == sg-* ]] || fail "cluster ${NAME} reports no cluster security group (${CLUSTER_SG_ID})"
 pass "the cluster runs in this run's VPC, with the EKS-created cluster security group"
 
-# Informational: what the partial state holds, and how many VPC CNI
-# interfaces exist before destroy. Neither is asserted, since what the state
-# should contain at this point is the fix's design, not this test's contract.
-partial_state="$(tf state list 2>/dev/null || true)"
+# Informational: the rest of what the partial state holds (asserted above
+# only for teardown_guard), and how many VPC CNI interfaces exist before
+# destroy.
 info "partial state holds $(grep -c . <<<"${partial_state}" || true) resources; terraform_data in it: $(grep '^terraform_data\.' <<<"${partial_state}" | tr '\n' ' ')"
 cni_enis="$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=${VPC_ID}" \
   "Name=description,Values=aws-K8S-*" --query 'length(NetworkInterfaces)' --output text 2>/dev/null || true)"
