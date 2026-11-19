@@ -112,6 +112,25 @@ spec:
   # every other add-on's template.
   templatePatch: |
     spec:
+      {{- if .dir }}
+      # #28: a local, platform-owned chart (accel-device-classes), never
+      # an upstream registry - same "dir" shape cells.ApplicationSet.yaml
+      # already uses for capacity-pool/smoke (#25 Decision 2), applied
+      # here because this one addon.yaml has no chart/repoURL/version.
+      # This branch fully replaces the base template's source (which
+      # rendered repoURL/chart/targetRevision all empty for a dir-only
+      # addon.yaml, an invalid Application with no repoURL) rather than
+      # patching it: the base template's own empty "chart" string still
+      # merges through underneath, which is harmless (Argo CD's own
+      # IsHelm() check treats an empty chart as "not a Helm chart source",
+      # the same way cells.ApplicationSet.yaml's own template - entirely
+      # dir-based - never sets chart/repoURL/version from .repoURL/.chart/
+      # .version in the first place).
+      source:
+        repoURL: https://github.com/littlemex/distai-platform.git
+        path: "{{ .dir }}"
+        targetRevision: '{{ index $.metadata.annotations "distai.dev.annotations/revision" }}'
+      {{- else }}
       source:
         helm:
           {{- if .skipCrds }}
@@ -132,6 +151,7 @@ spec:
             {{- end }}
           {{- end }}
           {{- end }}
+      {{- end }}
       {{- if .syncOptions }}
       syncPolicy:
         syncOptions:
