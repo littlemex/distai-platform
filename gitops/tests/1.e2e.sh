@@ -689,7 +689,16 @@ break_addon_branch() {
   local addon_relpath="$1" suffix="$2" branch clone
   branch="e2e-${suffix}-${RUN_ID#gitops-e2e-}"
   clone="${WORK_DIR}/break-${suffix}"
-  git clone --quiet --no-single-branch "${REPO_ROOT}" "${clone}" || return 1
+  # GITOPS_REPO_URL, never REPO_ROOT: cloning from a local filesystem path
+  # makes the new clone's own "origin" that same local path (git's own
+  # default for a local-path clone source), so a later `git push origin`
+  # lands only inside this run's own local checkout -- never on GitHub,
+  # where the ApplicationSet's Git generator actually reads from.
+  # Confirmed on a real cluster: the push itself reported success, but
+  # Argo CD's own error was consistent and permanent across 5+ minutes
+  # ("unable to resolve '<branch>' to a commit SHA") because the branch
+  # never existed on GitHub at all.
+  git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${clone}" || return 1
   git -C "${clone}" checkout --quiet -B "${branch}" "${GITOPS_REVISION}" || return 1
   sed -i.bak -E 's/^(\s*version:\s*).*/\1"0.0.0-e2e-nonexistent"/' "${clone}/${addon_relpath}" || return 1
   grep -q '0.0.0-e2e-nonexistent' "${clone}/${addon_relpath}" || return 1
@@ -765,7 +774,8 @@ kueue_crd_created="$(k get crd clusterqueues.kueue.x-k8s.io -o jsonpath='{.metad
 
 REMOVE_KUEUE_CLONE="${WORK_DIR}/remove-kueue"
 REMOVE_KUEUE_BRANCH="e2e-remove-kueue-${RUN_ID#gitops-e2e-}"
-git clone --quiet --no-single-branch "${REPO_ROOT}" "${REMOVE_KUEUE_CLONE}" || fail "git clone (remove-kueue)"
+# GITOPS_REPO_URL, never REPO_ROOT -- see break_addon_branch()'s own comment.
+git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${REMOVE_KUEUE_CLONE}" || fail "git clone (remove-kueue)"
 git -C "${REMOVE_KUEUE_CLONE}" checkout --quiet -B "${REMOVE_KUEUE_BRANCH}" "${GITOPS_REVISION}" || fail "git checkout (remove-kueue)"
 git -C "${REMOVE_KUEUE_CLONE}" rm --quiet "gitops/addons/kueue/addon.yaml" || fail "git rm gitops/addons/kueue/addon.yaml"
 git -C "${REMOVE_KUEUE_CLONE}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
