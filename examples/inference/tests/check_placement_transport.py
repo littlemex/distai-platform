@@ -1,0 +1,394 @@
+"""Values/template contract checks for examples/inference/vllm/{disagg-pd,agg-baseline}.
+
+Derived from the interface contract's "Placement and transport" section and
+acceptance criterion 1; needs `helm` and PyYAML, no cluster. Called by
+test_placement_transport.sh, which supplies PyYAML through `uv`.
+
+Nothing here depends on a Deployment, Service, label or container name the
+chart happens to choose. A role Deployment is identified by the one thing
+the contract fixes: its nodeSelector carries the role key
+(default `distai.dev/pd-role`) with the value `prefill` or `decode`. The
+vLLM container of a role is the container requesting `nvidia.com/gpu`
+(every container of the pod if none does).
+
+Usage: check_placement_transport.py --helm HELM --disagg CHART_DIR --agg CHART_DIR --work-dir DIR
+Prints PASS/FAIL per check; exits 1 if any failed.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+
+import yaml
+
+ROLE_KEY = "distai.dev/pd-role"
+OVERRIDE_KEY = "example.test/pd-role-override"
+ROLES = ("prefill", "decode")
+HOSTNAME = "kubernetes.io/hostname"
+WORKLOAD_KINDS = ("Deployment", "StatefulSet")
+
+failures = []
+
+
+def check(label, ok, detail=""):
+    if ok:
+        print(f"PASS {label}")
+    else:
+        print(f"FAIL {label}{': ' + detail if detail else ''}")
+        failures.append(label)
+    return ok
+
+
+# ------------------------------------------------------------- rendering
+
+class Renderer:
+    def __init__(self, helm, work_dir):
+        self.helm = helm
+        self.work_dir = work_dir
+        self.n = 0
+
+    def render(self, chart, sets=(), values=None):
+        cmd = [self.helm, "template", "contract-test", chart, "--namespace", "contract-test"]
+        if values is not None:
+            self.n += 1
+            path = os.path.join(self.work_dir, f"override-{self.n}.yaml")
+            with open(path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(values, f)
+            cmd += ["-f", path]
+        for s in sets:
+            cmd += ["--set", s]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            return None, proc.stderr.strip()
+        return [d for d in yaml.safe_load_all(proc.stdout) if isinstance(d, dict)], ""
+
+    def show_values(self, chart):
+        proc = subprocess.run([self.helm, "show", "values", chart], capture_output=True, text=True)
+        if proc.returncode != 0:
+            return None
+        return yaml.safe_load(proc.stdout) or {}
+
+
+# ------------------------------------------------------------ inspection
+
+def workloads(docs):
+    return [d for d in docs if d.get("kind") in WORKLOAD_KINDS]
+
+
+def pod_spec(w):
+    return ((w.get("spec") or {}).get("template") or {}).get("spec") or {}
+
+
+def pod_labels(w):
+    return (((w.get("spec") or {}).get("template") or {}).get("metadata") or {}).get("labels") or {}
+
+
+def name_of(d):
+    return f"{d.get('kind')}/{(d.get('metadata') or {}).get('name')}"
+
+
+def roles_by(docs, key):
+    out = {r: [] for r in ROLES}
+    for w in workloads(docs):
+        v = (pod_spec(w).get("nodeSelector") or {}).get(key)
+        if v in out:
+            out[v].append(w)
+    return out
+
+
+def selector_matches(sel, labels):
+    """Kubernetes LabelSelector semantics. An empty/absent selector matches nothing here
+    (in an affinity term, a null labelSelector selects no pods)."""
+    if not sel:
+        return False
+    for k, v in (sel.get("matchLabels") or {}).items():
+        if labels.get(k) != v:
+            return False
+    for e in sel.get("matchExpressions") or []:
+        k, op, vals = e.get("key"), e.get("operator"), e.get("values") or []
+        if op == "In" and labels.get(k) not in vals:
+            return False
+        if op == "NotIn" and k in labels and labels[k] in vals:
+            return False
+        if op == "Exists" and k not in labels:
+            return False
+        if op == "DoesNotExist" and k in labels:
+            return False
+    return bool(sel.get("matchLabels") or sel.get("matchExpressions"))
+
+
+def anti_terms(spec):
+    """Returns (required_terms, preferred_terms) of podAntiAffinity."""
+    paa = ((spec.get("affinity") or {}).get("podAntiAffinity")) or {}
+    req = paa.get("requiredDuringSchedulingIgnoredDuringExecution") or []
+    pref = [p.get("podAffinityTerm") or {} for p in paa.get("preferredDuringSchedulingIgnoredDuringExecution") or []]
+    return req, pref
+
+
+def term_hits(term, labels):
+    return term.get("topologyKey") == HOSTNAME and selector_matches(term.get("labelSelector"), labels)
+
+
+def gpu_containers(spec):
+    cs = spec.get("containers") or []
+    gpu = [c for c in cs if "nvidia.com/gpu" in (((c.get("resources") or {}).get("limits")) or {})]
+    return gpu or cs
+
+
+def env_of(c):
+    return {e.get("name"): e.get("value") for e in c.get("env") or []}
+
+
+def configmap_text(docs):
+    return " ".join(json.dumps(d.get("data") or {}) for d in docs if d.get("kind") == "ConfigMap")
+
+
+def container_text(c):
+    return json.dumps({"command": c.get("command"), "args": c.get("args"), "env": c.get("env")})
+
+
+def find_paths(tree, needle, prefix=()):
+    """Paths in a values tree where `needle` is a scalar value or a map key.
+    Returns [(path_tuple, 'scalar'|'mapkey')]."""
+    found = []
+    if isinstance(tree, dict):
+        for k, v in tree.items():
+            if k == needle:
+                found.append((prefix, "mapkey"))
+            if v == needle:
+                found.append((prefix + (k,), "scalar"))
+            found += find_paths(v, needle, prefix + (k,))
+    elif isinstance(tree, list):
+        # A key inside a list cannot be overridden by a values file without
+        # replacing the whole list; treat it as not an override point.
+        pass
+    return found
+
+
+def get_path(tree, path):
+    cur = tree
+    for p in path:
+        if not isinstance(cur, dict) or p not in cur:
+            return None, False
+        cur = cur[p]
+    return cur, True
+
+
+def nest(path, leaf):
+    d = leaf
+    for p in reversed(path):
+        d = {p: d}
+    return d
+
+
+def deep_merge(a, b):
+    for k, v in b.items():
+        if isinstance(v, dict) and isinstance(a.get(k), dict):
+            deep_merge(a[k], v)
+        else:
+            a[k] = v
+    return a
+
+
+# ---------------------------------------------------------------- checks
+
+def check_roles_present(label, docs, key=ROLE_KEY):
+    roles = roles_by(docs, key)
+    ok = all(roles[r] for r in ROLES)
+    check(f"{label}: a prefill and a decode workload, each with nodeSelector {key}=<role>", ok,
+          "found " + ", ".join(f"{r}={[name_of(w) for w in roles[r]]}" for r in ROLES))
+    return roles if ok else None
+
+
+def check_anti_affinity_present(label, roles):
+    for r in ROLES:
+        other = ROLES[1 - ROLES.index(r)]
+        for w in roles[r]:
+            req, _ = anti_terms(pod_spec(w))
+            other_ok = all(any(term_hits(t, pod_labels(o)) for t in req) for o in roles[other])
+            check(f"{label}: {name_of(w)} ({r}) has a required podAntiAffinity term, topologyKey {HOSTNAME}, "
+                  f"selecting the {other} pods' labels", other_ok,
+                  f"required terms={json.dumps(req)} {other} pod labels={[pod_labels(o) for o in roles[other]]}")
+            own_hit = any(term_hits(t, pod_labels(w)) for t in req)
+            check(f"{label}: {name_of(w)} ({r})'s anti-affinity does not also select its own role's pods "
+                  "(it must match the *other* role, so several replicas of one role can still share a node)",
+                  not own_hit, f"required terms={json.dumps(req)} own labels={pod_labels(w)}")
+    labels = {r: [pod_labels(w) for w in roles[r]] for r in ROLES}
+    distinct = all(p != d for p in labels["prefill"] for d in labels["decode"])
+    check(f"{label}: prefill and decode pod templates carry different labels", distinct, json.dumps(labels))
+
+
+def check_anti_affinity_absent(label, roles):
+    for r in ROLES:
+        other = ROLES[1 - ROLES.index(r)]
+        for w in roles[r]:
+            req, pref = anti_terms(pod_spec(w))
+            hits = [t for t in req + pref for o in roles[other] if term_hits(t, pod_labels(o))]
+            check(f"{label}: {name_of(w)} ({r}) has no podAntiAffinity term (required or preferred) "
+                  f"against the {other} pods -- dropped, not weakened", not hits, json.dumps(hits))
+
+
+def env_check(label, roles, name, predicate, describe):
+    for r in ROLES:
+        for w in roles[r]:
+            for c in gpu_containers(pod_spec(w)):
+                env = env_of(c)
+                present = name in env
+                check(f"{label}: {name_of(w)} container {c.get('name')} {describe}",
+                      predicate(present, env.get(name)),
+                      f"{name}={'<unset>' if not present else repr(env.get(name))}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--helm", default="helm")
+    ap.add_argument("--disagg", required=True)
+    ap.add_argument("--agg", required=True)
+    ap.add_argument("--work-dir", required=True)
+    a = ap.parse_args()
+    R = Renderer(a.helm, a.work_dir)
+
+    # ---------------------------------------------- default values file
+    values = R.show_values(a.disagg)
+    if not check("disagg-pd: helm show values", values is not None):
+        return 1
+
+    def val(path):
+        v, ok = get_path(values, path)
+        return v if ok else "<missing>"
+
+    check("disagg-pd values: placement.allowSameNode defaults to false",
+          val(("placement", "allowSameNode")) is False, repr(val(("placement", "allowSameNode"))))
+    check("disagg-pd values: transport.forceEfaSameNode defaults to false",
+          val(("transport", "forceEfaSameNode")) is False, repr(val(("transport", "forceEfaSameNode"))))
+    check("disagg-pd values: transport.backend defaults to LIBFABRIC",
+          val(("transport", "backend")) == "LIBFABRIC", repr(val(("transport", "backend"))))
+
+    # ----------------------------------------------- default rendering
+    docs, err = R.render(a.disagg)
+    if not check("disagg-pd: helm template with default values", docs is not None, err):
+        return 1
+    roles = check_roles_present("default", docs)
+    if roles:
+        check_anti_affinity_present("default", roles)
+        env_check("default", roles, "FI_EFA_ENABLE_SHM_TRANSFER",
+                  lambda present, v: (not present) or v != "0",
+                  "does not force FI_EFA_ENABLE_SHM_TRANSFER=0 (forceEfaSameNode=false)")
+        env_check("default", roles, "FI_PROVIDER", lambda p, v: v == "efa",
+                  "sets FI_PROVIDER=efa (backend LIBFABRIC)")
+        env_check("default", roles, "FI_EFA_USE_DEVICE_RDMA", lambda p, v: v == "1",
+                  "sets FI_EFA_USE_DEVICE_RDMA=1 (backend LIBFABRIC)")
+        cm = configmap_text(docs)
+        for r in ROLES:
+            for w in roles[r]:
+                text = " ".join(container_text(c) for c in gpu_containers(pod_spec(w))) + " " + cm
+                check(f"default: {name_of(w)} ({r}) configures NixlConnector with the LIBFABRIC backend",
+                      "NixlConnector" in text and "LIBFABRIC" in text)
+
+    # ----------------------------------- role key has a values override
+    key_paths = find_paths(values, ROLE_KEY)
+    if check(f"disagg-pd values: the role key {ROLE_KEY} is a values override point, not hardcoded",
+             bool(key_paths), f"{ROLE_KEY} does not appear as a value or map key anywhere in values.yaml"):
+        override = {}
+        for path, how in key_paths:
+            if how == "scalar":
+                deep_merge(override, nest(path, OVERRIDE_KEY))
+            else:
+                orig, _ = get_path(values, path)
+                deep_merge(override, nest(path, {ROLE_KEY: None, OVERRIDE_KEY: orig[ROLE_KEY]}))
+        odocs, err = R.render(a.disagg, values=override)
+        if check(f"key override: helm template with the role key set to {OVERRIDE_KEY}", odocs is not None, err):
+            oroles = check_roles_present("key override", odocs, OVERRIDE_KEY)
+            stale = [name_of(w) for w in workloads(odocs) if ROLE_KEY in (pod_spec(w).get("nodeSelector") or {})]
+            check(f"key override: no workload still selects nodes on {ROLE_KEY}", not stale, str(stale))
+            if oroles:
+                check_anti_affinity_present("key override", oroles)
+
+    # --------------------------------------------- allowSameNode=true
+    sdocs, err = R.render(a.disagg, sets=["placement.allowSameNode=true"])
+    if check("allowSameNode=true: helm template", sdocs is not None, err):
+        sroles = check_roles_present("allowSameNode=true", sdocs)
+        if sroles:
+            check_anti_affinity_absent("allowSameNode=true", sroles)
+
+    # ------------------------------------------ forceEfaSameNode=true
+    fdocs, err = R.render(a.disagg, sets=["transport.forceEfaSameNode=true"])
+    if check("forceEfaSameNode=true: helm template", fdocs is not None, err):
+        froles = check_roles_present("forceEfaSameNode=true", fdocs)
+        if froles:
+            env_check("forceEfaSameNode=true", froles, "FI_EFA_ENABLE_SHM_TRANSFER",
+                      lambda p, v: v == "0", "sets FI_EFA_ENABLE_SHM_TRANSFER=0")
+            check_anti_affinity_present("forceEfaSameNode=true (placement unchanged)", froles)
+
+    # ------------------------------------------------- backend=UCX
+    udocs, err = R.render(a.disagg, sets=["transport.backend=UCX"])
+    if check("transport.backend=UCX: helm template", udocs is not None, err):
+        uroles = check_roles_present("transport.backend=UCX", udocs)
+        if uroles:
+            cm = configmap_text(udocs)
+            for r in ROLES:
+                for w in uroles[r]:
+                    cs = gpu_containers(pod_spec(w))
+                    args = json.dumps([(c.get("command"), c.get("args")) for c in cs]) + " " + cm
+                    check(f"transport.backend=UCX: {name_of(w)} ({r})'s connector config follows the value "
+                          "(names UCX, no longer LIBFABRIC)", "UCX" in args and "LIBFABRIC" not in args)
+
+    # --------------------------- RFC Decision 4: ratio knobs are values
+    knobs = [("prefill", "replicas", 2), ("decode", "replicas", 3),
+             ("prefill", "gpusPerEngine", 1), ("decode", "gpusPerEngine", 4)]
+    missing = [".".join(k[:2]) for k in knobs if get_path(values, k[:2])[1] is False]
+    if check("disagg-pd values: prefill/decode replicas and gpusPerEngine are values (RFC Decision 4)",
+             not missing, f"missing: {missing}"):
+        kdocs, err = R.render(a.disagg, sets=[f"{r}.{k}={v}" for r, k, v in knobs])
+        if check("ratio knobs: helm template with prefill 2x1 GPU, decode 3x4 GPU", kdocs is not None, err):
+            kroles = check_roles_present("ratio knobs", kdocs)
+            if kroles:
+                for r, want_rep, want_gpu in (("prefill", 2, 1), ("decode", 3, 4)):
+                    reps = sum(int((w.get("spec") or {}).get("replicas", 1)) for w in kroles[r])
+                    check(f"ratio knobs: {r} replicas = {want_rep}", reps == want_rep, f"got {reps}")
+                    gpus = [str((((c.get("resources") or {}).get("limits")) or {}).get("nvidia.com/gpu"))
+                            for w in kroles[r] for c in gpu_containers(pod_spec(w))]
+                    check(f"ratio knobs: {r} container requests nvidia.com/gpu = {want_gpu}",
+                          gpus and all(g == str(want_gpu) for g in gpus), f"got {gpus}")
+
+    # -------------------------------------------------- agg-baseline
+    adocs, err = R.render(a.agg)
+    if check("agg-baseline: helm template with default values", adocs is not None, err):
+        aw = workloads(adocs)
+        check("agg-baseline: exactly one vLLM workload", len(aw) == 1, str([name_of(w) for w in aw]))
+        text = " ".join(json.dumps(w) for w in aw) + " " + configmap_text(adocs)
+        check("agg-baseline: no KV connector configured (no kv-transfer-config, no NixlConnector)",
+              "kv-transfer-config" not in text and "kv_transfer_config" not in text and "NixlConnector" not in text)
+        aroles = roles_by(adocs, ROLE_KEY)
+        check("agg-baseline: no workload is pinned to a prefill/decode role node",
+              not any(aroles[r] for r in ROLES))
+
+    # ----------------------------- exposure and pinning (AGENTS.md section 6)
+    for chart_label, rendered in (("disagg-pd", docs), ("agg-baseline", adocs)):
+        if rendered is None:
+            continue
+        svcs = [d for d in rendered if d.get("kind") == "Service"]
+        exposed = [name_of(s) for s in svcs if (s.get("spec") or {}).get("type", "ClusterIP") != "ClusterIP"]
+        check(f"{chart_label}: every Service is ClusterIP by default (nothing reachable from outside the cluster)",
+              not exposed, str(exposed))
+        ingresses = [name_of(d) for d in rendered if d.get("kind") in ("Ingress", "Gateway", "HTTPRoute")]
+        check(f"{chart_label}: no Ingress/Gateway/HTTPRoute by default", not ingresses, str(ingresses))
+        images = [c.get("image", "") for w in workloads(rendered)
+                  for c in (pod_spec(w).get("containers") or []) + (pod_spec(w).get("initContainers") or [])]
+        unpinned = [i for i in images if "@sha256:" not in i
+                    and (":" not in i.rsplit("/", 1)[-1] or i.endswith(":latest"))]
+        check(f"{chart_label}: every image is pinned by tag or digest, none :latest", images and not unpinned,
+              f"unpinned: {unpinned}" if images else "no images rendered")
+
+    print()
+    if failures:
+        print(f"RESULT FAIL: {len(failures)} placement/transport check(s) failed")
+        return 1
+    print("RESULT PASS: all placement/transport checks passed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
