@@ -91,7 +91,7 @@ set -euo pipefail
 # example) every time this script is run, rather than ever rely on a
 # moving default that is wrong on one side of this PR's own merge or the
 # other.
-: "${GITOPS_BASE_REF:?export GITOPS_BASE_REF (a ref of infra/foundation before issue #25's access-policy-association change -- e.g. this branch's merge-base with feat/20-foundation; never origin/main, see the comment above)}"
+: "${GITOPS_BASE_REF:?export GITOPS_BASE_REF (a ref of infra/foundation before the access-policy-association change this issue adds -- e.g. the merge-base of this branch with feat/20-foundation; never origin/main, see the comment above)}"
 export AWS_PROFILE AWS_REGION
 
 TERRAFORM="${TERRAFORM:-terraform}"
