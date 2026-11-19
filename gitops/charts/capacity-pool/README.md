@@ -88,6 +88,27 @@ keep them in step by hand, as with the smoke chart's
 - One `NodePool` per release and one capacity type per `NodePool`; a
   fallback from reserved to on-demand capacity is a second release, not a
   value of this one.
+- `reservation.instanceMatchCriteria: open` renders (Karpenter accepts
+  both values), but `gitops/tests/check_gitops_contract.py` rejects it for
+  every tracked `cells/*/capacity-pool/*.yaml` file in this repository --
+  the chart stays generic, the repository's own house rule (never `open`,
+  per #22 Decision 10 H9) is enforced once, at the content-contract layer,
+  not duplicated into the template as a second, chart-level restriction.
+- This PR's own real-cluster verification exercised an On-Demand Capacity
+  Reservation, not a Capacity Block; `capacityReservationSelectorTerms`
+  does not distinguish the two (Karpenter's own docs: both are selected
+  the same way), but a Capacity Block's own start/end behavior (nodes
+  drained before it ends, per the foundation layer's interruption-queue
+  wiring) was not itself observed by this PR.
+- If `pool.limits` or the matching `ClusterQueue`'s `nominalQuota`
+  (Quotas, above) is set larger than the reservation can actually hold --
+  more than the reservation's own instance count times the instance
+  type's allocatable resources -- Kueue can admit a workload the
+  reservation has no room for; it is then stuck `Pending` after
+  admission, the exact "admission does not always mean capacity" failure
+  #17 describes for `-od`/`-flex`, now possible on a misconfigured `-rsv`
+  pool too. Size both to the reservation's own allocatable capacity, not
+  its advertised instance type's full capacity.
 - `accelerator` and `tenancy` are values only and enforce nothing by
   themselves. No device plugin selects `accelerator.methodLabel` until the
   accelerator advertisers ship
