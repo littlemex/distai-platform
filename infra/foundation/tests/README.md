@@ -4,17 +4,25 @@ Two scripts check `infra/foundation` against the acceptance criteria of
 [issue #20](https://github.com/littlemex/distai-platform/issues/20), including
 the multi-tenancy acceptance criteria added to that issue (IMDS, CNI
 permissions, NetworkPolicy, Argo CD role mappings). They use only the
-variables and outputs that the issue defines.
+variables and outputs that the issue defines. A third script is the
+regression test for
+[issue #26](https://github.com/littlemex/distai-platform/issues/26): destroy
+after an apply that failed part-way.
 
 | Script | What it checks | Needs AWS | Duration |
 | --- | --- | --- | --- |
 | `0.static.sh` | `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`, `tflint`, and `terraform test` with `variables.tftest.hcl` (input validation against a mocked AWS provider: accepted and rejected `argocd` role mappings and public endpoint CIDRs) | No | About 1 minute |
 | `1.e2e.sh` | State is empty before apply, cluster shape, IMDS hop limit, CNI permissions, NetworkPolicy enforcement, Karpenter from the outputs, spot launch, interruption handling, destroy with Karpenter still running, nothing left behind | Yes | About 30 to 35 minutes |
+| `2.e2e-partial-apply.sh` | An apply forced to fail after the cluster and the system node group exist, then `terraform destroy` of that partial state with nothing left behind (issue #26) | Yes | About 20 to 30 minutes |
+
+`e2e-lib.sh` is not run on its own: both end-to-end scripts source it. It
+holds the shared helpers and is the one place that defines which AWS
+resources count as "left behind" after a destroy.
 
 ## Prerequisites
 
 - Terraform `>= 1.14.0` and [TFLint](https://github.com/terraform-linters/tflint) for `0.static.sh`.
-- For `1.e2e.sh` also the AWS CLI v2, `kubectl`, and Helm `>= 3.8` (OCI charts).
+- For `1.e2e.sh` also the AWS CLI v2, `kubectl`, and Helm `>= 3.8` (OCI charts). `2.e2e-partial-apply.sh` needs only Terraform and the AWS CLI v2.
 - An S3 bucket for the Terraform state.
 - The EC2 Spot service-linked role in the account. It exists once spot has been used in the account; otherwise create it once with `aws iam create-service-linked-role --aws-service-name spot.amazonaws.com`.
 - An IAM principal that can create a VPC, an EKS cluster, IAM roles, an SQS queue and EventBridge rules, and send messages to SQS. The test passes this principal as the cluster admin, so `ADMIN_PRINCIPAL_ARN` must be the principal that runs the test (for an assumed role, the IAM role ARN).
@@ -178,6 +186,86 @@ PASS Argo CD capability lists the EDITOR role mapping (...)
 
 The script exits with status 0 only when every check passed. On the first failed check it prints `FAIL` with the reason, deletes the test Deployment, NodePool, the IMDS check pod and the NetworkPolicy namespace, runs `terraform destroy`, lists anything that is left, and exits non-zero.
 
+## Partial-apply test (issue #26)
+
+`2.e2e-partial-apply.sh` checks that `terraform destroy` removes a cell
+whose `terraform apply` failed part-way, without manual steps. It uses the
+test-only variable `test_invalid_coredns_version`: set to an add-on version
+that does not exist, it makes the `coredns` add-on fail after the VPC, the
+EKS cluster and the system node group were created. Outside this test the
+variable stays `null`; `1.e2e.sh` never sets it, so the normal run is not
+affected.
+
+It takes the same environment as `1.e2e.sh` (Karpenter, Argo CD and
+`kubectl` are not used). Run it after `1.e2e.sh` has finished, or with a
+different `NAME`, since both use the state key
+`distai-platform/${AWS_REGION}/${NAME}/foundation`:
+
+```bash
+export AWS_PROFILE=default
+export AWS_REGION=us-east-2
+export NAME=dp-e2e
+export STATE_BUCKET=my-terraform-state-bucket
+export STATE_REGION=us-east-1
+export ADMIN_PRINCIPAL_ARN=arn:aws:iam::111122223333:role/Admin
+export MY_CIDR="$(curl -s https://checkip.amazonaws.com)/32"
+cd infra/foundation/tests
+./2.e2e-partial-apply.sh 2>&1 | tee "/tmp/foundation-e2e-partial-$(date +%Y%m%d%H%M%S).log"
+```
+
+Optional variables:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `TERRAFORM` | `terraform` | Terraform binary |
+| `E2E_INVALID_COREDNS_VERSION` | `v0.0.0-does-not-exist` | Value passed as `test_invalid_coredns_version`; must not be a real `coredns` add-on version for the cluster's Kubernetes version |
+| `E2E_WORK_DIR` | a new `mktemp -d` directory | Generated tfvars, the apply log and the Terraform data directory |
+| `E2E_KEEP_ON_FAILURE` | `0` | `1` leaves the cell in place after a failure, for debugging; the script prints the destroy command |
+| `E2E_LEFTOVER_GRACE_SECONDS` | `600` | How long to wait for each kind of leftover to disappear after destroy |
+
+### What the partial-apply test does
+
+1. Writes a tfvars file like `1.e2e.sh` (with `argocd = null`) plus `test_invalid_coredns_version`, runs `terraform init` with the S3 backend and checks that the state at that key has no resources yet.
+2. Runs `terraform apply` and requires it to fail.
+3. Requires that it failed where intended, not earlier: the apply output mentions `coredns`, `aws eks describe-cluster` reports the cluster `ACTIVE`, `aws eks describe-nodegroup` reports the system node group `ACTIVE`, and the `coredns` add-on is not `ACTIVE`. An apply that failed before the cluster and the node group existed fails the test, since it would not exercise issue #26. It also finds the VPC by the run tag, checks the cluster runs in it, and records the cluster security group that EKS created. For information only, it prints how many resources the partial state holds, which `terraform_data` resources are among them, and how many `aws-K8S-*` network interfaces the VPC has.
+4. Runs `terraform destroy` with the same tfvars file (so the same `test_invalid_coredns_version`) and requires it to succeed.
+5. Requires that nothing is left: the same kinds as `1.e2e.sh` (instance, ENI, NAT gateway, EBS volume, launch template), plus no detached VPC CNI interface in the VPC (`description` `aws-K8S-*`, `status` `available`) and no security group tagged `aws:eks:cluster-name = NAME`, tagged for the cell, or other than `default` in the VPC. Then the recorded cluster security group, the cluster and the VPC must be gone. As in `1.e2e.sh`, a failed AWS call is never read as "nothing left".
+
+Expected output (abridged, IDs redacted):
+
+```text
+PASS preflight: tools present, credentials valid
+PASS terraform init with the S3 backend, key distai-platform/us-east-2/dp-e2e/foundation
+PASS state at key distai-platform/us-east-2/dp-e2e/foundation has no resources before apply
+PASS terraform apply failed as intended (...s)
+PASS after the failed apply the EKS cluster exists and is ACTIVE
+PASS after the failed apply the system node group system exists and is ACTIVE
+PASS the coredns add-on was not created (not found)
+PASS the cluster runs in this run's VPC, with the EKS-created cluster security group
+INFO partial state holds ... resources; terraform_data in it: ...
+INFO VPC CNI (aws-K8S-*) network interfaces in the VPC before destroy: ...
+PASS terraform destroy after a partial apply completed without manual steps (...s)
+PASS no instance tagged for the cluster remains
+PASS no eni tagged for the cluster remains
+PASS no nat tagged for the cluster remains
+PASS no volume tagged for the cluster remains
+PASS no launch-template tagged for the cluster remains
+PASS no cni-eni tagged for the cluster remains
+PASS no security-group tagged for the cluster remains
+PASS EKS cluster security group removed
+PASS EKS cluster removed
+PASS VPC removed
+
+RESULT PASS: all checks passed (run e2e-partial-..., work dir ...)
+```
+
+It creates the same billable resources as the first half of `1.e2e.sh`
+(EKS control plane, two `m7i.large` system nodes, one NAT gateway), for
+about half an hour. On a failed check it runs `terraform destroy`; if that
+destroy fails, it deletes the detached `aws-K8S-*` interfaces and the EKS
+cluster security group in the cell's VPC (the leftovers of issue #26),
+retries the destroy, lists anything that is left, and exits non-zero.
+
 ## Assumptions behind the multi-tenancy checks
 
 - The Argo CD role mapping check assumes that `var.argocd.role_mappings[].group_ids` becomes, in the real AWS API, a list of identities of type `SSO_GROUP` (one per group ID) under `rbacRoleMappings[].identities` — the only identity source the Terraform variable exposes. It checks the role name and the set of `SSO_GROUP` identity IDs under it; it does not separately assert the `type` field of each identity, since the test's inputs cannot distinguish an `SSO_GROUP` from an `SSO_USER` with the same ID.
@@ -189,5 +277,6 @@ The script exits with status 0 only when every check passed. On the first failed
 ## Known issues
 
 - Spot capacity can be unavailable for all types in `E2E_INSTANCE_TYPES`; the launch step then times out. Add more types and run again.
+- Terraform keeps creating resources that do not depend on the failed `coredns` add-on, so which other resources the partial state holds depends on the configuration; the partial-apply test prints them but does not assert them.
 - The log contains instance IDs, node names and the queue name of the test account. Redact them before pasting the log into an issue or pull request.
 - The IMDS and NetworkPolicy checks pull third-party images (see "Pinned images" above) through the cell's NAT gateway; if the account or Region blocks that egress, both checks fail at the `kubectl apply` or pod-scheduling step rather than at the behavior they are meant to check.
