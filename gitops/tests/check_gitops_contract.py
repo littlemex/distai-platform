@@ -676,8 +676,8 @@ def main(root: str) -> int:
             )
             ctype = reqs.get("karpenter.sh/capacity-type") or {}
             check(
-                f"{rel}'s pool.requirements allow capacity-type spot (#28 section D/acceptance criteria: a real spot node)",
-                ctype.get("operator") == "In" and "spot" in (ctype.get("values") or []),
+                f"{rel}'s pool.requirements allow capacity-type spot only, no on-demand fallback (#28 acceptance criteria 2/3 name a real spot node; 1.e2e.sh's check_accel_layer1 asserts the launched node's own capacity-type label, which an on-demand fallback could silently fail)",
+                ctype.get("operator") == "In" and (ctype.get("values") or []) == ["spot"],
                 f"got {ctype!r}",
             )
 
