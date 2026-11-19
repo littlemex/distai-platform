@@ -34,6 +34,20 @@ repoURL: registry.k8s.io/kueue/charts
 version: "0.20.6"
 wave: controllers
 namespace: kueue-system
+values:
+  # RFC #25 Decision 4's own ordering table says this explicitly: "Both
+  # [karpenter and kueue] tolerate CriticalAddonsOnly and target the
+  # system node group, since no Karpenter-launched NodePool exists yet."
+  # karpenter/addon.yaml carries this toleration; this file did not, so
+  # the controllerManager Deployment's pod stayed Pending on a real
+  # cluster (no untainted node exists until the "capacity" step runs
+  # after this one) -- Synced but never Healthy. controllerManager is the
+  # chart's own values path for its one Deployment (confirmed against the
+  # chart's values.yaml, tag v0.20.6).
+  controllerManager:
+    tolerations:
+      - key: CriticalAddonsOnly
+        operator: Exists
 syncOptions:
   - ServerSideApply=true
   - CreateNamespace=true
