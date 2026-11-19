@@ -31,7 +31,7 @@ mkdir -p "${CB_EVIDENCE_DIR}"
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 pass() { log "PASS $*"; }
-fail() { log "FAIL $*"; FAILED_STEP="$*"; return 1; }
+fail() { log "FAIL $*"; return 1; }
 info() { log "INFO $*"; }
 k() { kubectl "$@"; }
 
