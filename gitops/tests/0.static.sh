@@ -12,8 +12,16 @@
 #   5. `helm lint` and `helm template` of charts/capacity-pool and
 #      charts/smoke, each against one real cells/*/{capacity-pool,smoke}/*.yaml
 #      parameter file's own `values:`;
-#   6. kubeconform of the rendered chart output, both ApplicationSets and
-#      the root Application, against pinned upstream + CRD-catalog schemas;
+#   5b. issue #27's values shapes, from tests/fixtures/<chart>/*.yaml:
+#      `helm lint` and `helm template` of each fixture; an unchanged
+#      on-demand pool and the default smoke queue compared against the
+#      pre-#27 golden output in tests/golden/; fixtures that must be
+#      refused (a reserved pool with no reservation tags, an unknown
+#      pool.capacityType) fail `helm template`; and the rendered objects'
+#      own fields checked by check_chart_renders.py;
+#   6. kubeconform of the rendered chart output (including every 5b
+#      fixture), both ApplicationSets and the root Application, against
+#      pinned upstream + CRD-catalog schemas;
 #   7. every pinned add-on's own exact chart version (never a generic,
 #      multi-version schema catalog) is `helm template`-d fresh and its
 #      real CustomResourceDefinitions extracted, to check that the
@@ -140,6 +148,7 @@ mapfile -t literal_yaml_files < <(
     find "${GITOPS_ROOT}/appsets" -name '*.yaml'
     find "${GITOPS_ROOT}/bootstrap" -name '*.yaml'
     find "${GITOPS_ROOT}/charts" -maxdepth 2 -name 'Chart.yaml' -o -maxdepth 2 -name 'values.yaml'
+    find "${SCRIPT_DIR}/fixtures" -name '*.yaml'
   } 2>/dev/null | sort -u
 )
 if [[ "${#literal_yaml_files[@]}" -eq 0 ]]; then
@@ -222,6 +231,92 @@ if [[ "${#cell_smoke_files[@]}" -ge 1 ]]; then
     bash -c "'${HELM}' template smoke-e2e '${GITOPS_ROOT}/charts/smoke' -f '${SMOKE_VALUES}' > '${RENDERED_DIR}/smoke.yaml'"
 fi
 
+# --------------------------------- 5b. issue #27 values shapes (fixtures)
+#
+# tests/fixtures/<chart>/<name>.yaml are plain Helm values files, one per
+# values shape issue #27 adds (pool.capacityType on-demand/reserved/flex,
+# reservation.*, accelerator.*, tenancy.teamTaint, clusterQueue.memQuota).
+# Each is linted and rendered to RENDERED_DIR/fixture-<chart>-<name>.yaml,
+# so section 6's kubeconform and section 7's pinned-CRD check see every new
+# shape too, then check_chart_renders.py checks the rendered fields.
+
+FIXTURES_DIR="${SCRIPT_DIR}/fixtures"
+GOLDEN_DIR="${SCRIPT_DIR}/golden"
+
+# Fixtures `helm template` must refuse. Each differs from a fixture that
+# renders (reserved.yaml, flex.yaml) in exactly the one value under test,
+# so a failure can only come from that value.
+expect_render_failure=(
+  "capacity-pool/reserved-no-tags"
+  "capacity-pool/unknown-capacity-type"
+)
+must_fail() {
+  local key="$1" f
+  for f in "${expect_render_failure[@]}"; do
+    [[ "${f}" == "${key}" ]] && return 0
+  done
+  return 1
+}
+
+# Golden comparison: the chart's own output before issue #27, rendered from
+# the same fixture and checked in under tests/golden/. Comment-only and
+# blank lines are dropped from both sides before a byte comparison: the
+# templates' own leading comments are rendered into helm's output, and a
+# rewritten comment is not a change to any object. Every other byte (keys,
+# order, quoting, indentation, values) must match.
+strip_comments() { grep -v -E '^[[:space:]]*(#.*)?$' "$1" || true; }
+golden_matches() {
+  local golden="$1" rendered="$2"
+  if cmp -s "${golden}" "${rendered}"; then
+    echo "INFO $(basename "${rendered}") is byte-identical to its golden file, comments included"
+    return 0
+  fi
+  diff -u <(strip_comments "${golden}") <(strip_comments "${rendered}")
+}
+
+for chart in capacity-pool smoke; do
+  mapfile -t chart_fixtures < <(find "${FIXTURES_DIR}/${chart}" -name '*.yaml' 2>/dev/null | sort)
+  if [[ "${#chart_fixtures[@]}" -eq 0 ]]; then
+    echo "FAIL no fixtures found under tests/fixtures/${chart}/"
+    failures=$((failures + 1))
+    continue
+  fi
+  for fixture in "${chart_fixtures[@]}"; do
+    name="$(basename "${fixture}" .yaml)"
+    if must_fail "${chart}/${name}"; then
+      if "${HELM}" template "fixture-${name}" "${GITOPS_ROOT}/charts/${chart}" -f "${fixture}" \
+        >"${WORK_DIR}/must-fail-${chart}-${name}.out" 2>"${WORK_DIR}/must-fail-${chart}-${name}.err"; then
+        echo "FAIL helm template charts/${chart} -f fixtures/${chart}/${name}.yaml rendered, but must be refused"
+        failures=$((failures + 1))
+      else
+        echo "PASS helm template charts/${chart} -f fixtures/${chart}/${name}.yaml is refused: $(tr '\n' ' ' <"${WORK_DIR}/must-fail-${chart}-${name}.err")"
+      fi
+      continue
+    fi
+    run_check "helm lint charts/${chart} (fixtures/${chart}/${name}.yaml)" \
+      "${HELM}" lint "${GITOPS_ROOT}/charts/${chart}" -f "${fixture}"
+    run_check "helm template charts/${chart} (fixtures/${chart}/${name}.yaml)" \
+      bash -c "'${HELM}' template 'fixture-${name}' '${GITOPS_ROOT}/charts/${chart}' -f '${fixture}' > '${RENDERED_DIR}/fixture-${chart}-${name}.yaml'"
+  done
+done
+
+# Issue #27: with no new value set, the output is the pre-#27 output.
+for pair in "capacity-pool/on-demand-default" "smoke/default"; do
+  rendered="${RENDERED_DIR}/fixture-${pair%%/*}-${pair##*/}.yaml"
+  golden="${GOLDEN_DIR}/${pair}.yaml"
+  if [[ ! -f "${rendered}" || ! -f "${golden}" ]]; then
+    echo "FAIL golden comparison ${pair}: missing $( [[ -f "${rendered}" ]] || printf 'rendered output ' )$( [[ -f "${golden}" ]] || printf 'golden file' )"
+    failures=$((failures + 1))
+    continue
+  fi
+  run_check "charts/${pair%%/*} with no #27 value set matches the pre-#27 golden output (tests/golden/${pair}.yaml)" \
+    golden_matches "${golden}" "${rendered}"
+done
+
+run_check "chart render fields (check_chart_renders.py)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_chart_renders.py" "${FIXTURES_DIR}" "${RENDERED_DIR}"
+
 # ------------------------------------------------------- 6. kubeconform
 
 KUBECONFORM_BIN="${WORK_DIR}/kubeconform"
@@ -254,6 +349,8 @@ KUBECONFORM_ARGS=(
 kubeconform_targets=("${GITOPS_ROOT}/appsets/platform.ApplicationSet.yaml" "${GITOPS_ROOT}/appsets/cells.ApplicationSet.yaml" "${GITOPS_ROOT}/bootstrap/root-application.yaml")
 [[ -f "${RENDERED_DIR}/capacity-pool.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/capacity-pool.yaml")
 [[ -f "${RENDERED_DIR}/smoke.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/smoke.yaml")
+mapfile -t rendered_fixtures < <(find "${RENDERED_DIR}" -name 'fixture-*.yaml' | sort)
+kubeconform_targets+=("${rendered_fixtures[@]}")
 
 run_check "kubeconform (${#kubeconform_targets[@]} file(s), k8s 1.37.0 + pinned CRD schemas)" \
   "${KUBECONFORM_BIN}" "${KUBECONFORM_ARGS[@]}" "${kubeconform_targets[@]}"

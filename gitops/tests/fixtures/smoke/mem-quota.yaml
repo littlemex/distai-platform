@@ -1,0 +1,8 @@
+# Static-check input (0.static.sh): a smoke queue sized to one small
+# reservation (2 vCPU, 8 GiB), the shape 1.e2e.sh's -rsv queue uses.
+namespace: distai-smoke-cpu-rsv
+clusterQueue:
+  name: smoke-cpu-rsv
+  resourceFlavor: cpu-rsv
+  cpuQuota: "2"
+  memQuota: 8192Mi
