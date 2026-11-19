@@ -95,6 +95,7 @@ def helm_template_chart(addon_doc, workdir, namespace=None):
     # registry host with no scheme of its own, so this branch leaves their
     # behavior unchanged.
     if repo_url.startswith("http://") or repo_url.startswith("https://"):
+        ref = f"{repo_url}#{chart}"  # descriptive only, for the FAIL message below; not a real helm ref
         cmd = ["helm", "template", f"{chart}-pinned-crd-check", chart, "--repo", repo_url, "--version", version]
     else:
         ref = f"oci://{repo_url}/{chart}"
