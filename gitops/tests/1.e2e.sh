@@ -870,7 +870,10 @@ break_addon_branch() {
   git -C "${clone}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
     commit --quiet -am "test: break ${addon_relpath} for e2e ordering experiment (never merged)" || return 1
   push_disposable_branch "${clone}" "${branch}" || return 1
-  BROKEN_BRANCHES+=("${branch}")
+  # Not BROKEN_BRANCHES+=(...) here: every caller of this function uses
+  # command substitution ($(break_addon_branch ...)), which always runs
+  # in a subshell -- an append here would only ever mutate that
+  # subshell's own copy. Callers append the printed name themselves.
   printf '%s' "${branch}"
 }
 
@@ -878,8 +881,16 @@ if [[ "${GITOPS_SKIP_ORDERING_EXPERIMENT}" == "1" ]]; then
   info "GITOPS_SKIP_ORDERING_EXPERIMENT=1: skipping acceptance criterion 4 (no push access to ${GITOPS_TEST_REPO_URL} assumed)"
 else
   # ---- 12a. break karpenter-crd -------------------------------------
+  # BREAK_CRDS_BRANCH="$(break_addon_branch ...)" runs the function in a
+  # subshell (command substitution always forks one); BROKEN_BRANCHES+=
+  # *inside* break_addon_branch() only ever mutated that subshell's own
+  # copy of the array, never this shell's -- confirmed on a real run: the
+  # branch was pushed, the whole run passed, and it was never deleted
+  # (git ls-remote still showed it after the run exited 0). Track it here
+  # instead, in the shell that actually runs delete_broken_branches().
   BREAK_CRDS_BRANCH="$(break_addon_branch "gitops/addons/karpenter-crd/addon.yaml" "break-crds")" \
     || fail "could not create/push the break-crds disposable branch"
+  BROKEN_BRANCHES+=("${BREAK_CRDS_BRANCH}")
   run_bootstrap --revision "${BREAK_CRDS_BRANCH}" || fail "bootstrap.sh --revision ${BREAK_CRDS_BRANCH}"
 
   app_not_synced() { [[ "$(app_sync "$1")" != "Synced" ]]; }
@@ -902,8 +913,10 @@ else
   pass "${APP_KARPENTER_CRD} recovered (Synced) within the retry bound after restoring --revision to ${GITOPS_REVISION}"
 
   # ---- 12b. break kueue ----------------------------------------------
+  # Same subshell-scoping note as break-crds above.
   BREAK_KUEUE_BRANCH="$(break_addon_branch "gitops/addons/kueue/addon.yaml" "break-kueue")" \
     || fail "could not create/push the break-kueue disposable branch"
+  BROKEN_BRANCHES+=("${BREAK_KUEUE_BRANCH}")
   run_bootstrap --revision "${BREAK_KUEUE_BRANCH}" || fail "bootstrap.sh --revision ${BREAK_KUEUE_BRANCH}"
 
   wait_until 300 10 "kueue Application leaves Synced once broken" app_not_synced "${APP_KUEUE}" \
