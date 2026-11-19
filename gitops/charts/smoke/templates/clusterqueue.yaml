@@ -3,7 +3,7 @@
 # "controllers" step (this chart's Application lives in a different
 # ApplicationSet - cells, not platform - RFC #25 Decision 4) is what makes
 # this converge only once Kueue's CRDs and webhook are Healthy.
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
   name: {{ .Values.clusterQueue.name | quote }}
