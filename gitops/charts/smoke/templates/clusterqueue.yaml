@@ -8,7 +8,15 @@ kind: ClusterQueue
 metadata:
   name: {{ .Values.clusterQueue.name | quote }}
 spec:
-  namespaceSelector: {}
+  # Restricted to this chart's own namespace (the built-in, immutable
+  # kubernetes.io/metadata.name label every Namespace carries): an empty
+  # selector would let a LocalQueue in any namespace draw on this admin
+  # quota, which this fixture's own smoke workload never needs and the
+  # multi-tenancy principle (this platform's own design note 0b) does not
+  # allow by default.
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ .Values.namespace | quote }}
   resourceGroups:
     - coveredResources: ["cpu", "memory"]
       flavors:

@@ -36,7 +36,11 @@ Directories are named by **ownership and kind**, not by sync order: a wave
 renumbering is a one-line edit inside an `addon.yaml` or cell parameter
 file, never a directory move (RFC #25 Decision 3). `appsets/`, `bootstrap/`,
 `addons/`, `charts/` and `cells/*/capacity-pool/`, `cells/*/smoke/` are
-`CODEOWNERS`-protected to the admin.
+covered today by this repository's single, repository-wide `.github/CODEOWNERS`
+entry (`* @littlemex`) -- which also covers every other path, including
+`cells/*/teams/*` once #22 ships, so nothing in `CODEOWNERS` yet
+distinguishes an admin path from a team one; a path-specific rule drawing
+that line is #22's own to add.
 
 ## Bootstrapping a cell (once, after `terraform apply`)
 
@@ -153,5 +157,7 @@ semver):
 - `platform.ApplicationSet.yaml` and `cells.ApplicationSet.yaml`'s
   `goTemplate: true` plus `templatePatch` mechanism (Decision 2) is this
   PR's own construction, not a primary-sourced example from Argo CD's
-  docs; it needs real-cluster verification before being relied on
-  (Experiment 1).
+  docs; Experiment 1's real-cluster verification is what this PR's own
+  `gitops/tests/1.e2e.sh` now provides (every generated Application
+  reaching `Synced`/`Healthy`, including the OCI chart and the
+  cross-generator `revision:` templating), not an open item.

@@ -9,8 +9,8 @@
 # "Only by CI" is enforced by a GitHub tag protection ruleset naming this
 # job's own actor, which a maintainer with Administration access configures
 # once, outside this workflow's reach (RFC #25 Decision 6 Residual risks;
-# this repository's fine-grained token has no Administration scope either -
-# see the distai-platform skill, section 3).
+# this repository's own CI/automation tokens have no Administration scope
+# either).
 #
 # No marketplace action is used, so there is nothing to pin by commit SHA:
 # the GitHub CLI (gh) that ships on the hosted runner image is the only
