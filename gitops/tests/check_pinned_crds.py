@@ -92,6 +92,16 @@ def helm_template_chart(addon_doc, workdir):
         cmd = ["helm", "template", f"{chart}-pinned-crd-check", ref, "--version", version]
     if skip_crds:
         cmd.append("--skip-crds")
+    # Both NVIDIA charts (accel-nvidia-device-plugin, accel-nvidia-dra)
+    # template a validation guard refusing the implicit "default"
+    # namespace ("Running in the 'default' namespace is not recommended"),
+    # found running this script for #28. Every addon.yaml already names
+    # its own real namespace (the Application's own destination); passing
+    # it here avoids relying on --set allowDefaultNamespace=true, a flag
+    # Argo CD's own generated Application never sets either.
+    namespace = addon_doc.get("namespace")
+    if namespace:
+        cmd += ["--namespace", namespace]
     values = placeholder_values(addon_doc)
     values_path = None
     if values:
