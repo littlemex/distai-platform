@@ -461,17 +461,30 @@ pass "preflight: tools present, credentials valid, bootstrap.sh present"
 if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
   [[ "${NAME}" == "${ACCEL_GPU_CELL_NAME}" ]] \
     || fail "GITOPS_RUN_ACCEL_E2E=1: NAME (${NAME}) must equal ACCEL_GPU_CELL_NAME (${ACCEL_GPU_CELL_NAME}) -- this script's own cell is the GPU accelerator cell, and only gitops/cells/${ACCEL_GPU_CELL_NAME}/ carries its method-labeled pool"
-  [[ "${ACCEL_GPU_CELL_NAME}" == "dp-a19-gpu" && "${ACCEL_TRN_CELL_NAME}" == "dp-a19-trn" ]] \
-    || fail "GITOPS_RUN_ACCEL_E2E=1: issue #28's fixtures are gitops/cells/dp-a19-gpu/ and gitops/cells/dp-a19-trn/; got ACCEL_GPU_CELL_NAME=${ACCEL_GPU_CELL_NAME} ACCEL_TRN_CELL_NAME=${ACCEL_TRN_CELL_NAME}"
-  for accel_cell in "${ACCEL_GPU_CELL_NAME}" "${ACCEL_TRN_CELL_NAME}"; do
-    compgen -G "${GITOPS_ROOT}/cells/${accel_cell}/capacity-pool/*.yaml" >/dev/null \
-      || fail "GITOPS_RUN_ACCEL_E2E=1: no gitops/cells/${accel_cell}/capacity-pool/*.yaml in this checkout"
-  done
-  [[ -n "${ACCEL_GPU_TEST_IMAGE}" ]] || fail "GITOPS_RUN_ACCEL_E2E=1: export ACCEL_GPU_TEST_IMAGE (an image with nvidia-smi on PATH)"
-  [[ -n "${ACCEL_TRN_TEST_IMAGE}" ]] || fail "GITOPS_RUN_ACCEL_E2E=1: export ACCEL_TRN_TEST_IMAGE (an image with neuron-ls on PATH)"
-  [[ "${ACCEL_TRN_REGION}" != "${AWS_REGION}" || "${ACCEL_TRN_CELL_NAME}" != "${NAME}" ]] \
-    || fail "GITOPS_RUN_ACCEL_E2E=1: the Trainium cell must differ from the GPU cell"
-  pass "preflight (GITOPS_RUN_ACCEL_E2E=1): GPU cell ${NAME} in ${AWS_REGION}, Trainium cell ${ACCEL_TRN_CELL_NAME} in ${ACCEL_TRN_REGION}, fixtures and test images present"
+  # verify/cb-batch addition (not for merge): ACCEL_SKIP_TRN=1 runs the GPU half only, against
+  # any fixture name (not just issue #28's own dp-a19-gpu), so a Capacity-Block dry run can use a
+  # unique cell name per run (dp-cbp-r1, -r2, ...) instead of colliding, account-wide, on the IAM
+  # role names issue #28's own live dp-a19-gpu cell already owns. Default (ACCEL_SKIP_TRN unset or
+  # 0) is byte-for-byte the original, unchanged behavior: both names are still forced to
+  # dp-a19-gpu/dp-a19-trn and both fixtures and test images are still required.
+  if [[ "${ACCEL_SKIP_TRN:-0}" == "1" ]]; then
+    compgen -G "${GITOPS_ROOT}/cells/${ACCEL_GPU_CELL_NAME}/capacity-pool/*.yaml" >/dev/null \
+      || fail "GITOPS_RUN_ACCEL_E2E=1 ACCEL_SKIP_TRN=1: no gitops/cells/${ACCEL_GPU_CELL_NAME}/capacity-pool/*.yaml in this checkout"
+    [[ -n "${ACCEL_GPU_TEST_IMAGE}" ]] || fail "GITOPS_RUN_ACCEL_E2E=1: export ACCEL_GPU_TEST_IMAGE (an image with nvidia-smi on PATH)"
+    pass "preflight (GITOPS_RUN_ACCEL_E2E=1 ACCEL_SKIP_TRN=1): GPU cell ${NAME} in ${AWS_REGION}, Trainium half skipped, fixture and test image present"
+  else
+    [[ "${ACCEL_GPU_CELL_NAME}" == "dp-a19-gpu" && "${ACCEL_TRN_CELL_NAME}" == "dp-a19-trn" ]] \
+      || fail "GITOPS_RUN_ACCEL_E2E=1: issue #28's fixtures are gitops/cells/dp-a19-gpu/ and gitops/cells/dp-a19-trn/; got ACCEL_GPU_CELL_NAME=${ACCEL_GPU_CELL_NAME} ACCEL_TRN_CELL_NAME=${ACCEL_TRN_CELL_NAME}"
+    for accel_cell in "${ACCEL_GPU_CELL_NAME}" "${ACCEL_TRN_CELL_NAME}"; do
+      compgen -G "${GITOPS_ROOT}/cells/${accel_cell}/capacity-pool/*.yaml" >/dev/null \
+        || fail "GITOPS_RUN_ACCEL_E2E=1: no gitops/cells/${accel_cell}/capacity-pool/*.yaml in this checkout"
+    done
+    [[ -n "${ACCEL_GPU_TEST_IMAGE}" ]] || fail "GITOPS_RUN_ACCEL_E2E=1: export ACCEL_GPU_TEST_IMAGE (an image with nvidia-smi on PATH)"
+    [[ -n "${ACCEL_TRN_TEST_IMAGE}" ]] || fail "GITOPS_RUN_ACCEL_E2E=1: export ACCEL_TRN_TEST_IMAGE (an image with neuron-ls on PATH)"
+    [[ "${ACCEL_TRN_REGION}" != "${AWS_REGION}" || "${ACCEL_TRN_CELL_NAME}" != "${NAME}" ]] \
+      || fail "GITOPS_RUN_ACCEL_E2E=1: the Trainium cell must differ from the GPU cell"
+    pass "preflight (GITOPS_RUN_ACCEL_E2E=1): GPU cell ${NAME} in ${AWS_REGION}, Trainium cell ${ACCEL_TRN_CELL_NAME} in ${ACCEL_TRN_REGION}, fixtures and test images present"
+  fi
 fi
 info "run ${RUN_ID}, work dir ${WORK_DIR}, repo ${GITOPS_REPO_URL}"
 report_stale_disposable_branches
@@ -1460,7 +1473,7 @@ pass "VPC removed"
 # TF_DATA_DIR, kubeconfig and Region for the duration of that one call
 # only, so nothing here can touch the first cell's state.
 
-if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
+if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" && "${ACCEL_SKIP_TRN:-0}" != "1" ]]; then
   trn_tf() { TF_DATA_DIR="${TRN_TF_DATA_DIR}" AWS_REGION="${ACCEL_TRN_REGION}" tf "${FOUNDATION_ROOT}" "$@"; }
   trn() { KUBECONFIG="${TRN_KUBECONFIG}" AWS_REGION="${ACCEL_TRN_REGION}" ARGOCD_NS="${TRN_ARGOCD_NS}" CLUSTER="${ACCEL_TRN_CELL_NAME}" "$@"; }
 
