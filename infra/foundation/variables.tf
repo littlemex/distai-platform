@@ -191,3 +191,13 @@ variable "test_invalid_karpenter_node_principal_arn" {
     error_message = "test_invalid_karpenter_node_principal_arn must not be an empty string; use null to disable."
   }
 }
+
+variable "test_invalid_coredns_version" {
+  type        = string
+  default     = null
+  description = "Test-only. When set, used as the add-on version for the coredns add-on instead of the pinned version, letting a test force terraform apply to fail after the cluster and system node group already exist (see issue #26). Must stay null outside tests."
+  validation {
+    condition     = var.test_invalid_coredns_version == null || length(var.test_invalid_coredns_version) > 0
+    error_message = "test_invalid_coredns_version must not be an empty string; use null to disable."
+  }
+}
