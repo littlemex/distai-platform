@@ -81,9 +81,27 @@ PASS terraform validate
 PASS tflint init
 PASS tflint
 PASS terraform test (input validation, mocked provider)
+PASS guard unit tests (scripted fake AWS CLI)
 
 RESULT PASS: all static checks passed
 ```
+
+`guard-unit-tests.sh` (run as part of `0.static.sh`, or on its own) runs
+`scripts/teardown-guard.sh` against a scripted fake `aws` on the `PATH`
+instead of the real AWS CLI, no credentials or network calls, each case
+well under a second. It exists for error handling the real end-to-end tests
+cannot reach on demand, because it needs a specific AWS API error at a
+specific moment: in particular, the node role or one of its instance
+profiles being deleted by something else (another destroy of the same
+cell racing this one, an operator cleaning up by hand) between the guard
+listing it and reading it again. Seen for real: `list-instance-profiles-for-role`
+returned `NoSuchEntity` after the node role had already been deleted,
+right after the guard had just finished terminating every instance
+(`us-east-1`, 2026-11-20), and `set -e` turned that into an aborted destroy
+(exit 254) instead of "nothing to clean" (issue #26). Three cases: the node
+role already gone, an instance profile already gone, and the ordinary path
+(a profile Karpenter owns) still being deleted, so the first two fixes did
+not come at the cost of the third.
 
 ## End-to-end test
 
