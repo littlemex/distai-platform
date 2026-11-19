@@ -73,8 +73,22 @@ def helm_template_chart(addon_doc, workdir):
     chart = addon_doc["chart"]
     version = str(addon_doc["version"])
     skip_crds = bool(addon_doc.get("skipCrds"))
-    ref = f"oci://{addon_doc['repoURL']}/{chart}"
-    cmd = ["helm", "template", f"{chart}-pinned-crd-check", ref, "--version", version]
+    repo_url = addon_doc["repoURL"]
+    # #28: not every registry chart is OCI. accel-nvidia-device-plugin's
+    # repoURL is a classic Helm chart repo (index.yaml at
+    # https://nvidia.github.io/k8s-device-plugin), which `helm template`
+    # reaches with `--repo <url> <chart-name>`, never an `oci://` ref --
+    # prefixing "oci://" onto an already-"https://" URL produced an
+    # unparseable "oci://https://..." reference (found while extending
+    # this script for #28). Every other pinned addon.yaml in this repo so
+    # far (karpenter*, kueue, the other three accel-* add-ons) uses an OCI
+    # registry host with no scheme of its own, so this branch leaves their
+    # behavior unchanged.
+    if repo_url.startswith("http://") or repo_url.startswith("https://"):
+        cmd = ["helm", "template", f"{chart}-pinned-crd-check", chart, "--repo", repo_url, "--version", version]
+    else:
+        ref = f"oci://{repo_url}/{chart}"
+        cmd = ["helm", "template", f"{chart}-pinned-crd-check", ref, "--version", version]
     if skip_crds:
         cmd.append("--skip-crds")
     values = placeholder_values(addon_doc)
