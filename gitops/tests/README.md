@@ -15,7 +15,7 @@ check them either.
 | Script | What it checks | Needs AWS | Duration |
 | --- | --- | --- | --- |
 | `0.static.sh` | Required files, `bash -n`/`shellcheck` on every `*.sh` under `gitops/` (including this suite's own three scripts, not only `bootstrap.sh`), `yamllint` on every literal (non-templated) tracked YAML file, the structural contract of every `addon.yaml`/cells parameter file and both ApplicationSets (`check_gitops_contract.py`, including issue #27's `pool.capacityType`/`reservation.tags` rules, exercised against disposable copies since the tracked tree ships no reserved pool), `helm lint`/`helm template` of `charts/capacity-pool` and `charts/smoke`, the same for every values fixture under `fixtures/` (issue #27's shapes: `on-demand`/`reserved`/`flex`, `accelerator`+`tenancy`, a no-value taint, `memQuota`, and seven fixtures that must be refused) with the rendered fields of every fixture -- including the unchanged `on-demand` default -- checked field-by-field by `check_chart_renders.py` against the exact fixture set shipped, `kubeconform` of all rendered output plus both ApplicationSets and the root Application against pinned upstream + CRD-catalog schemas, and `check_pinned_crds.py` validating the rendered CRD-backed objects against each pinned chart's own exact CRD versions | No | About 2 to 3 minutes |
-| `1.e2e.sh` | Builds one foundation cell (with a temporary Identity Center group), the before/after RBAC change on the capability's own access entry, bootstrap idempotency / `--revision`-only re-run / wrong-cluster abort, the `crds`→`controllers`→`capacity` ordering (including two deliberately broken steps), the OCI chart and Git-file-generator-revision checks, no shared CRD between `karpenter-crd` and `karpenter`, the admin smoke canary through Kueue and Karpenter, issue #27's three pools (`-rsv` backed by a real targeted Capacity Reservation, `-od`, `-flex`) with one canary each and a second `-rsv` canary held by quota, then the reservation cancelled, one accidental generator-entry loss, one full bootstrap-object teardown and re-adopt, then destroy and leftovers | Yes | About 60 to 85 minutes (measured on two real runs: 59m39s and 63 minutes) |
+| `1.e2e.sh` | Builds one foundation cell (with a temporary Identity Center group), the before/after RBAC change on the capability's own access entry, bootstrap idempotency / `--revision`-only re-run / wrong-cluster abort, the `crds`→`controllers`→`capacity` ordering (including two deliberately broken steps), the OCI chart and Git-file-generator-revision checks, no shared CRD between `karpenter-crd` and `karpenter`, the admin smoke canary through Kueue and Karpenter, issue #27's three pools (`-rsv` backed by a real targeted Capacity Reservation, `-od`, `-flex`) with one canary each and a second `-rsv` canary held by quota, then the reservation cancelled, one accidental generator-entry loss, one full bootstrap-object teardown and re-adopt, then destroy and leftovers | Yes | About 60 to 85 minutes (measured 60m42s on the run in PR #27's own Test Results) |
 | `2.upgrade.sh` | The mechanical version-pair check (decision 6) on a mismatched `karpenter`/`karpenter-crd` bump, then a matched bump against a live cell: no `Application` goes `Degraded`, the `NodePool`-launched instance is not replaced, and the canary pod stays `Running` throughout | Yes | About 50 to 65 minutes |
 
 ## Prerequisites
@@ -51,8 +51,9 @@ Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
   the account (the `-flex` pool may launch Spot; the
   `AWSServiceRoleForEC2Spot` service-linked role must exist or be
   creatable). The reservation is billed from creation until step 11b's
-  own teardown cancels it (about 9 minutes, measured on two real runs);
-  it ends on its own 110 minutes after creation in any case, so a run
+  own teardown cancels it (about 9 minutes, measured 8m57s in PR #27's
+  own Test Results); it ends on its own 110 minutes after creation in any
+  case, so a run
   that fails before reaching 11b-6 and before `cleanup()` runs still
   bounds the cost.
 - A GitHub token with **Contents: write** on the repository named by
@@ -248,14 +249,18 @@ silently:
   before step 12, so steps 12-15 see the single-pool cell step 11 left.
   Each smoke fixture uses its own `addon: smoke-<pool>` value (one
   `Application` name each), which `check_gitops_contract.py` accepts.
-- **No checked-in golden file for the unchanged default pool/queue.** A
-  byte-level golden comparison was tried and dropped (`check_chart_renders.py`'s
-  own module docstring has the reasoning): it broke twice during review for
-  reasons with nothing to do with a real regression (a stale base branch,
-  a different Helm version), and could not tell that apart from an actual
-  field change. `check_chart_renders.py`'s own field-level assertions on
-  `fixtures/capacity-pool/on-demand-default.yaml` and `fixtures/smoke/default.yaml`
-  are the evidence instead.
+- **No checked-in golden file for the unchanged default pool/queue; its
+  rendered fields, not its raw bytes, are what issue #27 is checked
+  against.** `check_chart_renders.py`'s own module docstring has the
+  reasoning: a byte-level golden file breaks on an unrelated base-branch
+  rebase or a different Helm version, neither a field regression, with
+  no way to tell the two apart from a byte diff alone.
+  `check_chart_renders.py`'s own field-level assertions on
+  `fixtures/capacity-pool/on-demand-default.yaml` and
+  `fixtures/smoke/default.yaml` are the evidence instead; the rendered
+  bytes are not identical to #25's original output (the capacity-pool
+  chart's own top-of-file comment reads differently), stated explicitly
+  since issue #27's own wording asks for byte-for-byte identity.
 - **Values paths follow issue #27's own spelling**: `pool.capacityType`,
   and top-level `reservation.*`, `accelerator.*`, `tenancy.teamTaint`;
   `clusterQueue.memQuota` for the smoke chart.
