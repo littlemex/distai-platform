@@ -1,0 +1,189 @@
+{{- include "disagg.validate" . -}}
+{{- $fullname := include "disagg.fullname" . -}}
+{{- $t := .Values.transport -}}
+{{- $extra := merge (dict "backends" (list $t.backend)) (deepCopy $t.extraConnectorConfig) -}}
+{{- $kvConfig := dict "kv_connector" "NixlConnector" "kv_role" "kv_both" "kv_load_failure_policy" $t.kvLoadFailurePolicy "kv_connector_extra_config" $extra -}}
+{{- range $role := list "prefill" "decode" }}
+{{- $r := index $.Values $role }}
+{{- $other := ternary "decode" "prefill" (eq $role "prefill") }}
+{{- $limits := dict $.Values.accelerator.resourceName (int $r.gpusPerEngine) }}
+{{- if gt (int $r.efaDevices) 0 }}
+{{- $_ := set $limits $t.efaResourceName (int $r.efaDevices) }}
+{{- end }}
+{{- $resources := deepCopy (default (dict) $r.resources) }}
+{{- $_ := set $resources "limits" (merge $limits (default (dict) $resources.limits)) }}
+---
+# Headless: the proxy resolves it to the ready {{ $role }} pod addresses and
+# balances per request, not per TCP connection.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-{{ $role }}
+  labels:
+    {{- include "disagg.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $.Values.engine.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-{{ $role }}
+  labels:
+    {{- include "disagg.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  replicas: {{ $r.replicas }}
+  selector:
+    matchLabels:
+      {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "disagg.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: {{ $role }}
+        {{- if $.Values.metrics.enabled }}
+        vllm-metrics: "true"
+        {{- end }}
+      {{- if $.Values.metrics.enabled }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ $.Values.engine.port | quote }}
+        prometheus.io/path: /metrics
+      {{- end }}
+    spec:
+      nodeSelector:
+        {{- with $r.extraNodeSelector }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{ $.Values.placement.nodeSelectorKey }}: {{ $r.nodeSelectorValue | quote }}
+      {{- if not $.Values.placement.allowSameNode }}
+      affinity:
+        podAntiAffinity:
+          # Never on a node that runs a {{ $other }} pod of this release.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "disagg.selector" (dict "root" $ "component" $other) | nindent 18 }}
+      {{- end }}
+      {{- with $.Values.placement.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $.Values.engine.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: vllm
+          image: {{ include "disagg.image" $ }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              if [ -z "$MODEL_ID" ]; then
+                echo "model.name is not set: install with --set model.name=MODEL_ID, a Hugging Face model id" >&2
+                exit 1
+              fi
+              set -- --host 0.0.0.0 --port "$ENGINE_PORT" \
+                --tensor-parallel-size "$GPUS_PER_ENGINE" \
+                --kv-transfer-config "$KV_TRANSFER_CONFIG" "$@"
+              [ -z "$MODEL_REVISION" ] || set -- --revision "$MODEL_REVISION" "$@"
+              [ -z "$SERVED_MODEL_NAME" ] || set -- --served-model-name "$SERVED_MODEL_NAME" "$@"
+              exec vllm serve "$MODEL_ID" "$@"
+            - vllm-{{ $role }}
+          {{- with $r.extraArgs }}
+          args:
+            {{- range . }}
+            - {{ . | toString | quote }}
+            {{- end }}
+          {{- end }}
+          env:
+            - name: MODEL_ID
+              value: {{ $.Values.model.name | quote }}
+            - name: MODEL_REVISION
+              value: {{ $.Values.model.revision | quote }}
+            - name: SERVED_MODEL_NAME
+              value: {{ $.Values.model.servedModelName | quote }}
+            - name: ENGINE_PORT
+              value: {{ $.Values.engine.port | quote }}
+            - name: GPUS_PER_ENGINE
+              value: {{ $r.gpusPerEngine | quote }}
+            - name: KV_TRANSFER_CONFIG
+              value: {{ toJson $kvConfig | quote }}
+            # The address the other role's engines use for the NIXL handshake.
+            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+              value: {{ $t.sideChannelPort | quote }}
+            {{- if eq $t.backend "LIBFABRIC" }}
+            - name: FI_PROVIDER
+              value: efa
+            - name: FI_EFA_USE_DEVICE_RDMA
+              value: "1"
+            {{- end }}
+            {{- if $t.forceEfaSameNode }}
+            # Same-host transfers go over the EFA device, not libfabric's shm path.
+            - name: FI_EFA_ENABLE_SHM_TRANSFER
+              value: "0"
+            {{- end }}
+            - name: HF_HOME
+              value: /cache/huggingface
+            {{- if $.Values.model.hfTokenSecret.name }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.model.hfTokenSecret.name }}
+                  key: {{ $.Values.model.hfTokenSecret.key }}
+            {{- end }}
+            {{- with $r.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $.Values.engine.port }}
+            - name: nixl
+              containerPort: {{ $t.sideChannelPort }}
+          resources:
+            {{- toYaml $resources | nindent 12 }}
+          securityContext:
+            {{- toYaml $.Values.engine.containerSecurityContext | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: {{ div (int $.Values.engine.startupTimeoutSeconds) 10 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            failureThreshold: 5
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: cache
+              mountPath: /cache
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ $.Values.engine.shmSizeLimit }}
+        - name: cache
+          {{- toYaml $.Values.engine.cacheVolume | nindent 10 }}
+{{- end }}

@@ -1,0 +1,58 @@
+# Prometheus scrape jobs that feed vllm-pd.json. They follow the shape of the
+# sglang job in awslabs/awsome-distributed-ai
+# observability/prometheus-grafana/eks-managed-observability/scrape-configs/,
+# so they can be appended to the same collector's scrape_configs list. Keep
+# $$1/$$2 as written: that collector unescapes $$ to $. For a plain
+# Prometheus configuration, write $1/$2 instead.
+#
+# The efa-exporter job the EFA panels read comes from that same directory.
+
+# vLLM engine metrics. Scrapes pods labeled vllm-metrics=true and annotated
+# prometheus.io/scrape=true (both charts in examples/inference/vllm/ set
+# them). The pod's app.kubernetes.io/component label (prefill, decode or
+# aggregated) becomes the component label the dashboard groups by.
+- job_name: 'vllm'
+  scrape_interval: 10s
+  metrics_path: /metrics
+  kubernetes_sd_configs:
+  - role: pod
+  relabel_configs:
+  - source_labels: [__meta_kubernetes_pod_label_vllm_metrics]
+    action: keep
+    regex: "true"
+  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+    action: keep
+    regex: "true"
+  - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+    action: replace
+    regex: ([^:]+)(?::\d+)?;(\d+)
+    replacement: $$1:$$2
+    target_label: __address__
+  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+    action: replace
+    regex: (.+)
+    target_label: __metrics_path__
+  - source_labels: [__meta_kubernetes_pod_node_name]
+    action: replace
+    target_label: kubernetes_node
+  - source_labels: [__meta_kubernetes_pod_name]
+    action: replace
+    target_label: pod
+  - source_labels: [__meta_kubernetes_namespace]
+    action: replace
+    target_label: namespace
+  - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+    action: replace
+    target_label: component
+  - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+    action: replace
+    target_label: release
+
+# Scores pushed by examples/inference/_shared/scorer/to_prom.py. The
+# Pushgateway keeps the last push of each run, so the joint-SLO goodput panel
+# shows one step per scored run. honor_labels keeps the run's own labels.
+- job_name: 'distai-pd-score'
+  scrape_interval: 30s
+  honor_labels: true
+  static_configs:
+  - targets: ['pushgateway.monitoring.svc:9091']

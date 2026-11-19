@@ -1,0 +1,15 @@
+{{- $fullname := include "disagg.fullname" . -}}
+Endpoint (cluster-internal): http://{{ $fullname }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+
+GPUs this release requests (the --gpu-count for score.py):
+  {{ add (mul (int .Values.prefill.replicas) (int .Values.prefill.gpusPerEngine)) (mul (int .Values.decode.replicas) (int .Values.decode.gpusPerEngine)) }} = prefill {{ .Values.prefill.replicas }} x {{ .Values.prefill.gpusPerEngine }} + decode {{ .Values.decode.replicas }} x {{ .Values.decode.gpusPerEngine }}
+
+Placement: {{ if .Values.placement.allowSameNode }}anti-affinity OFF (placement.allowSameNode=true): prefill and decode may share a node.{{ else }}prefill and decode never share a node (required pod anti-affinity).{{ end }}
+Transport: NIXL {{ .Values.transport.backend }}{{ if eq .Values.transport.backend "LIBFABRIC" }}, FI_PROVIDER=efa, FI_EFA_USE_DEVICE_RDMA=1, FI_EFA_ENABLE_SHM_TRANSFER={{ if .Values.transport.forceEfaSameNode }}0 (same-host transfers forced onto EFA){{ else }}unset (library default){{ end }}{{ end }}
+{{- if not .Values.model.name }}
+
+WARNING: model.name is empty; the engines exit until it is set.
+{{- end }}
+
+Check where the roles landed:
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }} -o wide

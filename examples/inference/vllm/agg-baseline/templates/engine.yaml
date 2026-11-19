@@ -1,0 +1,141 @@
+{{- $fullname := include "agg.fullname" . -}}
+{{- $e := .Values.engine -}}
+{{- if lt (int $e.gpusPerEngine) 1 -}}
+{{- fail "engine.gpusPerEngine must be at least 1" -}}
+{{- end -}}
+{{- $resources := deepCopy (default (dict) $e.resources) -}}
+{{- $_ := set $resources "limits" (merge (dict .Values.accelerator.resourceName (int $e.gpusPerEngine)) (default (dict) $resources.limits)) -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "agg.labels" . | nindent 4 }}
+spec:
+  replicas: {{ $e.replicas }}
+  selector:
+    matchLabels:
+      {{- include "agg.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agg.labels" . | nindent 8 }}
+        {{- if .Values.metrics.enabled }}
+        vllm-metrics: "true"
+        {{- end }}
+      {{- if .Values.metrics.enabled }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ $e.port | quote }}
+        prometheus.io/path: /metrics
+      {{- end }}
+    spec:
+      {{- with $e.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $e.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $e.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: vllm
+          image: {{ include "agg.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              if [ -z "$MODEL_ID" ]; then
+                echo "model.name is not set: install with --set model.name=MODEL_ID, a Hugging Face model id" >&2
+                exit 1
+              fi
+              set -- --host 0.0.0.0 --port "$ENGINE_PORT" \
+                --tensor-parallel-size "$GPUS_PER_ENGINE" "$@"
+              [ -z "$MODEL_REVISION" ] || set -- --revision "$MODEL_REVISION" "$@"
+              [ -z "$SERVED_MODEL_NAME" ] || set -- --served-model-name "$SERVED_MODEL_NAME" "$@"
+              exec vllm serve "$MODEL_ID" "$@"
+            - vllm-aggregated
+          {{- with $e.extraArgs }}
+          args:
+            {{- range . }}
+            - {{ . | toString | quote }}
+            {{- end }}
+          {{- end }}
+          env:
+            - name: MODEL_ID
+              value: {{ .Values.model.name | quote }}
+            - name: MODEL_REVISION
+              value: {{ .Values.model.revision | quote }}
+            - name: SERVED_MODEL_NAME
+              value: {{ .Values.model.servedModelName | quote }}
+            - name: ENGINE_PORT
+              value: {{ $e.port | quote }}
+            - name: GPUS_PER_ENGINE
+              value: {{ $e.gpusPerEngine | quote }}
+            - name: HF_HOME
+              value: /cache/huggingface
+            {{- if .Values.model.hfTokenSecret.name }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.model.hfTokenSecret.name }}
+                  key: {{ .Values.model.hfTokenSecret.key }}
+            {{- end }}
+            {{- with $e.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $e.port }}
+          resources:
+            {{- toYaml $resources | nindent 12 }}
+          securityContext:
+            {{- toYaml $e.containerSecurityContext | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: {{ div (int $e.startupTimeoutSeconds) 10 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            failureThreshold: 5
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: cache
+              mountPath: /cache
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ $e.shmSizeLimit }}
+        - name: cache
+          {{- toYaml $e.cacheVolume | nindent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "agg.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "agg.selector" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

@@ -1,0 +1,153 @@
+# Defaults are the safe shape: prefill and decode on different nodes, KV
+# transfer over libfabric on EFA, libfabric's own same-host behavior left
+# untouched, every Service cluster-internal.
+
+image:
+  repository: vllm/vllm-openai
+  # The -efa variant of the vLLM release image is built with vLLM's KV
+  # connectors (NIXL) and the AWS EFA userspace (libfabric) that NIXL's
+  # LIBFABRIC backend loads. Pinned by tag and by digest (multi-arch index).
+  tag: v0.34.0-efa
+  digest: sha256:c5248ff7ce6296602c730c646e8d53a42bea62bd43d60541c7076ba795ec975a
+  pullPolicy: IfNotPresent
+
+model:
+  # Hugging Face model repository id. No default: the engines refuse to start
+  # (with a message saying so) until it is set.
+  name: ""
+  # Commit or tag of the model repository; empty means the default branch.
+  # Pin it for any measurement, so two runs serve the same weights.
+  revision: ""
+  # Name clients send as "model"; empty means model.name.
+  servedModelName: ""
+  # Secret holding a Hugging Face token, for gated models. Empty: no token.
+  hfTokenSecret:
+    name: ""
+    key: token
+
+# Extended resource the accelerator device plugin advertises.
+accelerator:
+  resourceName: nvidia.com/gpu
+
+placement:
+  # Node label key that tells prefill nodes from decode nodes. Each role
+  # selects nodes where this key equals its own nodeSelectorValue.
+  nodeSelectorKey: distai.dev/pd-role
+  # false (default): a required pod anti-affinity rule on kubernetes.io/hostname
+  # keeps every prefill pod off every node running a decode pod of this
+  # release, and the other way round, even when node labels are wrong.
+  # true: that rule is not rendered at all. Only for measuring the same-node
+  # transport path on purpose; combine with the same nodeSelectorValue for
+  # both roles, or the node selectors still keep the roles apart.
+  allowSameNode: false
+  tolerations: []
+
+transport:
+  # NIXL backend for the KV transfer: LIBFABRIC (EFA) or UCX.
+  backend: LIBFABRIC
+  # With LIBFABRIC, FI_PROVIDER=efa and FI_EFA_USE_DEVICE_RDMA=1 are always
+  # set. libfabric's EFA provider still moves a same-host transfer over its
+  # shared-memory path by default. true sets FI_EFA_ENABLE_SHM_TRANSFER=0 on
+  # prefill and decode, which forces even a same-host transfer onto the EFA
+  # device. false leaves the variable unset (the library default).
+  forceEfaSameNode: false
+  # Extended resource the EFA device plugin advertises.
+  efaResourceName: vpc.amazonaws.com/efa
+  # NIXL handshake port (VLLM_NIXL_SIDE_CHANNEL_PORT); the pod IP is the host.
+  sideChannelPort: 5600
+  # What a decode engine does when it cannot load a transferred KV cache:
+  # "fail" returns an error, "recompute" silently runs the prefill again on
+  # decode (and hides a broken transfer from every measurement).
+  kvLoadFailurePolicy: fail
+  # Merged into kv_connector_extra_config next to "backends".
+  extraConnectorConfig: {}
+
+# One engine is one vLLM server process with gpusPerEngine GPUs (tensor
+# parallel degree). Total GPUs = prefill.replicas x prefill.gpusPerEngine +
+# decode.replicas x decode.gpusPerEngine; the ratio is free.
+prefill:
+  replicas: 1
+  gpusPerEngine: 1
+  # EFA devices per engine pod. Required by the LIBFABRIC backend.
+  efaDevices: 1
+  nodeSelectorValue: prefill
+  extraNodeSelector: {}
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+  extraArgs: []
+  extraEnv: []
+
+decode:
+  replicas: 1
+  gpusPerEngine: 1
+  efaDevices: 1
+  nodeSelectorValue: decode
+  extraNodeSelector: {}
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+  extraArgs: []
+  extraEnv: []
+
+engine:
+  port: 8000
+  # Shared memory for tensor-parallel workers (/dev/shm, memory-backed).
+  shmSizeLimit: 16Gi
+  # Model download cache. emptyDir re-downloads on every pod start; replace
+  # with a persistent volume source to keep the weights across restarts.
+  cacheVolume:
+    emptyDir: {}
+  # Model download and load time allowed before the engine is restarted.
+  startupTimeoutSeconds: 1800
+  # The vLLM image provides a non-root "vllm" user (UID 2000, GID 0) for
+  # exactly this; its home and cache directories are group-writable.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 2000
+    runAsGroup: 0
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+
+proxy:
+  replicas: 1
+  port: 8000
+  # How often the proxy re-resolves the prefill and decode pod addresses.
+  resolveIntervalSeconds: 5
+  resources:
+    requests:
+      cpu: "2"
+      memory: 2Gi
+    limits:
+      memory: 2Gi
+  nodeSelector: {}
+  tolerations: []
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 2000
+    runAsGroup: 0
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+
+# The client-facing Service, in front of the proxy. ClusterIP: reachable only
+# from inside the cluster. The engines have no authentication of their own.
+service:
+  type: ClusterIP
+  port: 8000
+
+metrics:
+  # Adds the vllm-metrics=true pod label and the prometheus.io/* annotations
+  # that the "vllm" scrape job in examples/inference/_shared/dashboards/
+  # scrape-configs.yaml selects on. vLLM serves /metrics on the engine port.
+  enabled: true
