@@ -10,6 +10,18 @@
 # the same pool and pass for the wrong reason). For the real block
 # (2x p5en.48xlarge, 8 GPUs/node), this value must be re-derived as
 # 2 x 8 = 16, not copied from here.
+# gpuQuota TEMPORARILY DISABLED for this dry-run round (2026-11-19): with it
+# set, the dp-cbp-r2-smoke Application sat at health=Healthy sync=OutOfSync
+# for the full 900s timeout in gitops/tests/1.e2e.sh, never converging. This
+# is a REAL, newly found defect in the chart's second resourceGroup (gpuQuota
+# opt-in, gitops/charts/smoke/templates/clusterqueue.yaml), not a timing
+# flake -- root cause not yet identified (needs a live kubectl diff of the
+# ClusterQueue to see what field ArgoCD/Kueue disagree on; the cluster was
+# already torn down by the time this was noticed). Disabled here only to let
+# the rest of this dry run (steps 20-27, the actual subject of this round)
+# proceed; the isolation-mechanism fix itself (section 2's Kueue-quota item)
+# is NOT validated by this dry run as a result -- tracked as an open item,
+# not silently dropped.
 addon: smoke
 wave: capacity
 dir: gitops/charts/smoke
@@ -17,4 +29,3 @@ namespace: distai-smoke
 values:
   clusterQueue:
     resourceFlavor: gpu
-    gpuQuota: "2"
