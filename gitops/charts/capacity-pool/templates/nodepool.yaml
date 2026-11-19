@@ -11,8 +11,18 @@ apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
   name: {{ .Values.pool.name | quote }}
+{{- with include "capacity-pool.annotations" . }}
+{{ . | indent 2 }}
+{{- end }}
 spec:
   template:
+{{- with (default (dict) .Values.accelerator).methodLabel }}
+{{- if .key }}
+    metadata:
+      labels:
+        {{ .key | quote }}: {{ .value | toString | quote }}
+{{- end }}
+{{- end }}
     spec:
       nodeClassRef:
         group: karpenter.k8s.aws
@@ -20,6 +30,10 @@ spec:
         name: {{ .Values.pool.name | quote }}
       requirements:
 {{ include "capacity-pool.requirements" . | fromJsonArray | toYaml | indent 8 }}
+{{- with include "capacity-pool.taints" . | fromJsonArray }}
+      taints:
+{{ toYaml . | indent 8 }}
+{{- end }}
       terminationGracePeriod: 24h0m0s
   limits:
 {{ toYaml .Values.pool.limits | indent 4 }}
