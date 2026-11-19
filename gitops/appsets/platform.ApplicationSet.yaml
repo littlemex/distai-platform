@@ -1,8 +1,9 @@
 # RFC #25 Decision 2/3/4. One Application per gitops/addons/<name>/addon.yaml,
 # per registered cluster (Matrix: Cluster generator x Git FILE generator).
-# This PR ships only the "crds" and "controllers" steps (karpenter-crd,
-# karpenter, kueue); "accelerators" and "extras" are later PRs' (#19, #18,
-# #23) and simply have no addon.yaml yet, so they generate nothing today.
+# Steps shipped: "crds" (karpenter-crd), "controllers" (karpenter, kueue)
+# and "accelerators" (the four accel-* advertisers and accel-device-classes,
+# #28); "extras" is a later PR's (#18, #23) and simply has no addon.yaml
+# yet, so it generates nothing today.
 #
 # goTemplate is on (a decision this PR makes, not spelled out by the RFC's
 # own prose, which quotes the legacy fasttemplate form for a single field):
@@ -74,6 +75,10 @@ spec:
             - key: distai.dev/wave
               operator: In
               values: ["controllers"]
+        - matchExpressions:
+            - key: distai.dev/wave
+              operator: In
+              values: ["accelerators"]
   template:
     metadata:
       name: "{{ .name }}-{{ .addon }}"
