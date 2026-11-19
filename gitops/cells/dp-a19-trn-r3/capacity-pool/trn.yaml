@@ -50,9 +50,14 @@ values:
       - key: karpenter.k8s.aws/instance-family
         operator: In
         values: ["trn2"]
+    # EXPERIMENT control (branch experiment/28-control-consolidate, never
+    # merged): left at the chart's own 60s default on purpose, to
+    # reproduce the 2026-11-19 failure with Karpenter's own controller
+    # log captured this time (89085fb), before #28's real branch
+    # re-applies the 15m fix with that log as evidence.
     disruption:
       consolidationPolicy: WhenEmptyOrUnderutilized
-      consolidateAfter: 15m
+      consolidateAfter: 60s
 valuesFrom:
   # The Cluster generator's own "name" field: this cell's cluster_name.
   - helmKey: clusterName
