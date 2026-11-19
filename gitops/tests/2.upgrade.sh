@@ -94,6 +94,7 @@ IDC_GROUP_ID=""
 BOOTSTRAP_RAN=0
 BROKEN_BRANCHES=()
 DEGRADED_SEEN=""
+CELL_FIXTURE_BRANCH=""
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 pass() { log "PASS $*"; }
@@ -269,6 +270,41 @@ checkout_revision_as() {
     || git -C "${clone}" checkout --quiet -B "${branch}" "origin/${revision}"
 }
 
+# ensure_cell_fixture: see 1.e2e.sh's own identical function for why --
+# cells.ApplicationSet.yaml's Git file generator needs a
+# gitops/cells/${NAME}/ directory at GITOPS_REVISION, this PR ships only
+# gitops/cells/example-cell/, and every concurrent run needs its own NAME
+# so it never collides with another owner's cell/state-lock/Identity
+# Center group. Reassigns GITOPS_REVISION to a disposable branch (copying
+# example-cell's fixture to NAME unchanged) when NAME has no fixture of
+# its own at GITOPS_REVISION; a no-op otherwise.
+ensure_cell_fixture() {
+  local probe
+  probe="$(mktemp -d)"
+  git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${probe}" || { rm -rf "${probe}"; return 1; }
+  checkout_revision_as "${probe}" "fixture-probe" "${GITOPS_REVISION}" || { rm -rf "${probe}"; return 1; }
+  if [[ -d "${probe}/gitops/cells/${NAME}" ]]; then
+    rm -rf "${probe}"
+    return 0
+  fi
+  if [[ ! -d "${probe}/gitops/cells/example-cell" ]]; then
+    echo "gitops/cells/example-cell is missing at ${GITOPS_REVISION}; cannot derive a fixture for NAME=${NAME}" >&2
+    rm -rf "${probe}"
+    return 1
+  fi
+  cp -r "${probe}/gitops/cells/example-cell" "${probe}/gitops/cells/${NAME}" || { rm -rf "${probe}"; return 1; }
+  git -C "${probe}" add "gitops/cells/${NAME}" || { rm -rf "${probe}"; return 1; }
+  git -C "${probe}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
+    commit --quiet -m "test: disposable cell fixture gitops/cells/${NAME}/, copied from example-cell (never merged)" \
+    || { rm -rf "${probe}"; return 1; }
+  CELL_FIXTURE_BRANCH="e2e/${RUN_ID}/cell-${NAME}"
+  push_disposable_branch "${probe}" "${CELL_FIXTURE_BRANCH}" || { rm -rf "${probe}"; CELL_FIXTURE_BRANCH=""; return 1; }
+  rm -rf "${probe}"
+  BROKEN_BRANCHES+=("${CELL_FIXTURE_BRANCH}")
+  GITOPS_REVISION="${CELL_FIXTURE_BRANCH}"
+  return 0
+}
+
 delete_broken_branches() {
   local b
   for b in "${BROKEN_BRANCHES[@]}"; do
@@ -348,6 +384,15 @@ fi
 grep -q "pin the same version" "${WORK_DIR}/mismatch-check.log" \
   || fail "check_gitops_contract.py failed, but not on the version-pair check (see ${WORK_DIR}/mismatch-check.log)"
 pass "check_gitops_contract.py's version-pair check caught the mismatched karpenter/karpenter-crd bump"
+
+# ------------------------------------- A2. per-run cell fixture (any NAME)
+
+ensure_cell_fixture || fail "could not prepare gitops/cells/${NAME}/ for this run (NAME=${NAME})"
+if [[ -n "${CELL_FIXTURE_BRANCH}" ]]; then
+  pass "pushed disposable cell fixture gitops/cells/${NAME}/ (copied from example-cell) to ${CELL_FIXTURE_BRANCH}; using it as this run's GITOPS_REVISION"
+else
+  pass "gitops/cells/${NAME}/ already exists at ${GITOPS_REVISION}; no disposable fixture needed"
+fi
 
 # ---------------------------------------- B0. build one cell at GITOPS_REVISION
 

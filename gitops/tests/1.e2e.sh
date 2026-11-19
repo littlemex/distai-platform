@@ -109,6 +109,7 @@ VPC_ID=""
 IDC_GROUP_ID=""
 BOOTSTRAP_RAN=0
 BROKEN_BRANCHES=()
+CELL_FIXTURE_BRANCH=""
 
 # ---------------------------------------------------------------- helpers
 
@@ -256,6 +257,54 @@ checkout_revision_as() {
     || git -C "${clone}" checkout --quiet -B "${branch}" "origin/${revision}"
 }
 
+# ensure_cell_fixture: cells.ApplicationSet.yaml's Git file generator reads
+# gitops/cells/{{name}}/{capacity-pool,smoke}/*.yaml from this checkout at
+# GITOPS_REVISION; this PR ships exactly one such fixture,
+# gitops/cells/example-cell/. Every concurrent run needs its own NAME (so
+# it gets its own STATE_KEY, Identity Center group and foundation cell,
+# never colliding with another owner's run on the same state lock), and a
+# NAME other than "example-cell" has no matching directory at
+# GITOPS_REVISION -- without this step the capacity step would generate
+# nothing for it (confirmed on a real cluster prior to this fix). If
+# GITOPS_REVISION already has a gitops/cells/${NAME}/ directory (true for
+# NAME=example-cell, or a future PR shipping a second named fixture),
+# nothing is created and CELL_FIXTURE_BRANCH stays empty. Otherwise this
+# clones GITOPS_REVISION, copies gitops/cells/example-cell/ to
+# gitops/cells/${NAME}/ unchanged, pushes the result to this run's own
+# disposable branch (the same authenticated, self-cleaning mechanism as
+# every other disposable branch here -- BROKEN_BRANCHES already deletes
+# it in cleanup()), and reassigns the script's own GITOPS_REVISION to that
+# branch, so every later comparison against GITOPS_REVISION (the Secret's
+# annotation, the root Application's targetRevision, every
+# checkout_revision_as derived from it below) is against the revision
+# this run actually bootstrapped from, not the revision it started with.
+ensure_cell_fixture() {
+  local probe
+  probe="$(mktemp -d)"
+  git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${probe}" || { rm -rf "${probe}"; return 1; }
+  checkout_revision_as "${probe}" "fixture-probe" "${GITOPS_REVISION}" || { rm -rf "${probe}"; return 1; }
+  if [[ -d "${probe}/gitops/cells/${NAME}" ]]; then
+    rm -rf "${probe}"
+    return 0
+  fi
+  if [[ ! -d "${probe}/gitops/cells/example-cell" ]]; then
+    echo "gitops/cells/example-cell is missing at ${GITOPS_REVISION}; cannot derive a fixture for NAME=${NAME}" >&2
+    rm -rf "${probe}"
+    return 1
+  fi
+  cp -r "${probe}/gitops/cells/example-cell" "${probe}/gitops/cells/${NAME}" || { rm -rf "${probe}"; return 1; }
+  git -C "${probe}" add "gitops/cells/${NAME}" || { rm -rf "${probe}"; return 1; }
+  git -C "${probe}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
+    commit --quiet -m "test: disposable cell fixture gitops/cells/${NAME}/, copied from example-cell (never merged)" \
+    || { rm -rf "${probe}"; return 1; }
+  CELL_FIXTURE_BRANCH="e2e/${RUN_ID}/cell-${NAME}"
+  push_disposable_branch "${probe}" "${CELL_FIXTURE_BRANCH}" || { rm -rf "${probe}"; CELL_FIXTURE_BRANCH=""; return 1; }
+  rm -rf "${probe}"
+  BROKEN_BRANCHES+=("${CELL_FIXTURE_BRANCH}")
+  GITOPS_REVISION="${CELL_FIXTURE_BRANCH}"
+  return 0
+}
+
 # report_stale_disposable_branches: preflight hygiene. Lists every remote
 # e2e/* branch older than a day (informational -- a run that was killed
 # before its own EXIT trap ran leaves branches only a human, or this
@@ -376,6 +425,15 @@ aws sts get-caller-identity --query Account --output text >/dev/null \
 pass "preflight: tools present, credentials valid, bootstrap.sh present"
 info "run ${RUN_ID}, work dir ${WORK_DIR}, repo ${GITOPS_REPO_URL}"
 report_stale_disposable_branches
+
+# ------------------------------------- 0. per-run cell fixture (any NAME)
+
+ensure_cell_fixture || fail "could not prepare gitops/cells/${NAME}/ for this run (NAME=${NAME})"
+if [[ -n "${CELL_FIXTURE_BRANCH}" ]]; then
+  pass "pushed disposable cell fixture gitops/cells/${NAME}/ (copied from example-cell) to ${CELL_FIXTURE_BRANCH}; using it as this run's GITOPS_REVISION"
+else
+  pass "gitops/cells/${NAME}/ already exists at ${GITOPS_REVISION}; no disposable fixture needed"
+fi
 
 # -------------------------------------- 1. temporary Identity Center group
 #

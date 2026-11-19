@@ -73,19 +73,29 @@ runner/run.sh --ref <this-PR's-branch> -- bash gitops/tests/0.static.sh
 For `1.e2e.sh`/`2.upgrade.sh`, export the same variables
 `infra/foundation/tests/README.md`'s "End-to-end test" section documents
 (`AWS_REGION`, `NAME`, `STATE_BUCKET`, `STATE_REGION`,
-`ADMIN_PRINCIPAL_ARN`, `MY_CIDR`), plus this layer's own. **`NAME` must be
-`example-cell`** for this PR: `cells.ApplicationSet.yaml`'s Git file
-generator reads `gitops/cells/{{ .name }}/capacity-pool/*.yaml` and
-`.../smoke/*.yaml` from the checked-in repository itself (decision 9
-ships exactly one such pair, under `gitops/cells/example-cell/`, matching
-`infra/foundation/README.md`'s own `NAME=example-cell` convention); any
-other `NAME` has no matching directory, so the `capacity`/smoke step
-never generates an Application at all (confirmed on a real cluster: "no
-Application named `<NAME>-capacity-pool-<pool>` appeared" with any other
-`NAME`) -- the mechanism is otherwise fine, there is just nothing at that
-path to generate from. Future PRs that make the `capacity-pool`/`smoke`
-fixture discoverable by any cell name (not just this one checked-in
-example) should relax this:
+`ADMIN_PRINCIPAL_ARN`, `MY_CIDR`), plus this layer's own. **`NAME` can be
+anything** (pick one no other concurrent run on this account/Region is
+using -- it is also the Terraform state key and the Identity Center group
+display name, so two runs sharing one `NAME` collide on the state lock):
+`cells.ApplicationSet.yaml`'s Git file generator reads
+`gitops/cells/{{ .name }}/capacity-pool/*.yaml` and `.../smoke/*.yaml`
+from the checked-in repository itself, and decision 9 ships exactly one
+such pair, under `gitops/cells/example-cell/` (matching
+`infra/foundation/README.md`'s own `NAME=example-cell` convention) -- a
+`NAME` with no matching directory would otherwise leave the
+`capacity`/smoke step generating nothing at all (confirmed on a real
+cluster before this was fixed: "no Application named
+`<NAME>-capacity-pool-<pool>` appeared"). Both scripts now close this gap
+themselves, before touching any AWS resource: if `GITOPS_REVISION` has no
+`gitops/cells/${NAME}/` directory, each clones `GITOPS_REVISION`, copies
+`gitops/cells/example-cell/` to `gitops/cells/${NAME}/` unchanged, pushes
+the result to this run's own disposable branch
+(`refs/heads/e2e/<run-id>/cell-<NAME>`, deleted again in `cleanup()` like
+every other disposable branch here), and bootstraps from that branch
+instead of the literal `GITOPS_REVISION` for the rest of the run. `NAME`
+and `example-cell` collide with nothing: a run with `NAME=example-cell`
+finds the checked-in directory already there and creates no branch at
+all.
 
 ```bash
 export GITOPS_REVISION=<this PR's branch, already pushed to GitHub>
