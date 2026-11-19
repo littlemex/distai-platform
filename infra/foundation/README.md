@@ -10,12 +10,12 @@
 | EKS managed add-ons `vpc-cni`, `kube-proxy`, `eks-pod-identity-agent`, `coredns` with pinned versions; `vpc-cni` gets its AWS credentials through a Pod Identity association bound to `kube-system/aws-node`, and has `enableNetworkPolicy = "true"` | Capacity reservations, NetworkPolicy objects |
 | Karpenter prerequisites: controller IAM role associated with `kube-system/karpenter` through EKS Pod Identity, node IAM role with an `EC2_LINUX` access entry, encrypted interruption SQS queue and five EventBridge rules | Observability stack |
 | Optional managed Argo CD capability (hub cells) with a `role_mappings` list, so IAM Identity Center groups can be given the Argo CD `ADMIN`, `EDITOR` or `VIEWER` role | Per-team AppProjects, anything that needs a running Karpenter |
-| Teardown guard that removes Karpenter-launched instances before the network is destroyed | |
+| Two teardown guards: one removes Karpenter-launched instances before the cluster is destroyed, one removes what the VPC CNI and EKS leave in the VPC before the network is destroyed, also after a failed `apply` | |
 
 ## Prerequisites
 
 - Terraform 1.14.0 or later. The AWS provider is constrained to `~> 6.73` and locked in `.terraform.lock.hcl`.
-- AWS CLI v2 and `bash` on the machine that runs `terraform destroy` (the teardown guard calls the AWS CLI), and `kubectl` to use the cluster.
+- AWS CLI v2 and `bash` on the machine that runs `terraform destroy` (the teardown guards call the AWS CLI), and `kubectl` to use the cluster.
 - AWS credentials allowed to create VPC, EC2, EKS, IAM, SQS, EventBridge and CloudWatch Logs resources in the target account and Region.
 - An S3 bucket for Terraform state, in a Region of your choice. State locking uses the S3 lock file (`use_lockfile`), so no DynamoDB table is needed.
 - A cell name that no other cell in the account uses, in any Region. IAM role and policy names include it, and IAM names are global to the account.
@@ -109,15 +109,19 @@ An EC2NodeClass selects the subnets and the security group of the cell with `sub
 terraform destroy
 ```
 
-Run it with the same variables as `apply`. Karpenter is installed outside Terraform, so the instances it launches are not in this state, and if they are still running when the network is destroyed, their network interfaces block the deletion of the subnets and of the cluster security group. The teardown guard (`teardown.tf`, `scripts/teardown-guard.sh`) handles this during `terraform destroy` in this order:
+Run it with the same variables as `apply`, also after an `apply` that failed part-way. Two kinds of resources in the cell's VPC are not in this state and block the deletion of the network if they are still there: the instances Karpenter launches (Karpenter is installed outside Terraform), and the network interfaces the VPC CNI creates (description `aws-K8S-*`) that stay behind detached when their node is terminated, together with the cluster security group that EKS creates and does not delete while such an interface still uses it. Two destroy-time guards (`teardown.tf`) handle them during `terraform destroy` in this order:
 
 1. Terraform detaches the permission policies of the Karpenter controller role, so a running Karpenter can no longer launch instances.
-2. The guard terminates every instance in the cell's VPC that has the tag `karpenter.sh/nodepool` and the tag `eks:eks-cluster-name = <name>`, waits until they are terminated (repeating up to five rounds), and then deletes detached VPC CNI network interfaces in the VPC (description `aws-K8S-*`), launch templates tagged `eks:eks-cluster-name = <name>` that also carry the tag key `karpenter.k8s.aws/ec2nodeclass` (how Karpenter v1 tags the templates it creates), and the instance profiles that hold the node role and carry Karpenter's tag `kubernetes.io/cluster/<name> = owned`.
-3. Terraform destroys the cluster, the node role and the network.
+2. The teardown guard (`scripts/teardown-guard.sh`) terminates every instance in the cell's VPC that has the tag `karpenter.sh/nodepool` and the tag `eks:eks-cluster-name = <name>`, waits until they are terminated (repeating up to five rounds), and then deletes detached VPC CNI network interfaces in the VPC, launch templates tagged `eks:eks-cluster-name = <name>` that also carry the tag key `karpenter.k8s.aws/ec2nodeclass` (how Karpenter v1 tags the templates it creates), and the instance profiles that hold the node role and carry Karpenter's tag `kubernetes.io/cluster/<name> = owned`.
+3. Terraform destroys the cluster, the node groups and the node role.
+4. The network guard (`scripts/network-guard.sh`) checks that no cluster named `<name>` exists any more, waits up to 10 minutes for the VPC CNI network interfaces left in the VPC to become detached and deletes them, and then deletes the security group in the VPC tagged `aws:eks:cluster-name = <name>`, retrying for up to 10 minutes while it is still in use. It terminates no instance.
+5. Terraform destroys the network.
 
-If the guard fails, `terraform destroy` stops before any network resource is removed; fix the cause and run `terraform destroy` again. The guard first checks that the AWS CLI acts on the same account as Terraform and stops otherwise. It runs with the credentials of the caller, which need `sts:GetCallerIdentity`, `ec2:DescribeInstances`, `ec2:TerminateInstances`, `ec2:DescribeNetworkInterfaces`, `ec2:DeleteNetworkInterface`, `ec2:DescribeLaunchTemplates`, `ec2:DeleteLaunchTemplate`, `iam:ListInstanceProfilesForRole`, `iam:ListInstanceProfileTags`, `iam:RemoveRoleFromInstanceProfile` and `iam:DeleteInstanceProfile`.
+The teardown guard is created last, after the cluster and the system node group, so after a failed `apply` it may be missing; Karpenter is not installed then, so there is nothing for it to do. The network guard is created right after the subnets, and the cluster depends on it, so it is in the state whenever the cluster is.
 
-The guard removes only what Karpenter leaves in AWS. Resources that in-cluster controllers create from Kubernetes objects (load balancers from `Service` or `Ingress` objects, EBS volumes from `PersistentVolumeClaim` objects) belong to the layers that create those objects and must be removed there before the foundation is destroyed.
+If a guard fails, `terraform destroy` stops before any network resource is removed; fix the cause and run `terraform destroy` again. Each guard first checks that the AWS CLI acts on the same account as Terraform and stops otherwise. They run with the credentials of the caller, which need `sts:GetCallerIdentity`, `ec2:DescribeInstances`, `ec2:TerminateInstances`, `ec2:DescribeNetworkInterfaces`, `ec2:DeleteNetworkInterface`, `ec2:DescribeLaunchTemplates`, `ec2:DeleteLaunchTemplate`, `ec2:DescribeSecurityGroups`, `ec2:DeleteSecurityGroup`, `eks:DescribeCluster`, `iam:ListInstanceProfilesForRole`, `iam:ListInstanceProfileTags`, `iam:RemoveRoleFromInstanceProfile` and `iam:DeleteInstanceProfile`.
+
+The guards remove only what Karpenter, the VPC CNI and EKS leave in AWS. Resources that in-cluster controllers create from Kubernetes objects (load balancers from `Service` or `Ingress` objects, EBS volumes from `PersistentVolumeClaim` objects) belong to the layers that create those objects and must be removed there before the foundation is destroyed.
 
 ## Design notes
 
@@ -133,6 +137,6 @@ The guard removes only what Karpenter leaves in AWS. Resources that in-cluster c
 ## Known limits
 
 - Add-on versions are pinned for Kubernetes 1.37 only. Another `kubernetes_version` is rejected at plan time until an entry is added to `local.addon_versions` in `eks.tf` (`aws eks describe-addon-versions --kubernetes-version <version>` lists the versions).
-- The guard is a destroy-time provisioner. It does not run if `teardown.tf` is removed from the configuration or the `terraform_data.teardown_guard` resource is removed from the state before `terraform destroy`.
+- The guards are destroy-time provisioners. A guard does not run if `teardown.tf` is removed from the configuration or its resource (`terraform_data.teardown_guard`, `terraform_data.network_guard`) is removed from the state before `terraform destroy`. A cell applied before `terraform_data.network_guard` existed gets it with the next `terraform apply` (one resource to add, no other change); run that before `terraform destroy`.
 - The control plane log group keeps logs for 30 days and is deleted with the cell.
 - IPv4 only.
