@@ -837,8 +837,23 @@ pass "${APP_KARPENTER_CRD} owns the CRDs (${crds_owned_by_karpenter_crd}); ${APP
 
 wait_until 900 15 "capacity-pool Application Healthy and Synced" app_healthy_synced "${APP_CAPACITY_POOL}" \
   || fail "${APP_CAPACITY_POOL} did not reach Healthy+Synced: health=$(app_health "${APP_CAPACITY_POOL}") sync=$(app_sync "${APP_CAPACITY_POOL}")"
-wait_until 900 15 "smoke Application Healthy and Synced" app_healthy_synced "${APP_SMOKE}" \
-  || fail "${APP_SMOKE} did not reach Healthy+Synced: health=$(app_health "${APP_SMOKE}") sync=$(app_sync "${APP_SMOKE}")"
+wait_until 900 15 "smoke Application Healthy and Synced" app_healthy_synced "${APP_SMOKE}" || {
+  # Diagnostic-only addition (verify/cb-batch, not for merge): a 2026-11-20
+  # dry run found this specific app stuck at OutOfSync for the full 900s
+  # when the smoke chart's ClusterQueue carries a second resourceGroup
+  # (the gpuQuota opt-in). Capture the live object and ArgoCD's own
+  # per-resource diff BEFORE the fail/teardown destroys the evidence, so
+  # the root cause can actually be read back, not just "it timed out."
+  info "smoke Application did not converge -- dumping diagnostics to the log before failing (not just to disk, since teardown may prune the work dir)"
+  echo "=== DIAG: ${APP_SMOKE} status.resources ==="
+  k -n argocd get application "${APP_SMOKE}" -o jsonpath='{.status.resources}' 2>&1 || true
+  echo "=== DIAG: ${APP_SMOKE} status.conditions ==="
+  k -n argocd get application "${APP_SMOKE}" -o jsonpath='{.status.conditions}' 2>&1 || true
+  echo "=== DIAG: live ClusterQueue(s) ==="
+  k get clusterqueue -o yaml 2>&1 || true
+  echo "=== DIAG: end ==="
+  fail "${APP_SMOKE} did not reach Healthy+Synced: health=$(app_health "${APP_SMOKE}") sync=$(app_sync "${APP_SMOKE}") -- see DIAG blocks above in this log"
+}
 pass "${APP_CAPACITY_POOL} and ${APP_SMOKE} (capacity step) reached Healthy+Synced"
 
 mapfile -t nodepools < <(k get nodepools -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$')

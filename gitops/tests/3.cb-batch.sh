@@ -102,7 +102,12 @@ if run_step 20; then
   # default and that disk/disruption fix are deliberately two independent
   # layers of the same fix, not a substitute for each other.
   CB_HEALTH_IMAGE="${CB_HEALTH_IMAGE:-public.ecr.aws/amazonlinux/amazonlinux:2023}"
-  k run cb-health --rm -i --restart=Never --image="${CB_HEALTH_IMAGE}" \
+  # 2026-11-19 dry-run finding: this pod never requested nvidia.com/gpu, so
+  # the device plugin never injected the driver/nvidia-smi into it at all --
+  # this was the real cause of "nvidia-smi: command not found", not the base
+  # image. --limits=nvidia.com/gpu=1 is required for the device plugin to
+  # grant access regardless of which image is used.
+  k run cb-health --rm -i --restart=Never --image="${CB_HEALTH_IMAGE}" --limits=nvidia.com/gpu=1 \
     --overrides="{\"metadata\":{\"annotations\":{\"karpenter.sh/do-not-disrupt\":\"true\"}},\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"${NODE}\"},\"tolerations\":[{\"operator\":\"Exists\"}]}}" \
     -- bash -c '
       echo "--- nvidia-smi -L ---"; nvidia-smi -L
