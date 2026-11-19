@@ -1,0 +1,61 @@
+# Parameter file for cells.ApplicationSet.yaml's Git file generator
+# (RFC #25 Decision 2/3), own cell for CB dry-run #2 (verify/cb-batch,
+# cell name dp-cbp-r2, unique per the OWNER-BRIEF hard safety rule --
+# never reuses or edits another owner's cell, e.g. dp-a19-gpu). Same shape
+# as gitops/cells/dp-a19-gpu/capacity-pool/gpu.yaml, deliberately NOT a
+# copy-edit of that file (dp-a19-gpu belongs to Issue #19's own test
+# suite / a live cluster of that name elsewhere; this plan's own dry runs
+# get their own cell directory instead of touching it).
+#
+# Two cheap GPU instances (g6e.2xlarge, 1 GPU each) so the Node A/Node B
+# per-node-lane and 2-node isolation prep items (plan.md section 2, "three
+# specific isolation mechanisms") can actually be exercised with two real
+# nodes during this dry run, not just unit-tested in isolation.
+addon: capacity-pool-gpu
+wave: capacity
+dir: gitops/charts/capacity-pool
+namespace: kube-system
+values:
+  pool:
+    name: gpu
+    labels:
+      distai.dev/nvidia-gpu-method: device-plugin
+    requirements:
+      - key: karpenter.sh/capacity-type
+        operator: In
+        values: ["spot"]
+      - key: kubernetes.io/arch
+        operator: In
+        values: ["amd64"]
+      - key: karpenter.k8s.aws/instance-family
+        operator: In
+        values: ["g6e"]
+      - key: node.kubernetes.io/instance-type
+        operator: In
+        values: ["g6e.2xlarge"]
+    # 150Gi root volume: the 2026-11-20 dry-run failure (disk-pressure
+    # eviction from a multi-GB CUDA/EFA/NCCL check image on an undersized
+    # default root volume, which Karpenter then read as an empty node and
+    # consolidated) is fixed at the chart level (gitops/charts/capacity-
+    # pool/templates/ec2nodeclass.yaml, opt-in blockDeviceMappings) --
+    # this cell turns that opt-in on.
+    blockDeviceMappings:
+      - deviceName: /dev/xvda
+        ebs:
+          volumeSize: 150Gi
+          volumeType: gp3
+          deleteOnTermination: true
+    # 10m, not the chart default 60s: gives a health-check pod's image
+    # pull room to finish before Karpenter considers the node for
+    # consolidation (same incident).
+    disruption:
+      consolidationPolicy: WhenEmptyOrUnderutilized
+      consolidateAfter: 10m
+    limits:
+      # Two g6e.2xlarge nodes (8 vCPU each) plus headroom for one retry.
+      cpu: "20"
+valuesFrom:
+  - helmKey: clusterName
+    param: name
+  - helmKey: nodeRole
+    annotationKey: distai.dev.annotations/karpenter-node-role

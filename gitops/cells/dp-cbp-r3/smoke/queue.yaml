@@ -1,0 +1,16 @@
+# Parameter file for cells.ApplicationSet.yaml's Git file generator
+# (RFC #25 Decision 2/3/9). Dedicated diagnostic cell (dp-cbp-r3), separate
+# from dp-cbp-r2, used only to root-cause the gpuQuota/ClusterQueue
+# OutOfSync a 2026-11-19 dry run found on dp-cbp-r2 (see that cell's own
+# queue.yaml, which disables gpuQuota pending this investigation).
+# gpuQuota is RE-ENABLED here on purpose, with the diagnostic capture this
+# branch added to gitops/tests/1.e2e.sh's smoke-sync wait, to get a live
+# kubectl diff of the ClusterQueue instead of a bare timeout.
+addon: smoke
+wave: capacity
+dir: gitops/charts/smoke
+namespace: distai-smoke
+values:
+  clusterQueue:
+    resourceFlavor: gpu
+    gpuQuota: "2"
