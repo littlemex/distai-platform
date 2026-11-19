@@ -30,10 +30,10 @@ spec:
 
 ---
 # Source: capacity-pool/templates/nodepool.yaml
-# One NodePool per release of this chart (RFC #25 Decision 9: a minimal
-# CPU-only skeleton - one capacity type, no -rsv/-od/-flex ordering across
-# several NodePools of this same pool name; #17's own PR adds that on top
-# of this chart, unchanged in name or shape).
+# One NodePool per release of this chart (RFC #17: one NodePool per
+# ResourceFlavor; RFC #25 Decision 9: this chart's own name and the three
+# kinds it renders do not change between the minimal CPU-only skeleton and
+# the -rsv/-od/-flex extension, only the values do).
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
