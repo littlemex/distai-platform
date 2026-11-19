@@ -11,7 +11,7 @@ check them either.
 
 | Script | What it checks | Needs AWS | Duration |
 | --- | --- | --- | --- |
-| `0.static.sh` | Required files, `bash -n`/`shellcheck` on every script, `yamllint` on every literal (non-templated) tracked YAML file, the structural contract of every `addon.yaml`/cells parameter file and both ApplicationSets (`check_gitops_contract.py`), `helm lint`/`helm template` of `charts/capacity-pool` and `charts/smoke`, and `kubeconform` of the rendered output plus both ApplicationSets and the root Application against pinned upstream + CRD-catalog schemas | No | About 2 to 3 minutes |
+| `0.static.sh` | Required files, `bash -n`/`shellcheck` on every `*.sh` under `gitops/` (including this suite's own three scripts, not only `bootstrap.sh`), `yamllint` on every literal (non-templated) tracked YAML file, the structural contract of every `addon.yaml`/cells parameter file and both ApplicationSets (`check_gitops_contract.py`), `helm lint`/`helm template` of `charts/capacity-pool` and `charts/smoke`, `kubeconform` of the rendered output plus both ApplicationSets and the root Application against pinned upstream + CRD-catalog schemas, and `check_pinned_crds.py` validating the rendered CRD-backed objects against each pinned chart's own exact CRD versions | No | About 2 to 3 minutes |
 | `1.e2e.sh` | Builds one foundation cell (with a temporary Identity Center group), the before/after RBAC change on the capability's own access entry, bootstrap idempotency / `--revision`-only re-run / wrong-cluster abort, the `crds`→`controllers`→`capacity` ordering (including two deliberately broken steps), the OCI chart and Git-file-generator-revision checks, no shared CRD between `karpenter-crd` and `karpenter`, the admin smoke canary through Kueue and Karpenter, one accidental generator-entry loss, one full bootstrap-object teardown and re-adopt, then destroy and leftovers | Yes | About 45 to 60 minutes |
 | `2.upgrade.sh` | The mechanical version-pair check (decision 6) on a mismatched `karpenter`/`karpenter-crd` bump, then a matched bump against a live cell: no `Application` goes `Degraded`, the `NodePool`-launched instance is not replaced, and the canary pod stays `Running` throughout | Yes | About 50 to 65 minutes |
 
@@ -60,14 +60,16 @@ Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
   this test does not guess a "next" version, since nothing here can assume
   upstream's release cadence.
 
-## Running on the EC2 test runner
+## Running these tests
 
-Per the maintainer rule (2026-11-19), these never run on a developer
-machine. From the repository root, on the Mac:
+Run from a machine with the AWS CLI v2, `kubectl`, `git` and `python3` on
+`PATH`, and credentials for the account/Region under test (see
+`infra/foundation/tests/README.md`'s own prerequisites for the IAM calls
+needed). `0.static.sh` needs no AWS credentials at all:
 
 ```bash
-cd /Users/akazawt/works/data-science/claudecode/.claude/skills/distai-platform
-runner/run.sh --ref <this-PR's-branch> -- bash gitops/tests/0.static.sh
+cd gitops/tests
+./0.static.sh
 ```
 
 For `1.e2e.sh`/`2.upgrade.sh`, export the same variables
@@ -98,41 +100,30 @@ finds the checked-in directory already there and creates no branch at
 all.
 
 ```bash
+export AWS_PROFILE="${AWS_PROFILE:-default}"
+export AWS_REGION=<region with an IAM Identity Center instance>
+export NAME=<cell name unused by any other cell in this account, any region>
+export STATE_BUCKET=<your Terraform state bucket>
+export STATE_REGION=<region of that bucket>
+export ADMIN_PRINCIPAL_ARN=<the principal running this test>
+export MY_CIDR="$(curl -fsS https://checkip.amazonaws.com)/32"
 export GITOPS_REVISION=<this PR's branch, already pushed to GitHub>
 export ARGOCD_IDC_INSTANCE_ARN=<arn:aws:sso:::instance/ssoins-...>
 export ARGOCD_IDC_REGION=<region of the Identity Center instance>
 export ARGOCD_IDC_IDENTITY_STORE_ID=$(aws sso-admin describe-instance \
   --instance-arn "${ARGOCD_IDC_INSTANCE_ARN}" --query IdentityStoreId --output text)
-ARN=$(runner/run.sh info | sed -n 's/^instance_role_arn=//p')
-IP=$(runner/run.sh info | sed -n 's/^public_ip=//p')
-runner/run.sh --ref "${GITOPS_REVISION}" \
-  --env AWS_REGION=<region with an IAM Identity Center instance> \
-  --env NAME=<cell name unused by any other cell in this account, any region> \
-  --env STATE_BUCKET=<your Terraform state bucket> \
-  --env STATE_REGION=<region of that bucket> \
-  --env ADMIN_PRINCIPAL_ARN="$ARN" \
-  --env MY_CIDR="${IP}/32" \
-  --env GITOPS_REVISION="${GITOPS_REVISION}" \
-  --env ARGOCD_IDC_INSTANCE_ARN="${ARGOCD_IDC_INSTANCE_ARN}" \
-  --env ARGOCD_IDC_REGION="${ARGOCD_IDC_REGION}" \
-  --env ARGOCD_IDC_IDENTITY_STORE_ID="${ARGOCD_IDC_IDENTITY_STORE_ID}" \
-  --env AWS_PROFILE=default \
-  --detach \
-  -- bash gitops/tests/1.e2e.sh
+cd gitops/tests
+./1.e2e.sh 2>&1 | tee "/tmp/gitops-e2e-$(date +%Y%m%d%H%M%S).log"
+# ./2.upgrade.sh instead, plus export UPGRADE_TO_KARPENTER_VERSION=<x>
 ```
-
-(swap the trailing command and add `--env UPGRADE_TO_KARPENTER_VERSION=<x>`
-for `2.upgrade.sh`). As with `infra/foundation/tests/1.e2e.sh`,
-`AWS_PROFILE=default` on the runner (it authenticates via its IAM role
-through IMDS) and `MY_CIDR` is the runner's own public IP, not the Mac's.
 
 ## Acceptance criteria -> checks
 
 | Acceptance criterion (issue #25) | Checked by |
 | --- | --- |
-| OCI chart reference accepted; Git-file-generator `revision:` resolves from the same Matrix's Cluster generator | `1.e2e.sh` step 9 (`${APP_KARPENTER}` Healthy+Synced from an `oci://` source; its `targetRevision` matches the Secret's annotation) |
-| Before this PR's foundation change: no RBAC on the capability's access entry; after: `AmazonEKSClusterAdminPolicy` | `1.e2e.sh` steps 2-3 (same cell, `GITOPS_BASE_REF` then this checkout's `infra/foundation`) |
-| bootstrap.sh idempotent; `--revision`-only re-run updates the Secret annotation and root `Application`'s `targetRevision` together; wrong-cluster attempt aborts before any write | `1.e2e.sh` steps 5-7 (resourceVersion comparisons before/after each re-run) |
+| OCI chart reference accepted; Git-file-generator `revision:` resolves from the same Matrix's Cluster generator | `1.e2e.sh` step 9 (`${APP_KARPENTER}` Healthy+Synced from an `oci://` source; `${APP_CAPACITY_POOL}`'s `targetRevision` -- the `cells` ApplicationSet's own Git-file-generator `revision:` field, resolved from the Cluster generator's annotation -- matches the Secret's annotation; `${APP_KARPENTER}`'s own `targetRevision` is its pinned chart version, never a git revision, so it cannot be the check for this criterion) |
+| Before this PR's foundation change: no `AmazonEKSClusterAdminPolicy` association on the capability's access entry (it already carries the two built-in Argo-CD-capability-management policies); after: `AmazonEKSClusterAdminPolicy` added | `1.e2e.sh` steps 2-3 (same cell, `GITOPS_BASE_REF` then this checkout's `infra/foundation`) |
+| bootstrap.sh idempotent; `--revision`-only re-run updates the Secret annotation and root `Application`'s `targetRevision` together; wrong-cluster attempt aborts before any write | `1.e2e.sh` steps 5-7 (a `.spec`/annotation write-fingerprint, not a raw `resourceVersion`, compared before/after each re-run; step 7's 7a and 7b each forge one of decision 1's two fields independently) |
 | Cross-`Application` ordering evidenced by breaking `crds` and `kueue`, not asserted from documentation | `1.e2e.sh` step 12 (two disposable branches, each reverted and recovery confirmed) |
 | `karpenter-crd`/`karpenter` report no shared CRD | `1.e2e.sh` step 9 (`status.resources` kind=CustomResourceDefinition lists compared) |
 | `kueue`/`karpenter` Healthy before any `NodePool`-launched node exists; smoke canary admitted and a node launches | `1.e2e.sh` steps 9 and 11 |
@@ -163,10 +154,14 @@ silently:
 - **The capability role has no output.** Decision 1 says so explicitly
   ("no output exposes...; never read by the script or any Application").
   Both `infra/foundation/tests/1.e2e.sh` (this PR's own addition there) and
-  `gitops/tests/1.e2e.sh` find it the same way: the one `STANDARD` access
-  entry that is neither `ADMIN_PRINCIPAL_ARN` nor an ARN containing `NAME`.
-  If a future change adds a second such entry, this check needs a less
-  ambiguous signal.
+  `gitops/tests/1.e2e.sh` find it the same way: `aws eks describe-capability`'s
+  own `capability.roleArn` field. An elimination approach over
+  `list-access-entries` (the one `STANDARD` entry that is neither
+  `ADMIN_PRINCIPAL_ARN` nor an ARN containing `NAME`) was tried first and
+  is wrong -- `argocd.tf` names the role `${var.name}-argocd-capability`,
+  which embeds `NAME` too, so elimination always skips the entry this
+  check needs (confirmed on a real cluster: both checks matched the same
+  unrelated entry instead).
 - **`cluster_arn`'s partition is not pinned to `aws`.** The regex accepts
   any partition, since the issue only specifies "an ARN, never an API
   server URL."
@@ -178,18 +173,35 @@ silently:
   checks assert only what decision 4 claims is true in both branches
   (dependents fail to create; an unrelated chain is unaffected), not a
   specific controller mechanism.
-- **The idempotency and revision-update checks use `resourceVersion`,
-  not a content diff.** A `kubectl apply` of byte-identical content does
-  not change `resourceVersion`, so an unchanged value across two runs is
-  direct evidence of a true no-op; this is the same technique
-  `infra/foundation/tests/1.e2e.sh` uses for its own leftover detection,
-  applied here to Kubernetes objects instead of AWS resources.
-- **The wrong-cluster abort test forges only `cluster_arn`.** The live
-  kubeconfig still points at the real cluster, so the check exercises the
-  registration Secret's own cross-check (decision 1's second condition),
-  not the kubeconfig-endpoint one -- both conditions are real per the
-  issue, but a single run cannot violate both independently without two
-  separate kubeconfigs, which would need a second cluster.
+- **The idempotency check uses `resourceVersion` for the Secret and
+  AppProject, but a `.spec`-only fingerprint for the root Application.**
+  A `kubectl apply` of byte-identical content does not change
+  `resourceVersion`, so an unchanged value across two runs of an object
+  with no other writer is direct evidence of a true no-op -- true for the
+  Secret and AppProject, neither actively reconciled by anything.
+  Argo CD's own application-controller continuously rewrites the root
+  Application's `.status` independently of what `bootstrap.sh` writes
+  (confirmed on a real cluster: its `resourceVersion` moved between two
+  runs of `bootstrap.sh` with identical `--revision`, while the Secret's
+  and AppProject's did not), so a raw `resourceVersion` comparison on that
+  one object would report every run as "not idempotent" regardless of
+  what `bootstrap.sh` does; comparing only its `.spec` (the part
+  `bootstrap.sh` itself writes) is what the acceptance criterion is
+  actually about. The `--revision`-only re-run check instead compares the
+  Secret's own revision annotation and the root Application's
+  `targetRevision` field directly, which `bootstrap.sh` sets verbatim --
+  no fingerprint needed there.
+- **The wrong-cluster abort test exercises both of decision 1's
+  conditions, neither needing a second real cluster.** 7a forges
+  `cluster_arn` in a copy of `--tf-outputs`, leaving the live kubeconfig
+  pointed at the real cluster, so only the registration Secret's own
+  cross-check (decision 1's second condition) can catch it. 7b instead
+  forges `cluster_endpoint`, leaving `cluster_arn` correct, so only the
+  kubeconfig-vs-`cluster_endpoint` check (decision 1's first condition --
+  the one active on a genuine first bootstrap too, since it runs before
+  the Secret even exists) can catch it. A single run exercises both,
+  independently, by forging a different field each time rather than by
+  pointing at a second cluster.
 - **No separate experiment for Karpenter's OCI chart `skipCrds` content.**
   Checked structurally by `check_gitops_contract.py` (acceptance-criterion-
   adjacent, not itself one of the nine criteria) and confirmed in

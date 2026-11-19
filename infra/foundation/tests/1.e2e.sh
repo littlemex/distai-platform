@@ -220,8 +220,7 @@ pass "terraform apply ($(($(date +%s) - apply_start))s)"
 
 for o in cluster_name cluster_endpoint cluster_certificate_authority_data region \
   vpc_id node_security_group_id karpenter_controller_role_arn \
-  karpenter_node_role_name karpenter_interruption_queue_name \
-  cluster_arn argocd_namespace; do
+  karpenter_node_role_name karpenter_interruption_queue_name cluster_arn; do
   v="$(tf_out "${o}" 2>/dev/null)" || fail "output ${o} is missing"
   [[ -n "${v}" ]] || fail "output ${o} is empty"
 done
@@ -229,13 +228,21 @@ done
 # Terraform omits a root output from state entirely when its value is exactly
 # null (confirmed on 1.17.2), so `terraform output -json <name>` then fails
 # with "Output ... not found" instead of printing null. outputs.tf uses
-# try(aws_eks_capability.argocd[0].arn, null), matching the README contract
-# ("null when not created"), so that failure means the same thing as null here.
+# try(aws_eks_capability.argocd[0].arn, null) for argocd_capability_arn and
+# try(aws_eks_capability.argocd[0]...namespace, null) for argocd_namespace
+# (issue #25 decision 1), matching the README contract ("null when not
+# created") for both -- so that failure means the same thing as null here.
+# Neither can go in the blanket "must be non-empty" loop above: both are
+# genuinely null in the common, lighter default run (ARGOCD_* unset, no
+# capability created), which the loop would otherwise always fail.
 argocd_arn_json="$(tf output -json argocd_capability_arn 2>/dev/null)" || argocd_arn_json="null"
+argocd_namespace_json="$(tf output -json argocd_namespace 2>/dev/null)" || argocd_namespace_json="null"
 if [[ "${ARGOCD_JSON}" == "null" ]]; then
   [[ "${argocd_arn_json}" == "null" ]] || fail "argocd_capability_arn is not null while argocd is unset"
+  [[ "${argocd_namespace_json}" == "null" ]] || fail "argocd_namespace is not null while argocd is unset"
 else
   [[ "${argocd_arn_json}" != "null" ]] || fail "argocd_capability_arn is missing while argocd is set"
+  [[ "${argocd_namespace_json}" != "null" ]] || fail "argocd_namespace is missing while argocd is set"
 fi
 pass "all thirteen outputs present"
 
@@ -348,25 +355,22 @@ if [[ "${ARGOCD_JSON}" != "null" ]]; then
   # Issue #25 decision 1: this layer's argocd.tf also creates one
   # aws_eks_access_policy_association binding the capability's own IAM role
   # to AmazonEKSClusterAdminPolicy at type=cluster, since AWS does not grant
-  # the capability's access entry any RBAC by default. No output exposes the
-  # capability role's ARN (the association is a direct Terraform resource
-  # reference the RFC says nothing else needs to read), so this test finds
-  # the role the same way a human would: it is the one STANDARD access entry
-  # on the cluster that is neither ADMIN_PRINCIPAL_ARN nor a node role.
-  all_entries="$(aws eks list-access-entries --cluster-name "${CLUSTER}" --query 'accessEntries' --output text)" \
-    || fail "aws eks list-access-entries --cluster-name ${CLUSTER}"
-  capability_role_arn=""
-  for entry in ${all_entries}; do
-    [[ "${entry}" == "${ADMIN_PRINCIPAL_ARN}" ]] && continue
-    [[ "${entry}" == *":role/"*"${NAME}"* ]] && continue # node / Karpenter roles embed NAME
-    entry_type="$(aws eks describe-access-entry --cluster-name "${CLUSTER}" --principal-arn "${entry}" \
-      --query 'accessEntry.type' --output text 2>/dev/null)"
-    [[ "${entry_type}" == "STANDARD" ]] || continue
-    capability_role_arn="${entry}"
-    break
-  done
-  [[ -n "${capability_role_arn}" ]] \
-    || fail "could not find the Argo CD capability's own access entry among: ${all_entries}"
+  # the capability's access entry any RBAC by default. No Terraform *output*
+  # exposes the capability role's ARN (the association is a direct Terraform
+  # resource reference the RFC says nothing else needs to read) -- but
+  # DescribeCapability's own response carries the capability's roleArn
+  # directly, so find it there rather than by elimination over
+  # list-access-entries: argocd.tf names the role
+  # "${var.name}-argocd-capability", which embeds NAME, the same substring
+  # an elimination-by-NAME approach would use to skip node/Karpenter roles,
+  # so it would skip the very entry this check needs (this is exactly the
+  # bug gitops/tests/1.e2e.sh's own identical check hit and fixed first;
+  # ported here).
+  capability_role_arn="$(aws eks describe-capability --cluster-name "${CLUSTER}" \
+    --capability-name "${ARGOCD_CAPABILITY_NAME}" --query 'capability.roleArn' --output text)" \
+    || fail "aws eks describe-capability --cluster-name ${CLUSTER} --capability-name ${ARGOCD_CAPABILITY_NAME}"
+  [[ -n "${capability_role_arn}" && "${capability_role_arn}" != "None" ]] \
+    || fail "capability ${ARGOCD_CAPABILITY_NAME} has no roleArn"
   capability_policies="$(aws eks list-associated-access-policies --cluster-name "${CLUSTER}" \
     --principal-arn "${capability_role_arn}" --query 'associatedAccessPolicies[].policyArn' --output text)" \
     || fail "aws eks list-associated-access-policies --principal-arn ${capability_role_arn}"

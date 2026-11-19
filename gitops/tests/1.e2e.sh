@@ -10,8 +10,11 @@
 #      templated from the Cluster generator (decision 2) each reach a real
 #      Synced object;
 #   2. before this PR's infra/foundation change, the capability's access
-#      entry has no RBAC; after it, AmazonEKSClusterAdminPolicy is
-#      associated -- both by a direct `aws eks` call, on the same cell;
+#      entry has no AmazonEKSClusterAdminPolicy association (it already
+#      carries the two built-in Argo-CD-capability-management policies,
+#      which let the capability manage itself, not arbitrary cluster
+#      objects); after it, AmazonEKSClusterAdminPolicy is associated too
+#      -- both by a direct `aws eks` call, on the same cell;
 #   3. bootstrap.sh's three objects are idempotent, a --revision-only
 #      re-run updates the Secret annotation and root Application's
 #      targetRevision together, and a wrong-cluster attempt aborts before
@@ -39,12 +42,16 @@
 #   ARGOCD_IDC_REGION, ARGOCD_IDC_IDENTITY_STORE_ID (the Identity Store ID
 #   behind that instance ARN -- `aws sso-admin describe-instance` prints
 #   it; this test creates and deletes its own temporary group, unlike the
-#   foundation e2e which takes pre-existing group IDs).
+#   foundation e2e which takes pre-existing group IDs), GITOPS_BASE_REF (a
+#   ref of infra/foundation before issue #25's access-policy-association
+#   change, for acceptance criterion 2's "before" state -- never a
+#   default: origin/main has no infra/foundation today, and after this PR
+#   merges main already carries the association, so either default would
+#   make the "before" apply prove nothing; pass this branch's own
+#   merge-base with feat/20-foundation).
 # Optional environment:
 #   TERRAFORM (terraform), KUBECTL (kubectl), E2E_WORK_DIR (mktemp -d),
 #   E2E_KEEP_ON_FAILURE (0), E2E_LEFTOVER_GRACE_SECONDS (600),
-#   GITOPS_BASE_REF (origin/main -- the pre-this-PR foundation code used
-#   for acceptance criterion 2's "before" state),
 #   GITOPS_REPO_URL (inferred from `git remote get-url origin` -- read-only
 #   clone source for every disposable branch below),
 #   GITOPS_TEST_REPO_URL (https://github.com/littlemex/distai-platform.git
@@ -73,13 +80,24 @@ set -euo pipefail
 : "${ARGOCD_IDC_INSTANCE_ARN:?export ARGOCD_IDC_INSTANCE_ARN}"
 : "${ARGOCD_IDC_REGION:?export ARGOCD_IDC_REGION}"
 : "${ARGOCD_IDC_IDENTITY_STORE_ID:?export ARGOCD_IDC_IDENTITY_STORE_ID}"
+# No default: acceptance criterion 2's "before" state only means anything
+# against a ref that does NOT yet carry issue #25's access-policy
+# association. Today, origin/main has no infra/foundation directory at all
+# (fails the "has no infra/foundation directory" check below); once this PR
+# merges, main WILL carry the association, and a default of origin/main
+# would then make the "before" apply already pass what step 3 asserts to be
+# new -- silently proving nothing. Pin this explicitly to a pre-#25 commit
+# or ref of feat/20-foundation (its own merge-base with this branch, for
+# example) every time this script is run, rather than ever rely on a
+# moving default that is wrong on one side of this PR's own merge or the
+# other.
+: "${GITOPS_BASE_REF:?export GITOPS_BASE_REF (a ref of infra/foundation before issue #25's access-policy-association change -- e.g. this branch's merge-base with feat/20-foundation; never origin/main, see the comment above)}"
 export AWS_PROFILE AWS_REGION
 
 TERRAFORM="${TERRAFORM:-terraform}"
 KUBECTL="${KUBECTL:-kubectl}"
 E2E_KEEP_ON_FAILURE="${E2E_KEEP_ON_FAILURE:-0}"
 E2E_LEFTOVER_GRACE_SECONDS="${E2E_LEFTOVER_GRACE_SECONDS:-600}"
-GITOPS_BASE_REF="${GITOPS_BASE_REF:-origin/main}"
 GITOPS_SKIP_ORDERING_EXPERIMENT="${GITOPS_SKIP_ORDERING_EXPERIMENT:-0}"
 GITOPS_TEST_REPO_URL="${GITOPS_TEST_REPO_URL:-https://github.com/littlemex/distai-platform.git}"
 GITOPS_TEST_TOKEN_SSM_PARAM="${GITOPS_TEST_TOKEN_SSM_PARAM:-/relay/github/distai-platform}"
@@ -168,7 +186,7 @@ app_healthy_synced() { [[ "$(app_health "$1")" == "Healthy" && "$(app_sync "$1")
 # Every branch this test ever pushes lives under refs/heads/e2e/<RUN_ID>/*
 # -- this run's own namespace, never anywhere else -- and is deleted again
 # before the run ends, success or failure. The GitHub token (Contents:
-# write on GITOPS_TEST_REPO_URL only, per the distai-platform skill) is
+# write on GITOPS_TEST_REPO_URL only) is
 # read fresh from SSM at each push/delete through a one-shot GIT_ASKPASS
 # script, never written to disk beyond that script's own short lifetime,
 # never in .git/config, never on a command line, and never under `set -x`
@@ -203,6 +221,7 @@ github_askpass_script() {
   { set +x
     {
       printf '#!/usr/bin/env bash\n'
+      # shellcheck disable=SC2016 # literal $1 for the generated askpass script, not this shell's
       printf 'case "$1" in\n'
       printf '  Username*) echo %q ;;\n' "x-access-token"
       printf '  *) echo %q ;;\n' "${token}"
@@ -313,25 +332,45 @@ ensure_cell_fixture() {
 # yet at preflight time; this guards a RUN_ID collision, not the normal
 # case).
 report_stale_disposable_branches() {
-  local token api_repo branches_json
+  local token api_repo branches_json curl_config token_file
   token="$(aws ssm get-parameter --with-decryption --name "${GITOPS_TEST_TOKEN_SSM_PARAM}" \
     --region "${GITOPS_TEST_TOKEN_SSM_REGION}" --query Parameter.Value --output text 2>/dev/null)" || { info "could not read the GitHub token from SSM; skipping the stale e2e/ branch check"; return 0; }
   api_repo="$(sed -E 's#^https://github.com/##; s#\.git$##' <<<"${GITOPS_TEST_REPO_URL}")"
-  branches_json="$(curl -fsS -H "Authorization: Bearer ${token}" -H "Accept: application/vnd.github+json" \
+  # Neither the curl header nor the Python helper below ever takes the token
+  # on a command line or in an environment variable (both are visible to
+  # any other process via `ps` for the command's lifetime): curl reads it
+  # from a -K config file, and the Python helper reads it from a file path
+  # named by an env var, never the token itself. Both files are mode 600
+  # and removed immediately after use.
+  curl_config="$(mktemp)"
+  chmod 600 "${curl_config}"
+  { set +x
+    printf 'header = "Authorization: Bearer %s"\n' "${token}"
+    printf 'header = "Accept: application/vnd.github+json"\n'
+  } >"${curl_config}" 2>/dev/null
+  branches_json="$(curl -fsS -K "${curl_config}" \
     "https://api.github.com/repos/${api_repo}/branches?per_page=100" 2>/dev/null)" || branches_json="[]"
+  rm -f "${curl_config}"
+  token_file="$(mktemp)"
+  chmod 600 "${token_file}"
+  { set +x; printf '%s' "${token}" >"${token_file}"; } 2>/dev/null
   while IFS=$'\t' read -r name age_days; do
     [[ -n "${name}" ]] || continue
     info "found remote disposable branch refs/heads/${name} (${age_days}d old) -- reported for visibility, deleted only if it is this run's own"
     if [[ "${name}" == "e2e/${RUN_ID}/"* ]]; then
-      delete_disposable_branch "${name}" \
-        && info "cleanup: deleted stale branch refs/heads/${name} from this run's own namespace" \
-        || info "cleanup: could not delete stale branch refs/heads/${name} from this run's own namespace (remove it by hand)"
+      if delete_disposable_branch "${name}"; then
+        info "cleanup: deleted stale branch refs/heads/${name} from this run's own namespace"
+      else
+        info "cleanup: could not delete stale branch refs/heads/${name} from this run's own namespace (remove it by hand)"
+      fi
     fi
-  done < <(printf '%s' "${branches_json}" | GITHUB_TOKEN_FOR_DATES="${token}" API_REPO="${api_repo}" python3 -c '
+  done < <(printf '%s' "${branches_json}" | API_REPO="${api_repo}" TOKEN_FILE="${token_file}" python3 -c '
 import json, os, sys, urllib.request, datetime
 docs = json.load(sys.stdin) if sys.stdin.readable() else []
-token = os.environ.get("GITHUB_TOKEN_FOR_DATES", "")
 api_repo = os.environ.get("API_REPO", "")
+token_file = os.environ.get("TOKEN_FILE", "")
+with open(token_file, encoding="utf-8") as f:
+    token = f.read()
 now = datetime.datetime.now(datetime.timezone.utc)
 for b in (docs or []):
     name = b.get("name", "")
@@ -360,6 +399,7 @@ for b in (docs or []):
     if age_days >= 1 or age_days == -1:
         print(f"{name}\t{age_days}")
 ')
+  rm -f "${token_file}"
   token=""
 }
 
@@ -453,11 +493,14 @@ pass "created temporary Identity Center group ${IDC_GROUP_DISPLAY_NAME}"
 # ------------------------------------- 2. foundation fixture, "before"
 #
 # Acceptance criterion 2: a cell built from #20/#21's own foundation code,
-# before this PR's own change, shows no RBAC on the capability's access
-# entry. GITOPS_BASE_REF is a worktree-checked-out copy of
-# infra/foundation as it existed before this issue's decision 1 change
-# (origin/main by default); it is applied to the SAME state key the
-# "after" apply (step 3) reuses, so this is a real upgrade, not two
+# before this PR's own change, shows no AmazonEKSClusterAdminPolicy
+# association on the capability's access entry (it already carries the two
+# built-in Argo-CD-capability-management policies -- see the comment above
+# the before/after check below). GITOPS_BASE_REF is a worktree-checked-out
+# copy of infra/foundation as it existed before this issue's decision 1
+# change (no default -- see the GITOPS_BASE_REF comment at the top of this
+# file); it is applied to the SAME state key the "after" apply (step 3)
+# reuses, so this is a real upgrade, not two
 # unrelated cells.
 
 BASE_WORKTREE="${WORK_DIR}/base-foundation"
@@ -540,7 +583,7 @@ capability_policies_before="$(aws eks list-associated-access-policies --cluster-
   || fail "aws eks list-associated-access-policies --principal-arn ${CAPABILITY_ROLE_ARN} (before)"
 [[ "${capability_policies_before}" != *"AmazonEKSClusterAdminPolicy"* ]] \
   || fail "capability role already has AmazonEKSClusterAdminPolicy before applying this PR's change: [${capability_policies_before}]"
-pass "before this PR's change: capability role ${CAPABILITY_ROLE_ARN} has no RBAC on its access entry (policies: [${capability_policies_before:-none}])"
+pass "before this PR's change: capability role ${CAPABILITY_ROLE_ARN} has no AmazonEKSClusterAdminPolicy association (policies: [${capability_policies_before:-none}])"
 
 # ------------------------------------- 3. foundation fixture, "after"
 #
@@ -676,14 +719,17 @@ pass "restored --revision to ${GITOPS_REVISION}"
 
 # ------------------------------------------ 7. wrong-cluster abort
 #
-# Acceptance criterion 3, third half: a kubeconfig pointed at a different
-# cluster than --tf-outputs describes aborts before any write, both on a
-# first bootstrap (simulated here by also rewriting cluster_arn, so the
-# existing cell-registration Secret's cross-check also triggers) and on a
-# re-run. Only cluster_arn is forged; the live kubeconfig still points at
-# the real cluster, so bootstrap.sh's own "kubeconfig server matches
-# cluster_endpoint" check cannot save a cluster_arn-only mismatch -- it
-# must be the Secret cross-check (decision 1) that catches this.
+# Acceptance criterion 3, third half: decision 1's two abort conditions,
+# each independently, both without a second real cluster.
+#
+# 7a. The Secret cross-check (decision 1's second condition: an existing
+# cell-registration Secret must match --tf-outputs' cluster_arn exactly).
+# This is a re-run, not a first bootstrap -- the Secret this run's own
+# step 1 already wrote is what the forged cluster_arn conflicts with; the
+# live kubeconfig still points at the real cluster, so bootstrap.sh's own
+# "kubeconfig server matches cluster_endpoint" check (condition 1, below)
+# cannot catch a cluster_arn-only mismatch -- it must be this cross-check
+# that does.
 
 WRONG_TF_OUTPUTS_JSON="${WORK_DIR}/tf-outputs-wrong-cluster.json"
 python3 - "${TF_OUTPUTS_JSON}" "${WRONG_TF_OUTPUTS_JSON}" <<'PY'
@@ -705,6 +751,36 @@ rv_after_wrong="$(object_write_fingerprint)"
 [[ "${rv_before_wrong}" == "${rv_after_wrong}" ]] \
   || fail "bootstrap.sh wrote something before aborting on a cluster_arn mismatch: before=[${rv_before_wrong}] after=[${rv_after_wrong}]"
 pass "bootstrap.sh aborts before any write when --tf-outputs names a different cluster_arn than the registered Secret"
+
+# 7b. The kubeconfig/cluster_endpoint check (decision 1's first condition,
+# the one condition active on a genuine first bootstrap too -- it runs
+# unconditionally, before the Secret even exists): forge cluster_endpoint
+# instead, leave cluster_arn correct, and leave the live kubeconfig
+# pointed at the real cluster. The mismatch this creates is between the
+# forged endpoint and the live kubeconfig's own server, not between two
+# real clusters, so this needs no second cluster either.
+
+WRONG_ENDPOINT_JSON="${WORK_DIR}/tf-outputs-wrong-endpoint.json"
+python3 - "${TF_OUTPUTS_JSON}" "${WRONG_ENDPOINT_JSON}" <<'PY'
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+with open(src, encoding="utf-8") as f:
+    doc = json.load(f)
+doc["cluster_endpoint"]["value"] = "https://not-the-real-endpoint.example.invalid"
+with open(dst, "w", encoding="utf-8") as f:
+    json.dump(doc, f)
+PY
+rv_before_wrong_endpoint="$(object_write_fingerprint)"
+if "${GITOPS_ROOT}/bootstrap/bootstrap.sh" --tf-outputs "${WRONG_ENDPOINT_JSON}" \
+  --revision "${GITOPS_REVISION}" >/dev/null 2>"${WORK_DIR}/wrong-endpoint.log"; then
+  fail "bootstrap.sh did not abort on a cluster_endpoint mismatch (see ${WORK_DIR}/wrong-endpoint.log)"
+fi
+rv_after_wrong_endpoint="$(object_write_fingerprint)"
+[[ "${rv_before_wrong_endpoint}" == "${rv_after_wrong_endpoint}" ]] \
+  || fail "bootstrap.sh wrote something before aborting on a cluster_endpoint mismatch"
+grep -q "cluster_endpoint" "${WORK_DIR}/wrong-endpoint.log" \
+  || fail "bootstrap.sh aborted for a reason other than the cluster_endpoint mismatch (see ${WORK_DIR}/wrong-endpoint.log)"
+pass "bootstrap.sh aborts before any write when --tf-outputs names a different cluster_endpoint than the live kubeconfig"
 
 # ------------------------------- 8. generated Applications: discovery
 #
@@ -818,7 +894,9 @@ pass "NodePool/EC2NodeClass/ResourceFlavor are joined: ${NODEPOOL} -> ${NODECLAS
 mapfile -t localqueues < <(k get localqueues -A -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' | grep -v '^$')
 [[ "${#localqueues[@]}" -eq 1 ]] || fail "expected exactly 1 LocalQueue, found ${#localqueues[@]}: ${localqueues[*]:-none}"
 read -r SMOKE_NS SMOKE_LOCALQUEUE <<<"${localqueues[0]}"
-pass "discovered the admin smoke LocalQueue: ${SMOKE_NS}/${SMOKE_LOCALQUEUE}"
+SMOKE_CLUSTERQUEUE="$(k get localqueue "${SMOKE_LOCALQUEUE}" -n "${SMOKE_NS}" -o jsonpath='{.spec.clusterQueue}')"
+[[ -n "${SMOKE_CLUSTERQUEUE}" ]] || fail "LocalQueue ${SMOKE_NS}/${SMOKE_LOCALQUEUE} has no spec.clusterQueue"
+pass "discovered the admin smoke LocalQueue: ${SMOKE_NS}/${SMOKE_LOCALQUEUE} (ClusterQueue ${SMOKE_CLUSTERQUEUE})"
 
 cat >"${WORK_DIR}/canary.yaml" <<YAML
 apiVersion: batch/v1
@@ -938,6 +1016,23 @@ break_addon_branch() {
 if [[ "${GITOPS_SKIP_ORDERING_EXPERIMENT}" == "1" ]]; then
   info "GITOPS_SKIP_ORDERING_EXPERIMENT=1: skipping acceptance criterion 4 (no push access to ${GITOPS_TEST_REPO_URL} assumed)"
 else
+  # Whether RollingSync is actually active is itself observable, not only
+  # inferable from side effects: Argo CD's own ApplicationSet Progressive
+  # Syncs populates status.applicationStatus with one entry per generated
+  # Application once a RollingSync strategy is accepted; an unsupported or
+  # rejected strategy leaves it empty and every Application syncs
+  # independently (automated.selfHeal) instead. Read directly, once, so
+  # the experiments below can say which branch of decision 4 this run is
+  # actually in rather than only reporting what they observed around it.
+  rollingsync_status_json="$(k get applicationset platform -n "${ARGOCD_NS}" -o jsonpath='{.status.applicationStatus}' 2>/dev/null)"
+  if [[ -n "${rollingsync_status_json}" && "${rollingsync_status_json}" != "[]" && "${rollingsync_status_json}" != "null" ]]; then
+    ROLLINGSYNC_ACTIVE=1
+    info "RollingSync is active on the managed capability: ApplicationSet platform's status.applicationStatus is populated"
+  else
+    ROLLINGSYNC_ACTIVE=0
+    info "RollingSync does not appear active on the managed capability: ApplicationSet platform's status.applicationStatus is empty; every generated Application likely syncs independently (automated.selfHeal fallback)"
+  fi
+
   # ---- 12a. break karpenter-crd -------------------------------------
   # BREAK_CRDS_BRANCH="$(break_addon_branch ...)" runs the function in a
   # subshell (command substitution always forks one); BROKEN_BRANCHES+=
@@ -961,9 +1056,12 @@ else
   # needs the CRD, so the capacity-pool Application cannot stay Synced
   # once karpenter-crd is broken and its own retry eventually gives up (or
   # RollingSync never advances past crds).
-  wait_until 300 10 "capacity-pool Application is affected by the broken crds step" app_not_synced "${APP_CAPACITY_POOL}" \
-    || info "capacity-pool Application stayed Synced on its already-created CRDs within the retry window -- recorded, not failed, since decision 4 only promises capacity FAILS TO CREATE NEW objects depending on a broken crds step, not that an already-reconciled one un-syncs"
-  pass "observed: breaking the crds step blocks dependents (evidenced, not asserted from documentation: $(app_sync "${APP_CAPACITY_POOL}") sync status recorded for capacity-pool)"
+  if wait_until 300 10 "capacity-pool Application is affected by the broken crds step" app_not_synced "${APP_CAPACITY_POOL}"; then
+    pass "observed: breaking the crds step left capacity-pool not Synced (sync=$(app_sync "${APP_CAPACITY_POOL}")) -- a real dependent was blocked, not asserted from documentation"
+  else
+    info "capacity-pool Application stayed Synced on its already-created objects within the retry window -- recorded, not failed, since decision 4 only promises capacity FAILS TO CREATE NEW objects depending on a broken crds step, not that an already-reconciled one un-syncs"
+    pass "observed: breaking the crds step did not un-sync capacity-pool's already-reconciled objects within the retry window (consistent with decision 4, which makes no stronger claim); this half of acceptance criterion 4 is instead evidenced by karpenter-crd itself leaving Synced (above) and recovering (below)$([[ "${ROLLINGSYNC_ACTIVE}" -eq 1 ]] && echo "; RollingSync is active on this capability, per the status check above")"
+  fi
 
   run_bootstrap --revision "${GITOPS_REVISION}" || fail "bootstrap.sh (restoring --revision ${GITOPS_REVISION} after break-crds)"
   wait_until 300 10 "karpenter-crd Application recovers" app_synced "${APP_KARPENTER_CRD}" \
@@ -1031,7 +1129,8 @@ kueue_crd_created_after="$(k get crd clusterqueues.kueue.x-k8s.io -o jsonpath='{
   || fail "clusterqueues.kueue.x-k8s.io CRD was deleted after removing addons/kueue/addon.yaml (preserveResourcesOnDeletion did not hold)"
 [[ "${kueue_crd_created_after}" == "${kueue_crd_created}" ]] \
   || fail "clusterqueues.kueue.x-k8s.io CRD has a new creationTimestamp -- it was deleted and recreated, not preserved"
-k get clusterqueue -A >/dev/null 2>&1 || fail "ClusterQueue objects are gone after removing addons/kueue/addon.yaml"
+k get clusterqueue "${SMOKE_CLUSTERQUEUE}" >/dev/null 2>&1 \
+  || fail "ClusterQueue ${SMOKE_CLUSTERQUEUE} is gone after removing addons/kueue/addon.yaml"
 k get localqueue "${SMOKE_LOCALQUEUE}" -n "${SMOKE_NS}" >/dev/null 2>&1 \
   || fail "LocalQueue ${SMOKE_LOCALQUEUE} is gone after removing addons/kueue/addon.yaml"
 pass "kueue's CRDs and the smoke ClusterQueue/LocalQueue survive, orphaned, with the same CRD creationTimestamp (${kueue_crd_created})"
@@ -1063,7 +1162,20 @@ k delete secret cell-registration -n "${ARGOCD_NS}" --wait=true --timeout=60s \
   || fail "kubectl delete secret cell-registration"
 pass "deleted the three bootstrap objects in decision 8's order: root, platform AppProject, cell-registration Secret"
 
-sleep 10 # let any cascade finalizer that would (wrongly) propagate have a moment to act
+# Proving orphaning (not merely "not yet deleted") needs the thing that
+# would carry a cascade to be confirmed gone first: deleting the root
+# Application cascades to both ApplicationSets (it carries the only
+# cascade finalizer in this design -- decision 8), which in turn delete
+# every Application they generated, including capacity-pool-cpu, the one
+# whose own objects (NodePool, EC2NodeClass) this check is about. Waiting
+# a fixed, short sleep and then checking survival would only show the
+# cascade had not yet arrived; waiting, bounded, for the generator's own
+# Application to actually disappear first is what turns "still there"
+# into "never going to cascade", since preserveResourcesOnDeletion stops
+# the Application's own deletion from reaching its resources at all.
+capacity_pool_app_gone() { ! k get application "${APP_CAPACITY_POOL}" -n "${ARGOCD_NS}" >/dev/null 2>&1; }
+wait_until 120 5 "capacity-pool Application is gone (cascaded from the deleted root Application)" capacity_pool_app_gone \
+  || fail "${APP_CAPACITY_POOL} Application still exists after deleting the three bootstrap objects -- the cascade this check depends on never completed"
 k get nodepool "${NODEPOOL}" >/dev/null 2>&1 || fail "NodePool ${NODEPOOL} was deleted by the bootstrap-object teardown (should be orphaned, not deleted)"
 k get ec2nodeclass "${NODECLASS}" >/dev/null 2>&1 || fail "EC2NodeClass ${NODECLASS} was deleted by the bootstrap-object teardown (should be orphaned, not deleted)"
 instance_state="$(aws ec2 describe-instances --instance-ids "${CANARY_INSTANCE_ID}" \

@@ -116,7 +116,7 @@ fi
 
 # ------------------------------------------------- 2. shellcheck, bash -n
 
-mapfile -t shell_scripts < <(find "${GITOPS_ROOT}" -name '*.sh' -not -path '*/tests/*' | sort)
+mapfile -t shell_scripts < <(find "${GITOPS_ROOT}" -name '*.sh' | sort)
 if [[ "${#shell_scripts[@]}" -eq 0 ]]; then
   echo "FAIL no shell scripts found under gitops/ (expected at least bootstrap/bootstrap.sh)"
   failures=$((failures + 1))
@@ -125,7 +125,7 @@ else
     run_check "bash -n $(basename "${s}")" bash -n "${s}"
   done
   if command -v shellcheck >/dev/null 2>&1; then
-    run_check "shellcheck gitops/bootstrap/*.sh" shellcheck -x "${shell_scripts[@]}"
+    run_check "shellcheck every *.sh under gitops/" shellcheck -x "${shell_scripts[@]}"
   else
     echo "INFO shellcheck not found on PATH; skipped (install it, e.g. the pinned runner image already has it)"
   fi
