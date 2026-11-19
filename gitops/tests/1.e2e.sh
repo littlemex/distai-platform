@@ -45,11 +45,21 @@
 #   E2E_KEEP_ON_FAILURE (0), E2E_LEFTOVER_GRACE_SECONDS (600),
 #   GITOPS_BASE_REF (origin/main -- the pre-this-PR foundation code used
 #   for acceptance criterion 2's "before" state),
-#   GITOPS_REPO_URL (inferred from `git remote get-url origin`),
-#   GITOPS_TEST_REMOTE (origin -- where this test pushes its two
-#   disposable, deliberately-broken branches and deletes them afterwards),
+#   GITOPS_REPO_URL (inferred from `git remote get-url origin` -- read-only
+#   clone source for every disposable branch below),
+#   GITOPS_TEST_REPO_URL (https://github.com/littlemex/distai-platform.git
+#   -- the push target for this test's own disposable branches; override
+#   to run against a fork you have write access to),
+#   GITOPS_TEST_TOKEN_SSM_PARAM (/relay/github/distai-platform) and
+#   GITOPS_TEST_TOKEN_SSM_REGION (us-east-1) -- a GitHub token with
+#   Contents: write on GITOPS_TEST_REPO_URL, read fresh from SSM Parameter
+#   Store (SecureString) at each push/delete, never written to disk,
+#   .git/config or a log (see push_disposable_branch()),
 #   GITOPS_SKIP_ORDERING_EXPERIMENT (0 -- set to 1 to skip acceptance
-#   criterion 4 if the runner has no push access to GITOPS_TEST_REMOTE).
+#   criterion 4 if this token cannot write to GITOPS_TEST_REPO_URL; the
+#   step 13 generator-entry-loss experiment and 2.upgrade.sh's own two
+#   disposable branches have no such bypass, since their own acceptance
+#   criteria need exactly this write).
 set -euo pipefail
 
 : "${AWS_PROFILE:?export AWS_PROFILE}"
@@ -70,14 +80,16 @@ KUBECTL="${KUBECTL:-kubectl}"
 E2E_KEEP_ON_FAILURE="${E2E_KEEP_ON_FAILURE:-0}"
 E2E_LEFTOVER_GRACE_SECONDS="${E2E_LEFTOVER_GRACE_SECONDS:-600}"
 GITOPS_BASE_REF="${GITOPS_BASE_REF:-origin/main}"
-GITOPS_TEST_REMOTE="${GITOPS_TEST_REMOTE:-origin}"
 GITOPS_SKIP_ORDERING_EXPERIMENT="${GITOPS_SKIP_ORDERING_EXPERIMENT:-0}"
+GITOPS_TEST_REPO_URL="${GITOPS_TEST_REPO_URL:-https://github.com/littlemex/distai-platform.git}"
+GITOPS_TEST_TOKEN_SSM_PARAM="${GITOPS_TEST_TOKEN_SSM_PARAM:-/relay/github/distai-platform}"
+GITOPS_TEST_TOKEN_SSM_REGION="${GITOPS_TEST_TOKEN_SSM_REGION:-us-east-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GITOPS_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${GITOPS_ROOT}/.." && pwd)"
 FOUNDATION_ROOT="${REPO_ROOT}/infra/foundation"
-GITOPS_REPO_URL="${GITOPS_REPO_URL:-$(git -C "${REPO_ROOT}" remote get-url "${GITOPS_TEST_REMOTE}" 2>/dev/null | sed -e 's#^git@github.com:#https://github.com/#' -e 's#\.git$##')}"
+GITOPS_REPO_URL="${GITOPS_REPO_URL:-$(git -C "${REPO_ROOT}" remote get-url origin 2>/dev/null | sed -e 's#^git@github.com:#https://github.com/#' -e 's#\.git$##')}"
 [[ -n "${GITOPS_REPO_URL}" ]] || { echo "FAIL could not infer GITOPS_REPO_URL; set it explicitly"; exit 1; }
 
 WORK_DIR="${E2E_WORK_DIR:-$(mktemp -d)}"
@@ -150,13 +162,150 @@ app_health() { app_field "$1" '{.status.health.status}'; }
 app_sync() { app_field "$1" '{.status.sync.status}'; }
 app_healthy_synced() { [[ "$(app_health "$1")" == "Healthy" && "$(app_sync "$1")" == "Synced" ]]; }
 
+# ------------------------------------- authenticated disposable branches
+#
+# Every branch this test ever pushes lives under refs/heads/e2e/<RUN_ID>/*
+# -- this run's own namespace, never anywhere else -- and is deleted again
+# before the run ends, success or failure. The GitHub token (Contents:
+# write on GITOPS_TEST_REPO_URL only, per the distai-platform skill) is
+# read fresh from SSM at each push/delete through a one-shot GIT_ASKPASS
+# script, never written to disk beyond that script's own short lifetime,
+# never in .git/config, never on a command line, and never under `set -x`
+# (every block below runs with it off, restored after).
+
+# assert_disposable_ref BRANCH: the guard. Refuses anything outside this
+# run's own e2e/<RUN_ID>/* namespace before push_disposable_branch() or
+# delete_disposable_branch() ever shells out.
+assert_disposable_ref() {
+  case "$1" in
+    "e2e/${RUN_ID}/"*) return 0 ;;
+    *)
+      echo "refusing to touch refs/heads/$1: outside this run's own e2e/${RUN_ID}/* namespace" >&2
+      return 1
+      ;;
+  esac
+}
+
+# github_askpass_script: writes a one-shot GIT_ASKPASS helper that prints
+# the token read fresh from SSM, and prints its path. The token exists in
+# this process' memory only long enough to write the file; the file is
+# deleted by the caller immediately after the one git command that needs
+# it. Returns non-zero (printing nothing) if the token cannot be read, so
+# a caller's `||` always sees a real failure instead of an empty path.
+github_askpass_script() {
+  local token askpass
+  token="$(aws ssm get-parameter --with-decryption --name "${GITOPS_TEST_TOKEN_SSM_PARAM}" \
+    --region "${GITOPS_TEST_TOKEN_SSM_REGION}" --query Parameter.Value --output text 2>/dev/null)" || return 1
+  [[ -n "${token}" && "${token}" != "None" ]] || return 1
+  askpass="$(mktemp)"
+  chmod 700 "${askpass}"
+  { set +x
+    {
+      printf '#!/usr/bin/env bash\n'
+      printf 'case "$1" in\n'
+      printf '  Username*) echo %q ;;\n' "x-access-token"
+      printf '  *) echo %q ;;\n' "${token}"
+      printf 'esac\n'
+    } >"${askpass}"
+  } 2>/dev/null
+  token=""
+  printf '%s' "${askpass}"
+}
+
+# push_disposable_branch CLONE_DIR BRANCH: pushes CLONE_DIR's HEAD to
+# refs/heads/BRANCH on GITOPS_TEST_REPO_URL.
+push_disposable_branch() {
+  local clone="$1" branch="$2" askpass rc
+  assert_disposable_ref "${branch}" || return 1
+  askpass="$(github_askpass_script)" || { echo "could not read the GitHub token from SSM (${GITOPS_TEST_TOKEN_SSM_PARAM})" >&2; return 1; }
+  ( set +x
+    GIT_ASKPASS="${askpass}" GIT_TERMINAL_PROMPT=0 \
+      git -C "${clone}" push --quiet "${GITOPS_TEST_REPO_URL}" "HEAD:refs/heads/${branch}" )
+  rc=$?
+  rm -f "${askpass}"
+  return "${rc}"
+}
+
+# delete_disposable_branch BRANCH: deletes refs/heads/BRANCH on
+# GITOPS_TEST_REPO_URL. Runs from REPO_ROOT (any local git repo works;
+# this never touches REPO_ROOT's own refs, only the remote's).
+delete_disposable_branch() {
+  local branch="$1" askpass rc
+  assert_disposable_ref "${branch}" || return 1
+  askpass="$(github_askpass_script)" || { echo "could not read the GitHub token from SSM (${GITOPS_TEST_TOKEN_SSM_PARAM})" >&2; return 1; }
+  ( set +x
+    GIT_ASKPASS="${askpass}" GIT_TERMINAL_PROMPT=0 \
+      git -C "${REPO_ROOT}" push --quiet "${GITOPS_TEST_REPO_URL}" --delete "${branch}" )
+  rc=$?
+  rm -f "${askpass}"
+  return "${rc}"
+}
+
+# report_stale_disposable_branches: preflight hygiene. Lists every remote
+# e2e/* branch older than a day (informational -- a run that was killed
+# before its own EXIT trap ran leaves branches only a human, or this
+# check, ever lists again) and actively deletes only the ones already in
+# this run's own e2e/${RUN_ID}/* namespace (by construction none exist
+# yet at preflight time; this guards a RUN_ID collision, not the normal
+# case).
+report_stale_disposable_branches() {
+  local token api_repo branches_json
+  token="$(aws ssm get-parameter --with-decryption --name "${GITOPS_TEST_TOKEN_SSM_PARAM}" \
+    --region "${GITOPS_TEST_TOKEN_SSM_REGION}" --query Parameter.Value --output text 2>/dev/null)" || { info "could not read the GitHub token from SSM; skipping the stale e2e/ branch check"; return 0; }
+  api_repo="$(sed -E 's#^https://github.com/##; s#\.git$##' <<<"${GITOPS_TEST_REPO_URL}")"
+  branches_json="$(curl -fsS -H "Authorization: Bearer ${token}" -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${api_repo}/branches?per_page=100" 2>/dev/null)" || branches_json="[]"
+  while IFS=$'\t' read -r name age_days; do
+    [[ -n "${name}" ]] || continue
+    info "found remote disposable branch refs/heads/${name} (${age_days}d old) -- reported for visibility, deleted only if it is this run's own"
+    if [[ "${name}" == "e2e/${RUN_ID}/"* ]]; then
+      delete_disposable_branch "${name}" \
+        && info "cleanup: deleted stale branch refs/heads/${name} from this run's own namespace" \
+        || info "cleanup: could not delete stale branch refs/heads/${name} from this run's own namespace (remove it by hand)"
+    fi
+  done < <(printf '%s' "${branches_json}" | GITHUB_TOKEN_FOR_DATES="${token}" API_REPO="${api_repo}" python3 -c '
+import json, os, sys, urllib.request, datetime
+docs = json.load(sys.stdin) if sys.stdin.readable() else []
+token = os.environ.get("GITHUB_TOKEN_FOR_DATES", "")
+api_repo = os.environ.get("API_REPO", "")
+now = datetime.datetime.now(datetime.timezone.utc)
+for b in (docs or []):
+    name = b.get("name", "")
+    if not name.startswith("e2e/"):
+        continue
+    sha = (b.get("commit") or {}).get("sha", "")
+    date_str = ""
+    if sha and api_repo:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{api_repo}/commits/{sha}",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                commit = json.load(resp)
+            date_str = commit["commit"]["committer"]["date"]
+        except Exception:
+            date_str = ""
+    age_days = -1
+    if date_str:
+        try:
+            dt = datetime.datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            age_days = (now - dt).days
+        except Exception:
+            age_days = -1
+    if age_days >= 1 or age_days == -1:
+        print(f"{name}\t{age_days}")
+')
+  token=""
+}
+
 # -------------------------------------------------------- cleanup (trap)
 
 delete_broken_branches() {
   local b
   for b in "${BROKEN_BRANCHES[@]}"; do
-    git -C "${REPO_ROOT}" push "${GITOPS_TEST_REMOTE}" --delete "${b}" >/dev/null 2>&1 \
-      || info "cleanup: could not delete disposable branch ${b} on ${GITOPS_TEST_REMOTE} (remove it by hand)"
+    delete_disposable_branch "${b}" >/dev/null 2>&1 \
+      || info "cleanup: could not delete disposable branch refs/heads/${b} on ${GITOPS_TEST_REPO_URL} (remove it by hand)"
   done
 }
 
@@ -204,13 +353,14 @@ trap 'exit 130' INT TERM
 
 # ------------------------------------------------------------ preflight
 
-for b in "${TERRAFORM}" aws "${KUBECTL}" git python3; do require_bin "${b}"; done
+for b in "${TERRAFORM}" aws "${KUBECTL}" git curl python3; do require_bin "${b}"; done
 [[ "${MY_CIDR}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]] || fail "MY_CIDR must be an IPv4 CIDR, got ${MY_CIDR}"
 aws sts get-caller-identity --query Account --output text >/dev/null \
   || fail "aws sts get-caller-identity (check AWS_PROFILE and credentials)"
 [[ -x "${GITOPS_ROOT}/bootstrap/bootstrap.sh" ]] || fail "gitops/bootstrap/bootstrap.sh is missing or not executable"
 pass "preflight: tools present, credentials valid, bootstrap.sh present"
 info "run ${RUN_ID}, work dir ${WORK_DIR}, repo ${GITOPS_REPO_URL}"
+report_stale_disposable_branches
 
 # -------------------------------------- 1. temporary Identity Center group
 #
@@ -682,12 +832,12 @@ pass "a Karpenter node (${CANARY_NODE}) launched from NodePool ${NODEPOOL} for t
 # re-points back at GITOPS_REVISION and confirms recovery.
 
 # break_addon_branch ADDON_RELPATH SUFFIX: creates
-# "${GITOPS_REVISION}-e2e-${SUFFIX}-${RUN_ID}" with ADDON_RELPATH's
-# `version:` replaced by a release that cannot exist, pushes it to
-# GITOPS_TEST_REMOTE, and prints the branch name. Tracked for cleanup.
+# "e2e/${RUN_ID}/${SUFFIX}" with ADDON_RELPATH's `version:` replaced by a
+# release that cannot exist, pushes it to GITOPS_TEST_REPO_URL, and
+# prints the branch name. Tracked for cleanup.
 break_addon_branch() {
   local addon_relpath="$1" suffix="$2" branch clone
-  branch="e2e-${suffix}-${RUN_ID#gitops-e2e-}"
+  branch="e2e/${RUN_ID}/${suffix}"
   clone="${WORK_DIR}/break-${suffix}"
   # GITOPS_REPO_URL, never REPO_ROOT: cloning from a local filesystem path
   # makes the new clone's own "origin" that same local path (git's own
@@ -704,13 +854,13 @@ break_addon_branch() {
   grep -q '0.0.0-e2e-nonexistent' "${clone}/${addon_relpath}" || return 1
   git -C "${clone}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
     commit --quiet -am "test: break ${addon_relpath} for e2e ordering experiment (never merged)" || return 1
-  git -C "${clone}" push --quiet "${GITOPS_TEST_REMOTE}" "HEAD:refs/heads/${branch}" || return 1
+  push_disposable_branch "${clone}" "${branch}" || return 1
   BROKEN_BRANCHES+=("${branch}")
   printf '%s' "${branch}"
 }
 
 if [[ "${GITOPS_SKIP_ORDERING_EXPERIMENT}" == "1" ]]; then
-  info "GITOPS_SKIP_ORDERING_EXPERIMENT=1: skipping acceptance criterion 4 (no push access to ${GITOPS_TEST_REMOTE} assumed)"
+  info "GITOPS_SKIP_ORDERING_EXPERIMENT=1: skipping acceptance criterion 4 (no push access to ${GITOPS_TEST_REPO_URL} assumed)"
 else
   # ---- 12a. break karpenter-crd -------------------------------------
   BREAK_CRDS_BRANCH="$(break_addon_branch "gitops/addons/karpenter-crd/addon.yaml" "break-crds")" \
@@ -773,7 +923,7 @@ kueue_crd_created="$(k get crd clusterqueues.kueue.x-k8s.io -o jsonpath='{.metad
 [[ -n "${kueue_crd_created}" ]] || fail "clusterqueues.kueue.x-k8s.io CRD not found before the removal experiment"
 
 REMOVE_KUEUE_CLONE="${WORK_DIR}/remove-kueue"
-REMOVE_KUEUE_BRANCH="e2e-remove-kueue-${RUN_ID#gitops-e2e-}"
+REMOVE_KUEUE_BRANCH="e2e/${RUN_ID}/remove-kueue"
 # GITOPS_REPO_URL, never REPO_ROOT -- see break_addon_branch()'s own comment.
 git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${REMOVE_KUEUE_CLONE}" || fail "git clone (remove-kueue)"
 git -C "${REMOVE_KUEUE_CLONE}" checkout --quiet -B "${REMOVE_KUEUE_BRANCH}" "${GITOPS_REVISION}" || fail "git checkout (remove-kueue)"
@@ -781,8 +931,7 @@ git -C "${REMOVE_KUEUE_CLONE}" rm --quiet "gitops/addons/kueue/addon.yaml" || fa
 git -C "${REMOVE_KUEUE_CLONE}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
   commit --quiet -m "test: remove addons/kueue/addon.yaml for e2e generator-loss experiment (never merged)" \
   || fail "git commit (remove-kueue)"
-git -C "${REMOVE_KUEUE_CLONE}" push --quiet "${GITOPS_TEST_REMOTE}" "HEAD:refs/heads/${REMOVE_KUEUE_BRANCH}" \
-  || fail "git push (remove-kueue)"
+push_disposable_branch "${REMOVE_KUEUE_CLONE}" "${REMOVE_KUEUE_BRANCH}" || fail "git push (remove-kueue)"
 BROKEN_BRANCHES+=("${REMOVE_KUEUE_BRANCH}")
 
 run_bootstrap --revision "${REMOVE_KUEUE_BRANCH}" || fail "bootstrap.sh --revision ${REMOVE_KUEUE_BRANCH}"

@@ -33,13 +33,27 @@ Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
   taken as input), `eks:ListAccessEntries`, `eks:DescribeAccessEntry`,
   `eks:ListAssociatedAccessPolicies`, `eks:DescribeCapability`,
   `eks:ListCapabilities`.
-- Push access to `GITOPS_TEST_REMOTE` (default `origin`): `1.e2e.sh` and
-  `2.upgrade.sh` each push one to three small, disposable branches (never
-  `main`, never `stable`) to exercise the ordering, generator-loss and
-  upgrade experiments on a real Argo CD sync, and delete them again when
-  the run ends. Set `GITOPS_SKIP_ORDERING_EXPERIMENT=1` on `1.e2e.sh` if
-  the runner has no push access; `2.upgrade.sh` has no such flag, since
-  its entire purpose is the upgrade experiment.
+- A GitHub token with **Contents: write** on the repository named by
+  `GITOPS_TEST_REPO_URL` (default `https://github.com/littlemex/distai-platform.git`
+  -- override to run against a fork you have write access to), read
+  fresh from AWS SSM Parameter Store (SecureString) at `GITOPS_TEST_TOKEN_SSM_PARAM`
+  (default `/relay/github/distai-platform`) in `GITOPS_TEST_TOKEN_SSM_REGION`
+  (default `us-east-1`) -- never passed as an env var, a command-line
+  argument, or written to `.git/config`: both scripts read it through a
+  one-shot `GIT_ASKPASS` helper, deleted immediately after the one `git`
+  command that needs it. `1.e2e.sh` and `2.upgrade.sh` each push one to
+  three small, disposable branches, every one of them under
+  `refs/heads/e2e/<run-id>/*` (a guard function refuses pushing or
+  deleting anything outside that namespace), to exercise the ordering,
+  generator-loss and upgrade experiments on a real Argo CD sync; `main`
+  and `stable` are never touched. Each run also lists every remote
+  `e2e/*` branch older than a day at its own start (reported, for a human
+  to clean up) and deletes the ones already in its own `e2e/<run-id>/*`
+  namespace. Branches are deleted again when the run ends, on success and
+  on failure alike. Set `GITOPS_SKIP_ORDERING_EXPERIMENT=1` on `1.e2e.sh`
+  if this token is unavailable; `2.upgrade.sh`, and `1.e2e.sh`'s own step
+  13 generator-entry-loss experiment, have no such flag, since the write
+  is exactly what their own acceptance criteria need.
 - For `2.upgrade.sh`: a real, currently published Karpenter version
   different from `addons/karpenter/addon.yaml`'s pinned one (confirm with
   `helm show chart oci://public.ecr.aws/karpenter/karpenter --version <x>`);
@@ -174,10 +188,12 @@ silently:
 ## Known issues
 
 - `1.e2e.sh` and `2.upgrade.sh` each push disposable branches to
-  `GITOPS_TEST_REMOTE` and delete them on exit; a run that is killed
-  without reaching the `EXIT` trap (for example `kill -9`) can leave one
-  behind. List and remove any `e2e-*`/`gitops-e2e-*`/`gitops-upgrade-*`
-  branch found after an interrupted run.
+  `GITOPS_TEST_REPO_URL`, every one under `refs/heads/e2e/<run-id>/*`, and
+  delete them on exit; a run that is killed without reaching the `EXIT`
+  trap (for example `kill -9`) can leave one behind -- the next run's own
+  `report_stale_disposable_branches()` lists any `e2e/*` branch older than
+  a day for visibility, but only deletes ones in its own run's namespace.
+  List and remove any other stale `refs/heads/e2e/*` branch by hand.
 - Both e2e scripts build one foundation cell each; running them
   concurrently against the same `NAME`/`STATE_KEY` is rejected by the
   "state has no resources before apply" check, not silently corrupted.
