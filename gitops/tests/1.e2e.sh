@@ -41,8 +41,8 @@
 #      are destroyed with the same tagged-leftover sweep.
 #
 # GITOPS_RUN_ACCEL_E2E=1 coupling: this script's existing single cell
-# (NAME) IS the GPU accelerator cell. NAME must equal dp-a19-gpu
-# (ACCEL_GPU_CELL_NAME) for the checked-in gitops/cells/dp-a19-gpu/ fixture
+# (NAME) IS the GPU accelerator cell. NAME must equal dp-a19-gpu-r3
+# (ACCEL_GPU_CELL_NAME) for the checked-in gitops/cells/dp-a19-gpu-r3/ fixture
 # to apply, and every existing step (1-15) then runs unchanged against that
 # cell's own single `gpu` NodePool and smoke queue; the preflight refuses
 # any other NAME. The GPU cell's Region is AWS_REGION (g7.2xlarge spot is
@@ -697,8 +697,8 @@ pass "preflight: tools present, credentials valid, bootstrap.sh present"
 if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
   [[ "${NAME}" == "${ACCEL_GPU_CELL_NAME}" ]] \
     || fail "GITOPS_RUN_ACCEL_E2E=1: NAME (${NAME}) must equal ACCEL_GPU_CELL_NAME (${ACCEL_GPU_CELL_NAME}) -- this script's own cell is the GPU accelerator cell, and only gitops/cells/${ACCEL_GPU_CELL_NAME}/ carries its method-labeled pool"
-  [[ "${ACCEL_GPU_CELL_NAME}" == "dp-a19-gpu" && "${ACCEL_TRN_CELL_NAME}" == "dp-a19-trn" ]] \
-    || fail "GITOPS_RUN_ACCEL_E2E=1: issue #28's fixtures are gitops/cells/dp-a19-gpu/ and gitops/cells/dp-a19-trn/; got ACCEL_GPU_CELL_NAME=${ACCEL_GPU_CELL_NAME} ACCEL_TRN_CELL_NAME=${ACCEL_TRN_CELL_NAME}"
+  [[ "${ACCEL_GPU_CELL_NAME}" == "dp-a19-gpu-r3" && "${ACCEL_TRN_CELL_NAME}" == "dp-a19-trn-r3" ]] \
+    || fail "GITOPS_RUN_ACCEL_E2E=1: issue #28's fixtures are gitops/cells/dp-a19-gpu-r3/ and gitops/cells/dp-a19-trn-r3/; got ACCEL_GPU_CELL_NAME=${ACCEL_GPU_CELL_NAME} ACCEL_TRN_CELL_NAME=${ACCEL_TRN_CELL_NAME}"
   for accel_cell in "${ACCEL_GPU_CELL_NAME}" "${ACCEL_TRN_CELL_NAME}"; do
     compgen -G "${GITOPS_ROOT}/cells/${accel_cell}/capacity-pool/*.yaml" >/dev/null \
       || fail "GITOPS_RUN_ACCEL_E2E=1: no gitops/cells/${accel_cell}/capacity-pool/*.yaml in this checkout"
@@ -1136,7 +1136,7 @@ pass "NodePool/EC2NodeClass/ResourceFlavor are joined: ${NODEPOOL} -> ${NODECLAS
 # ------------------------------- 10a. accelerators on the GPU cell (#28)
 #
 # Issue #28 acceptance criteria 2, 4 and 5, NVIDIA half: this cell (NAME =
-# dp-a19-gpu, enforced by the preflight) carries exactly one NodePool, the
+# dp-a19-gpu-r3, enforced by the preflight) carries exactly one NodePool, the
 # `gpu` pool labeled distai.dev/nvidia-gpu-method=device-plugin, so step 10
 # above already found it as NODEPOOL.
 #
@@ -2259,7 +2259,7 @@ JSON
   # ---------------------------------- 17. Trainium cell: capacity (#28)
   #
   # Same shape as steps 8 and 10 on the first cell: the cell's one
-  # capacity-pool Application (cells/dp-a19-trn/capacity-pool/trn.yaml)
+  # capacity-pool Application (cells/dp-a19-trn-r3/capacity-pool/trn.yaml)
   # Healthy+Synced, and exactly one NodePool to launch from.
   trn wait_until 600 10 "a capacity-pool Application exists (Trainium cell)" discover_capacity_pool_app \
     || fail "no Application named ${TRN_CLUSTER}-capacity-pool-<pool> appeared on the Trainium cell"
