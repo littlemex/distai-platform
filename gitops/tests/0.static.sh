@@ -219,11 +219,14 @@ values:
       distai-platform-contract-check: "1"
 '
 if run_contract_check_on "${RESERVED_OK_DIR}" >"${WORK_DIR}/contract-reserved-ok.log" 2>&1; then
-  grep -q "values.pool.capacityType is one of" "${WORK_DIR}/contract-reserved-ok.log" \
+  if grep -q "values.pool.capacityType is one of" "${WORK_DIR}/contract-reserved-ok.log" \
     && grep -q "sets a non-empty values.reservation.tags" "${WORK_DIR}/contract-reserved-ok.log" \
-    && grep -q "instanceMatchCriteria is 'targeted'" "${WORK_DIR}/contract-reserved-ok.log" \
-    && echo "PASS check_gitops_contract.py's reserved-pool checks ran and passed against a valid -rsv cell file" \
-    || { echo "FAIL check_gitops_contract.py passed but did not print the issue #27 reserved-pool checks (still dead code)"; failures=$((failures + 1)); }
+    && grep -q "instanceMatchCriteria is 'targeted'" "${WORK_DIR}/contract-reserved-ok.log"; then
+    echo "PASS check_gitops_contract.py's reserved-pool checks ran and passed against a valid -rsv cell file"
+  else
+    echo "FAIL check_gitops_contract.py passed but did not print the issue #27 reserved-pool checks (still dead code)"
+    failures=$((failures + 1))
+  fi
 else
   echo "FAIL check_gitops_contract.py rejected a valid reserved pool: $(cat "${WORK_DIR}/contract-reserved-ok.log")"
   failures=$((failures + 1))
