@@ -31,7 +31,13 @@
 #   --version <x>`); this test does not guess one, since "the next patch
 #   exists" is not something to assume about an upstream release cadence.
 # Optional: the same as 1.e2e.sh (TERRAFORM, KUBECTL, E2E_WORK_DIR,
-# E2E_KEEP_ON_FAILURE, E2E_LEFTOVER_GRACE_SECONDS, GITOPS_TEST_REMOTE).
+# E2E_KEEP_ON_FAILURE, E2E_LEFTOVER_GRACE_SECONDS, GITOPS_REPO_URL,
+# GITOPS_TEST_REPO_URL, GITOPS_TEST_TOKEN_SSM_PARAM,
+# GITOPS_TEST_TOKEN_SSM_REGION). Unlike 1.e2e.sh's ordering experiment,
+# this script's own two disposable branches have no skip flag: the
+# mismatch and matched-bump experiments they drive are this script's
+# entire purpose, so a token with Contents: write on GITOPS_TEST_REPO_URL
+# is required here, not optional.
 set -euo pipefail
 
 : "${AWS_PROFILE:?export AWS_PROFILE}"
@@ -52,7 +58,9 @@ TERRAFORM="${TERRAFORM:-terraform}"
 KUBECTL="${KUBECTL:-kubectl}"
 E2E_KEEP_ON_FAILURE="${E2E_KEEP_ON_FAILURE:-0}"
 E2E_LEFTOVER_GRACE_SECONDS="${E2E_LEFTOVER_GRACE_SECONDS:-600}"
-GITOPS_TEST_REMOTE="${GITOPS_TEST_REMOTE:-origin}"
+GITOPS_TEST_REPO_URL="${GITOPS_TEST_REPO_URL:-https://github.com/littlemex/distai-platform.git}"
+GITOPS_TEST_TOKEN_SSM_PARAM="${GITOPS_TEST_TOKEN_SSM_PARAM:-/relay/github/distai-platform}"
+GITOPS_TEST_TOKEN_SSM_REGION="${GITOPS_TEST_TOKEN_SSM_REGION:-us-east-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GITOPS_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -65,7 +73,7 @@ FOUNDATION_ROOT="${REPO_ROOT}/infra/foundation"
 # inside this run's own local checkout, never on GitHub -- where the
 # ApplicationSet's Git generator actually reads from (confirmed on a real
 # cluster in 1.e2e.sh's own identical bug).
-GITOPS_REPO_URL="${GITOPS_REPO_URL:-$(git -C "${REPO_ROOT}" remote get-url "${GITOPS_TEST_REMOTE}" 2>/dev/null | sed -e 's#^git@github.com:#https://github.com/#' -e 's#\.git$##')}"
+GITOPS_REPO_URL="${GITOPS_REPO_URL:-$(git -C "${REPO_ROOT}" remote get-url origin 2>/dev/null | sed -e 's#^git@github.com:#https://github.com/#' -e 's#\.git$##')}"
 [[ -n "${GITOPS_REPO_URL}" ]] || { echo "FAIL could not infer GITOPS_REPO_URL; set it explicitly"; exit 1; }
 
 WORK_DIR="${E2E_WORK_DIR:-$(mktemp -d)}"
@@ -136,11 +144,125 @@ app_healthy_synced() { [[ "$(app_health "$1")" == "Healthy" && "$(app_sync "$1")
 app_synced() { [[ "$(app_sync "$1")" == "Synced" ]]; }
 instance_of_node() { k get node "$1" -o jsonpath='{.spec.providerID}' | awk -F/ '{print $NF}'; }
 
+# ------------------------------------- authenticated disposable branches
+#
+# Same mechanism as gitops/tests/1.e2e.sh's own (see its comment): every
+# branch this test pushes lives under refs/heads/e2e/<RUN_ID>/*, deleted
+# again before the run ends, success or failure. The token is read fresh
+# from SSM at each push/delete through a one-shot GIT_ASKPASS script,
+# never written to disk beyond that script's own short lifetime, never
+# in .git/config, never on a command line, never under `set -x`.
+
+assert_disposable_ref() {
+  case "$1" in
+    "e2e/${RUN_ID}/"*) return 0 ;;
+    *)
+      echo "refusing to touch refs/heads/$1: outside this run's own e2e/${RUN_ID}/* namespace" >&2
+      return 1
+      ;;
+  esac
+}
+
+github_askpass_script() {
+  local token askpass
+  token="$(aws ssm get-parameter --with-decryption --name "${GITOPS_TEST_TOKEN_SSM_PARAM}" \
+    --region "${GITOPS_TEST_TOKEN_SSM_REGION}" --query Parameter.Value --output text 2>/dev/null)" || return 1
+  [[ -n "${token}" && "${token}" != "None" ]] || return 1
+  askpass="$(mktemp)"
+  chmod 700 "${askpass}"
+  { set +x
+    {
+      printf '#!/usr/bin/env bash\n'
+      printf 'case "$1" in\n'
+      printf '  Username*) echo %q ;;\n' "x-access-token"
+      printf '  *) echo %q ;;\n' "${token}"
+      printf 'esac\n'
+    } >"${askpass}"
+  } 2>/dev/null
+  token=""
+  printf '%s' "${askpass}"
+}
+
+push_disposable_branch() {
+  local clone="$1" branch="$2" askpass rc
+  assert_disposable_ref "${branch}" || return 1
+  askpass="$(github_askpass_script)" || { echo "could not read the GitHub token from SSM (${GITOPS_TEST_TOKEN_SSM_PARAM})" >&2; return 1; }
+  ( set +x
+    GIT_ASKPASS="${askpass}" GIT_TERMINAL_PROMPT=0 \
+      git -C "${clone}" push --quiet "${GITOPS_TEST_REPO_URL}" "HEAD:refs/heads/${branch}" )
+  rc=$?
+  rm -f "${askpass}"
+  return "${rc}"
+}
+
+delete_disposable_branch() {
+  local branch="$1" askpass rc
+  assert_disposable_ref "${branch}" || return 1
+  askpass="$(github_askpass_script)" || { echo "could not read the GitHub token from SSM (${GITOPS_TEST_TOKEN_SSM_PARAM})" >&2; return 1; }
+  ( set +x
+    GIT_ASKPASS="${askpass}" GIT_TERMINAL_PROMPT=0 \
+      git -C "${REPO_ROOT}" push --quiet "${GITOPS_TEST_REPO_URL}" --delete "${branch}" )
+  rc=$?
+  rm -f "${askpass}"
+  return "${rc}"
+}
+
+report_stale_disposable_branches() {
+  local token api_repo branches_json
+  token="$(aws ssm get-parameter --with-decryption --name "${GITOPS_TEST_TOKEN_SSM_PARAM}" \
+    --region "${GITOPS_TEST_TOKEN_SSM_REGION}" --query Parameter.Value --output text 2>/dev/null)" || { info "could not read the GitHub token from SSM; skipping the stale e2e/ branch check"; return 0; }
+  api_repo="$(sed -E 's#^https://github.com/##; s#\.git$##' <<<"${GITOPS_TEST_REPO_URL}")"
+  branches_json="$(curl -fsS -H "Authorization: Bearer ${token}" -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${api_repo}/branches?per_page=100" 2>/dev/null)" || branches_json="[]"
+  while IFS=$'\t' read -r name age_days; do
+    [[ -n "${name}" ]] || continue
+    info "found remote disposable branch refs/heads/${name} (${age_days}d old) -- reported for visibility, deleted only if it is this run's own"
+    if [[ "${name}" == "e2e/${RUN_ID}/"* ]]; then
+      delete_disposable_branch "${name}" \
+        && info "cleanup: deleted stale branch refs/heads/${name} from this run's own namespace" \
+        || info "cleanup: could not delete stale branch refs/heads/${name} from this run's own namespace (remove it by hand)"
+    fi
+  done < <(printf '%s' "${branches_json}" | GITHUB_TOKEN_FOR_DATES="${token}" API_REPO="${api_repo}" python3 -c '
+import json, os, sys, urllib.request, datetime
+docs = json.load(sys.stdin) if sys.stdin.readable() else []
+token = os.environ.get("GITHUB_TOKEN_FOR_DATES", "")
+api_repo = os.environ.get("API_REPO", "")
+now = datetime.datetime.now(datetime.timezone.utc)
+for b in (docs or []):
+    name = b.get("name", "")
+    if not name.startswith("e2e/"):
+        continue
+    sha = (b.get("commit") or {}).get("sha", "")
+    date_str = ""
+    if sha and api_repo:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{api_repo}/commits/{sha}",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                commit = json.load(resp)
+            date_str = commit["commit"]["committer"]["date"]
+        except Exception:
+            date_str = ""
+    age_days = -1
+    if date_str:
+        try:
+            dt = datetime.datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            age_days = (now - dt).days
+        except Exception:
+            age_days = -1
+    if age_days >= 1 or age_days == -1:
+        print(f"{name}\t{age_days}")
+')
+  token=""
+}
+
 delete_broken_branches() {
   local b
   for b in "${BROKEN_BRANCHES[@]}"; do
-    git -C "${REPO_ROOT}" push "${GITOPS_TEST_REMOTE}" --delete "${b}" >/dev/null 2>&1 \
-      || info "cleanup: could not delete disposable branch ${b} on ${GITOPS_TEST_REMOTE} (remove it by hand)"
+    delete_disposable_branch "${b}" >/dev/null 2>&1 \
+      || info "cleanup: could not delete disposable branch refs/heads/${b} on ${GITOPS_TEST_REPO_URL} (remove it by hand)"
   done
 }
 
@@ -184,11 +306,12 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-for b in "${TERRAFORM}" aws "${KUBECTL}" git python3; do require_bin "${b}"; done
+for b in "${TERRAFORM}" aws "${KUBECTL}" git curl python3; do require_bin "${b}"; done
 [[ "${MY_CIDR}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]] || fail "MY_CIDR must be an IPv4 CIDR"
 aws sts get-caller-identity --query Account --output text >/dev/null || fail "aws sts get-caller-identity"
 pass "preflight: tools present, credentials valid"
 info "run ${RUN_ID}, work dir ${WORK_DIR}, upgrading karpenter/karpenter-crd to ${UPGRADE_TO_KARPENTER_VERSION}"
+report_stale_disposable_branches
 
 # --------------------- A. mismatched version-pair check (cheapest first)
 #
@@ -335,7 +458,7 @@ pass "canary Pod Running on node ${CANARY_NODE} (instance ${CANARY_INSTANCE_ID})
 # revision annotation ... never the shared stable tag").
 
 UPGRADE_CLONE="${WORK_DIR}/upgrade-match"
-UPGRADE_BRANCH="e2e-upgrade-match-${RUN_ID#gitops-upgrade-}"
+UPGRADE_BRANCH="e2e/${RUN_ID}/upgrade-match"
 git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${UPGRADE_CLONE}" || fail "git clone (upgrade-match)"
 git -C "${UPGRADE_CLONE}" checkout --quiet -B "${UPGRADE_BRANCH}" "${GITOPS_REVISION}" || fail "git checkout (upgrade-match)"
 for f in addons/karpenter/addon.yaml addons/karpenter-crd/addon.yaml; do
@@ -349,7 +472,7 @@ fi
 git -C "${UPGRADE_CLONE}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
   commit --quiet -am "test: bump karpenter/karpenter-crd to ${UPGRADE_TO_KARPENTER_VERSION} for e2e upgrade experiment (never merged)" \
   || fail "git commit (upgrade-match)"
-git -C "${UPGRADE_CLONE}" push --quiet "${GITOPS_TEST_REMOTE}" "HEAD:refs/heads/${UPGRADE_BRANCH}" || fail "git push (upgrade-match)"
+push_disposable_branch "${UPGRADE_CLONE}" "${UPGRADE_BRANCH}" || fail "git push (upgrade-match)"
 BROKEN_BRANCHES+=("${UPGRADE_BRANCH}")
 pass "pushed the matched version bump to disposable branch ${UPGRADE_BRANCH}"
 
