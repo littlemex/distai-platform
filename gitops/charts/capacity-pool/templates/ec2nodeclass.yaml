@@ -25,3 +25,15 @@ spec:
     httpProtocolIPv6: disabled
     httpPutResponseHopLimit: 1
     httpTokens: required
+{{- if .Values.pool.blockDeviceMappings }}
+  # Opt-in only (unset by default, so the existing CPU/trn pools keep
+  # inheriting the AMI's own root volume size unchanged). The GPU pool sets
+  # this explicitly because its own health-check pulls a multi-GB CUDA/EFA/
+  # NCCL test image on top of the base AMI image set; the AMI's own default
+  # root volume was not sized for that and filled up during a dry run,
+  # which triggered kubelet disk-pressure eviction and, from there, a
+  # Karpenter consolidation of the now-empty-looking node (CB rebalance,
+  # 2026-11-20).
+  blockDeviceMappings:
+{{ toYaml .Values.pool.blockDeviceMappings | indent 4 }}
+{{- end }}

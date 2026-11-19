@@ -51,7 +51,7 @@ wait_until() {
   done
 }
 
-STEPS="${CB_STEPS:-20 21 22 23 24 25 26}"
+STEPS="${CB_STEPS:-20 21 22 23 24 25 26 27}"
 run_step() {
   local n="$1"
   [[ " ${STEPS} " == *" ${n} "* ]]
@@ -61,6 +61,17 @@ run_step() {
 # NVIDIA ResourceSlice. Steps 20-23 run against this node; they do not assume
 # EFA or a second node (dry-run-safe on g6e/g5/g7, which have neither).
 gpu_node() { k get nodes -l 'karpenter.sh/nodepool' -o jsonpath='{.items[0].metadata.name}' 2>/dev/null; }
+
+# Node A/Node B pinning by hostname (plan.md section 2's isolation
+# mechanism #1): neither the pool label nor a DRA DeviceClass is
+# node-scoped, so a per-node-lane test must pin by
+# kubernetes.io/hostname explicitly, never rely on "whichever node
+# answers first" -- that can silently satisfy on the other node. Sorted
+# by node name so A/B assignment is stable across repeated calls within
+# one run (not across re-provisioning, where names change).
+gpu_nodes_sorted() { k get nodes -l 'karpenter.sh/nodepool' -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | sort; }
+gpu_node_a() { gpu_nodes_sorted | sed -n '1p'; }
+gpu_node_b() { gpu_nodes_sorted | sed -n '2p'; }
 
 # ============================================================ step 20
 # Node bring-up and health (inventory: "Node bring-up and health").
@@ -78,21 +89,34 @@ if run_step 20; then
   READY_T="$(k get node "${NODE}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].lastTransitionTime}')"
   info "node ${NODE}: created=${CREATED} ready=${READY_T} (launch-to-Ready; compare against this run's own node-launch timestamp from Karpenter/EC2 logs, not recorded here since this script starts after the node exists)"
 
-  k run cb-health --rm -i --restart=Never --image=public.ecr.aws/hpc-cloud/nccl-tests:cuda13.1.2-efa1.50.0-ofiv1.21.1-ncclv2.31.2-1-testsv2.20.0 \
-    --overrides="{\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"${NODE}\"},\"tolerations\":[{\"operator\":\"Exists\"}]}}" \
+  # CB_HEALTH_IMAGE defaults to a small, already-small-and-proven image (the
+  # same one step21 uses, so it is usually already cached on the node) for
+  # dry runs on cheap spot. The real block MUST override this to the full
+  # NCCL/EFA test image, since dcgmi/nvbandwidth/fi_info are no-ops without
+  # it — this default is a dry-run economy measure, not a real-block default.
+  # A multi-GB image on an undersized root volume was the actual cause of a
+  # 2026-11-20 dry-run failure (disk-pressure eviction -> Karpenter read the
+  # node as empty -> consolidated it); the GPU pool's EC2NodeClass now also
+  # carries a 150Gi root volume and a 10m consolidateAfter for the same
+  # reason (gitops/cells/dp-a19-gpu/capacity-pool/gpu.yaml) — this image
+  # default and that disk/disruption fix are deliberately two independent
+  # layers of the same fix, not a substitute for each other.
+  CB_HEALTH_IMAGE="${CB_HEALTH_IMAGE:-public.ecr.aws/amazonlinux/amazonlinux:2023}"
+  k run cb-health --rm -i --restart=Never --image="${CB_HEALTH_IMAGE}" \
+    --overrides="{\"metadata\":{\"annotations\":{\"karpenter.sh/do-not-disrupt\":\"true\"}},\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"${NODE}\"},\"tolerations\":[{\"operator\":\"Exists\"}]}}" \
     -- bash -c '
       echo "--- nvidia-smi -L ---"; nvidia-smi -L
       echo "--- driver/CUDA ---"; nvidia-smi --query-gpu=driver_version,name,memory.total --format=csv
       echo "--- Fabric Manager (if present) ---"; (systemctl is-active nvidia-fabricmanager 2>&1 || echo "not applicable on this instance type")
       echo "--- dcgmi diag -r 3 ---"; (command -v dcgmi >/dev/null && dcgmi diag -r 3 || echo "dcgmi not in this image; run from a DCGM-enabled image on the real block")
       echo "--- nvbandwidth (if present) ---"; (command -v nvbandwidth >/dev/null && nvbandwidth || echo "nvbandwidth not in this image; add to the pre-block image for the real block")
-      echo "--- lspci PCIe topology ---"; lspci -t
+      echo "--- lspci PCIe topology ---"; (command -v lspci >/dev/null && lspci -t || echo "lspci not in this image; the real block pinned NCCL/EFA test image includes pciutils")
       echo "--- aws-ofi-nccl / libfabric ---"; (fi_info -p efa 2>&1 || echo "no EFA on this node (expected on cheap dry-run instances)")
       echo "--- NCCL/libfabric versions baked into this image ---"
     ' 2>&1 | tee "${CB_EVIDENCE_DIR}/step20-node-health.raw.log" || fail "step20: health pod did not complete"
 
   cp "${CB_EVIDENCE_DIR}/step20-node-health.raw.log" "${CB_EVIDENCE_DIR}/step20-node-health.log"
-  grep -qi "driver_version" "${CB_EVIDENCE_DIR}/step20-node-health.log" || fail "step20: nvidia-smi query did not return a driver version"
+  grep -qi "driver_version" "${CB_EVIDENCE_DIR}/step20-node-health.log" || fail "step20: nvidia-smi query did not return a driver version (if CB_HEALTH_IMAGE was overridden to a minimal image, the NVIDIA toolkit may not have injected nvidia-smi into it — retry with the default or the full NCCL/EFA test image before concluding the node itself is unhealthy)"
   pass "step20: versions and topology recorded in ${CB_EVIDENCE_DIR}/step20-node-health.log (dcgmi/nvbandwidth/fi_info are no-ops on a cheap dry-run node without those tools/EFA — expected, not a failure; must re-run on the real block's image/instance to get real values)"
 fi
 
@@ -107,7 +131,7 @@ if run_step 21; then
   NODE="$(gpu_node)"
   [[ -n "${NODE}" ]] || fail "step21: no GPU node found"
   k run cb-nvme --rm -i --restart=Never --image=public.ecr.aws/amazonlinux/amazonlinux:2023 \
-    --overrides="{\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"${NODE}\"},\"hostPID\":false,\"tolerations\":[{\"operator\":\"Exists\"}],\"containers\":[{\"name\":\"cb-nvme\",\"image\":\"public.ecr.aws/amazonlinux/amazonlinux:2023\",\"command\":[\"sh\",\"-c\",\"lsblk; df -h /mnt 2>/dev/null || echo no-mnt; echo done\"],\"volumeMounts\":[{\"name\":\"mnt\",\"mountPath\":\"/mnt\"}]}],\"volumes\":[{\"name\":\"mnt\",\"hostPath\":{\"path\":\"/mnt/k8s-disks/0\",\"type\":\"DirectoryOrCreate\"}}]}}" \
+    --overrides="{\"metadata\":{\"annotations\":{\"karpenter.sh/do-not-disrupt\":\"true\"}},\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"${NODE}\"},\"hostPID\":false,\"tolerations\":[{\"operator\":\"Exists\"}],\"containers\":[{\"name\":\"cb-nvme\",\"image\":\"public.ecr.aws/amazonlinux/amazonlinux:2023\",\"command\":[\"sh\",\"-c\",\"lsblk; df -h /mnt 2>/dev/null || echo no-mnt; echo done\"],\"volumeMounts\":[{\"name\":\"mnt\",\"mountPath\":\"/mnt\"}]}],\"volumes\":[{\"name\":\"mnt\",\"hostPath\":{\"path\":\"/mnt/k8s-disks/0\",\"type\":\"DirectoryOrCreate\"}}]}}" \
     2>&1 | tee "${CB_EVIDENCE_DIR}/step21-nvme.log" || fail "step21: NVMe probe pod did not complete"
   info "step21: fio itself needs a privileged pod with the fio binary; not run here on the cheap dry-run image to avoid a second large image pull — run fio (randread/randwrite/seq, 4k and 1M block sizes) from the pinned benchmark image on the real block, writing results next to this file."
   pass "step21: /mnt/k8s-disks/0 presence checked, logged to ${CB_EVIDENCE_DIR}/step21-nvme.log"
@@ -141,16 +165,26 @@ fi
 # connection between the same two pods is blocked, as a control. Needs a
 # multi-EFA node (p5en/p6-b200) — on a cheap dry-run node without EFA, this
 # step records "skipped: no EFA on this node" rather than a false pass.
+#
+# Isolation mechanism #3 (plan.md section 2): this test's own namespace,
+# not a shared one, so its own default-deny NetworkPolicy cannot affect
+# Node A's or Node B's other concurrent pods during a parallel-lane run.
+# Created and used below regardless of whether the EFA assertion itself
+# can run on this node, so the mechanism is still exercised on a dry run.
+CB_NETPOL_NS="cb-batch-networkpolicy"
 if run_step 23; then
   log "=== step 23: NetworkPolicy vs EFA ==="
+  k create namespace "${CB_NETPOL_NS}" --dry-run=client -o yaml | k apply -f - >/dev/null \
+    || fail "step23: could not create/confirm dedicated namespace ${CB_NETPOL_NS}"
+  info "step23: dedicated namespace ${CB_NETPOL_NS} confirmed (isolation mechanism #3 — this test's default-deny policy never shares a namespace with a concurrent Node-A/Node-B lane)"
   NODE="$(gpu_node)"
   EFA_COUNT="$(k get node "${NODE}" -o jsonpath='{.status.allocatable.vpc\.amazonaws\.com/efa}' 2>/dev/null || true)"
   if [[ -z "${EFA_COUNT}" || "${EFA_COUNT}" == "0" ]]; then
-    info "step23: SKIPPED — node ${NODE} has no vpc.amazonaws.com/efa allocatable (expected on g6e/g5/g7 dry-run nodes). Must run for real on p5en/p6-b200 during pre-block prep or the block itself."
+    info "step23: SKIPPED — node ${NODE} has no vpc.amazonaws.com/efa allocatable (expected on g6e/g5/g7 dry-run nodes). Must run for real on p5en/p6-b200 during pre-block prep or the block itself, inside ${CB_NETPOL_NS}."
   else
-    info "step23: EFA present (${EFA_COUNT}) — full test not scripted in this dry-run pass; author the default-deny NetworkPolicy + fi_pingpong-vs-plain-TCP control manifest before the real block (see plan.md Test 3 for the fi_pingpong invocation to reuse)."
+    info "step23: EFA present (${EFA_COUNT}) — full test not scripted in this dry-run pass; author the default-deny NetworkPolicy + fi_pingpong-vs-plain-TCP control manifest inside ${CB_NETPOL_NS} before the real block (see plan.md Test 3 for the fi_pingpong invocation to reuse)."
   fi
-  pass "step23: recorded in ${CB_EVIDENCE_DIR} (real assertion pending an EFA-carrying node)"
+  pass "step23: recorded in ${CB_EVIDENCE_DIR} (dedicated namespace ${CB_NETPOL_NS} confirmed; the EFA assertion itself is pending an EFA-carrying node)"
 fi
 
 # ============================================================ step 24
@@ -212,6 +246,35 @@ if run_step 26; then
   else
     info "step26: ClusterQueue(s) with GPU quota found — author the two-LocalQueue, one-Cohort, reclaimWithinCohort:Any manifests here before the real block (reuse #22 Decision 4's flat-Cohort model); not yet authored in this dry-run pass."
     pass "step26: prerequisite present, manifest authoring still pending"
+  fi
+fi
+
+# ============================================================ step 27
+# Node A/Node B pinning smoke check (plan.md section 2's isolation
+# mechanism #1). Purpose: on a real 2-node pool, confirm gpu_node_a and
+# gpu_node_b resolve to two DISTINCT real nodes, and that a pod pinned to
+# each by kubernetes.io/hostname actually lands there -- not "whichever
+# node Kubernetes picks," which is the exact failure mode this mechanism
+# exists to rule out before any per-node-lane test (E7a/E7b constrained
+# vs. unconstrained arms, etc.) relies on it. Needs 2 nodes; on a 1-node
+# dry run this records a SKIPPED finding, not a false pass.
+if run_step 27; then
+  log "=== step 27: Node A/Node B pinning smoke ==="
+  NODE_A="$(gpu_node_a)"
+  NODE_B="$(gpu_node_b)"
+  if [[ -z "${NODE_B}" || "${NODE_A}" == "${NODE_B}" ]]; then
+    info "step27: SKIPPED — only one GPU node present (node_a=${NODE_A:-<none>}, node_b=${NODE_B:-<none>}). Must re-run against a real 2-node pool before trusting any per-node-lane test's isolation."
+    pass "step27: skipped, 1-node pool (expected on a 1-node dry run)"
+  else
+    info "step27: node_a=${NODE_A} node_b=${NODE_B} (distinct)"
+    for pair in "a:${NODE_A}" "b:${NODE_B}"; do
+      label="${pair%%:*}"; target="${pair#*:}"
+      k run "cb-pin-${label}" --rm -i --restart=Never --image=public.ecr.aws/amazonlinux/amazonlinux:2023 \
+        --overrides="{\"metadata\":{\"annotations\":{\"karpenter.sh/do-not-disrupt\":\"true\"}},\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"${target}\"},\"tolerations\":[{\"operator\":\"Exists\"}]}}" \
+        -- sh -c 'echo "landed on: $(cat /etc/hostname 2>/dev/null || hostname)"; echo pinned-ok' \
+        2>&1 | tee "${CB_EVIDENCE_DIR}/step27-pin-${label}.log" || fail "step27: pin pod for node ${label} (${target}) did not complete"
+    done
+    pass "step27: both pin pods completed, pinned to distinct nodes (node_a=${NODE_A}, node_b=${NODE_B}); evidence in ${CB_EVIDENCE_DIR}/step27-pin-{a,b}.log"
   fi
 fi
 

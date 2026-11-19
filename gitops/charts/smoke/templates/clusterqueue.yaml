@@ -18,3 +18,19 @@ spec:
               nominalQuota: {{ .Values.clusterQueue.cpuQuota | quote }}
             - name: "memory"
               nominalQuota: "64Gi"
+{{- if .Values.clusterQueue.gpuQuota }}
+    # Opt-in, omitted by default (the smoke ClusterQueue otherwise covers
+    # only cpu/memory, per this file's own header comment). Set
+    # clusterQueue.gpuQuota explicitly to the POOL'S REAL TOTAL
+    # (nodes-in-the-pool x GPUs-per-node), never one node's own count --
+    # a Kueue quota test that only proves "stays pending" against a
+    # one-node number can be silently admitted onto a second node in the
+    # same pool and pass for the wrong reason (CB plan.md section 2's
+    # isolation-mechanism #2, 2026-11-20).
+    - coveredResources: ["nvidia.com/gpu"]
+      flavors:
+        - name: {{ required "clusterQueue.resourceFlavor is required" .Values.clusterQueue.resourceFlavor | quote }}
+          resources:
+            - name: "nvidia.com/gpu"
+              nominalQuota: {{ .Values.clusterQueue.gpuQuota | quote }}
+{{- end }}

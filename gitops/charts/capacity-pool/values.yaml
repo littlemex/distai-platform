@@ -43,6 +43,13 @@ pool:
     consolidationPolicy: WhenEmptyOrUnderutilized
     consolidateAfter: 60s
 
+  # Opt-in, empty by default (omitted from the EC2NodeClass template when
+  # unset, so existing pools keep the AMI's own default root volume). Set
+  # this on pools whose checks pull large images (e.g. the GPU pool's CB
+  # health-check image) so a transient disk-pressure eviction cannot be
+  # mistaken by Karpenter for an empty node mid-pull.
+  blockDeviceMappings: []
+
 amiFamily: AL2023
 amiSelectorTerms:
   - alias: al2023@latest

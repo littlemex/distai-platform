@@ -1,0 +1,20 @@
+# Parameter file for cells.ApplicationSet.yaml's Git file generator
+# (RFC #25 Decision 2/3/9), own cell for CB dry-run #2 (dp-cbp-r2, see
+# capacity-pool/gpu.yaml's own header for why this is a separate cell
+# directory rather than an edit to dp-a19-gpu).
+#
+# gpuQuota is set to this pool's REAL total for the dry run: 2 nodes x
+# 1 GPU each (g6e.2xlarge) = 2, not one node's own count -- the exact
+# isolation-mechanism fix plan.md section 2 calls for (a Kueue quota test
+# sized against one node can be silently satisfied by a second node in
+# the same pool and pass for the wrong reason). For the real block
+# (2x p5en.48xlarge, 8 GPUs/node), this value must be re-derived as
+# 2 x 8 = 16, not copied from here.
+addon: smoke
+wave: capacity
+dir: gitops/charts/smoke
+namespace: distai-smoke
+values:
+  clusterQueue:
+    resourceFlavor: gpu
+    gpuQuota: "2"
