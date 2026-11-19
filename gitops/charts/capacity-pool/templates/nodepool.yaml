@@ -8,6 +8,13 @@ metadata:
   name: {{ .Values.pool.name | quote }}
 spec:
   template:
+    {{- with .Values.pool.labels }}
+    # pool.labels: the accelerator method label an accel-* add-on selects
+    # (#19 Decision 2, #28 section C). Omitted when empty.
+    metadata:
+      labels:
+{{ toYaml . | indent 8 }}
+    {{- end }}
     spec:
       nodeClassRef:
         group: karpenter.k8s.aws

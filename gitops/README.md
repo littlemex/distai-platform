@@ -89,7 +89,7 @@ separate `ApplicationSet` objects.
 | --- | --- | --- |
 | `platform` | `crds` (`karpenter-crd`) | yes |
 | `platform` | `controllers` (`karpenter`, `kueue`) | yes |
-| `platform` | `accelerators` | no - [#19](https://github.com/littlemex/distai-platform/issues/19) |
+| `platform` | `accelerators` (`accel-nvidia-device-plugin`, `accel-nvidia-dra`, `accel-neuron-device-plugin`, `accel-neuron-dra`, `accel-device-classes`) | yes |
 | `platform` | `extras` | no - [#18](https://github.com/littlemex/distai-platform/issues/18)/[#23](https://github.com/littlemex/distai-platform/issues/23) |
 | `cells` | `capacity` (`capacity-pool/*`, `smoke/*`) | yes |
 | `cells` | `teams` | no - [#22](https://github.com/littlemex/distai-platform/issues/22) |
@@ -127,6 +127,36 @@ semver):
 | `karpenter` | `oci://public.ecr.aws/karpenter/karpenter` | `1.15.2` |
 | `kueue` | `oci://registry.k8s.io/kueue/charts/kueue` | `0.20.6` |
 
+Accelerator add-on pins, confirmed against each chart's upstream source on
+2026-11-19 ([#28](https://github.com/littlemex/distai-platform/issues/28),
+Facts checked; no content digest is recorded for these yet):
+
+| Add-on | Chart | Version |
+| --- | --- | --- |
+| `accel-nvidia-device-plugin` | `nvidia-device-plugin` from `https://nvidia.github.io/k8s-device-plugin` (classic Helm repository) | `0.20.2` |
+| `accel-nvidia-dra` | `oci://registry.k8s.io/dra-driver-nvidia/charts/dra-driver-nvidia-gpu` | `0.5.1` |
+| `accel-neuron-device-plugin`, `accel-neuron-dra` | `oci://public.ecr.aws/neuron/neuron-helm-chart` (one chart, two releases with opposite toggles) | `1.11.2` |
+| `accel-device-classes` | local chart `gitops/charts/accel-device-classes` | - |
+
+## Accelerators
+
+A `NodePool` opts its nodes into exactly one advertiser per device class by
+setting a method label through `capacity-pool`'s `pool.labels`
+([#19](https://github.com/littlemex/distai-platform/issues/19) Decision 2):
+
+| Label | Value | Advertiser selected |
+| --- | --- | --- |
+| `distai.dev/nvidia-gpu-method` | `device-plugin` | `accel-nvidia-device-plugin` |
+| `distai.dev/nvidia-gpu-method` | `dra` | `accel-nvidia-dra` |
+| `distai.dev/neuron-method` | `device-plugin` | `accel-neuron-device-plugin` |
+| `distai.dev/neuron-method` | `dra` | `accel-neuron-dra` |
+
+A `NodePool` without a method label gets no advertiser, so every
+advertiser is always delivered and costs nothing on a cell that does not
+use it. `cells/dp-a19-gpu/capacity-pool/gpu.yaml` and
+`cells/dp-a19-trn/capacity-pool/trn.yaml` are the device-plugin-method
+pools the light-tier e2e launches nodes from.
+
 ## Adding a cell
 
 1. Build the cell with `infra/foundation` and run `gitops/bootstrap/bootstrap.sh`
@@ -151,9 +181,14 @@ semver):
   reserved/on-demand/flex ordering across several `NodePool`s
   ([#17](https://github.com/littlemex/distai-platform/issues/17) extends
   it).
-- No accelerator advertiser, team object, `sharedfs` or notifications
-  add-on ships here (RFC #25 Decision 9); their steps exist in the RFC but
-  have no `addon.yaml` yet, so they generate nothing today.
+- No team object, `sharedfs` or notifications add-on ships here (RFC #25
+  Decision 9); their steps exist in the RFC but have no `addon.yaml` yet,
+  so they generate nothing today.
+- The DRA method (`accel-nvidia-dra`, `accel-neuron-dra`) is delivered and
+  statically checked, but no dynamically provisioned `NodePool` initializes
+  a DRA node (#19 E2, E4c); a static `NodePool` for DRA is
+  [#27](https://github.com/littlemex/distai-platform/issues/27)'s scope.
+  Only the device-plugin method is verified on real nodes.
 - `platform.ApplicationSet.yaml` and `cells.ApplicationSet.yaml`'s
   `goTemplate: true` plus `templatePatch` mechanism (Decision 2) is this
   PR's own construction, not a primary-sourced example from Argo CD's

@@ -1,0 +1,54 @@
+# The Neuron device plugin: advertises aws.amazon.com/neuron (and
+# neuroncore) as extended resources (a Layer 1 request, #19 Decision 1) on
+# every node whose NodePool opts into the device-plugin method. One of four
+# accelerator add-ons in the "accelerators" step (#25 Decision 5, #28
+# section A).
+#
+# Neuron ships one chart for both methods, so this release and
+# accel-neuron-dra/addon.yaml install the same chart twice with opposite
+# toggles. The DRA docs are explicit that the two advertisers cannot share
+# a node ("Do not install the Neuron device plugin on the cluster!" when
+# draDriver.enabled=true), so:
+#   - devicePlugin.nodeSelector selects distai.dev/neuron-method=device-plugin
+#     (#19 Decision 2). The chart's own default affinity, which matches
+#     Neuron instance types, stays in place; the method label narrows it.
+#   - draDriver.enabled: false (already the chart default, set explicitly so
+#     this file states which advertiser it owns).
+#   - The cluster-wide or per-instance-type sub-components (npd, scheduler,
+#     observer) stay at the chart defaults in this release and are turned
+#     off in the DRA release, so exactly one copy of each exists in the
+#     cell (#25 Decision 5: two copies under different Applications would
+#     collide on object names). In chart 1.11.2 those defaults are npd on,
+#     scheduler off, observer off. npd is not an advertiser; it runs on
+#     every Neuron instance type regardless of method.
+#
+# npd.namespaceOverride: the chart puts npd in its own namespace
+# neuron-healthcheck-system by default and creates no Namespace object for
+# it, while Argo CD's CreateNamespace=true only creates this Application's
+# own destination namespace (below), so the sync would fail on a missing
+# namespace. Pointing npd at the destination namespace keeps the release
+# self-contained. The device plugin DaemonSet itself keeps the chart's
+# devicePlugin.namespaceOverride (kube-system), which always exists.
+#
+# Light-tier pods request aws.amazon.com/neuron, never neuroncore: #19 E4a
+# found Karpenter estimates neuroncore: 8 for trn2.3xlarge where the node
+# reports 4 (#28, Alternatives Considered).
+#
+# Chart source: https://github.com/aws-neuron/neuron-helm-charts (chart
+# version 1.11.2), OCI:
+#   oci://public.ecr.aws/neuron/neuron-helm-chart:1.11.2
+# confirmed 2026-11-19 (#28, Facts checked).
+addon: accel-neuron-device-plugin
+chart: neuron-helm-chart
+repoURL: public.ecr.aws/neuron
+version: "1.11.2"
+wave: accelerators
+namespace: neuron-device-plugin
+values:
+  devicePlugin:
+    nodeSelector:
+      distai.dev/neuron-method: device-plugin
+  draDriver:
+    enabled: false
+  npd:
+    namespaceOverride: neuron-device-plugin

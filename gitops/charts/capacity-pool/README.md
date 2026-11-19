@@ -14,6 +14,7 @@ and the three kinds it renders do not change under that extension.
 | `clusterName` | yes | Matches the `karpenter.sh/discovery` tag the foundation layer puts on the cell's subnets and security group |
 | `nodeRole` | yes | IAM role name for nodes launched by Karpenter (`infra/foundation` output `karpenter_node_role_name`) |
 | `pool.name` | yes | Name shared by the `NodePool`, its `EC2NodeClass` and the `ResourceFlavor` |
+| `pool.labels` | no | Labels on every node launched from the `NodePool` (`spec.template.metadata.labels`), map of string to string; default `{}`. Sets the accelerator method label (`distai.dev/nvidia-gpu-method`, `distai.dev/neuron-method`) the matching `gitops/addons/accel-*` advertiser selects ([#19](https://github.com/littlemex/distai-platform/issues/19) Decision 2) |
 | `pool.requirements` | no | Karpenter `NodePool` scheduling requirements; defaults to on-demand, amd64, `c`/`m`/`r` instance categories |
 | `pool.limits` | no | Karpenter `NodePool` resource limits; defaults to `cpu: "32"` |
 | `pool.disruption` | no | Karpenter `NodePool` disruption settings |
