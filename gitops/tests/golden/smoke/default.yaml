@@ -1,0 +1,39 @@
+---
+# Source: smoke/templates/namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: "distai-smoke"
+
+---
+# Source: smoke/templates/clusterqueue.yaml
+# A single-flavor ClusterQueue naming one capacity-pool ResourceFlavor.
+# Kueue's own kind (not Karpenter's); the retry-based dependency on the
+# "controllers" step (this chart's Application lives in a different
+# ApplicationSet - cells, not platform - RFC #25 Decision 4) is what makes
+# this converge only once Kueue's CRDs and webhook are Healthy.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: "smoke"
+spec:
+  namespaceSelector: {}
+  resourceGroups:
+    - coveredResources: ["cpu", "memory"]
+      flavors:
+        - name: "cpu"
+          resources:
+            - name: "cpu"
+              nominalQuota: "32"
+            - name: "memory"
+              nominalQuota: "64Gi"
+
+---
+# Source: smoke/templates/localqueue.yaml
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: "smoke"
+  namespace: "distai-smoke"
+spec:
+  clusterQueue: "smoke"
