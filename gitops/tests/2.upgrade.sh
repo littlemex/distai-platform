@@ -174,6 +174,7 @@ github_askpass_script() {
   { set +x
     {
       printf '#!/usr/bin/env bash\n'
+      # shellcheck disable=SC2016 # literal $1 for the generated askpass script, not this shell's
       printf 'case "$1" in\n'
       printf '  Username*) echo %q ;;\n' "x-access-token"
       printf '  *) echo %q ;;\n' "${token}"
@@ -209,25 +210,45 @@ delete_disposable_branch() {
 }
 
 report_stale_disposable_branches() {
-  local token api_repo branches_json
+  local token api_repo branches_json curl_config token_file
   token="$(aws ssm get-parameter --with-decryption --name "${GITOPS_TEST_TOKEN_SSM_PARAM}" \
     --region "${GITOPS_TEST_TOKEN_SSM_REGION}" --query Parameter.Value --output text 2>/dev/null)" || { info "could not read the GitHub token from SSM; skipping the stale e2e/ branch check"; return 0; }
   api_repo="$(sed -E 's#^https://github.com/##; s#\.git$##' <<<"${GITOPS_TEST_REPO_URL}")"
-  branches_json="$(curl -fsS -H "Authorization: Bearer ${token}" -H "Accept: application/vnd.github+json" \
+  # Neither the curl header nor the Python helper below ever takes the token
+  # on a command line or in an environment variable (both are visible to
+  # any other process via `ps` for the command's lifetime): curl reads it
+  # from a -K config file, and the Python helper reads it from a file path
+  # named by an env var, never the token itself. Both files are mode 600
+  # and removed immediately after use.
+  curl_config="$(mktemp)"
+  chmod 600 "${curl_config}"
+  { set +x
+    printf 'header = "Authorization: Bearer %s"\n' "${token}"
+    printf 'header = "Accept: application/vnd.github+json"\n'
+  } >"${curl_config}" 2>/dev/null
+  branches_json="$(curl -fsS -K "${curl_config}" \
     "https://api.github.com/repos/${api_repo}/branches?per_page=100" 2>/dev/null)" || branches_json="[]"
+  rm -f "${curl_config}"
+  token_file="$(mktemp)"
+  chmod 600 "${token_file}"
+  { set +x; printf '%s' "${token}" >"${token_file}"; } 2>/dev/null
   while IFS=$'\t' read -r name age_days; do
     [[ -n "${name}" ]] || continue
     info "found remote disposable branch refs/heads/${name} (${age_days}d old) -- reported for visibility, deleted only if it is this run's own"
     if [[ "${name}" == "e2e/${RUN_ID}/"* ]]; then
-      delete_disposable_branch "${name}" \
-        && info "cleanup: deleted stale branch refs/heads/${name} from this run's own namespace" \
-        || info "cleanup: could not delete stale branch refs/heads/${name} from this run's own namespace (remove it by hand)"
+      if delete_disposable_branch "${name}"; then
+        info "cleanup: deleted stale branch refs/heads/${name} from this run's own namespace"
+      else
+        info "cleanup: could not delete stale branch refs/heads/${name} from this run's own namespace (remove it by hand)"
+      fi
     fi
-  done < <(printf '%s' "${branches_json}" | GITHUB_TOKEN_FOR_DATES="${token}" API_REPO="${api_repo}" python3 -c '
+  done < <(printf '%s' "${branches_json}" | API_REPO="${api_repo}" TOKEN_FILE="${token_file}" python3 -c '
 import json, os, sys, urllib.request, datetime
 docs = json.load(sys.stdin) if sys.stdin.readable() else []
-token = os.environ.get("GITHUB_TOKEN_FOR_DATES", "")
 api_repo = os.environ.get("API_REPO", "")
+token_file = os.environ.get("TOKEN_FILE", "")
+with open(token_file, encoding="utf-8") as f:
+    token = f.read()
 now = datetime.datetime.now(datetime.timezone.utc)
 for b in (docs or []):
     name = b.get("name", "")
@@ -256,6 +277,7 @@ for b in (docs or []):
     if age_days >= 1 or age_days == -1:
         print(f"{name}\t{age_days}")
 ')
+  rm -f "${token_file}"
   token=""
 }
 
@@ -559,6 +581,22 @@ pass "sampled the canary Pod and every tracked Application every 5s for 300s: ca
 wait_until 900 15 "karpenter Healthy+Synced at ${UPGRADE_TO_KARPENTER_VERSION}" app_healthy_synced "${APP_KARPENTER}" \
   || fail "${APP_KARPENTER} did not reach Healthy+Synced at the new version"
 pass "${APP_KARPENTER} reached Healthy+Synced after the version bump to ${UPGRADE_TO_KARPENTER_VERSION}"
+
+# Healthy+Synced alone does not prove the bump actually took -- an
+# ApplicationSet that silently kept the old generated Application would
+# also read Healthy+Synced at its own (unchanged) version. For an OCI
+# chart source, spec.source.targetRevision IS the chart version (never a
+# git revision -- the same distinction the capacity-pool/revision check
+# above relies on), so comparing it directly against
+# UPGRADE_TO_KARPENTER_VERSION is the one assertion that actually proves
+# the new chart version, not merely a healthy old one, is what synced.
+karpenter_bumped_revision="$(app_field "${APP_KARPENTER}" '{.spec.source.targetRevision}')"
+[[ "${karpenter_bumped_revision}" == "${UPGRADE_TO_KARPENTER_VERSION}" ]] \
+  || fail "${APP_KARPENTER}'s targetRevision is ${karpenter_bumped_revision}, not the bumped ${UPGRADE_TO_KARPENTER_VERSION} -- Healthy+Synced was reached on the OLD version, the bump never actually applied"
+karpenter_crd_bumped_revision="$(app_field "${APP_KARPENTER_CRD}" '{.spec.source.targetRevision}')"
+[[ "${karpenter_crd_bumped_revision}" == "${UPGRADE_TO_KARPENTER_VERSION}" ]] \
+  || fail "${APP_KARPENTER_CRD}'s targetRevision is ${karpenter_crd_bumped_revision}, not the bumped ${UPGRADE_TO_KARPENTER_VERSION}"
+pass "${APP_KARPENTER} and ${APP_KARPENTER_CRD}'s own targetRevision both confirm the bump to ${UPGRADE_TO_KARPENTER_VERSION} actually applied, not merely that the old version stayed healthy"
 
 [[ "$(k get nodepool "${NODEPOOL}" -o jsonpath='{.metadata.creationTimestamp}')" == "${NODEPOOL_CREATED}" ]] \
   || fail "NodePool ${NODEPOOL}'s creationTimestamp changed -- it was replaced, not merely upgraded"

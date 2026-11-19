@@ -17,7 +17,7 @@ and the three kinds it renders do not change under that extension.
 | `pool.requirements` | no | Karpenter `NodePool` scheduling requirements; defaults to on-demand, amd64, `c`/`m`/`r` instance categories |
 | `pool.limits` | no | Karpenter `NodePool` resource limits; defaults to `cpu: "32"` |
 | `pool.disruption` | no | Karpenter `NodePool` disruption settings |
-| `amiFamily`, `amiSelectorTerms` | no | `EC2NodeClass` AMI selection; defaults to the latest AL2023 alias |
+| `amiFamily`, `amiSelectorTerms` | no | `EC2NodeClass` AMI selection; defaults to a pinned AL2023 alias (`al2023@v20261112`), bumped only by a reviewed diff, never `latest` |
 
 This chart is never installed from an upstream chart registry: a cell's own
 `gitops/cells/<cluster-name>/capacity-pool/*.yaml` parameter file points

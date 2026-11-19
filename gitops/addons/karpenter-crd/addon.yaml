@@ -1,5 +1,6 @@
 # Karpenter's five CustomResourceDefinitions (EC2NodeClass, NodeClaim,
-# NodePool - the chart ships all five as plain templates, no crds/ folder,
+# NodePool, NodeOverlay, CapacityBuffer - the chart ships all five as plain
+# templates, no crds/ folder,
 # so Argo CD upgrades them on every sync like any other template). Delivered
 # one step ahead of the "karpenter" add-on, which ships the same five CRDs a
 # second time, in a true crds/ folder, and sets helm.skipCrds (below) so the
