@@ -20,9 +20,21 @@
 # aws.amazon.com/neuron) would not reach a DRA node through it alone. The
 # platform's DeviceClass neuron-extended-resource
 # (accel-device-classes/addon.yaml) adds that mapping (#19 Decision 1(c),
-# E4b). The DRA kubelet plugin goes to the chart's own namespace
-# (draDriver.namespaceOverride, default neuron-dra-driver), for which the
-# chart ships a Namespace object.
+# E4b).
+#
+# draDriver.namespaceOverride: neuron-dra, not the chart's own default
+# (neuron-dra-driver): without this override, confirmed by `helm template`
+# against this exact pinned version, the kubelet plugin DaemonSet and its
+# ServiceAccount render into neuron-dra-driver while this Application's
+# own destination namespace (below) stays neuron-dra, empty. The real-
+# machine e2e's "no second advertiser" check (1.e2e.sh's
+# check_accel_layer1) reads each release's namespace from its own
+# Application object (`.spec.destination.namespace`), so a mismatch here
+# would make that check compare against a namespace the DRA pods never
+# actually run in -- it would find no DaemonSet pod there and pass even
+# if a real double advertisement happened. The chart creates this
+# namespace itself (a Namespace object in its own templates), so Argo
+# CD's CreateNamespace=true is redundant here but harmless.
 #
 # Not launched on a real node in #28: #19 E4c showed a dynamically
 # provisioned DRA pool never initializes a Neuron node
@@ -42,6 +54,7 @@ values:
     enabled: false
   draDriver:
     enabled: true
+    namespaceOverride: neuron-dra
     nodeSelector:
       distai.dev/neuron-method: dra
   scheduler:

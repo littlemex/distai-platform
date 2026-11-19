@@ -11,7 +11,7 @@
 # pool.requirements replaces the chart default as a whole (Helm replaces
 # lists): the chart's instance-category/instance-generation terms describe
 # CPU families and are dropped; instance-family names the GPU families
-# directly, spot preferred with on-demand allowed as a fallback.
+# directly, spot only (#28 acceptance criteria name a spot node explicitly; this PR drops the on-demand fallback rather than leave it un-asserted).
 addon: capacity-pool-gpu
 wave: capacity
 dir: gitops/charts/capacity-pool
@@ -24,7 +24,7 @@ values:
     requirements:
       - key: karpenter.sh/capacity-type
         operator: In
-        values: ["spot", "on-demand"]
+        values: ["spot"]
       - key: kubernetes.io/arch
         operator: In
         values: ["amd64"]
