@@ -14,11 +14,15 @@ after an apply that failed part-way.
 
 Issue #25 decision 9 also removes this layer's own stand-in Karpenter
 install from `1.e2e.sh`: Karpenter is now delivered by the managed Argo CD
-capability, and that coverage (Karpenter healthy, a NodePool launches a
-node, a canary admitted by Kueue) moved to `gitops/tests/1.e2e.sh`. This
-script keeps only what belongs to the foundation layer itself: the outputs
-Karpenter will need exist and are well-formed, and the node role carries no
-CNI permissions, independent of anything that later runs on top of it.
+capability. Coverage for "Karpenter healthy, a NodePool launches a node, a
+canary admitted by Kueue" moved to `gitops/tests/1.e2e.sh`, on an
+on-demand pool; the spot launch and the synthetic EventBridge interruption
+message this script used to send are dropped, not replaced -- no test in
+this repository exercises Karpenter's interruption handling until #17's
+full `capacity-pool` chart adds a spot/flex pool. This script keeps only
+what belongs to the foundation layer itself: the outputs Karpenter will
+need exist and are well-formed, and the node role carries no CNI
+permissions, independent of anything that later runs on top of it.
 
 | Script | What it checks | Needs AWS | Duration |
 | --- | --- | --- | --- |
@@ -36,7 +40,7 @@ resources count as "left behind" after a destroy.
 - For `1.e2e.sh` also the AWS CLI v2 and `kubectl`. Helm is no longer needed by this script (issue #25 removed the stand-in Karpenter install); `gitops/tests/0.static.sh` needs it for `helm lint`/`helm template` (`gitops/tests/1.e2e.sh`/`2.upgrade.sh` never call Helm themselves -- Argo CD installs every chart in-cluster). `2.e2e-partial-apply.sh` needs only Terraform and the AWS CLI v2.
 - An S3 bucket for the Terraform state.
 - An IAM principal that can create a VPC, an EKS cluster, IAM roles, an SQS queue and EventBridge rules. The test passes this principal as the cluster admin, so `ADMIN_PRINCIPAL_ARN` must be the principal that runs the test (for an assumed role, the IAM role ARN).
-- An IAM principal that can also call `iam:ListAttachedRolePolicies`, `eks:ListPodIdentityAssociations`, `eks:ListAccessEntries`, `eks:DescribeAccessEntry`, `eks:ListAssociatedAccessPolicies` and, with `argocd` set, `eks:DescribeCapability` (the test checks these in addition to what issue #20 already needed).
+- An IAM principal that can also call `iam:ListAttachedRolePolicies`, `eks:ListPodIdentityAssociations`, `eks:ListAssociatedAccessPolicies` and, with `argocd` set, `eks:DescribeCapability` (the test checks these in addition to what issue #20 already needed).
 - A `NAME` that no other cell in the account uses, in any Region (IAM role and policy names include it and are global to the account).
 - Outbound internet access from the private subnets (through the NAT gateway the layer creates) to `public.ecr.aws` and `docker.io`/`registry-1.docker.io`, to pull the pinned images below.
 
@@ -209,7 +213,7 @@ Optional variables:
 
 1. Writes a tfvars file with `name`, `region`, `endpoint_public_access_cidrs = [MY_CIDR]`, `admin_principal_arns = [ADMIN_PRINCIPAL_ARN]`, `argocd` and a run tag in `tags`; runs `terraform init` with the S3 backend, checks that the state at that key has no resources yet (so the run cannot apply new code over an old cell), and runs `terraform apply`.
 2. Checks that all thirteen outputs exist (including `cluster_arn` and `argocd_namespace`, issue #25 decision 1), that `argocd_capability_arn` is null when `argocd` is unset, that `cluster_arn` is a well-formed EKS cluster ARN for the input region and name, and that `cluster_name` and `region` match the inputs.
-3. Checks the cluster: EKS 1.37, authentication mode `API`, public endpoint limited to `MY_CIDR`, `kubectl` access through the access entry, two Ready nodes of the managed node group with the taint `CriticalAddonsOnly=true:NoSchedule`, and the add-ons `vpc-cni`, `coredns`, `kube-proxy` and `eks-pod-identity-agent` `ACTIVE`. With `argocd` set, also waits for the capability to be `ACTIVE`, checks, through `aws eks describe-capability`, that its `rbacRoleMappings` list the ADMIN role mapping (and the VIEWER and/or EDITOR ones, for whichever of `ARGOCD_VIEWER_GROUP_IDS` and `ARGOCD_EDITOR_GROUP_IDS` were set) with the expected group IDs, and checks, through `aws eks list-access-entries`/`list-associated-access-policies`, that the capability's own IAM role (the one `STANDARD` access entry that is neither `ADMIN_PRINCIPAL_ARN` nor a node role) has an `AmazonEKSClusterAdminPolicy` association — issue #25 decision 1's `aws_eks_access_policy_association`, without which Argo CD cannot deliver anything to the cluster it runs on.
+3. Checks the cluster: EKS 1.37, authentication mode `API`, public endpoint limited to `MY_CIDR`, `kubectl` access through the access entry, two Ready nodes of the managed node group with the taint `CriticalAddonsOnly=true:NoSchedule`, and the add-ons `vpc-cni`, `coredns`, `kube-proxy` and `eks-pod-identity-agent` `ACTIVE`. With `argocd` set, also waits for the capability to be `ACTIVE`, checks, through `aws eks describe-capability`, that its `rbacRoleMappings` list the ADMIN role mapping (and the VIEWER and/or EDITOR ones, for whichever of `ARGOCD_VIEWER_GROUP_IDS` and `ARGOCD_EDITOR_GROUP_IDS` were set) with the expected group IDs, and checks, through `aws eks describe-capability`'s own `capability.roleArn` plus `aws eks list-associated-access-policies`, that the capability's own IAM role has an `AmazonEKSClusterAdminPolicy` association — issue #25 decision 1's `aws_eks_access_policy_association`, without which Argo CD cannot deliver anything to the cluster it runs on.
 4. Runs a short-lived pod with no host networking on a system node (tolerating `CriticalAddonsOnly`) that tries to `PUT` an IMDSv2 token from `169.254.169.254`; the check passes when no token comes back. Also checks, with `aws ec2 describe-instances`, that every system node instance has `MetadataOptions.HttpTokens = required` and `MetadataOptions.HttpPutResponseHopLimit = 1`.
 5. Checks, with `aws iam list-attached-role-policies`, that neither the Karpenter node role (`karpenter_node_role_name`) nor the system node group's node role (found with `aws eks describe-nodegroup`) has `AmazonEKS_CNI_Policy` attached; checks, with `aws eks list-pod-identity-associations`, that `kube-system`/`aws-node` has an association; and checks that the pod from the previous step, which has no host networking and no node role, still got a pod IP from the CNI.
 6. Creates a namespace with a server pod (BusyBox `httpd`) and a client pod (BusyBox), and checks that the client reaches the server. Applies a deny-all ingress `NetworkPolicy` on the server and checks that the same request from the client now fails (retried for up to a minute, to allow time for the policy to take effect). Deletes the namespace.
@@ -252,7 +256,7 @@ PASS VPC removed
 RESULT PASS: all checks passed (run e2e-..., work dir ...)
 ```
 
-(measured on a real run under the previous, Karpenter-installing version of this script: `terraform apply` 676s, `terraform destroy` 859s, about 32 minutes end to end; re-measure once this version runs, since removing the Karpenter install should shorten the apply and, with no Karpenter-launched instance, the destroy)
+(measured on a real run of this version: `terraform apply` 721s, `terraform destroy` 429s, about 22 minutes end to end in default mode; with `argocd` set, 918s/445s, about 26 minutes -- both shorter than the previous, Karpenter-installing version's 676s/859s/32 minutes, since there is no Karpenter-launched instance for destroy to wait on)
 
 With `ARGOCD_IDC_INSTANCE_ARN`, `ARGOCD_IDC_REGION` and `ARGOCD_ADMIN_GROUP_IDS` set (`ARGOCD_VIEWER_GROUP_IDS` and `ARGOCD_EDITOR_GROUP_IDS` optional, independently of each other), the output also has, after `PASS Argo CD capability ACTIVE`:
 
@@ -263,7 +267,7 @@ PASS Argo CD capability lists the EDITOR role mapping (...)
 PASS Argo CD capability role has an AmazonEKSClusterAdminPolicy access-policy association
 ```
 
-(the VIEWER line only when `ARGOCD_VIEWER_GROUP_IDS` was set, the EDITOR line only when `ARGOCD_EDITOR_GROUP_IDS` was set; each role-mapping check uses `aws eks describe-capability` to confirm that the capability's `rbacRoleMappings` lists that role with its group IDs; the access-policy line uses `aws eks list-access-entries`, `describe-access-entry` and `list-associated-access-policies` and runs regardless of which role mappings were set, since it checks the capability's own role, not a group).
+(the VIEWER line only when `ARGOCD_VIEWER_GROUP_IDS` was set, the EDITOR line only when `ARGOCD_EDITOR_GROUP_IDS` was set; each role-mapping check uses `aws eks describe-capability` to confirm that the capability's `rbacRoleMappings` lists that role with its group IDs; the access-policy line uses `aws eks describe-capability`'s own `capability.roleArn` plus `list-associated-access-policies` and runs regardless of which role mappings were set, since it checks the capability's own role, not a group).
 
 The script exits with status 0 only when every check passed. On the first failed check it prints `FAIL` with the reason, deletes the IMDS check pod and the NetworkPolicy namespace, runs `terraform destroy`, lists anything that is left, and exits non-zero.
 

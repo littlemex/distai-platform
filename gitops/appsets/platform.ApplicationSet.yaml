@@ -21,13 +21,18 @@
 # rule (the consumer comes after the producer, Decision 1) is satisfied
 # inside one Matrix generator.
 #
-# RollingSync is this PR's Decision-4 answer, pending Experiment 4 (whether
-# the managed capability's ApplicationSet controller actually exposes
-# Progressive Syncs - Beta since Argo CD v3.3.0, unconfirmed here). If it
-# does not, every generated Application instead syncs independently with
-# automated.selfHeal, and a later step's Application fails once and
-# succeeds on retry against an earlier step that has not converged yet -
-# the fallback this manifest's retry policy is already sized for.
+# RollingSync is this PR's Decision-4 answer (Experiment 4: whether the
+# managed capability's ApplicationSet controller actually exposes
+# Progressive Syncs - Beta since Argo CD v3.3.0). Confirmed on a real
+# cluster (gitops/tests/1.e2e.sh, reading this ApplicationSet's own
+# status.applicationStatus): it does not, as of this PR. Every generated
+# Application instead syncs independently with automated.selfHeal, and a
+# later step's Application fails once and succeeds on retry against an
+# earlier step that has not converged yet - the fallback this manifest's
+# retry policy is already sized for. The strategy.type: RollingSync block
+# below is kept rather than removed: it is harmless when unsupported (the
+# controller simply ignores it, confirmed by the same real-cluster run),
+# and ready to take effect the day the managed capability does expose it.
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
