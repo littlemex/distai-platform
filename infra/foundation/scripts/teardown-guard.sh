@@ -1,43 +1,27 @@
 #!/usr/bin/env bash
-# Destroy-time guard of infra/foundation (called from teardown.tf).
+# Destroy-time guard of infra/foundation (called from teardown.tf,
+# terraform_data.teardown_guard).
 #
 # Terminates every EC2 instance that Karpenter launched for one cluster, waits
 # until they are terminated, then deletes what they leave behind: detached VPC
 # CNI network interfaces in the cell's VPC, Karpenter launch templates and the
-# instance profiles that hold the Karpenter node role.
+# instance profiles that hold the Karpenter node role. network-guard.sh runs
+# later in the same destroy, after the cluster is gone, and removes what is
+# left in the VPC after that (see teardown.tf).
 #
 # Required environment: CLUSTER_NAME, ACCOUNT_ID, AWS_REGION, VPC_ID, NODE_ROLE_NAME.
 # Requires the AWS CLI v2 and the credentials that run terraform destroy.
 set -euo pipefail
 
 : "${CLUSTER_NAME:?}" "${ACCOUNT_ID:?}" "${AWS_REGION:?}" "${VPC_ID:?}" "${NODE_ROLE_NAME:?}"
-export AWS_REGION AWS_PAGER=""
+
+LOG_PREFIX="teardown-guard"
+# shellcheck source=SCRIPTDIR/guard-common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/guard-common.sh"
 
 MAX_ROUNDS=5
 
-log() { echo "[teardown-guard] $*"; }
-
-# The AWS CLI must act on the account Terraform manages. If the CLI resolves
-# other credentials (for example when the provider assumes a role), every
-# lookup below would come back empty and the guard would pass without
-# removing anything.
-caller_account="$(aws sts get-caller-identity --query Account --output text)"
-if [ "$caller_account" != "$ACCOUNT_ID" ]; then
-  log "the AWS CLI uses account ${caller_account}, but the cell is in account ${ACCOUNT_ID}; set AWS_PROFILE or credentials for the cell's account" >&2
-  exit 1
-fi
-
-# Delete calls tolerate resources that disappeared since they were listed
-# (the VPC CNI or Karpenter may remove them at the same time).
-tolerate_not_found() {
-  local out
-  if ! out="$("$@" 2>&1)"; then
-    case "$out" in
-      *NotFound* | *NoSuchEntity*) log "already gone: $*" ;;
-      *) echo "$out" >&2; return 1 ;;
-    esac
-  fi
-}
+require_cell_account
 
 list_instances() {
   aws ec2 describe-instances \
@@ -78,17 +62,10 @@ while :; do
   fi
 done
 
-# 2. Network interfaces that the VPC CNI attached and that were not deleted
-#    with their instance. Any detached interface the VPC CNI created in this
-#    cell's VPC belongs to this cluster.
-enis="$(aws ec2 describe-network-interfaces \
-  --filters "Name=vpc-id,Values=${VPC_ID}" "Name=status,Values=available" \
-  "Name=description,Values=aws-K8S-*" \
-  --query 'NetworkInterfaces[].NetworkInterfaceId' --output text)"
-for eni in $enis; do
-  log "deleting detached network interface ${eni}"
-  tolerate_not_found aws ec2 delete-network-interface --network-interface-id "$eni"
-done
+# 2. Network interfaces that the VPC CNI attached to those instances and that
+#    were not deleted with them. Removing them now lets EKS delete its cluster
+#    security group itself when the cluster is destroyed.
+delete_detached_cni_interfaces
 
 # 3. Launch templates Karpenter created for this cluster. Karpenter v1 tags
 #    them with eks:eks-cluster-name (v1.EKSClusterNameTagKey, which its own
