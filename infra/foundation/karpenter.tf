@@ -48,8 +48,10 @@ resource "aws_iam_role_policy_attachment" "karpenter_node" {
 }
 
 resource "aws_eks_access_entry" "karpenter_node" {
-  cluster_name  = aws_eks_cluster.this.name
-  principal_arn = aws_iam_role.karpenter_node.arn
+  cluster_name = aws_eks_cluster.this.name
+  # var.test_invalid_karpenter_node_principal_arn is test-only (null outside
+  # tests); see its description in variables.tf.
+  principal_arn = coalesce(var.test_invalid_karpenter_node_principal_arn, aws_iam_role.karpenter_node.arn)
   type          = "EC2_LINUX"
 }
 
