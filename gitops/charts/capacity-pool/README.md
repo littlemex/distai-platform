@@ -82,10 +82,10 @@ instance count times each instance type's own full, advertised resources
 (this PR's own real-cluster verification sets `pool.limits` this way --
 the reservation's own vCPU and memory, read from `DescribeInstanceTypes` --
 and a single reserved node launched and admitted a workload under it). A
-smaller, allocatable-based number here would already read as "at or over
-limit" the moment one reserved instance is running, before any pod is
-even scheduled, since the launched instance's own full capacity would
-already exceed it -- that pool would then never launch a node at all.
+smaller, allocatable-based number here would already be below one
+instance's own full capacity, so Karpenter would refuse to launch that
+instance type for this pool at all, before any pod is even scheduled --
+not after the fact, but as a precondition it never clears.
 The `nominalQuota` of the `ClusterQueue` naming this flavor (for example
 the smoke chart's `clusterQueue.cpuQuota` and `clusterQueue.memQuota`) is
 a separate number for a separate purpose: Kueue admits against pod
