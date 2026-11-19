@@ -11,7 +11,7 @@ after an apply that failed part-way.
 
 | Script | What it checks | Needs AWS | Duration |
 | --- | --- | --- | --- |
-| `0.static.sh` | `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`, `tflint`, and `terraform test` with `variables.tftest.hcl` (input validation against a mocked AWS provider: accepted and rejected `argocd` role mappings and public endpoint CIDRs) | No | About 1 minute |
+| `0.static.sh` | `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`, `tflint`, `terraform test` with `variables.tftest.hcl` (input validation against a mocked AWS provider: accepted and rejected `argocd` role mappings and public endpoint CIDRs), and `guard-unit-tests.sh`/`network-guard-unit-tests.sh` (`scripts/teardown-guard.sh`/`scripts/network-guard.sh` against a scripted fake `aws` CLI) | No | About 1 minute |
 | `1.e2e.sh` | State is empty before apply, cluster shape, IMDS hop limit, CNI permissions, NetworkPolicy enforcement, Karpenter from the outputs, spot launch, interruption handling, destroy with Karpenter still running, nothing left behind | Yes | About 30 to 35 minutes |
 | `2.e2e-partial-apply.sh` | An apply forced to fail after the cluster and the system node group exist, then `terraform destroy` of that partial state with nothing left behind (issue #26) | Yes | About 20 to 30 minutes |
 
@@ -112,6 +112,12 @@ PASS security group retried: retries after DependencyViolation
 PASS security group retried: calls delete-security-group twice
 PASS security group already gone: exit 0
 PASS security group already gone: logs already gone
+PASS security group never released: exit non-zero
+PASS security group never released: logs who still uses it
+PASS security group never released: retried more than once
+PASS describe-cluster itself fails: exit non-zero
+PASS describe-cluster itself fails: does not claim refusing
+PASS describe-cluster itself fails: deletes nothing
 RESULT PASS: all network guard unit tests passed
 PASS network guard unit tests (scripted fake AWS CLI)
 
@@ -123,9 +129,10 @@ RESULT PASS: all static checks passed
 `scripts/network-guard.sh` against a scripted fake `aws` on the `PATH`
 instead of the real AWS CLI, plus a no-op `sleep` so the guards' own real
 waits cost nothing here: no credentials or network calls, each case well
-under a second. They exist for error handling and ordering the real
-end-to-end tests cannot reach on demand, because each needs a specific AWS
-API response, or absence of one, at a specific moment.
+under a second. They share their assertion helper and the fake `sleep`
+through `guard-unit-test-lib.sh`. They exist for error handling and
+ordering the real end-to-end tests cannot reach on demand, because each
+needs a specific AWS API response, or absence of one, at a specific moment.
 
 `guard-unit-tests.sh`: the node role or one of its instance profiles being
 deleted by something else (another destroy of the same cell racing this
@@ -145,13 +152,20 @@ nothing - the first three cases alone could not tell this fix from a
 version that treats every IAM error, not only `NoSuchEntity`, as nothing to
 clean.
 
-`network-guard-unit-tests.sh`: refusing while a cluster with this name
-still exists (the safety property that keeps the guard from touching a
-cluster it does not own the teardown of), waiting out and timing out on
-interfaces that never become detached, retrying the security group delete
-on `DependencyViolation`, and treating `NotFound` on it as already gone -
-none of which the real end-to-end tests can force on demand, since none of
-them happens in a normal run.
+`network-guard-unit-tests.sh`, seven cases: refusing while a cluster with
+this name still exists (the safety property that keeps the guard from
+touching a cluster it does not own the teardown of, checked with a real
+interface and a real security group present, so "deletes nothing" is not
+true only because there was nothing to delete), the ordinary path, waiting
+out and timing out on interfaces that never become detached (likewise with
+a real security group present), retrying the security group delete on
+`DependencyViolation` and succeeding, treating `NotFound` on it as already
+gone, timing out when it never stops being in use, and `describe-cluster`
+itself failing with something other than `ResourceNotFoundException`
+(plausible: `eks:DescribeCluster` is a permission this guard newly needs),
+which must stay fatal and not be read as "the cluster is gone" - none of
+which the real end-to-end tests can force on demand, since none of them
+happens in a normal run.
 
 ## End-to-end test
 
