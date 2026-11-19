@@ -347,7 +347,6 @@ delete_broken_branches() {
 cleanup() {
   local rc=$?
   set +e
-  rm -rf "${SECRET_TMP_DIR}"
   # Keep a disposable fixture/break/upgrade branch alive when the cell
   # itself is being kept for debugging (E2E_KEEP_ON_FAILURE=1) -- the
   # kept cell's own root Application still points at it; deleting it
@@ -386,6 +385,15 @@ cleanup() {
   else
     log "RESULT FAIL: ${FAILED_STEP:-exit ${rc}} (run ${RUN_ID}, work dir ${WORK_DIR})"
   fi
+  # Removed last, after delete_broken_branches above has had the chance
+  # to create its own fresh askpass/curl-config/token files under this
+  # directory for each branch it deletes -- removing it any earlier
+  # breaks every later git push --delete in this same cleanup() (mktemp
+  # under a directory that no longer exists fails silently inside the
+  # if/else context delete_disposable_branch runs in, confirmed on a
+  # real run: all of this run's own disposable branches failed to
+  # delete, consistently, until this ordering was fixed).
+  rm -rf "${SECRET_TMP_DIR}"
   exit "${rc}"
 }
 trap cleanup EXIT
