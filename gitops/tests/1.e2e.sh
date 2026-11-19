@@ -1723,7 +1723,7 @@ check_accel_layer1() {
   local cell="$1" nodepool="$2" advertiser_addon="$3" other_addon="$4" label="$5" resource="$6" image="$7" probe="$8"
   local app="${cell}-${advertiser_addon}" other_app="${cell}-${other_addon}"
   local label_jp="${label//./\\.}" resource_jp="${resource//./\\.}"
-  local advertiser_ns other_ns wave np_label node node_label allocatable probe_out count pods_on_node node_capacity_type instance_type
+  local advertiser_ns other_ns wave np_label node node_label allocatable probe_out count pods_on_node node_capacity_type instance_type karpenter_log_file karpenter_log_pid
 
   # Criterion 5: the accelerators step's device-plugin release is
   # Healthy+Synced before anything is asserted about it.
@@ -1786,9 +1786,33 @@ spec:
 YAML
   k apply -f "${WORK_DIR}/accel-layer1-${cell}.yaml" || fail "kubectl apply the Layer 1 ${resource} pod on ${cell}"
 
+  # Capture Karpenter's own controller log for the whole wait below, so a
+  # disruption decision (consolidation, drift, expiration, or a
+  # registration/initialization timeout) has its own stated reason on
+  # record, never inferred from side effects alone (#28, root-caused from
+  # CloudTrail alone once already -- "Karpenter called TerminateInstances"
+  # is confirmed, but CloudTrail carries no application-level reason field,
+  # only Karpenter's own log does). `-l app.kubernetes.io/name=karpenter`
+  # matches the upstream chart's own pod labels (addons/karpenter/addon.yaml
+  # sets no nameOverride). Started in the background, killed right after
+  # the wait resolves either way, and always kept under WORK_DIR (never
+  # deleted by this function) so a passing run's log is still available to
+  # read afterward, not only a failing one's.
+  karpenter_log_file="${WORK_DIR}/karpenter-${cell}-$(date -u +%H%M%S).log"
+  k logs -n kube-system -l app.kubernetes.io/name=karpenter -f --since=1s --timestamps \
+    >"${karpenter_log_file}" 2>&1 &
+  karpenter_log_pid=$!
+
   accel_pod_running() { [[ "$(k get pod accel-layer1 -n "${ACCEL_TEST_NS}" -o jsonpath='{.status.phase}' 2>/dev/null)" == "Running" ]]; }
-  wait_until "${ACCEL_POD_TIMEOUT_SECONDS}" 20 "the Layer 1 ${resource} pod is Running" accel_pod_running \
-    || fail "Layer 1 pod requesting ${resource}: 1 never reached Running on ${cell}: $(k get pod accel-layer1 -n "${ACCEL_TEST_NS}" -o jsonpath='{.status}' 2>&1) nodeclaims: $(k get nodeclaims -o wide 2>&1)"
+  if ! wait_until "${ACCEL_POD_TIMEOUT_SECONDS}" 20 "the Layer 1 ${resource} pod is Running" accel_pod_running; then
+    kill "${karpenter_log_pid}" 2>/dev/null; wait "${karpenter_log_pid}" 2>/dev/null || true
+    info "Karpenter controller log during this wait (${cell}, saved at ${karpenter_log_file}), lines mentioning disruption/registration/initialization:"
+    grep -iE "disrupt|consolidat|drift|expir|regist|initializ|liveness|terminat|empt" "${karpenter_log_file}" >&2 \
+      || { info "no matching line; printing the whole log:"; cat "${karpenter_log_file}" >&2; }
+    fail "Layer 1 pod requesting ${resource}: 1 never reached Running on ${cell}: $(k get pod accel-layer1 -n "${ACCEL_TEST_NS}" -o jsonpath='{.status}' 2>&1) nodeclaims: $(k get nodeclaims -o wide 2>&1)"
+  fi
+  kill "${karpenter_log_pid}" 2>/dev/null; wait "${karpenter_log_pid}" 2>/dev/null || true
+  info "Karpenter controller log for this pod's wait saved at ${karpenter_log_file} ($(wc -l <"${karpenter_log_file}" 2>/dev/null || echo 0) lines)"
   node="$(k get pod accel-layer1 -n "${ACCEL_TEST_NS}" -o jsonpath='{.spec.nodeName}')"
   [[ -n "${node}" ]] || fail "Layer 1 pod is Running but has no spec.nodeName"
   ACCEL_NODE="${node}"
