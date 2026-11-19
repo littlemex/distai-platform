@@ -241,6 +241,21 @@ delete_disposable_branch() {
   return "${rc}"
 }
 
+# checkout_revision_as CLONE_DIR NEW_BRANCH REVISION: `-B` with an
+# explicit start point does not get `git checkout <name>`'s own DWIM
+# auto-tracking-branch creation (confirmed on a real clone: `checkout -B x
+# feat/25-delivery-bootstrap` fails "unknown revision", while plain
+# `checkout feat/25-delivery-bootstrap` succeeds) -- a fresh clone of
+# GITOPS_REPO_URL only has GITOPS_REVISION as a remote-tracking ref,
+# never a local branch. Tries the bare name first (works for a tag, or a
+# commit SHA already reachable), falling back to "origin/<name>" (the
+# common case: GITOPS_REVISION is a branch).
+checkout_revision_as() {
+  local clone="$1" branch="$2" revision="$3"
+  git -C "${clone}" checkout --quiet -B "${branch}" "${revision}" 2>/dev/null \
+    || git -C "${clone}" checkout --quiet -B "${branch}" "origin/${revision}"
+}
+
 # report_stale_disposable_branches: preflight hygiene. Lists every remote
 # e2e/* branch older than a day (informational -- a run that was killed
 # before its own EXIT trap ran leaves branches only a human, or this
@@ -849,7 +864,7 @@ break_addon_branch() {
   # ("unable to resolve '<branch>' to a commit SHA") because the branch
   # never existed on GitHub at all.
   git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${clone}" || return 1
-  git -C "${clone}" checkout --quiet -B "${branch}" "${GITOPS_REVISION}" || return 1
+  checkout_revision_as "${clone}" "${branch}" "${GITOPS_REVISION}" || return 1
   sed -i.bak -E 's/^(\s*version:\s*).*/\1"0.0.0-e2e-nonexistent"/' "${clone}/${addon_relpath}" || return 1
   grep -q '0.0.0-e2e-nonexistent' "${clone}/${addon_relpath}" || return 1
   git -C "${clone}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
@@ -926,7 +941,7 @@ REMOVE_KUEUE_CLONE="${WORK_DIR}/remove-kueue"
 REMOVE_KUEUE_BRANCH="e2e/${RUN_ID}/remove-kueue"
 # GITOPS_REPO_URL, never REPO_ROOT -- see break_addon_branch()'s own comment.
 git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${REMOVE_KUEUE_CLONE}" || fail "git clone (remove-kueue)"
-git -C "${REMOVE_KUEUE_CLONE}" checkout --quiet -B "${REMOVE_KUEUE_BRANCH}" "${GITOPS_REVISION}" || fail "git checkout (remove-kueue)"
+checkout_revision_as "${REMOVE_KUEUE_CLONE}" "${REMOVE_KUEUE_BRANCH}" "${GITOPS_REVISION}" || fail "git checkout (remove-kueue)"
 git -C "${REMOVE_KUEUE_CLONE}" rm --quiet "gitops/addons/kueue/addon.yaml" || fail "git rm gitops/addons/kueue/addon.yaml"
 git -C "${REMOVE_KUEUE_CLONE}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
   commit --quiet -m "test: remove addons/kueue/addon.yaml for e2e generator-loss experiment (never merged)" \
