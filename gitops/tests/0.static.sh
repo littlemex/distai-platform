@@ -21,14 +21,12 @@
 #      fail `helm template`; and the rendered objects' own fields checked
 #      by check_chart_renders.py, including the unchanged `on-demand`
 #      default pool and default smoke queue, whose fields must be
-#      identical to this chart's pre-#27 shape (a byte-level comparison
-#      against a checked-in golden file was tried and dropped: it broke
-#      the moment either the base branch or the Helm version changed,
-#      confirmed twice during review, and a template comment fix that
-#      changes no object field has no way to pass it without a golden
-#      regeneration on every rebase -- the field-level check below does
-#      not have this problem, since it asserts what the acceptance
-#      criterion actually cares about);
+#      identical to this chart's pre-#27 shape at the field level (not a
+#      byte-level comparison: a checked-in golden file breaks on an
+#      unrelated base-branch rebase or a different Helm version, neither
+#      of which is a field regression, with no way to tell the two apart
+#      from a byte diff alone; the field-level check below asserts what
+#      the acceptance criterion actually cares about instead);
 #   6. kubeconform of the rendered chart output (including every 5b
 #      fixture), both ApplicationSets and the root Application, against
 #      pinned upstream + CRD-catalog schemas;
@@ -245,7 +243,7 @@ for case in "${contract_bad_cases[@]}"; do
   if run_contract_check_on "${dest}" >"${WORK_DIR}/contract-${case_name}.log" 2>&1; then
     echo "FAIL check_gitops_contract.py passed a cell file that must fail (${case_name})"
     failures=$((failures + 1))
-  elif grep -qE "${case_pattern}" "${WORK_DIR}/contract-${case_name}.log"; then
+  elif grep -qE "^FAIL gitops/cells/contract-check/capacity-pool/cpu-rsv\.yaml.*${case_pattern}" "${WORK_DIR}/contract-${case_name}.log"; then
     echo "PASS check_gitops_contract.py rejected the ${case_name} cell file on the expected check"
   else
     echo "FAIL check_gitops_contract.py rejected the ${case_name} cell file, but not on the expected check (pattern: ${case_pattern}): $(cat "${WORK_DIR}/contract-${case_name}.log")"
