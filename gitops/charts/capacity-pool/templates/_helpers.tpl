@@ -34,3 +34,51 @@ pool.capacityType stays the only place the capacity type is declared.
 {{- $ct := dict "key" "karpenter.sh/capacity-type" "operator" "In" "values" (include "capacity-pool.capacityTypeValues" . | fromJsonArray) -}}
 {{- prepend .Values.pool.requirements $ct | toJson -}}
 {{- end -}}
+
+{{/*
+capacity-pool.taints: every NodePool taint this release declares, as a
+JSON array of {key, value, effect}. accelerator.taint and
+tenancy.teamTaint both feed this one list; an entry whose key is empty is
+skipped. nodepool.yaml renders the list as NodePool taints and
+resourceflavor.yaml mirrors the same list as ResourceFlavor tolerations,
+so the two can never disagree.
+*/}}
+{{- define "capacity-pool.taints" -}}
+{{- $sources := list
+      (dict "name" "accelerator.taint" "taint" (default (dict) (default (dict) .Values.accelerator).taint))
+      (dict "name" "tenancy.teamTaint" "taint" (default (dict) (default (dict) .Values.tenancy).teamTaint)) -}}
+{{- $out := list -}}
+{{- $seen := dict -}}
+{{- range $sources -}}
+{{- $t := .taint -}}
+{{- if $t.key -}}
+{{- if not (has $t.effect (list "NoSchedule" "PreferNoSchedule" "NoExecute")) -}}
+{{- fail (printf "%s.effect must be one of NoSchedule, PreferNoSchedule, NoExecute (got %q)" .name (toString $t.effect)) -}}
+{{- end -}}
+{{- $id := printf "%s:%s" $t.key $t.effect -}}
+{{- if hasKey $seen $id -}}
+{{- fail (printf "%s repeats the taint key %q with effect %s already set by %s" .name $t.key $t.effect (get $seen $id)) -}}
+{{- end -}}
+{{- $_ := set $seen $id .name -}}
+{{- $entry := dict "key" $t.key "effect" $t.effect -}}
+{{- if $t.value -}}
+{{- $_ := set $entry "value" (toString $t.value) -}}
+{{- end -}}
+{{- $out = append $out $entry -}}
+{{- end -}}
+{{- end -}}
+{{- $out | toJson -}}
+{{- end -}}
+
+{{/*
+capacity-pool.annotations: the metadata.annotations block shared by the
+NodePool and the ResourceFlavor. Provenance only: no template branches on
+accelerator.resourceName's value. Renders nothing when it is empty.
+*/}}
+{{- define "capacity-pool.annotations" -}}
+{{- $name := (default (dict) .Values.accelerator).resourceName -}}
+{{- if $name -}}
+annotations:
+  distai.dev/accelerator-resource-name: {{ $name | quote }}
+{{- end -}}
+{{- end -}}
