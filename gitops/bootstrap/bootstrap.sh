@@ -2,10 +2,12 @@
 # gitops/bootstrap/bootstrap.sh - RFC #25 Decision 1.
 #
 # Closes the chicken-and-egg gap a freshly-`terraform apply`'d cell is left
-# with: a running, empty managed Argo CD capability, zero registered
-# clusters, and zero RBAC on its own access entry beyond what
-# infra/foundation's aws_eks_access_policy_association already granted.
-# This script writes the three Kubernetes objects that let the capability
+# with: a running, empty managed Argo CD capability with zero registered
+# clusters, and an access entry that carries only the two built-in
+# Argo-CD-capability-management policies (letting it manage itself, not
+# arbitrary cluster objects) until infra/foundation's
+# aws_eks_access_policy_association grants it cluster-admin too. This
+# script writes the three Kubernetes objects that let the capability
 # discover its own cluster and have something to deliver to it. It never
 # calls an AWS API directly; every AWS-side fact it needs comes from
 # `terraform output -json`, read once, passed in by the caller so this
@@ -192,10 +194,14 @@ EOF
 # branch naming convention (feat/..., test/..., fix/...) always contains a
 # "/" -- a "/"-delimited s/// breaks ("unknown option to `s'") the instant
 # REVISION has one, which is every real --revision this script is ever
-# run with before a PR merges (Decision 6). Git ref names cannot contain
-# "|", so it is a safe delimiter for all three placeholders here.
+# run with before a PR merges (Decision 6). "|" is not confirmed illegal
+# in a git ref name the way space/~/^/:/?/*/[ are (`git check-ref-format`),
+# and "&" is special in sed's own replacement text regardless of
+# delimiter, so REVISION is escaped for both before use, rather than
+# assumed never to contain them.
+REVISION_SED_ESCAPED="$(printf '%s' "${REVISION}" | sed -e 's/[\&|]/\\&/g')"
 sed \
-  -e "s|__REVISION__|${REVISION}|g" \
+  -e "s|__REVISION__|${REVISION_SED_ESCAPED}|g" \
   -e "s|__CLUSTER_NAME__|${CLUSTER_NAME}|g" \
   -e "s|__ARGOCD_NAMESPACE__|${ARGOCD_NAMESPACE}|g" \
   "${SCRIPT_DIR}/root-application.yaml" \

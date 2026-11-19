@@ -81,9 +81,18 @@ mkdir -p "${WORK_DIR}"
 export TF_DATA_DIR="${WORK_DIR}/.terraform"
 export KUBECONFIG="${WORK_DIR}/kubeconfig"
 export TF_IN_AUTOMATION=1
+# Every GitHub-token-bearing temp file (the GIT_ASKPASS helper, the
+# curl -K config, the Python helper's token file) lives under this one
+# mode-700 directory, never the shared system /tmp. cleanup() below
+# removes it unconditionally, even on a signal that interrupts a
+# function before its own normal rm -f runs -- the per-use rm -f calls
+# stay too, so a file is gone immediately after use in the common case,
+# not only at the end of the whole run.
+SECRET_TMP_DIR="$(mktemp -d)"
+chmod 700 "${SECRET_TMP_DIR}"
 
 STATE_KEY="distai-platform/${AWS_REGION}/${NAME}/foundation"
-RUN_ID="gitops-upgrade-$(date -u +%Y%m%d%H%M%S)"
+RUN_ID="gitops-upgrade-${NAME}-$(date -u +%Y%m%d%H%M%S)-${RANDOM}"
 TEST_TAG_KEY="distai-platform-e2e"
 
 APPLY_ATTEMPTED=0
@@ -169,7 +178,7 @@ github_askpass_script() {
   token="$(aws ssm get-parameter --with-decryption --name "${GITOPS_TEST_TOKEN_SSM_PARAM}" \
     --region "${GITOPS_TEST_TOKEN_SSM_REGION}" --query Parameter.Value --output text 2>/dev/null)" || return 1
   [[ -n "${token}" && "${token}" != "None" ]] || return 1
-  askpass="$(mktemp)"
+  askpass="$(mktemp "${SECRET_TMP_DIR}/askpass.XXXXXX")"
   chmod 700 "${askpass}"
   { set +x
     {
@@ -220,7 +229,7 @@ report_stale_disposable_branches() {
   # from a -K config file, and the Python helper reads it from a file path
   # named by an env var, never the token itself. Both files are mode 600
   # and removed immediately after use.
-  curl_config="$(mktemp)"
+  curl_config="$(mktemp "${SECRET_TMP_DIR}/curl-config.XXXXXX")"
   chmod 600 "${curl_config}"
   { set +x
     printf 'header = "Authorization: Bearer %s"\n' "${token}"
@@ -229,7 +238,7 @@ report_stale_disposable_branches() {
   branches_json="$(curl -fsS -K "${curl_config}" \
     "https://api.github.com/repos/${api_repo}/branches?per_page=100" 2>/dev/null)" || branches_json="[]"
   rm -f "${curl_config}"
-  token_file="$(mktemp)"
+  token_file="$(mktemp "${SECRET_TMP_DIR}/token.XXXXXX")"
   chmod 600 "${token_file}"
   { set +x; printf '%s' "${token}" >"${token_file}"; } 2>/dev/null
   while IFS=$'\t' read -r name age_days; do
@@ -338,7 +347,14 @@ delete_broken_branches() {
 cleanup() {
   local rc=$?
   set +e
-  delete_broken_branches
+  rm -rf "${SECRET_TMP_DIR}"
+  # Keep a disposable fixture/break/upgrade branch alive when the cell
+  # itself is being kept for debugging (E2E_KEEP_ON_FAILURE=1) -- the
+  # kept cell's own root Application still points at it; deleting it
+  # unconditionally would leave that cell unable to sync anything.
+  if [[ "${E2E_KEEP_ON_FAILURE}" != "1" ]]; then
+    delete_broken_branches
+  fi
   if [[ -n "${IDC_GROUP_ID}" ]]; then
     if aws identitystore delete-group --identity-store-id "${ARGOCD_IDC_IDENTITY_STORE_ID}" \
       --region "${ARGOCD_IDC_REGION}" --group-id "${IDC_GROUP_ID}" >/dev/null 2>&1; then
