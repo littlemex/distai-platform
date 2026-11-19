@@ -22,6 +22,10 @@ check them either.
 
 Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
 
+- Bash 4.3 or later (both `mapfile`/`readarray` and the `${var,,}`
+  lowercasing expansion, already used throughout `1.e2e.sh`/`2.upgrade.sh`
+  before this PR, need it). The EC2 test runner's Bash is new enough; the
+  Mac's own `/bin/bash` (3.2) is not, one more reason these never run there.
 - Helm `>= 3.8` (OCI charts), for `0.static.sh` only (`1.e2e.sh`/`2.upgrade.sh`
   never call `helm` themselves -- Argo CD installs every chart in-cluster).
 - `uv` (for `0.static.sh`'s pinned `yamllint`/`pyyaml`, and for `2.upgrade.sh`'s
@@ -169,7 +173,7 @@ For `2.upgrade.sh` instead, additionally export `UPGRADE_TO_KARPENTER_VERSION` (
 | #27: a `-rsv`, `-od` and `-flex` release each render one `NodePool`/`EC2NodeClass`/`ResourceFlavor` joined by `karpenter.sh/nodepool`, with the pool's `karpenter.sh/capacity-type` requirement and, for `-rsv` only, `capacityReservationSelectorTerms` from `reservation.tags` (targeted) -- on a real cluster | `1.e2e.sh` step 11b-3 (each live object's spec; `EC2NodeClass` status resolves the reservation for `-rsv` only); `0.static.sh` section 5b for the rendered shape |
 | #27: a targeted one-instance two-hour ODCR backs `-rsv`: a canary launches exactly one node with `capacity-type=reserved` and `capacity-reservation-id` equal to the reservation; a second canary is not admitted, by the `ClusterQueue`'s quota | `1.e2e.sh` steps 11b-1, 11b-4 (node labels, NodeClaim count, the instance's own `CapacityReservationId`) and 11b-5 (`Workload` `QuotaReserved=False` on quota, `ClusterQueue` admitted/pending `1/1`, Job suspended with no pod, still one NodeClaim) |
 | #27: `-od` and `-flex` each admit a canary and launch a node of the pool's capacity type | `1.e2e.sh` step 11b-4 |
-| #27: with `accelerator`/`tenancy` unset, output is identical to #25's | `0.static.sh` section 5b (`fixtures/capacity-pool/on-demand-default.yaml` and `fixtures/smoke/default.yaml` against `golden/`) |
+| #27: with `accelerator`/`tenancy` unset, the rendered fields are identical to #25's | `0.static.sh` section 5b (`check_chart_renders.py` on `fixtures/capacity-pool/on-demand-default.yaml` and `fixtures/smoke/default.yaml`: object counts, names, the join, the capacity-type requirement, no reservation/taints/tolerations/labels/annotation) |
 | #27: `accelerator.*` and `tenancy.teamTaint` render taints, mirrored tolerations, the method label and the resource-name annotation | `0.static.sh` section 5b (`check_chart_renders.py` on `fixtures/capacity-pool/accelerator-tenancy.yaml`) |
 | #27: the reservation is cancelled at the end, pass or fail, shown by `DescribeCapacityReservations` | `1.e2e.sh` step 11b-6, and `cleanup()` (`cancel_run_capacity_reservations`) if 11b-6 was not reached |
 | #27: `helm lint` and `kubeconform` pass for every new values shape, including `memQuota` | `0.static.sh` sections 5b and 6 (every `fixture-*.yaml` render is a `kubeconform` target) |
@@ -396,11 +400,14 @@ silently:
   before step 12, so steps 12-15 see the single-pool cell step 11 left.
   Each smoke fixture uses its own `addon: smoke-<pool>` value (one
   `Application` name each), which `check_gitops_contract.py` accepts.
-- **Golden comparison ignores comment-only and blank lines.** The
-  templates' own leading comments are rendered into `helm template`'s
-  output; a rewritten comment changes no object. Every other byte must
-  match `golden/`. `0.static.sh` prints an `INFO` line when the output is
-  byte-identical including comments.
+- **No checked-in golden file for the unchanged default pool/queue.** A
+  byte-level golden comparison was tried and dropped (`check_chart_renders.py`'s
+  own module docstring has the reasoning): it broke twice during review for
+  reasons with nothing to do with a real regression (a stale base branch,
+  a different Helm version), and could not tell that apart from an actual
+  field change. `check_chart_renders.py`'s own field-level assertions on
+  `fixtures/capacity-pool/on-demand-default.yaml` and `fixtures/smoke/default.yaml`
+  are the evidence instead.
 - **Values paths follow issue #27's own spelling**: `pool.capacityType`,
   and top-level `reservation.*`, `accelerator.*`, `tenancy.teamTaint`;
   `clusterQueue.memQuota` for the smoke chart.
