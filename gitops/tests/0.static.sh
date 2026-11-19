@@ -175,6 +175,97 @@ run_check "gitops contract (check_gitops_contract.py)" \
   "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
   python3 "${SCRIPT_DIR}/check_gitops_contract.py" "${REPO_ROOT}"
 
+# -------------------------------------- 4b. issue #27's contract checks
+#
+# The tracked tree ships no reserved pool and no cell with two queues, so
+# the reserved/duplicate-addon checks added for issue #27 never run against
+# real content above (confirmed: a dead check still prints PASS on an empty
+# input). Each case below copies the real repo into a throwaway directory,
+# adds exactly one cell parameter file exercising one rule, and runs
+# check_gitops_contract.py against the copy -- never against the tracked
+# tree, so nothing here is committed.
+
+contract_copy_with() {
+  # contract_copy_with DEST REL_PATH CONTENT: copies REPO_ROOT into DEST,
+  # writes CONTENT to DEST/REL_PATH (parent directories created).
+  local dest="$1" rel="$2" content="$3"
+  rm -rf "${dest}"
+  mkdir -p "${dest}"
+  cp -r "${REPO_ROOT}/gitops" "${dest}/gitops"
+  mkdir -p "$(dirname "${dest}/${rel}")"
+  printf '%s' "${content}" >"${dest}/${rel}"
+}
+run_contract_check_on() {
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+    python3 "${SCRIPT_DIR}/check_gitops_contract.py" "$1"
+}
+
+RESERVED_OK_DIR="${WORK_DIR}/contract-reserved-ok"
+contract_copy_with "${RESERVED_OK_DIR}" "gitops/cells/contract-check/capacity-pool/cpu-rsv.yaml" \
+'addon: capacity-pool-cpu-rsv
+wave: capacity
+dir: gitops/charts/capacity-pool
+namespace: kube-system
+values:
+  pool:
+    name: cpu-rsv
+    capacityType: reserved
+  reservation:
+    tags:
+      distai-platform-contract-check: "1"
+'
+if run_contract_check_on "${RESERVED_OK_DIR}" >"${WORK_DIR}/contract-reserved-ok.log" 2>&1; then
+  grep -q "values.pool.capacityType is one of" "${WORK_DIR}/contract-reserved-ok.log" \
+    && grep -q "sets a non-empty values.reservation.tags" "${WORK_DIR}/contract-reserved-ok.log" \
+    && grep -q "instanceMatchCriteria is 'targeted'" "${WORK_DIR}/contract-reserved-ok.log" \
+    && echo "PASS check_gitops_contract.py's reserved-pool checks ran and passed against a valid -rsv cell file" \
+    || { echo "FAIL check_gitops_contract.py passed but did not print the issue #27 reserved-pool checks (still dead code)"; failures=$((failures + 1)); }
+else
+  echo "FAIL check_gitops_contract.py rejected a valid reserved pool: $(cat "${WORK_DIR}/contract-reserved-ok.log")"
+  failures=$((failures + 1))
+fi
+
+contract_bad_cases=(
+  "empty-tags|values:\n  pool:\n    name: cpu-rsv\n    capacityType: reserved\n  reservation:\n    tags: {}\n|sets a non-empty values.reservation.tags"
+  "open-match|values:\n  pool:\n    name: cpu-rsv\n    capacityType: reserved\n  reservation:\n    tags: {k: v}\n    instanceMatchCriteria: open\n|instanceMatchCriteria is .targeted."
+  "bad-enum|values:\n  pool:\n    name: cpu-rsv\n    capacityType: spot\n|values.pool.capacityType is one of"
+)
+for case in "${contract_bad_cases[@]}"; do
+  IFS='|' read -r case_name case_values case_pattern <<<"${case}"
+  dest="${WORK_DIR}/contract-${case_name}"
+  contract_copy_with "${dest}" "gitops/cells/contract-check/capacity-pool/cpu-rsv.yaml" \
+    "$(printf 'addon: capacity-pool-cpu-rsv\nwave: capacity\ndir: gitops/charts/capacity-pool\nnamespace: kube-system\n%b' "${case_values}")"
+  if run_contract_check_on "${dest}" >"${WORK_DIR}/contract-${case_name}.log" 2>&1; then
+    echo "FAIL check_gitops_contract.py passed a cell file that must fail (${case_name})"
+    failures=$((failures + 1))
+  elif grep -qE "${case_pattern}" "${WORK_DIR}/contract-${case_name}.log"; then
+    echo "PASS check_gitops_contract.py rejected the ${case_name} cell file on the expected check"
+  else
+    echo "FAIL check_gitops_contract.py rejected the ${case_name} cell file, but not on the expected check (pattern: ${case_pattern}): $(cat "${WORK_DIR}/contract-${case_name}.log")"
+    failures=$((failures + 1))
+  fi
+done
+
+DUP_ADDON_DIR="${WORK_DIR}/contract-dup-addon"
+contract_copy_with "${DUP_ADDON_DIR}" "gitops/cells/example-cell/smoke/second.yaml" \
+'addon: smoke
+wave: capacity
+dir: gitops/charts/smoke
+namespace: distai-smoke
+values:
+  clusterQueue:
+    resourceFlavor: cpu
+'
+if run_contract_check_on "${DUP_ADDON_DIR}" >"${WORK_DIR}/contract-dup-addon.log" 2>&1; then
+  echo "FAIL check_gitops_contract.py passed two parameter files with the same addon value in one cell"
+  failures=$((failures + 1))
+elif grep -q "unique addon values" "${WORK_DIR}/contract-dup-addon.log"; then
+  echo "PASS check_gitops_contract.py rejected two parameter files with the same addon value in one cell"
+else
+  echo "FAIL check_gitops_contract.py rejected the duplicate-addon cell, but not on the expected check: $(cat "${WORK_DIR}/contract-dup-addon.log")"
+  failures=$((failures + 1))
+fi
+
 # ----------------------------------------------- 5. helm lint and template
 
 RENDERED_DIR="${WORK_DIR}/rendered"
@@ -252,6 +343,11 @@ GOLDEN_DIR="${SCRIPT_DIR}/golden"
 expect_render_failure=(
   "capacity-pool/reserved-no-tags"
   "capacity-pool/unknown-capacity-type"
+  "capacity-pool/capacity-type-in-requirements"
+  "capacity-pool/invalid-instance-match-criteria"
+  "capacity-pool/invalid-taint-effect"
+  "capacity-pool/duplicate-taint"
+  "capacity-pool/empty-tag-value"
 )
 must_fail() {
   local key="$1" f
@@ -261,20 +357,18 @@ must_fail() {
   return 1
 }
 
-# Golden comparison: the chart's own output before issue #27, rendered from
-# the same fixture and checked in under tests/golden/. Comment-only and
-# blank lines are dropped from both sides before a byte comparison: the
-# templates' own leading comments are rendered into helm's output, and a
-# rewritten comment is not a change to any object. Every other byte (keys,
-# order, quoting, indentation, values) must match.
-strip_comments() { grep -v -E '^[[:space:]]*(#.*)?$' "$1" || true; }
+# Golden comparison: the chart's own output rendered from the same fixture
+# before issue #27 added pool.capacityType/reservation/accelerator/tenancy,
+# checked in under tests/golden/. A strict byte comparison: every template
+# comment this PR touches (for example nodepool.yaml's own top-of-file
+# explanation) must either stay word-for-word unchanged or have its golden
+# file regenerated in the same commit that changes it -- a `{{- /* */}} -`
+# Helm comment block renders nothing either way, so this never forces a
+# choice between an accurate comment and a passing check.
 golden_matches() {
   local golden="$1" rendered="$2"
-  if cmp -s "${golden}" "${rendered}"; then
-    echo "INFO $(basename "${rendered}") is byte-identical to its golden file, comments included"
-    return 0
-  fi
-  diff -u <(strip_comments "${golden}") <(strip_comments "${rendered}")
+  cmp -s "${golden}" "${rendered}" && return 0
+  diff -u "${golden}" "${rendered}"
 }
 
 for chart in capacity-pool smoke; do

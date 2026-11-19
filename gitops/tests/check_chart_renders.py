@@ -80,14 +80,23 @@ def only(docs: list[dict], kind: str) -> list[dict]:
 
 
 def taint_entries(values: dict) -> list[dict]:
-    """The {key, value, effect} entries the fixture asks for, in the order
-    the issue names them (accelerator first, then tenancy)."""
+    """The {key, value, effect, has_value} entries the fixture asks for, in
+    the order the issue names them (accelerator first, then tenancy).
+    has_value distinguishes "no value given" (the chart must render
+    operator: Exists) from a given value (operator: Equal) -- the two are
+    not interchangeable to Kubernetes."""
     out = []
     accel_taint = ((values.get("accelerator") or {}).get("taint")) or {}
     team_taint = ((values.get("tenancy") or {}).get("teamTaint")) or {}
     for t in (accel_taint, team_taint):
-        if t:
-            out.append({"key": t["key"], "value": str(t["value"]), "effect": t["effect"]})
+        if t and t.get("key"):
+            has_value = "value" in t and t["value"] not in (None, "")
+            out.append({
+                "key": t["key"],
+                "value": str(t.get("value", "")) if has_value else "",
+                "effect": t["effect"],
+                "has_value": has_value,
+            })
     return out
 
 
@@ -156,7 +165,12 @@ def check_capacity_pool(name: str, values: dict, docs: list[dict]) -> None:
     # --- accelerator / tenancy (values only)
     want_taints = taint_entries(values)
     got_taints = [
-        {"key": t.get("key"), "value": str(t.get("value")), "effect": t.get("effect")}
+        {
+            "key": t.get("key"),
+            "value": str(t.get("value", "")) if "value" in t else "",
+            "effect": t.get("effect"),
+            "has_value": "value" in t,
+        }
         for t in (np_spec.get("taints") or [])
     ]
     got_tolerations = rf_spec.get("tolerations") or []
@@ -168,14 +182,17 @@ def check_capacity_pool(name: str, values: dict, docs: list[dict]) -> None:
     check(f"{label} NodePool taints are exactly the accelerator/tenancy taints set {want_taints}",
           sorted(got_taints, key=repr) == sorted(want_taints, key=repr), f"got {got_taints!r}")
     for t in want_taints:
+        want_operator = "Equal" if t["has_value"] else "Exists"
         mirrored = [
             tol for tol in got_tolerations
             if tol.get("key") == t["key"]
-            and str(tol.get("value")) == t["value"]
             and tol.get("effect") == t["effect"]
-            and tol.get("operator", "Equal") == "Equal"
+            and tol.get("operator") == want_operator
+            and (want_operator == "Exists" or str(tol.get("value")) == t["value"])
+            and (want_operator != "Exists" or "value" not in tol)
         ]
-        check(f"{label} ResourceFlavor tolerates the NodePool taint {t['key']}={t['value']}:{t['effect']}",
+        check(f"{label} ResourceFlavor tolerates the NodePool taint {t['key']}:{t['effect']} "
+              f"with operator {want_operator}" + (f" value {t['value']}" if t["has_value"] else " (no value)"),
               len(mirrored) == 1, f"got tolerations {got_tolerations!r}")
     check(f"{label} ResourceFlavor has no toleration beyond the mirrored taints",
           len(got_tolerations) == len(want_taints), f"got {got_tolerations!r}")
@@ -221,20 +238,50 @@ def check_smoke(name: str, values: dict, docs: list[dict]) -> None:
           f"got {quotas!r}")
 
 
+# The exact fixture files this PR ships, by chart -- not "at least one":
+# deleting a fixture (or a must-fail one silently starting to render) must
+# fail this check, not pass it with a smaller count. Keep in step with
+# gitops/tests/fixtures/*/*.yaml and 0.static.sh's own expect_render_failure.
+EXPECTED_FIXTURES = {
+    "capacity-pool": {
+        "on-demand-default", "reserved", "flex", "accelerator-tenancy", "taint-no-value",
+        "reserved-no-tags", "unknown-capacity-type", "capacity-type-in-requirements",
+        "invalid-instance-match-criteria", "invalid-taint-effect", "duplicate-taint",
+        "empty-tag-value",
+    },
+    "smoke": {"default", "mem-quota"},
+}
+# Of those, the ones 0.static.sh expects helm template to refuse (no
+# rendered file is ever produced for these, by design).
+EXPECTED_MUST_FAIL = {
+    "reserved-no-tags", "unknown-capacity-type", "capacity-type-in-requirements",
+    "invalid-instance-match-criteria", "invalid-taint-effect", "duplicate-taint",
+    "empty-tag-value",
+}
+
+
 def main(fixtures_dir: str, rendered_dir: str) -> int:
     checked = 0
     for chart, checker in (("capacity-pool", check_capacity_pool), ("smoke", check_smoke)):
         chart_fixtures = os.path.join(fixtures_dir, chart)
-        for fname in sorted(os.listdir(chart_fixtures)):
-            if not fname.endswith(".yaml"):
-                continue
-            name = fname[: -len(".yaml")]
+        on_disk = {
+            fname[: -len(".yaml")]
+            for fname in os.listdir(chart_fixtures)
+            if fname.endswith(".yaml")
+        }
+        check(f"fixtures/{chart}/ has exactly the expected fixture files",
+              on_disk == EXPECTED_FIXTURES[chart],
+              f"got {sorted(on_disk)}, want {sorted(EXPECTED_FIXTURES[chart])}")
+        for name in sorted(on_disk):
             rendered = os.path.join(rendered_dir, f"fixture-{chart}-{name}.yaml")
-            if not os.path.isfile(rendered):
-                # Fixtures 0.static.sh expects to fail rendering have no
-                # rendered file; 0.static.sh itself asserts that failure.
+            is_must_fail = name in EXPECTED_MUST_FAIL
+            check(f"{chart}[{name}] has a rendered file iff it is not expected to fail rendering",
+                  os.path.isfile(rendered) != is_must_fail,
+                  f"rendered file exists={os.path.isfile(rendered)}, expected must-fail={is_must_fail}")
+            if is_must_fail or not os.path.isfile(rendered):
+                # 0.static.sh itself asserts a must-fail fixture actually fails.
                 continue
-            checker(name, load_values(os.path.join(chart_fixtures, fname)), load_docs(rendered))
+            checker(name, load_values(os.path.join(chart_fixtures, f"{name}.yaml")), load_docs(rendered))
             checked += 1
     check("at least one rendered fixture was checked", checked >= 1, f"checked {checked}")
     if FAILURES:
