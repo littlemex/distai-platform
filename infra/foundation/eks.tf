@@ -130,10 +130,14 @@ resource "aws_eks_cluster" "this" {
     }
   }
 
+  # The network guard must be in the state before the cluster exists, so that
+  # terraform destroy after an apply that failed part-way still removes what
+  # the cluster and its nodes leave in the VPC (see teardown.tf).
   depends_on = [
     aws_iam_role_policy_attachment.cluster,
     aws_iam_role_policy.cluster_kms,
     aws_cloudwatch_log_group.cluster,
+    terraform_data.network_guard,
   ]
 }
 
@@ -449,9 +453,14 @@ resource "aws_eks_node_group" "system" {
 resource "aws_eks_addon" "after_nodes" {
   for_each = toset(local.addons_after_nodes)
 
-  cluster_name                = aws_eks_cluster.this.name
-  addon_name                  = each.value
-  addon_version               = local.addon_versions[var.kubernetes_version][each.value]
+  cluster_name = aws_eks_cluster.this.name
+  addon_name   = each.value
+  # var.test_invalid_coredns_version is test-only (null outside tests).
+  addon_version = (
+    each.value == "coredns" && var.test_invalid_coredns_version != null
+    ? var.test_invalid_coredns_version
+    : local.addon_versions[var.kubernetes_version][each.value]
+  )
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
 
