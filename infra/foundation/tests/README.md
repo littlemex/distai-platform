@@ -190,11 +190,16 @@ The script exits with status 0 only when every check passed. On the first failed
 
 `2.e2e-partial-apply.sh` checks that `terraform destroy` removes a cell
 whose `terraform apply` failed part-way, without manual steps. It uses the
-test-only variable `test_invalid_coredns_version`: set to an add-on version
-that does not exist, it makes the `coredns` add-on fail after the VPC, the
-EKS cluster and the system node group were created. Outside this test the
-variable stays `null`; `1.e2e.sh` never sets it, so the normal run is not
-affected.
+test-only variable `test_invalid_karpenter_node_principal_arn`: set to an
+IAM role ARN that does not exist, it makes `aws_eks_access_entry.karpenter_node`
+fail after the VPC, the EKS cluster and the system node group were created.
+`terraform_data.teardown_guard` `depends_on` that access entry (`teardown.tf`),
+so this is not only a late failure: it forces the exact state issue #26 is
+about (the cluster and the node group exist, the guard does not) by
+construction, because the access entry is the guard's own dependency and
+not a sibling of it that merely happens to run around the same time.
+Outside this test the variable stays `null`; `1.e2e.sh` never sets it, so
+the normal run is not affected.
 
 It takes the same environment as `1.e2e.sh` (Karpenter, Argo CD and
 `kubectl` are not used). Run it after `1.e2e.sh` has finished, or with a
@@ -218,17 +223,17 @@ Optional variables:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `TERRAFORM` | `terraform` | Terraform binary |
-| `E2E_INVALID_COREDNS_VERSION` | `v0.0.0-does-not-exist` | Value passed as `test_invalid_coredns_version`; must not be a real `coredns` add-on version for the cluster's Kubernetes version |
+| `E2E_INVALID_KARPENTER_NODE_PRINCIPAL_ARN` | `arn:aws:iam::<account>:role/<NAME>-test-only-does-not-exist` | Value passed as `test_invalid_karpenter_node_principal_arn`; must be a well-formed IAM role ARN in the cell's own account that names a role that does not exist |
 | `E2E_WORK_DIR` | a new `mktemp -d` directory | Generated tfvars, the apply log and the Terraform data directory |
 | `E2E_KEEP_ON_FAILURE` | `0` | `1` leaves the cell in place after a failure, for debugging; the script prints the destroy command |
 | `E2E_LEFTOVER_GRACE_SECONDS` | `600` | How long to wait for each kind of leftover to disappear after destroy |
 
 ### What the partial-apply test does
 
-1. Writes a tfvars file like `1.e2e.sh` (with `argocd = null`) plus `test_invalid_coredns_version`, runs `terraform init` with the S3 backend and checks that the state at that key has no resources yet.
+1. Writes a tfvars file like `1.e2e.sh` (with `argocd = null`) plus `test_invalid_karpenter_node_principal_arn`, runs `terraform init` with the S3 backend and checks that the state at that key has no resources yet.
 2. Runs `terraform apply` and requires it to fail.
-3. Requires that it failed where intended, not earlier: the apply output mentions `coredns`, `aws eks describe-cluster` reports the cluster `ACTIVE`, `aws eks describe-nodegroup` reports the system node group `ACTIVE`, and the `coredns` add-on is not `ACTIVE`. An apply that failed before the cluster and the node group existed fails the test, since it would not exercise issue #26. It also finds the VPC by the run tag, checks the cluster runs in it, and records the cluster security group that EKS created. For information only, it prints how many resources the partial state holds, which `terraform_data` resources are among them, and how many `aws-K8S-*` network interfaces the VPC has.
-4. Runs `terraform destroy` with the same tfvars file (so the same `test_invalid_coredns_version`) and requires it to succeed.
+3. Requires that it failed where intended, not earlier: the apply output mentions `aws_eks_access_entry.karpenter_node`, `aws eks describe-cluster` reports the cluster `ACTIVE`, `aws eks describe-nodegroup` reports the system node group `ACTIVE`, `aws eks describe-access-entry` for the real Karpenter node role ARN returns `ResourceNotFoundException`, and `terraform state list` does not contain `terraform_data.teardown_guard`. An apply that failed before the cluster and the node group existed fails the test, since it would not exercise issue #26. It also finds the VPC by the run tag, checks the cluster runs in it, and records the cluster security group that EKS created. For information only, it prints how many resources the partial state holds, which `terraform_data` resources are among them, and how many `aws-K8S-*` network interfaces the VPC has.
+4. Runs `terraform destroy` with the same tfvars file (so the same `test_invalid_karpenter_node_principal_arn`) and requires it to succeed.
 5. Requires that nothing is left: the same kinds as `1.e2e.sh` (instance, ENI, NAT gateway, EBS volume, launch template), plus no detached VPC CNI interface in the VPC (`description` `aws-K8S-*`, `status` `available`) and no security group tagged `aws:eks:cluster-name = NAME`, tagged for the cell, or other than `default` in the VPC. Then the recorded cluster security group, the cluster and the VPC must be gone. As in `1.e2e.sh`, a failed AWS call is never read as "nothing left".
 
 Expected output (abridged, IDs redacted):
@@ -240,7 +245,8 @@ PASS state at key distai-platform/us-east-2/dp-e2e/foundation has no resources b
 PASS terraform apply failed as intended (...s)
 PASS after the failed apply the EKS cluster exists and is ACTIVE
 PASS after the failed apply the system node group system exists and is ACTIVE
-PASS the coredns add-on was not created (not found)
+PASS no access entry for the real Karpenter node role exists
+PASS terraform_data.teardown_guard is absent from the partial state, as issue #26 requires
 PASS the cluster runs in this run's VPC, with the EKS-created cluster security group
 INFO partial state holds ... resources; terraform_data in it: ...
 INFO VPC CNI (aws-K8S-*) network interfaces in the VPC before destroy: ...
@@ -277,6 +283,6 @@ retries the destroy, lists anything that is left, and exits non-zero.
 ## Known issues
 
 - Spot capacity can be unavailable for all types in `E2E_INSTANCE_TYPES`; the launch step then times out. Add more types and run again.
-- Terraform keeps creating resources that do not depend on the failed `coredns` add-on, so which other resources the partial state holds depends on the configuration; the partial-apply test prints them but does not assert them.
+- Terraform keeps creating resources that do not depend on the failed access entry, so which other resources the partial state holds (beyond the asserted absence of `terraform_data.teardown_guard`) depends on the configuration; the partial-apply test prints them but does not assert them.
 - The log contains instance IDs, node names and the queue name of the test account. Redact them before pasting the log into an issue or pull request.
 - The IMDS and NetworkPolicy checks pull third-party images (see "Pinned images" above) through the cell's NAT gateway; if the account or Region blocks that egress, both checks fail at the `kubectl apply` or pod-scheduling step rather than at the behavior they are meant to check.
