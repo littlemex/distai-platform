@@ -1710,7 +1710,7 @@ check_accel_layer1() {
   local cell="$1" nodepool="$2" advertiser_addon="$3" other_addon="$4" label="$5" resource="$6" image="$7" probe="$8"
   local app="${cell}-${advertiser_addon}" other_app="${cell}-${other_addon}"
   local label_jp="${label//./\\.}" resource_jp="${resource//./\\.}"
-  local advertiser_ns other_ns wave np_label node node_label allocatable probe_out count pods_on_node
+  local advertiser_ns other_ns wave np_label node node_label allocatable probe_out count pods_on_node node_capacity_type instance_type
 
   # Criterion 5: the accelerators step's device-plugin release is
   # Healthy+Synced before anything is asserted about it.
@@ -1787,7 +1787,16 @@ YAML
   allocatable="$(k get node "${node}" -o jsonpath="{.status.allocatable.${resource_jp}}")"
   [[ "${allocatable}" =~ ^[0-9]+$ && "${allocatable}" -ge 1 ]] \
     || fail "node ${node} advertises ${resource} allocatable='${allocatable}' (expected >= 1)"
-  pass "Layer 1 pod scheduled on ${node} ($(k get node "${node}" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}'), ${label}=device-plugin, allocatable ${resource}=${allocatable})"
+  # Acceptance criteria 2/3 name a real spot node, not merely "whatever
+  # Karpenter happened to pick" -- #28's own capacity-pool fixtures allow
+  # only karpenter.sh/capacity-type=spot (no on-demand fallback), so this
+  # is a real assertion on the node Karpenter actually launched, not a
+  # restatement of the NodePool's own requirements.
+  node_capacity_type="$(k get node "${node}" -o jsonpath='{.metadata.labels.karpenter\.sh/capacity-type}')"
+  [[ "${node_capacity_type}" == "spot" ]] \
+    || fail "node ${node} has karpenter.sh/capacity-type='${node_capacity_type}', not spot (#28 acceptance criteria 2/3 name a spot node)"
+  instance_type="$(k get node "${node}" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}')"
+  pass "Layer 1 pod scheduled on ${node} (${instance_type}, capacity-type=spot, ${label}=device-plugin, allocatable ${resource}=${allocatable})"
 
   # Criteria 2/3: the device is usable from inside the pod.
   case "${probe}" in
@@ -2801,7 +2810,7 @@ JSON
   TRN_TF_OUTPUTS_JSON="${WORK_DIR}/tf-outputs-trn.json"
   trn_tf output -json >"${TRN_TF_OUTPUTS_JSON}" || fail "terraform output -json (Trainium cell)"
 
-  KUBECONFIG="${TRN_KUBECONFIG}" "${GITOPS_ROOT}/bootstrap/bootstrap.sh" \
+  KUBECONFIG="${TRN_KUBECONFIG}" AWS_REGION="${ACCEL_TRN_REGION}" "${GITOPS_ROOT}/bootstrap/bootstrap.sh" \
     --tf-outputs "${TRN_TF_OUTPUTS_JSON}" --revision "${GITOPS_REVISION}" \
     || fail "bootstrap.sh (Trainium cell, --revision ${GITOPS_REVISION})"
   TRN_BOOTSTRAP_RAN=1
