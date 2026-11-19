@@ -55,6 +55,39 @@ reservation:
   tags: {}
   instanceMatchCriteria: targeted
 
+# Optional accelerator-class fields shared by every accelerator vendor
+# (#19, #22). Values only: nothing here installs a device plugin or
+# enforces anything; left empty (the default), none of it renders.
+#   resourceName  - provenance annotation distai.dev/accelerator-resource-name
+#                   on the NodePool and the ResourceFlavor (for example
+#                   nvidia.com/gpu or aws.amazon.com/neuron); no template
+#                   branches on its value.
+#   taint         - a NodePool taint, mirrored as a ResourceFlavor
+#                   toleration. Rendered only when taint.key is set; effect
+#                   must then be NoSchedule, PreferNoSchedule or NoExecute.
+#   methodLabel   - a label on the NodePool's node template, for an
+#                   advertiser DaemonSet to select nodes by. Rendered only
+#                   when methodLabel.key is set.
+accelerator:
+  resourceName: ""
+  taint:
+    key: ""
+    value: ""
+    effect: ""
+  methodLabel:
+    key: ""
+    value: ""
+
+# Optional team-exclusive taint (#22 Decision 3), rendered exactly like
+# accelerator.taint: a NodePool taint mirrored as a ResourceFlavor
+# toleration, only when teamTaint.key is set. A value only: nothing in this
+# chart stops another team's ClusterQueue from listing this ResourceFlavor.
+tenancy:
+  teamTaint:
+    key: ""
+    value: ""
+    effect: ""
+
 # Pinned, not "latest": confirmed against the public SSM parameter
 # /aws/service/eks/optimized-ami/1.37/amazon-linux-2023/x86_64/standard/recommended/release_version
 # (value 1.37.1-20261112 on 2026-11-19), the same EKS-optimized AL2023
