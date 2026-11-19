@@ -16,7 +16,7 @@ neither a field regression, with no way to tell the two apart from a
 byte diff alone. These checks do not have that problem; the acceptance
 criterion is met at the level these checks assert, stated explicitly
 since the chart's own rendered comments are not byte-identical to #25's
-original (the capacity-pool chart's own README says so):
+original (`gitops/tests/README.md`'s own assumptions section says so):
 
   * every capacity-pool fixture renders exactly one NodePool, one
     EC2NodeClass and one ResourceFlavor, joined by name and by the
