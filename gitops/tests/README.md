@@ -73,19 +73,22 @@ runner/run.sh --ref <this-PR's-branch> -- bash gitops/tests/0.static.sh
 For `1.e2e.sh`/`2.upgrade.sh`, export the same variables
 `infra/foundation/tests/README.md`'s "End-to-end test" section documents
 (`AWS_REGION`, `NAME`, `STATE_BUCKET`, `STATE_REGION`,
-`ADMIN_PRINCIPAL_ARN`, `MY_CIDR`), plus this layer's own. **`NAME` must be
-`example-cell`** for this PR: `cells.ApplicationSet.yaml`'s Git file
-generator reads `gitops/cells/{{ .name }}/capacity-pool/*.yaml` and
-`.../smoke/*.yaml` from the checked-in repository itself (decision 9
-ships exactly one such pair, under `gitops/cells/example-cell/`, matching
-`infra/foundation/README.md`'s own `NAME=example-cell` convention); any
-other `NAME` has no matching directory, so the `capacity`/smoke step
-never generates an Application at all (confirmed on a real cluster: "no
-Application named `<NAME>-capacity-pool-<pool>` appeared" with any other
-`NAME`) -- the mechanism is otherwise fine, there is just nothing at that
-path to generate from. Future PRs that make the `capacity-pool`/`smoke`
-fixture discoverable by any cell name (not just this one checked-in
-example) should relax this:
+`ADMIN_PRINCIPAL_ARN`, `MY_CIDR`), plus this layer's own. **`NAME` must
+name a cell directory that exists under `gitops/cells/`**:
+`cells.ApplicationSet.yaml`'s Git file generator reads
+`gitops/cells/{{ .name }}/capacity-pool/*.yaml` and `.../smoke/*.yaml`
+from the checked-in repository itself; any other `NAME` has no matching
+directory, so the `capacity`/smoke step never generates an Application at
+all (confirmed on a real cluster: "no Application named
+`<NAME>-capacity-pool-<pool>` appeared" with any other `NAME`) -- the
+mechanism is otherwise fine, there is just nothing at that path to
+generate from. Three cell directories ship as of #28: `example-cell`
+(CPU-only, issue #25's own fixture), `dp-a19-gpu` and `dp-a19-trn` (one
+NVIDIA GPU pool and one Trainium pool, issue #28's own light-tier
+accelerator fixtures -- use these two `NAME`s only when also running the
+`GITOPS_RUN_ACCEL_E2E=1` extension below). Future PRs that make the
+`capacity-pool`/`smoke` fixture discoverable by any cell name (not just
+these three checked-in examples) should relax this:
 
 ```bash
 export GITOPS_REVISION=<this PR's branch, already pushed to GitHub>
@@ -115,6 +118,37 @@ runner/run.sh --ref "${GITOPS_REVISION}" \
 for `2.upgrade.sh`). As with `infra/foundation/tests/1.e2e.sh`,
 `AWS_PROFILE=default` on the runner (it authenticates via its IAM role
 through IMDS) and `MY_CIDR` is the runner's own public IP, not the Mac's.
+
+### Accelerator extension (issue #28, opt-in: `GITOPS_RUN_ACCEL_E2E=1`)
+
+Adds the `accelerators` step's own real-hardware check, light tier (#16):
+a Layer 1 pod on the existing cell's NVIDIA GPU pool, and a second
+foundation cell built in a Trainium-capable Region for a Layer 1 pod on a
+Neuron pool. Off by default, so an ordinary `1.e2e.sh` run (any `NAME`) is
+unaffected.
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `GITOPS_RUN_ACCEL_E2E` | no (default `0`) | Set to `1` to run this extension |
+| `NAME` | yes, when set to `1` | Must equal `ACCEL_GPU_CELL_NAME` (default `dp-a19-gpu`) -- the GPU accelerator check reuses this script's own existing cell, it does not build a third one |
+| `ACCEL_GPU_CELL_NAME` | no (default `dp-a19-gpu`) | Must match `NAME` and the `gitops/cells/<name>/` fixture this cell's pool comes from |
+| `ACCEL_TRN_CELL_NAME` | no (default `dp-a19-trn`) | Name of the second, Trainium-only foundation cell this extension builds and destroys itself |
+| `ACCEL_TRN_REGION` | no (default `ap-southeast-4`) | Region offering `trn2.3xlarge` spot capacity; the Identity Center instance stays wherever `ARGOCD_IDC_REGION` already points (#28 section E) |
+| `ACCEL_GPU_TEST_IMAGE` | yes, when set to `1` | Container image with `nvidia-smi` on `PATH` (for example a CUDA base image), no default pinned in this repository |
+| `ACCEL_TRN_TEST_IMAGE` | yes, when set to `1` | Container image with `neuron-ls` on `PATH` (a Neuron SDK image), no default pinned in this repository |
+| `ACCEL_POD_TIMEOUT_SECONDS` | no (default `1800`) | How long to wait for each accelerator pod's node to launch |
+
+```bash
+runner/run.sh --ref "${GITOPS_REVISION}" \
+  --env NAME=dp-a19-gpu \
+  --env AWS_REGION=<Region offering g7/g6e/g5 spot capacity> \
+  ... (every variable the plain 1.e2e.sh invocation above already needs) \
+  --env GITOPS_RUN_ACCEL_E2E=1 \
+  --env ACCEL_GPU_TEST_IMAGE=<a CUDA image reference> \
+  --env ACCEL_TRN_TEST_IMAGE=<a Neuron SDK image reference> \
+  --detach \
+  -- bash gitops/tests/1.e2e.sh
+```
 
 ## Acceptance criteria -> checks
 
