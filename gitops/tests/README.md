@@ -15,7 +15,7 @@ check them either.
 | Script | What it checks | Needs AWS | Duration |
 | --- | --- | --- | --- |
 | `0.static.sh` | Required files, `bash -n`/`shellcheck` on every `*.sh` under `gitops/` (including this suite's own three scripts, not only `bootstrap.sh`), `yamllint` on every literal (non-templated) tracked YAML file, the structural contract of every `addon.yaml`/cells parameter file and both ApplicationSets (`check_gitops_contract.py`, including issue #27's `pool.capacityType`/`reservation.tags` rules, exercised against disposable copies since the tracked tree ships no reserved pool), `helm lint`/`helm template` of `charts/capacity-pool` and `charts/smoke`, the same for every values fixture under `fixtures/` (issue #27's shapes: `on-demand`/`reserved`/`flex`, `accelerator`+`tenancy`, a no-value taint, `memQuota`, and seven fixtures that must be refused) with the rendered fields of every fixture -- including the unchanged `on-demand` default -- checked field-by-field by `check_chart_renders.py` against the exact fixture set shipped, `kubeconform` of all rendered output plus both ApplicationSets and the root Application against pinned upstream + CRD-catalog schemas, and `check_pinned_crds.py` validating the rendered CRD-backed objects against each pinned chart's own exact CRD versions | No | About 2 to 3 minutes |
-| `1.e2e.sh` | Builds one foundation cell (with a temporary Identity Center group), the before/after RBAC change on the capability's own access entry, bootstrap idempotency / `--revision`-only re-run / wrong-cluster abort, the `crds`→`controllers`→`capacity` ordering (including two deliberately broken steps), the OCI chart and Git-file-generator-revision checks, no shared CRD between `karpenter-crd` and `karpenter`, the admin smoke canary through Kueue and Karpenter, issue #27's three pools (`-rsv` backed by a real targeted Capacity Reservation, `-od`, `-flex`) with one canary each and a second `-rsv` canary held by quota, then the reservation cancelled, one accidental generator-entry loss, one full bootstrap-object teardown and re-adopt, then destroy and leftovers | Yes | About 60 to 85 minutes (measured 59m39s on one full run) |
+| `1.e2e.sh` | Builds one foundation cell (with a temporary Identity Center group), the before/after RBAC change on the capability's own access entry, bootstrap idempotency / `--revision`-only re-run / wrong-cluster abort, the `crds`→`controllers`→`capacity` ordering (including two deliberately broken steps), the OCI chart and Git-file-generator-revision checks, no shared CRD between `karpenter-crd` and `karpenter`, the admin smoke canary through Kueue and Karpenter, issue #27's three pools (`-rsv` backed by a real targeted Capacity Reservation, `-od`, `-flex`) with one canary each and a second `-rsv` canary held by quota, then the reservation cancelled, one accidental generator-entry loss, one full bootstrap-object teardown and re-adopt, then destroy and leftovers | Yes | About 60 to 85 minutes (measured on two real runs: 59m39s and 63 minutes) |
 | `2.upgrade.sh` | The mechanical version-pair check (decision 6) on a mismatched `karpenter`/`karpenter-crd` bump, then a matched bump against a live cell: no `Application` goes `Degraded`, the `NodePool`-launched instance is not replaced, and the canary pod stays `Running` throughout | Yes | About 50 to 65 minutes |
 
 ## Prerequisites
@@ -47,8 +47,10 @@ Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
   the account (the `-flex` pool may launch Spot; the
   `AWSServiceRoleForEC2Spot` service-linked role must exist or be
   creatable). The reservation is billed from creation until step 11b's
-  own teardown cancels it (about 20 minutes); it ends on its own 110
-  minutes after creation in any case.
+  own teardown cancels it (about 9 minutes, measured on two real runs);
+  it ends on its own 110 minutes after creation in any case, so a run
+  that fails before reaching 11b-6 and before `cleanup()` runs still
+  bounds the cost.
 - A GitHub token with **Contents: write** on the repository named by
   `GITOPS_TEST_REPO_URL` (default `https://github.com/littlemex/distai-platform.git`
   -- override to run against a fork you have write access to), read
