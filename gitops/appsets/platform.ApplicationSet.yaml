@@ -106,26 +106,35 @@ spec:
   # spec.goTemplate above - the only way Decision 2's per-add-on values
   # (karpenter's settings.clusterName and so on) avoid being forced into
   # every other add-on's template.
+  #
+  # The {{- if .dir }} branch below (#28: a local, platform-owned chart,
+  # accel-device-classes, never an upstream registry - same "dir" shape
+  # cells.ApplicationSet.yaml already uses for capacity-pool/smoke, #25
+  # Decision 2, applied here because this one addon.yaml has no
+  # chart/repoURL/version) fully replaces the base template's source,
+  # which otherwise renders repoURL/chart/targetRevision all empty for a
+  # dir-only addon.yaml - an invalid Application with no repoURL. Its own
+  # "chart: null" is explicit, not left to whatever the base template's
+  # own "{{ .chart }}" happens to render for a missing key: with
+  # goTemplateOptions missingkey=zero, a map value of static type
+  # interface{} (what a parsed addon.yaml's own params decode to) still
+  # prints the literal string "<no value>" for a missing key in the
+  # text/template engine Argo CD uses, not the empty string "zero" might
+  # suggest - left unset, a non-empty "chart: <no value>" alongside
+  # "path:" would make Argo CD treat this as a Helm chart source instead
+  # of a Git path source, and this Application would never sync. A JSON
+  # Merge Patch null removes the key entirely, which is what a dir-only
+  # addon.yaml actually needs. Verify this on a real cluster before
+  # relying on it (same caveat as goTemplate itself, #25's own header
+  # comment on this file).
   templatePatch: |
     spec:
       {{- if .dir }}
-      # #28: a local, platform-owned chart (accel-device-classes), never
-      # an upstream registry - same "dir" shape cells.ApplicationSet.yaml
-      # already uses for capacity-pool/smoke (#25 Decision 2), applied
-      # here because this one addon.yaml has no chart/repoURL/version.
-      # This branch fully replaces the base template's source (which
-      # rendered repoURL/chart/targetRevision all empty for a dir-only
-      # addon.yaml, an invalid Application with no repoURL) rather than
-      # patching it: the base template's own empty "chart" string still
-      # merges through underneath, which is harmless (Argo CD's own
-      # IsHelm() check treats an empty chart as "not a Helm chart source",
-      # the same way cells.ApplicationSet.yaml's own template - entirely
-      # dir-based - never sets chart/repoURL/version from .repoURL/.chart/
-      # .version in the first place).
       source:
         repoURL: https://github.com/littlemex/distai-platform.git
         path: "{{ .dir }}"
         targetRevision: '{{ index $.metadata.annotations "distai.dev.annotations/revision" }}'
+        chart: null
       {{- else }}
       source:
         helm:
