@@ -230,7 +230,10 @@ report_leftovers() {
   fi
   for kind in "${kinds[@]}"; do
     if wait_until "${grace}" 20 "no ${kind} left" no_leftover "${kind}"; then
-      pass "no ${kind} tagged for the cluster remains"
+      case "${kind}" in
+        cni-eni | security-group) pass "no ${kind} remains in the cell's VPC" ;;
+        *) pass "no ${kind} tagged for the cluster remains" ;;
+      esac
     else
       if ! ids="$(list_leftover "${kind}")"; then
         fail "checking for leftover ${kind}: ${ids}"
