@@ -101,34 +101,8 @@ KARPENTER_INSTANCE_IDS=()
 
 # ---------------------------------------------------------------- helpers
 
-log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
-pass() { log "PASS $*"; }
-fail() {
-  FAILED_STEP="$*"
-  log "FAIL $*"
-  exit 1
-}
-info() { log "INFO $*"; }
-
-# wait_until TIMEOUT_SECONDS INTERVAL_SECONDS DESCRIPTION COMMAND...
-# Runs COMMAND until it succeeds or the timeout expires.
-wait_until() {
-  local timeout="$1" interval="$2" desc="$3"
-  shift 3
-  local start now
-  start="$(date +%s)"
-  while true; do
-    if "$@"; then
-      return 0
-    fi
-    now="$(date +%s)"
-    if ((now - start >= timeout)); then
-      log "timed out after ${timeout}s waiting for: ${desc}"
-      return 1
-    fi
-    sleep "${interval}"
-  done
-}
+# shellcheck source=e2e-lib.sh
+source "${SCRIPT_DIR}/e2e-lib.sh"
 
 new_uuid() {
   if command -v uuidgen >/dev/null 2>&1; then
@@ -136,42 +110,6 @@ new_uuid() {
   else
     cat /proc/sys/kernel/random/uuid
   fi
-}
-
-tf() { "${TERRAFORM}" -chdir="${ROOT}" "$@"; }
-tf_out() { tf output -raw "$1"; }
-
-require_bin() {
-  command -v "$1" >/dev/null 2>&1 || fail "prerequisite: $1 not found"
-}
-
-# aws_text CMD ARGS...: runs an AWS CLI read call and prints its stdout.
-# A "*.NotFound*"-shaped error (for example InvalidVpcID.NotFound or
-# InvalidInstanceID.NotFound, returned when the call names an ID that no
-# longer exists) means "the thing is gone": prints nothing and returns 0, the
-# same as a successful call that matched nothing. Any other non-zero exit
-# (expired credentials, throttling, a typo in the call) is a hard failure:
-# prints the command and the AWS CLI's error text and returns 1, so a caller
-# capturing this with `out="$(aws_text ...)"; rc=$?` gets the error text in
-# `out` and a non-zero `rc`, and must fail() rather than treat it as "found
-# nothing".
-aws_text() {
-  local out err errfile ok=1
-  errfile="$(mktemp)"
-  if ! out="$("$@" 2>"${errfile}")"; then
-    ok=0
-  fi
-  err="$(cat "${errfile}")"
-  rm -f "${errfile}"
-  if [[ "${ok}" -eq 1 ]]; then
-    printf '%s' "${out}"
-    return 0
-  fi
-  if [[ "${err}" == *".NotFound"* || "${err}" == *"NotFoundException"* ]]; then
-    return 0
-  fi
-  printf '%s: %s' "$*" "${err}"
-  return 1
 }
 
 instance_of_node() {
@@ -215,104 +153,6 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
-
-# ---------------------------------------------------- leftover detection
-
-# Tag filters that identify resources belonging to this cell: the tag the
-# test passes through var.tags and the EC2NodeClass, the Karpenter discovery
-# tag, and the tags that EKS, managed node groups, Karpenter and the VPC CNI
-# put on what they create.
-tag_filters() {
-  printf '%s\n' \
-    "Name=tag:${TEST_TAG_KEY},Values=${RUN_ID}" \
-    "Name=tag:karpenter.sh/discovery,Values=${NAME}" \
-    "Name=tag-key,Values=kubernetes.io/cluster/${NAME}" \
-    "Name=tag:eks:cluster-name,Values=${NAME}" \
-    "Name=tag:eks:eks-cluster-name,Values=${NAME}" \
-    "Name=tag:cluster.k8s.amazonaws.com/name,Values=${NAME}"
-}
-
-# Prints the IDs of one resource kind that still exist for the cell.
-# Each underlying AWS call goes through aws_text (see above), so a hard
-# failure of any single call (not a "not found") stops this function
-# immediately: it prints the error text instead of an ID list and returns 1.
-list_leftover() {
-  local kind="$1" filter out all=""
-  while IFS= read -r filter; do
-    if ! case "${kind}" in
-      instance)
-        out="$(aws_text aws ec2 describe-instances --filters "${filter}" \
-          "Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped" \
-          --query 'Reservations[].Instances[].InstanceId' --output text)" ;;
-      eni)
-        out="$(aws_text aws ec2 describe-network-interfaces --filters "${filter}" \
-          --query 'NetworkInterfaces[].NetworkInterfaceId' --output text)" ;;
-      nat)
-        out="$(aws_text aws ec2 describe-nat-gateways --filter "${filter}" \
-          "Name=state,Values=pending,available,deleting" \
-          --query 'NatGateways[].NatGatewayId' --output text)" ;;
-      volume)
-        out="$(aws_text aws ec2 describe-volumes --filters "${filter}" \
-          --query 'Volumes[].VolumeId' --output text)" ;;
-      launch-template)
-        out="$(aws_text aws ec2 describe-launch-templates --filters "${filter}" \
-          --query 'LaunchTemplates[].LaunchTemplateId' --output text)" ;;
-    esac; then
-      printf '%s' "${out}"
-      return 1
-    fi
-    all+="${out}"$'\n'
-  done < <(tag_filters)
-  if [[ -n "${VPC_ID}" ]]; then
-    if ! case "${kind}" in
-      instance)
-        out="$(aws_text aws ec2 describe-instances --filters "Name=vpc-id,Values=${VPC_ID}" \
-          "Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped" \
-          --query 'Reservations[].Instances[].InstanceId' --output text)" ;;
-      eni)
-        out="$(aws_text aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=${VPC_ID}" \
-          --query 'NetworkInterfaces[].NetworkInterfaceId' --output text)" ;;
-      nat)
-        out="$(aws_text aws ec2 describe-nat-gateways --filter "Name=vpc-id,Values=${VPC_ID}" \
-          "Name=state,Values=pending,available,deleting" \
-          --query 'NatGateways[].NatGatewayId' --output text)" ;;
-      volume | launch-template) out="" ;;
-    esac; then
-      printf '%s' "${out}"
-      return 1
-    fi
-    all+="${out}"$'\n'
-  fi
-  printf '%s' "${all}" | tr '\t' '\n' | grep -v '^None$' | grep -v '^$' | sort -u || true
-}
-
-# no_leftover KIND: true if nothing of KIND remains. A hard AWS failure
-# inside list_leftover is not "nothing remains": it calls fail() with the
-# error text and stops the whole script, the same as any other check here.
-no_leftover() {
-  local out
-  if ! out="$(list_leftover "$1")"; then
-    fail "checking for leftover $1: ${out}"
-  fi
-  [[ -z "${out}" ]]
-}
-
-# report_leftovers GRACE_SECONDS: PASS/FAIL per kind, returns 1 if any remains.
-report_leftovers() {
-  local grace="$1" kind ids bad=0
-  for kind in instance eni nat volume launch-template; do
-    if wait_until "${grace}" 20 "no ${kind} left" no_leftover "${kind}"; then
-      pass "no ${kind} tagged for the cluster remains"
-    else
-      if ! ids="$(list_leftover "${kind}")"; then
-        fail "checking for leftover ${kind}: ${ids}"
-      fi
-      log "FAIL ${kind} left after destroy: $(tr '\n' ' ' <<<"${ids}")"
-      bad=1
-    fi
-  done
-  return "${bad}"
-}
 
 # ------------------------------------------------------------ preflight
 
@@ -1001,12 +841,4 @@ pass "Karpenter instance(s) ${KARPENTER_INSTANCE_IDS[*]} terminated"
 report_leftovers "${E2E_LEFTOVER_GRACE_SECONDS}" \
   || fail "resources tagged for the cluster remain after destroy"
 
-# describe-vpcs on a gone VPC returns InvalidVpcID.NotFound (empty text,
-# success); any other failure must not be read as "the VPC is gone".
-if ! vpc_check_out="$(aws_text aws ec2 describe-vpcs --vpc-ids "${VPC_ID}" --query 'Vpcs[0].VpcId' --output text)"; then
-  fail "checking whether VPC ${VPC_ID} still exists: ${vpc_check_out}"
-fi
-if [[ -n "${vpc_check_out}" && "${vpc_check_out}" != "None" ]]; then
-  fail "VPC ${VPC_ID} still exists after destroy"
-fi
-pass "VPC removed"
+assert_vpc_gone
