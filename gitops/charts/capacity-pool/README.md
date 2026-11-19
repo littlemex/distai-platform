@@ -72,11 +72,16 @@ fails the render.
 `pool.limits` is the only quota-shaped field this chart renders; the
 `ResourceFlavor` carries no quota. For an `on-demand` or `flex` pool it is
 the budget the admin chooses. For a `reserved` pool, set it to the
-reservation's own size (instance count times the instance type's
-resources) as a ceiling, and set the `nominalQuota` of the `ClusterQueue`
-naming this flavor (for example the smoke chart's `clusterQueue.cpuQuota`
-and `clusterQueue.memQuota`) to the same amounts. Nothing links the two:
-keep them in step by hand, as with the smoke chart's
+reservation's own size as a ceiling -- the reservation's instance count
+times each instance's own **allocatable** resources, never the instance
+type's full advertised resources, which no pod can actually request in
+full once `kubelet`/system overhead is reserved -- and set the
+`nominalQuota` of the `ClusterQueue` naming this flavor (for example the
+smoke chart's `clusterQueue.cpuQuota` and `clusterQueue.memQuota`) to the
+same, allocatable-based amounts (Kueue admits against pod requests, which
+must fit in a node's allocatable capacity, never its full advertised
+capacity). Nothing links `pool.limits` and the `ClusterQueue`'s
+`nominalQuota`: keep them in step by hand, as with the smoke chart's
 `clusterQueue.resourceFlavor`.
 
 ## Known limits
@@ -95,7 +100,15 @@ keep them in step by hand, as with the smoke chart's
   does not distinguish the two (Karpenter's own docs: both are selected
   the same way), but a Capacity Block's own start/end behavior (nodes
   drained before it ends, per the foundation layer's interruption-queue
-  wiring) was not itself observed by this PR.
+  wiring) was not itself observed by this PR. Two symptoms outside this
+  pool's own control, not solved here: before a Capacity Block's own
+  start time, `capacityReservationSelectorTerms` resolves nothing yet, so
+  a `-rsv` pool with no other capacity type behaves as if no capacity
+  exists at all (Kueue admits, Karpenter cannot launch); after a
+  reservation's own `EndDate`, or a Capacity Block's own end, AWS reclaims
+  the capacity regardless of what is still running on it, and the
+  foundation layer's interruption-queue wiring is what gives Karpenter a
+  chance to drain first, not anything in this chart.
 - If `pool.limits` or the matching `ClusterQueue`'s `nominalQuota`
   (Quotas, above) is set larger than the reservation can actually hold --
   more than the reservation's own instance count times the instance

@@ -5,10 +5,17 @@ gitops/tests/fixtures/ (issue #27's acceptance criteria that `helm template`
 alone can evidence).
 
 0.static.sh renders every fixture into <rendered_dir> as
-`fixture-<chart>-<fixture-name>.yaml` and calls this script afterwards. The
-byte-level comparison of the unchanged on-demand pool and the default smoke
-queue against the pre-#27 golden files is done by 0.static.sh itself (a
-`diff`); this script checks what each new values shape must render:
+`fixture-<chart>-<fixture-name>.yaml` and calls this script afterwards.
+This script checks what each values shape must render, including the
+unchanged `on-demand-default`/`default` fixtures, which carry none of
+issue #27's new values and must still render the exact same fields
+`capacity-pool`/`smoke` rendered before #27 (a checked-in golden file and
+a byte-level `diff` were tried for this and dropped: a template comment
+fix that changes no object field broke it twice during review -- once
+against a stale base branch, once against a different Helm version --
+with no way to tell "a real field regressed" apart from "the comment
+changed" from a byte diff alone; the field-level checks below are what
+the acceptance criterion actually needs, and do not have this problem):
 
   * every capacity-pool fixture renders exactly one NodePool, one
     EC2NodeClass and one ResourceFlavor, joined by name and by the
