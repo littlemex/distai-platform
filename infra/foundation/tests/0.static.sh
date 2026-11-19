@@ -54,6 +54,7 @@ run_check "tflint init" "${TFLINT}" --chdir="${ROOT}" --init
 run_check "tflint" "${TFLINT}" --chdir="${ROOT}"
 run_check "terraform test (input validation, mocked provider)" "${TERRAFORM}" -chdir="${ROOT}" test
 run_check "guard unit tests (scripted fake AWS CLI)" bash "${SCRIPT_DIR}/guard-unit-tests.sh"
+run_check "network guard unit tests (scripted fake AWS CLI)" bash "${SCRIPT_DIR}/network-guard-unit-tests.sh"
 
 echo
 if [[ "${failures}" -eq 0 ]]; then
