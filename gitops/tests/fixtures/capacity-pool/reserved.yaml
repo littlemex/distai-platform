@@ -1,0 +1,14 @@
+# Static-check input (0.static.sh): a -rsv pool selecting its reservation
+# by tag. instanceMatchCriteria is left unset on purpose: the chart's own
+# default must be "targeted", never "open" (issue #27, Security).
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: cpu-rsv
+  capacityType: reserved
+  limits:
+    cpu: "2"
+    memory: 8192Mi
+reservation:
+  tags:
+    distai-platform-e2e: static-check
