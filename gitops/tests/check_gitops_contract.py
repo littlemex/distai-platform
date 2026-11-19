@@ -216,19 +216,67 @@ def main(root: str) -> int:
             )
 
     # ------------------------------------------------- cells/ parameter files
+    # Issue #27: pool.capacityType is an enum, and a reserved pool selects
+    # its reservation by tag -- a reserved pool with no tags would leave a
+    # selector term matching every reservation of its instanceMatchCriteria
+    # in the account.
+    allowed_capacity_types = {"on-demand", "reserved", "flex"}
+    addons_by_cell: dict[str, list[tuple[str, str]]] = {}
     for path in cell_capacity_pool_files:
         rel = os.path.relpath(path, root)
         doc = check_addon_yaml(path, allow_dir=True)
+        addons_by_cell.setdefault(os.path.dirname(os.path.dirname(path)), []).append((rel, str(doc.get("addon", ""))))
         check(f"{rel}'s addon value is 'capacity-pool-<pool>' (decision 2)", str(doc.get("addon", "")).startswith("capacity-pool-"))
         check(f"{rel}'s wave is one of {sorted(allowed_cells_waves)}", doc.get("wave") in allowed_cells_waves)
         if "dir" in doc:
             check(f"{rel}'s dir points under gitops/charts/", str(doc["dir"]).rstrip("/").endswith("charts/capacity-pool") or "charts/capacity-pool" in str(doc["dir"]))
+        values = doc.get("values") or {}
+        capacity_type = (values.get("pool") or {}).get("capacityType", "on-demand")
+        check(
+            f"{rel}'s values.pool.capacityType is one of {sorted(allowed_capacity_types)} (issue #27)",
+            capacity_type in allowed_capacity_types,
+            f"got {capacity_type!r}",
+        )
+        if capacity_type == "reserved":
+            tags = (values.get("reservation") or {}).get("tags")
+            check(
+                f"{rel} is a reserved pool and sets a non-empty values.reservation.tags (issue #27)",
+                isinstance(tags, dict) and len(tags) >= 1 and all(str(k) and str(v) for k, v in tags.items()),
+                f"got {tags!r}",
+            )
+            imc = (values.get("reservation") or {}).get("instanceMatchCriteria", "targeted")
+            check(
+                f"{rel}'s values.reservation.instanceMatchCriteria is 'targeted' (issue #27: never 'open' for a pool's own reservation)",
+                imc == "targeted",
+                f"got {imc!r}",
+            )
 
+    # A cell may carry more than one smoke queue (one per pool, as
+    # 1.e2e.sh's issue #27 fixture does), so 'smoke-<suffix>' is accepted
+    # alongside 'smoke'.
     for path in cell_smoke_files:
         rel = os.path.relpath(path, root)
         doc = check_addon_yaml(path, allow_dir=True)
-        check(f"{rel}'s addon value is 'smoke' (decision 2)", doc.get("addon") == "smoke")
+        addon = str(doc.get("addon", ""))
+        addons_by_cell.setdefault(os.path.dirname(os.path.dirname(path)), []).append((rel, addon))
+        check(f"{rel}'s addon value is 'smoke' or 'smoke-<suffix>' (decision 2)", addon == "smoke" or addon.startswith("smoke-"))
         check(f"{rel}'s wave is one of {sorted(allowed_cells_waves)}", doc.get("wave") in allowed_cells_waves)
+
+    # Decision 2: a generated Application is named {{name}}-{{addon}}, so two
+    # parameter files of one cell with the same addon value would generate
+    # two Applications with one name.
+    for cell_dir, entries in sorted(addons_by_cell.items()):
+        seen: dict[str, str] = {}
+        dupes = []
+        for rel, addon in entries:
+            if addon in seen:
+                dupes.append(f"{addon} ({seen[addon]}, {rel})")
+            seen.setdefault(addon, rel)
+        check(
+            f"{os.path.relpath(cell_dir, root)}'s parameter files have unique addon values (decision 2: one Application name each)",
+            not dupes,
+            f"duplicates: {dupes}",
+        )
 
     # ----------------------------------------------- ApplicationSet shape
     def check_applicationset(path: str, expected_steps: set[str]) -> dict:
