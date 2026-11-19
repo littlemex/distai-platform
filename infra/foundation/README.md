@@ -20,7 +20,7 @@
 - An S3 bucket for Terraform state, in a Region of your choice. State locking uses the S3 lock file (`use_lockfile`), so no DynamoDB table is needed.
 - A cell name that no other cell in the account uses, in any Region. IAM role and policy names include it, and IAM names are global to the account.
 - The EC2 Spot service-linked role, if Karpenter is to launch spot instances. It exists once spot has been used in the account; otherwise create it once with `aws iam create-service-linked-role --aws-service-name spot.amazonaws.com`. The Karpenter controller role is not allowed to create it.
-- For the Argo CD capability only: an IAM Identity Center instance and the IDs of the groups that become Argo CD admins.
+- For the Argo CD capability only: an IAM Identity Center instance and the IDs of the groups to map to the Argo CD `ADMIN`, `EDITOR` and `VIEWER` roles (`role_mappings`).
 
 ## Usage
 
