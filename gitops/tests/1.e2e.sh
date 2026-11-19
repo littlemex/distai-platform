@@ -393,22 +393,33 @@ pass "root Application's targetRevision matches --revision"
 # Acceptance criterion 3, first half: re-running with identical inputs
 # changes nothing. kubectl apply only bumps resourceVersion when the
 # server-side object actually changes, so an unchanged resourceVersion
-# across the two runs is direct evidence of a true no-op, not just "the
-# script exited 0".
-
-object_resource_versions() {
+# across the two runs is direct evidence of a true no-op for the
+# cell-registration Secret and the platform AppProject -- neither has a
+# controller actively reconciling it. The root Application does: Argo CD's
+# own application-controller continuously writes its .status (sync,
+# health, operationState, reconciledAt) the instant the Application
+# exists, entirely independent of whether bootstrap.sh's own write
+# changed anything -- confirmed on a real cluster (resourceVersion moved
+# between two runs of bootstrap.sh with identical --revision, while the
+# Secret's and AppProject's did not). A raw resourceVersion comparison
+# would report every run as "not idempotent" on an Argo CD-managed object,
+# no matter what bootstrap.sh does; a stable fingerprint of only the
+# fields bootstrap.sh itself writes (.spec, never .status) is what
+# acceptance criterion 3 is actually about.
+object_write_fingerprint() {
   printf '%s %s %s' \
     "$(k get secret cell-registration -n "${ARGOCD_NS}" -o jsonpath='{.metadata.resourceVersion}')" \
     "$(k get appproject platform -n "${ARGOCD_NS}" -o jsonpath='{.metadata.resourceVersion}')" \
-    "$(k get application root -n "${ARGOCD_NS}" -o jsonpath='{.metadata.resourceVersion}')"
+    "$(k get application root -n "${ARGOCD_NS}" -o json \
+      | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["spec"], sort_keys=True))')"
 }
 
-rv_before_rerun="$(object_resource_versions)"
+rv_before_rerun="$(object_write_fingerprint)"
 run_bootstrap --revision "${GITOPS_REVISION}" || fail "bootstrap.sh (identical re-run)"
-rv_after_rerun="$(object_resource_versions)"
+rv_after_rerun="$(object_write_fingerprint)"
 [[ "${rv_before_rerun}" == "${rv_after_rerun}" ]] \
-  || fail "an identical bootstrap.sh re-run changed resourceVersion(s): before=[${rv_before_rerun}] after=[${rv_after_rerun}]"
-pass "an identical bootstrap.sh re-run is a true no-op (resourceVersions unchanged)"
+  || fail "an identical bootstrap.sh re-run changed what it writes: before=[${rv_before_rerun}] after=[${rv_after_rerun}]"
+pass "an identical bootstrap.sh re-run is a true no-op (Secret/AppProject resourceVersions and the root Application's spec all unchanged)"
 
 # --------------------------------------- 6. --revision-only re-run
 #
@@ -462,12 +473,12 @@ doc["cluster_arn"]["value"] = real_arn.rsplit(":", 1)[0] + ":not-" + real_arn.rs
 with open(dst, "w", encoding="utf-8") as f:
     json.dump(doc, f)
 PY
-rv_before_wrong="$(object_resource_versions)"
+rv_before_wrong="$(object_write_fingerprint)"
 if "${GITOPS_ROOT}/bootstrap/bootstrap.sh" --tf-outputs "${WRONG_TF_OUTPUTS_JSON}" \
   --revision "${GITOPS_REVISION}" 2>"${WORK_DIR}/wrong-cluster.log"; then
   fail "bootstrap.sh did not abort on a cluster_arn mismatch (see ${WORK_DIR}/wrong-cluster.log)"
 fi
-rv_after_wrong="$(object_resource_versions)"
+rv_after_wrong="$(object_write_fingerprint)"
 [[ "${rv_before_wrong}" == "${rv_after_wrong}" ]] \
   || fail "bootstrap.sh wrote something before aborting on a cluster_arn mismatch: before=[${rv_before_wrong}] after=[${rv_after_wrong}]"
 pass "bootstrap.sh aborts before any write when --tf-outputs names a different cluster_arn than the registered Secret"
