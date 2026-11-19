@@ -94,21 +94,34 @@ done
 #    is guarded explicitly rather than left as a bare assignment (seen for
 #    real: exit 254 on list-instance-profiles-for-role after the node role
 #    had already been deleted by another process, right after this guard had
-#    just finished terminating every instance - see issue #26).
-if ! profiles="$(aws iam list-instance-profiles-for-role \
+#    just finished terminating every instance - see issue #26). stderr is
+#    captured to its own temp file, not merged into the variable with 2>&1:
+#    merging them would make a CLI warning on an otherwise successful call
+#    become part of the profile name list below.
+profiles_err="$(mktemp)"
+if profiles="$(aws iam list-instance-profiles-for-role \
   --role-name "$NODE_ROLE_NAME" \
-  --query 'InstanceProfiles[].InstanceProfileName' --output text 2>&1)"; then
-  case "$profiles" in
+  --query 'InstanceProfiles[].InstanceProfileName' --output text 2>"${profiles_err}")"; then
+  rm -f "${profiles_err}"
+else
+  profiles_err_text="$(cat "${profiles_err}")"
+  rm -f "${profiles_err}"
+  case "$profiles_err_text" in
     *NoSuchEntity*) log "already gone: node role ${NODE_ROLE_NAME}, nothing to clean"; profiles="" ;;
-    *) echo "$profiles" >&2; exit 1 ;;
+    *) echo "$profiles_err_text" >&2; exit 1 ;;
   esac
 fi
 for p in $profiles; do
-  if ! owner="$(aws iam list-instance-profile-tags --instance-profile-name "$p" \
-    --query "Tags[?Key=='kubernetes.io/cluster/${CLUSTER_NAME}'].Value" --output text 2>&1)"; then
-    case "$owner" in
+  tags_err="$(mktemp)"
+  if owner="$(aws iam list-instance-profile-tags --instance-profile-name "$p" \
+    --query "Tags[?Key=='kubernetes.io/cluster/${CLUSTER_NAME}'].Value" --output text 2>"${tags_err}")"; then
+    rm -f "${tags_err}"
+  else
+    tags_err_text="$(cat "${tags_err}")"
+    rm -f "${tags_err}"
+    case "$tags_err_text" in
       *NoSuchEntity*) log "already gone: instance profile ${p}"; continue ;;
-      *) echo "$owner" >&2; exit 1 ;;
+      *) echo "$tags_err_text" >&2; exit 1 ;;
     esac
   fi
   if [ "$owner" != "owned" ]; then

@@ -238,8 +238,13 @@ pass "terraform apply failed as intended ($(($(date +%s) - apply_start))s)"
 # failed before the cluster and the system node group existed (a typo in the
 # inputs, a quota, a transient API error) leaves nothing for EKS or the VPC
 # CNI to have created, so it would not test issue #26 at all.
-grep -q 'aws_eks_access_entry.karpenter_node' "${APPLY_LOG}" \
-  || fail "terraform apply failed, but its output never mentions aws_eks_access_entry.karpenter_node: it failed somewhere other than the injected principal ARN (see ${APPLY_LOG})"
+# aws_eks_access_entry.karpenter_node alone is not enough: that address
+# also appears in the plan ("will be created") and in "Creating..." lines
+# for a normal, successful apply. Terraform's error diagnostic for a given
+# resource always includes a "with <address>," line; matching that is
+# specific to this resource actually being the one that errored.
+grep -q 'with aws_eks_access_entry.karpenter_node,' "${APPLY_LOG}" \
+  || fail "terraform apply failed, but its output has no error diagnostic for aws_eks_access_entry.karpenter_node: it failed somewhere other than the injected principal ARN (see ${APPLY_LOG})"
 
 if ! cluster_status="$(aws_text aws eks describe-cluster --name "${NAME}" \
   --query 'cluster.status' --output text)"; then
@@ -282,7 +287,9 @@ pass "no access entry for the real Karpenter node role exists"
 # how the apply's resources happened to be scheduled. Asserting this is not
 # coupling to the fix: teardown_guard and its depends_on list predate it
 # (PR #21) and are unchanged by it.
-partial_state="$(tf state list 2>/dev/null || true)"
+if ! partial_state="$(tf state list 2>&1)"; then
+  fail "terraform state list (key ${STATE_KEY}): ${partial_state}"
+fi
 if grep -qx 'terraform_data.teardown_guard' <<<"${partial_state}"; then
   fail "terraform_data.teardown_guard is in the partial state; the injected failure did not block it as expected, so this run does not test issue #26"
 fi
@@ -311,17 +318,25 @@ cni_enis="$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=${
   "Name=description,Values=aws-K8S-*" --query 'length(NetworkInterfaces)' --output text 2>/dev/null || true)"
 info "VPC CNI (aws-K8S-*) network interfaces in the VPC before destroy: ${cni_enis:-unknown}"
 
+# -------------------------------------------- 4. plant the issue #26 leftover
+
 # Whether the system node group's own deletion happens to leave a detached
 # VPC CNI interface behind is a race this test must not depend on (with no
 # real pod load and no Karpenter running, it usually does not). So the test
 # plants the exact artifact issue #26 describes directly: a detached network
 # interface in a private subnet of this cell's VPC, with the description
-# both guards filter on (Name=description,Values=aws-K8S-*). This is the
-# same shape of leftover a Karpenter-launched instance's secondary interface
-# becomes once that instance is terminated outside the normal node group
-# lifecycle; planting it this way removes the need to run Karpenter here,
-# and makes the cause-and-effect of this test deterministic: present at this
-# point whichever guard is or is not later in a position to remove it.
+# both guards filter on (Name=description,Values=aws-K8S-*), and carrying
+# the cluster security group CLUSTER_SG_ID recorded above (--groups): a real
+# detached VPC CNI interface still carries that security group (its node
+# used it), and keeping it out of a default-security-group interface
+# matters here specifically, because the group being in use is what keeps
+# EKS from deleting it with the cluster, which is the second half of this
+# Issue's symptom alongside the interface itself. This is the same shape of
+# leftover a Karpenter-launched instance's secondary interface becomes once
+# that instance is terminated outside the normal node group lifecycle;
+# planting it this way removes the need to run Karpenter here, and makes
+# the cause-and-effect of this test deterministic: present at this point
+# whichever guard is or is not later in a position to remove it.
 if ! private_subnet="$(aws_text aws ec2 describe-subnets \
   --filters "Name=vpc-id,Values=${VPC_ID}" "Name=tag:karpenter.sh/discovery,Values=${NAME}" \
   --query 'Subnets[0].SubnetId' --output text)"; then
@@ -330,13 +345,19 @@ fi
 [[ -n "${private_subnet}" && "${private_subnet}" != "None" ]] \
   || fail "no private subnet (tag karpenter.sh/discovery=${NAME}) found in ${VPC_ID} to plant the test interface in"
 if ! planted_eni="$(aws_text aws ec2 create-network-interface \
-  --subnet-id "${private_subnet}" --description "aws-K8S-i-issue26testonly" \
+  --subnet-id "${private_subnet}" --groups "${CLUSTER_SG_ID}" --description "aws-K8S-i-issue26testonly" \
   --query 'NetworkInterface.NetworkInterfaceId' --output text)"; then
   fail "aws ec2 create-network-interface (planting the issue #26 test artifact in ${private_subnet}): ${planted_eni}"
 fi
-pass "planted a detached network interface (${planted_eni}, aws-K8S-* description) in ${private_subnet}"
+if ! planted_groups="$(aws_text aws ec2 describe-network-interfaces --network-interface-ids "${planted_eni}" \
+  --query 'NetworkInterfaces[0].Groups[].GroupId' --output text)"; then
+  fail "aws ec2 describe-network-interfaces (confirming the planted interface's security group): ${planted_groups}"
+fi
+[[ "${planted_groups}" == "${CLUSTER_SG_ID}" ]] \
+  || fail "planted interface ${planted_eni} carries group(s) '${planted_groups}', expected only the cluster security group ${CLUSTER_SG_ID}"
+pass "planted a detached network interface (${planted_eni}, aws-K8S-* description) in ${private_subnet}, carrying the cluster security group ${CLUSTER_SG_ID}"
 
-# ------------------------------------ 4. destroy the partial state
+# ------------------------------------ 5. destroy the partial state
 
 destroy_start="$(date +%s)"
 tf destroy -auto-approve -input=false -var-file="${TFVARS}" \
@@ -344,7 +365,7 @@ tf destroy -auto-approve -input=false -var-file="${TFVARS}" \
 DESTROYED=1
 pass "terraform destroy after a partial apply completed without manual steps ($(($(date +%s) - destroy_start))s)"
 
-# ------------------------------------------------- 5. nothing left behind
+# ------------------------------------------------- 6. nothing left behind
 
 report_leftovers "${E2E_LEFTOVER_GRACE_SECONDS}" "${LEFTOVER_KINDS[@]}" \
   || fail "resources of the cell remain after destroy of a partial apply"
