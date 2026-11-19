@@ -1,0 +1,16 @@
+# Static-check input (0.static.sh), expected to FAIL `helm template`: an
+# empty reservation.tags value would be accepted by this chart's own
+# template logic but rejected by the live EC2NodeClass CRD at apply time
+# -- caught here instead. Identical to reserved.yaml except for this one
+# value.
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: cpu-rsv
+  capacityType: reserved
+  limits:
+    cpu: "2"
+    memory: 8192Mi
+reservation:
+  tags:
+    distai-platform-e2e: ""

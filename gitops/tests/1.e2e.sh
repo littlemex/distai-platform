@@ -1301,8 +1301,10 @@ rsv_resolved() { [[ "$(nodeclass_reservations "${POOL_RSV}")" == "${RSV_ID}" ]];
 wait_until 300 10 "EC2NodeClass ${POOL_RSV} resolves ${RSV_ID}" rsv_resolved \
   || fail "EC2NodeClass ${POOL_RSV}'s status.capacityReservations is [$(nodeclass_reservations "${POOL_RSV}")], want exactly [${RSV_ID}]"
 for p in "${POOL_OD}" "${POOL_FLEX}"; do
-  [[ -z "$(nodeclass_reservations "${p}")" ]] \
-    || fail "EC2NodeClass ${p} resolved a capacity reservation it never selects: $(nodeclass_reservations "${p}")"
+  reservations_out="$(k get ec2nodeclass "${p}" -o jsonpath='{.status.capacityReservations[*].id}')" \
+    || fail "kubectl get ec2nodeclass ${p} -o jsonpath=... failed outright (not evidence of an empty list)"
+  [[ -z "${reservations_out}" ]] \
+    || fail "EC2NodeClass ${p} resolved a capacity reservation it never selects: ${reservations_out}"
 done
 pass "Karpenter resolved ${RSV_ID} for EC2NodeClass ${POOL_RSV} only"
 
@@ -1450,7 +1452,9 @@ sleep 60
 pending_on_quota || fail "canary-2 left the quota-pending state: [$(workload_quota_state "${RSV_NS}" canary-2)]"
 [[ "$(k get job canary-2 -n "${RSV_NS}" -o jsonpath='{.spec.suspend}')" == "true" ]] \
   || fail "Job ${RSV_NS}/canary-2 is not suspended"
-[[ -z "$(k get pods -n "${RSV_NS}" -l job-name=canary-2 -o jsonpath='{.items[*].metadata.name}')" ]] \
+canary_2_pods="$(k get pods -n "${RSV_NS}" -l job-name=canary-2 -o jsonpath='{.items[*].metadata.name}')" \
+  || fail "kubectl get pods -n ${RSV_NS} -l job-name=canary-2 failed outright (not evidence of no pod)"
+[[ -z "${canary_2_pods}" ]] \
   || fail "Job ${RSV_NS}/canary-2 has a pod although it was never admitted"
 [[ "$(job_node "${RSV_NS}" canary-1)" == "${RSV_NODE}" ]] \
   || fail "canary-1 no longer runs on ${RSV_NODE}, so canary-2's state is not evidence against a held node"
