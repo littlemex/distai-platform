@@ -31,15 +31,28 @@ accelerator:
 
 placement:
   # Node label key that tells prefill nodes from decode nodes. Each role
-  # selects nodes where this key equals its own nodeSelectorValue.
+  # selects nodes where this key equals its own nodeSelectorValue, unless
+  # sameNodeMeasurement overrides both to sharedPoolValue (below).
   nodeSelectorKey: distai.dev/pd-role
-  # false (default): a required pod anti-affinity rule on kubernetes.io/hostname
-  # keeps every prefill pod off every node running a decode pod of this
-  # release, and the other way round, even when node labels are wrong.
-  # true: that rule is not rendered at all. Only for measuring the same-node
-  # transport path on purpose; combine with the same nodeSelectorValue for
-  # both roles, or the node selectors still keep the roles apart.
-  allowSameNode: false
+  # false (default): both roles keep their own nodeSelectorValue (prefill,
+  # decode), so they can never land on the same node (two different pools).
+  # true: both roles' nodeSelector instead targets sharedPoolValue, a single
+  # shared pool. Pair with a pool whose NodePool.spec.limits is sized to fit
+  # both roles' combined request on exactly one instance, so Karpenter cannot
+  # launch a second node for it; combined with enforceAntiAffinity below,
+  # this is what makes the fault-injection and same-node measurement cells
+  # possible at all.
+  sameNodeMeasurement: false
+  sharedPoolValue: shared
+  # true (default): a required pod anti-affinity rule on kubernetes.io/hostname,
+  # rendered on the decode Deployment only (never on both roles - a required
+  # term on both can leave neither schedulable, each waiting on a peer that
+  # is itself waiting), keeps decode off any node running a prefill pod of
+  # this release. false: that rule is dropped. If sameNodeMeasurement is also
+  # true, a required pod affinity (toward prefill) is rendered on decode
+  # instead, to actively pull it onto prefill's own node rather than merely
+  # permitting it.
+  enforceAntiAffinity: true
   tolerations: []
 
 transport:

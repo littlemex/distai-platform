@@ -14,18 +14,23 @@ import sys
 
 REQUIRED_METRICS = [
     "vllm:time_to_first_token_seconds_bucket",
-    "vllm:time_per_output_token_seconds_bucket",
+    # vLLM's real /metrics output (confirmed against a running v0.34.0
+    # engine; "vllm:time_per_output_token_seconds_bucket" and
+    # "vllm:gpu_cache_usage_perc", named in an earlier draft of this
+    # contract, do not exist):
+    "vllm:inter_token_latency_seconds_bucket",
+    "vllm:request_time_per_output_token_seconds_bucket",
     "vllm:e2e_request_latency_seconds_bucket",
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
-    "vllm:gpu_cache_usage_perc",
+    "vllm:kv_cache_usage_perc",
     "node_amazonefa_tx_bytes_total",
     "node_amazonefa_rdma_write_bytes_total",
     "node_amazonefa_rdma_write_recv_bytes_total",
 ]
 QUANTILE_METRICS = [
     "vllm:time_to_first_token_seconds_bucket",
-    "vllm:time_per_output_token_seconds_bucket",
+    "vllm:request_time_per_output_token_seconds_bucket",
 ]
 
 failures = []

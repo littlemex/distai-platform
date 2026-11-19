@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Values/template contract test for examples/inference/vllm/disagg-pd and
-# agg-baseline: placement (nodeSelector on the role key, podAntiAffinity
-# against the other role, placement.allowSameNode dropping it) and
-# transport (transport.forceEfaSameNode, transport.backend) are checked
-# from `helm template` output alone. No AWS credentials, no cluster.
+# agg-baseline: placement (nodeSelector on the role key, decode-only
+# podAntiAffinity against prefill by default, placement.sameNodeMeasurement
+# plus placement.enforceAntiAffinity switching to a shared pool and a
+# required podAffinity) and transport (transport.forceEfaSameNode,
+# transport.backend) are checked from `helm template` output alone. No AWS
+# credentials, no cluster.
 #
 # The checks themselves live in check_placement_transport.py; this script
 # only supplies a pinned PyYAML through uv, the same way gitops/tests does.

@@ -4,12 +4,14 @@ Derived from the interface contract's "Placement and transport" section and
 acceptance criterion 1; needs `helm` and PyYAML, no cluster. Called by
 test_placement_transport.sh, which supplies PyYAML through `uv`.
 
-Nothing here depends on a Deployment, Service, label or container name the
-chart happens to choose. A role Deployment is identified by the one thing
-the contract fixes: its nodeSelector carries the role key
-(default `distai.dev/pd-role`) with the value `prefill` or `decode`. The
-vLLM container of a role is the container requesting `nvidia.com/gpu`
-(every container of the pod if none does).
+Nothing here depends on a Deployment, Service, or container name the chart
+happens to choose. A role Deployment is identified primarily by its
+nodeSelector carrying the role key (default `distai.dev/pd-role`) with the
+value `prefill` or `decode`; when placement.sameNodeMeasurement overrides
+both roles onto one shared value, role identity falls back to the pod
+template's own `app.kubernetes.io/component` label instead (see
+`roles_by`). The vLLM container of a role is the container requesting
+`nvidia.com/gpu` (every container of the pod if none does).
 
 Usage: check_placement_transport.py --helm HELM --disagg CHART_DIR --agg CHART_DIR --work-dir DIR
 Prints PASS/FAIL per check; exits 1 if any failed.
@@ -90,9 +92,17 @@ def name_of(d):
 
 
 def roles_by(docs, key):
+    """Identifies a role by its nodeSelector[key] value (prefill/decode) when
+    that value is still role-specific. When placement.sameNodeMeasurement
+    overrides both roles to the same shared nodeSelector value, that key no
+    longer distinguishes them, so this falls back to the pod template's own
+    app.kubernetes.io/component label (which the chart always sets to the
+    role name, independent of any placement value)."""
     out = {r: [] for r in ROLES}
     for w in workloads(docs):
         v = (pod_spec(w).get("nodeSelector") or {}).get(key)
+        if v not in out:
+            v = pod_labels(w).get("app.kubernetes.io/component")
         if v in out:
             out[v].append(w)
     return out
@@ -124,6 +134,14 @@ def anti_terms(spec):
     paa = ((spec.get("affinity") or {}).get("podAntiAffinity")) or {}
     req = paa.get("requiredDuringSchedulingIgnoredDuringExecution") or []
     pref = [p.get("podAffinityTerm") or {} for p in paa.get("preferredDuringSchedulingIgnoredDuringExecution") or []]
+    return req, pref
+
+
+def affinity_terms(spec):
+    """Returns (required_terms, preferred_terms) of podAffinity (not anti-affinity)."""
+    pa = ((spec.get("affinity") or {}).get("podAffinity")) or {}
+    req = pa.get("requiredDuringSchedulingIgnoredDuringExecution") or []
+    pref = [p.get("podAffinityTerm") or {} for p in pa.get("preferredDuringSchedulingIgnoredDuringExecution") or []]
     return req, pref
 
 
@@ -203,18 +221,24 @@ def check_roles_present(label, docs, key=ROLE_KEY):
 
 
 def check_anti_affinity_present(label, roles):
-    for r in ROLES:
-        other = ROLES[1 - ROLES.index(r)]
-        for w in roles[r]:
-            req, _ = anti_terms(pod_spec(w))
-            other_ok = all(any(term_hits(t, pod_labels(o)) for t in req) for o in roles[other])
-            check(f"{label}: {name_of(w)} ({r}) has a required podAntiAffinity term, topologyKey {HOSTNAME}, "
-                  f"selecting the {other} pods' labels", other_ok,
-                  f"required terms={json.dumps(req)} {other} pod labels={[pod_labels(o) for o in roles[other]]}")
-            own_hit = any(term_hits(t, pod_labels(w)) for t in req)
-            check(f"{label}: {name_of(w)} ({r})'s anti-affinity does not also select its own role's pods "
-                  "(it must match the *other* role, so several replicas of one role can still share a node)",
-                  not own_hit, f"required terms={json.dumps(req)} own labels={pod_labels(w)}")
+    # Rendered on decode only (never on both roles -- a required term on both
+    # could leave neither schedulable, each waiting on a peer that is itself
+    # waiting), matching prefill's own label.
+    for w in roles["decode"]:
+        req, _ = anti_terms(pod_spec(w))
+        other_ok = all(any(term_hits(t, pod_labels(o)) for t in req) for o in roles["prefill"])
+        check(f"{label}: {name_of(w)} (decode) has a required podAntiAffinity term, topologyKey {HOSTNAME}, "
+              f"selecting the prefill pods' labels", other_ok,
+              f"required terms={json.dumps(req)} prefill pod labels={[pod_labels(o) for o in roles['prefill']]}")
+        own_hit = any(term_hits(t, pod_labels(w)) for t in req)
+        check(f"{label}: {name_of(w)} (decode)'s anti-affinity does not also select its own role's pods "
+              "(it must match the *other* role, so several replicas of one role can still share a node)",
+              not own_hit, f"required terms={json.dumps(req)} own labels={pod_labels(w)}")
+    for w in roles["prefill"]:
+        req, pref = anti_terms(pod_spec(w))
+        check(f"{label}: {name_of(w)} (prefill) carries no podAntiAffinity term of its own "
+              "(only decode carries the rule, so prefill always schedules unconstrained)",
+              not (req or pref), json.dumps(req + pref))
     labels = {r: [pod_labels(w) for w in roles[r]] for r in ROLES}
     distinct = all(p != d for p in labels["prefill"] for d in labels["decode"])
     check(f"{label}: prefill and decode pod templates carry different labels", distinct, json.dumps(labels))
@@ -228,6 +252,18 @@ def check_anti_affinity_absent(label, roles):
             hits = [t for t in req + pref for o in roles[other] if term_hits(t, pod_labels(o))]
             check(f"{label}: {name_of(w)} ({r}) has no podAntiAffinity term (required or preferred) "
                   f"against the {other} pods -- dropped, not weakened", not hits, json.dumps(hits))
+
+
+def check_affinity_present(label, roles):
+    # The same-node measurement cell: decode carries a required podAffinity
+    # (not anti-affinity) toward prefill, so it is actively pulled onto
+    # prefill's own node rather than merely left free to land there.
+    for w in roles["decode"]:
+        req, _ = affinity_terms(pod_spec(w))
+        other_ok = all(any(term_hits(t, pod_labels(o)) for t in req) for o in roles["prefill"])
+        check(f"{label}: {name_of(w)} (decode) has a required podAffinity term, topologyKey {HOSTNAME}, "
+              f"selecting the prefill pods' labels", other_ok,
+              f"required terms={json.dumps(req)} prefill pod labels={[pod_labels(o) for o in roles['prefill']]}")
 
 
 def env_check(label, roles, name, predicate, describe):
@@ -259,8 +295,10 @@ def main():
         v, ok = get_path(values, path)
         return v if ok else "<missing>"
 
-    check("disagg-pd values: placement.allowSameNode defaults to false",
-          val(("placement", "allowSameNode")) is False, repr(val(("placement", "allowSameNode"))))
+    check("disagg-pd values: placement.sameNodeMeasurement defaults to false",
+          val(("placement", "sameNodeMeasurement")) is False, repr(val(("placement", "sameNodeMeasurement"))))
+    check("disagg-pd values: placement.enforceAntiAffinity defaults to true",
+          val(("placement", "enforceAntiAffinity")) is True, repr(val(("placement", "enforceAntiAffinity"))))
     check("disagg-pd values: transport.forceEfaSameNode defaults to false",
           val(("transport", "forceEfaSameNode")) is False, repr(val(("transport", "forceEfaSameNode"))))
     check("disagg-pd values: transport.backend defaults to LIBFABRIC",
@@ -306,21 +344,65 @@ def main():
             if oroles:
                 check_anti_affinity_present("key override", oroles)
 
-    # --------------------------------------------- allowSameNode=true
-    sdocs, err = R.render(a.disagg, sets=["placement.allowSameNode=true"])
-    if check("allowSameNode=true: helm template", sdocs is not None, err):
-        sroles = check_roles_present("allowSameNode=true", sdocs)
+    # ------------------- sameNodeMeasurement=true (fault-injection shape)
+    # Both roles target the shared pool value; decode still carries the
+    # required anti-affinity (enforceAntiAffinity stays at its true default)
+    # -- this is the configuration the real-cluster e2e caps to one node to
+    # prove the backstop itself works, not the YAML contract alone.
+    sdocs, err = R.render(a.disagg, sets=["placement.sameNodeMeasurement=true"])
+    if check("sameNodeMeasurement=true: helm template", sdocs is not None, err):
+        sroles = check_roles_present("sameNodeMeasurement=true", sdocs, key=ROLE_KEY)
         if sroles:
-            check_anti_affinity_absent("allowSameNode=true", sroles)
+            shared_ok = all(
+                (pod_spec(w).get("nodeSelector") or {}).get(ROLE_KEY) == "shared"
+                for r in ROLES for w in sroles[r]
+            )
+            check("sameNodeMeasurement=true: both roles' nodeSelector targets placement.sharedPoolValue (shared)",
+                  shared_ok, json.dumps({r: [pod_spec(w).get("nodeSelector") for w in sroles[r]] for r in ROLES}))
+            check_anti_affinity_present("sameNodeMeasurement=true, enforceAntiAffinity=true (default)", sroles)
 
-    # ------------------------------------------ forceEfaSameNode=true
-    fdocs, err = R.render(a.disagg, sets=["transport.forceEfaSameNode=true"])
-    if check("forceEfaSameNode=true: helm template", fdocs is not None, err):
-        froles = check_roles_present("forceEfaSameNode=true", fdocs)
+    # ----- sameNodeMeasurement=true, enforceAntiAffinity=false (same-node
+    # transport measurement shape): decode carries required affinity toward
+    # prefill instead of anti-affinity against it.
+    adocs, err = R.render(a.disagg, sets=[
+        "placement.sameNodeMeasurement=true", "placement.enforceAntiAffinity=false",
+    ])
+    if check("sameNodeMeasurement=true,enforceAntiAffinity=false: helm template", adocs is not None, err):
+        aroles = check_roles_present("sameNodeMeasurement=true,enforceAntiAffinity=false", adocs)
+        if aroles:
+            check_affinity_present("sameNodeMeasurement=true,enforceAntiAffinity=false", aroles)
+            check_anti_affinity_absent("sameNodeMeasurement=true,enforceAntiAffinity=false "
+                                        "(no anti-affinity left once affinity replaces it)", aroles)
+
+    # ------ forceEfaSameNode=true alone (no sameNodeMeasurement): must fail
+    _, err = R.render(a.disagg, sets=["transport.forceEfaSameNode=true"])
+    check("forceEfaSameNode=true without sameNodeMeasurement=true: helm template fails "
+          "(forcing the same-host EFA path has no meaning on a cross-node run)",
+          err is not None and "sameNodeMeasurement" in (err or ""), err)
+
+    # --- forceEfaSameNode=true combined with sameNodeMeasurement=true: the
+    # actual same-node transport measurement cell.
+    fdocs, err = R.render(a.disagg, sets=[
+        "placement.sameNodeMeasurement=true", "placement.enforceAntiAffinity=false",
+        "transport.forceEfaSameNode=true",
+    ])
+    if check("sameNodeMeasurement=true,forceEfaSameNode=true: helm template", fdocs is not None, err):
+        froles = check_roles_present("sameNodeMeasurement=true,forceEfaSameNode=true", fdocs)
         if froles:
-            env_check("forceEfaSameNode=true", froles, "FI_EFA_ENABLE_SHM_TRANSFER",
+            env_check("sameNodeMeasurement=true,forceEfaSameNode=true", froles, "FI_EFA_ENABLE_SHM_TRANSFER",
                       lambda p, v: v == "0", "sets FI_EFA_ENABLE_SHM_TRANSFER=0")
-            check_anti_affinity_present("forceEfaSameNode=true (placement unchanged)", froles)
+            check_affinity_present("sameNodeMeasurement=true,forceEfaSameNode=true (placement unchanged)", froles)
+
+    # forceEfaSameNode=false, same-node mode: explicit =1, not unset.
+    ndocs, err = R.render(a.disagg, sets=[
+        "placement.sameNodeMeasurement=true", "placement.enforceAntiAffinity=false",
+        "transport.forceEfaSameNode=false",
+    ])
+    if check("sameNodeMeasurement=true,forceEfaSameNode=false: helm template", ndocs is not None, err):
+        nroles = check_roles_present("sameNodeMeasurement=true,forceEfaSameNode=false", ndocs)
+        if nroles:
+            env_check("sameNodeMeasurement=true,forceEfaSameNode=false", nroles, "FI_EFA_ENABLE_SHM_TRANSFER",
+                      lambda p, v: p and v == "1", "sets FI_EFA_ENABLE_SHM_TRANSFER=1 explicitly (library default, stated)")
 
     # ------------------------------------------------- backend=UCX
     udocs, err = R.render(a.disagg, sets=["transport.backend=UCX"])
@@ -331,9 +413,14 @@ def main():
             for r in ROLES:
                 for w in uroles[r]:
                     cs = gpu_containers(pod_spec(w))
-                    args = json.dumps([(c.get("command"), c.get("args")) for c in cs]) + " " + cm
+                    # KV_TRANSFER_CONFIG, the field that actually carries the
+                    # backend name, lives in each container's own env list,
+                    # not in command/args (the entrypoint script reads it
+                    # from the environment at runtime) -- check container_text,
+                    # which includes env, not just command/args.
+                    text = json.dumps([container_text(c) for c in cs]) + " " + cm
                     check(f"transport.backend=UCX: {name_of(w)} ({r})'s connector config follows the value "
-                          "(names UCX, no longer LIBFABRIC)", "UCX" in args and "LIBFABRIC" not in args)
+                          "(names UCX, no longer LIBFABRIC)", "UCX" in text and "LIBFABRIC" not in text)
 
     # --------------------------- RFC Decision 4: ratio knobs are values
     knobs = [("prefill", "replicas", 2), ("decode", "replicas", 3),

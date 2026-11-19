@@ -13,7 +13,7 @@
 #      distai.dev/pd-role value, and a request through the proxy returns a
 #      generated completion that the prefill pod prefilled and the decode
 #      pod decoded (both pods' own vLLM counters move);
-#   3. both roles forced onto one node (placement.allowSameNode=true):
+#   3. both roles forced onto one node (placement.sameNodeMeasurement=true, placement.enforceAntiAffinity=false):
 #      with transport.forceEfaSameNode=true the node's EFA hardware
 #      counters increase during requests; with it false they do not
 #      move at all;
@@ -698,15 +698,15 @@ NONCE="$(date +%s%N)"
 
 # same_node_cell FORCE: both roles on SAME_NODE with
 # transport.forceEfaSameNode=FORCE. The chart gets
-# placement.allowSameNode=true (so the anti-affinity is gone and the two
+# placement.sameNodeMeasurement=true and placement.enforceAntiAffinity=false (so the anti-affinity is gone and the two
 # roles *can* share a node); the role Deployments' nodeSelector is then
 # replaced by a hostname pin, the one thing a values file cannot express
 # without knowing the chart's own value names. Recreate, so the old pods
 # release their GPUs before the new ones need them on the same node.
 same_node_cell() {
   local force="$1" d patch pod node env_val
-  disagg_install --set placement.allowSameNode=true --set "transport.forceEfaSameNode=${force}" \
-    || fail "criterion 3: helm upgrade with placement.allowSameNode=true, transport.forceEfaSameNode=${force}"
+  disagg_install --set placement.sameNodeMeasurement=true --set placement.enforceAntiAffinity=false --set "transport.forceEfaSameNode=${force}" \
+    || fail "criterion 3: helm upgrade with placement.sameNodeMeasurement=true, placement.enforceAntiAffinity=false, transport.forceEfaSameNode=${force}"
   patch="$(py 'import json, sys; print(json.dumps([
     {"op": "replace", "path": "/spec/template/spec/nodeSelector", "value": {"kubernetes.io/hostname": sys.argv[1]}},
     {"op": "replace", "path": "/spec/strategy", "value": {"type": "Recreate"}}]))' "${SAME_NODE}")"

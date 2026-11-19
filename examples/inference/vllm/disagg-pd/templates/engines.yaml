@@ -5,7 +5,6 @@
 {{- $kvConfig := dict "kv_connector" "NixlConnector" "kv_role" "kv_both" "kv_load_failure_policy" $t.kvLoadFailurePolicy "kv_connector_extra_config" $extra -}}
 {{- range $role := list "prefill" "decode" }}
 {{- $r := index $.Values $role }}
-{{- $other := ternary "decode" "prefill" (eq $role "prefill") }}
 {{- $limits := dict $.Values.accelerator.resourceName (int $r.gpusPerEngine) }}
 {{- if gt (int $r.efaDevices) 0 }}
 {{- $_ := set $limits $t.efaResourceName (int $r.efaDevices) }}
@@ -62,16 +61,36 @@ spec:
         {{- with $r.extraNodeSelector }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-        {{ $.Values.placement.nodeSelectorKey }}: {{ $r.nodeSelectorValue | quote }}
-      {{- if not $.Values.placement.allowSameNode }}
+        {{ $.Values.placement.nodeSelectorKey }}: {{ ternary $.Values.placement.sharedPoolValue $r.nodeSelectorValue $.Values.placement.sameNodeMeasurement | quote }}
+      {{- /*
+        Required affinity/anti-affinity is rendered on decode only, never on
+        both roles: a required term on both can leave neither schedulable,
+        each waiting on a peer that is itself waiting. Prefill always
+        schedules unconstrained; decode either avoids prefill's node
+        (default) or is pulled onto it (sameNodeMeasurement, anti-affinity
+        off) - never both, never neither silently.
+      */}}
+      {{- if eq $role "decode" }}
+      {{- if $.Values.placement.enforceAntiAffinity }}
       affinity:
         podAntiAffinity:
-          # Never on a node that runs a {{ $other }} pod of this release.
+          # Never on a node that runs a prefill pod of this release.
           requiredDuringSchedulingIgnoredDuringExecution:
             - topologyKey: kubernetes.io/hostname
               labelSelector:
                 matchLabels:
-                  {{- include "disagg.selector" (dict "root" $ "component" $other) | nindent 18 }}
+                  {{- include "disagg.selector" (dict "root" $ "component" "prefill") | nindent 18 }}
+      {{- else if $.Values.placement.sameNodeMeasurement }}
+      affinity:
+        podAffinity:
+          # Actively pulled onto the same node as a prefill pod of this
+          # release, not merely left free to land there by chance.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "disagg.selector" (dict "root" $ "component" "prefill") | nindent 18 }}
+      {{- end }}
       {{- end }}
       {{- with $.Values.placement.tolerations }}
       tolerations:
@@ -131,10 +150,13 @@ spec:
             - name: FI_EFA_USE_DEVICE_RDMA
               value: "1"
             {{- end }}
-            {{- if $t.forceEfaSameNode }}
-            # Same-host transfers go over the EFA device, not libfabric's shm path.
+            {{- if eq $t.backend "LIBFABRIC" }}
+            # Always set explicitly, never left to the library's own default:
+            # 0 forces even a same-host transfer onto the EFA device instead
+            # of libfabric's own shared-memory provider; 1 matches that
+            # library default, stated rather than omitted.
             - name: FI_EFA_ENABLE_SHM_TRANSFER
-              value: "0"
+              value: {{ if $t.forceEfaSameNode }}"0"{{ else }}"1"{{ end }}
             {{- end }}
             - name: HF_HOME
               value: /cache/huggingface

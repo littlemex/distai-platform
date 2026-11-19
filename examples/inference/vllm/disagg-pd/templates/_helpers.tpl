@@ -36,6 +36,9 @@ app.kubernetes.io/component: {{ .component }}
 {{- if and $t.forceEfaSameNode (ne $t.backend "LIBFABRIC") -}}
 {{- fail "transport.forceEfaSameNode=true only has an effect with transport.backend=LIBFABRIC" -}}
 {{- end -}}
+{{- if and $t.forceEfaSameNode (not .Values.placement.sameNodeMeasurement) -}}
+{{- fail "transport.forceEfaSameNode=true only makes sense with placement.sameNodeMeasurement=true; a cross-node run already uses the EFA device path" -}}
+{{- end -}}
 {{- if not (has $t.kvLoadFailurePolicy (list "fail" "recompute")) -}}
 {{- fail (printf "transport.kvLoadFailurePolicy must be fail or recompute, got %q" $t.kvLoadFailurePolicy) -}}
 {{- end -}}

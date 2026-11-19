@@ -79,6 +79,26 @@ def rec(send, ttft, itls, success=True):
     return r
 
 
+def records_to_doc(records):
+    """Converts a list of rec() dicts into the one JSON object score.py
+    actually reads: per-request parallel arrays, matching vLLM's own
+    --save-detailed output (ttfts, itls, errors, start_times, latencies,
+    queue_times). Each fixture record's "send" time is both its scheduled
+    arrival and its actual start time (queue_times[i] = 0), so goodput's
+    interval-including-drain reduces to min(start_times) .. max(start_times
+    + latencies) over successful requests, consistent with every test's own
+    comments about when the interval starts and ends.
+    """
+    return {
+        "ttfts": [r["ttft"] for r in records],
+        "itls": [r["itls"] for r in records],
+        "errors": [r["error"] for r in records],
+        "start_times": [r["start_time"] for r in records],
+        "latencies": [r["latency"] for r in records],
+        "queue_times": [0.0 for _ in records],
+    }
+
+
 class ScoreTestBase(unittest.TestCase):
     def setUp(self):
         self.assertTrue(
@@ -120,7 +140,7 @@ class ScoreTestBase(unittest.TestCase):
         return proc, out
 
     def score(self, records, planned, **kw):
-        proc, out = self.run_score(json.dumps(records), planned, **kw)
+        proc, out = self.run_score(json.dumps(records_to_doc(records)), planned, **kw)
         self.assertEqual(
             proc.returncode, 0,
             f"score.py exited {proc.returncode} on a well-formed input\n"

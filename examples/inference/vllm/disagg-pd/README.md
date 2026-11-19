@@ -32,12 +32,12 @@ Three mechanisms keep the roles apart, each doing a different job:
 | Mechanism | What it does | Value |
 | --- | --- | --- |
 | Node label | Nodes are labeled for one role, for example `distai.dev/pd-role=prefill` or `distai.dev/pd-role=decode` | `placement.nodeSelectorKey` (default `distai.dev/pd-role`) |
-| `nodeSelector` | Each role requests nodes with its own label value | `prefill.nodeSelectorValue`, `decode.nodeSelectorValue` |
-| Required pod anti-affinity on `kubernetes.io/hostname` | No prefill pod is scheduled onto a node running a decode pod of the same release, and the other way round, even if the node labels are wrong; a pod that cannot be placed stays `Pending` | on unless `placement.allowSameNode=true` |
+| `nodeSelector` | Each role requests nodes with its own label value, unless `placement.sameNodeMeasurement=true` overrides both to `placement.sharedPoolValue` (default `shared`) | `prefill.nodeSelectorValue`, `decode.nodeSelectorValue`, `placement.sameNodeMeasurement`, `placement.sharedPoolValue` |
+| Required pod anti-affinity (default) or affinity (same-node measurement), on `kubernetes.io/hostname`, rendered on the **decode** Deployment only | Default: decode never schedules onto a node running a prefill pod of the same release, even if the node labels are wrong. With `sameNodeMeasurement=true` and `enforceAntiAffinity=false`: decode is instead required to schedule onto the *same* node as a prefill pod | `placement.enforceAntiAffinity` (default `true`) |
 
-`placement.allowSameNode=true` removes the anti-affinity rule from both Deployments. It exists to measure the same-node transport path on purpose. To actually co-locate the roles, also give both roles the same node selector value, for example `--set decode.nodeSelectorValue=prefill`.
+With `placement.sameNodeMeasurement=false` (default), the two mechanisms above already make same-node impossible — two different pools, decode's own anti-affinity never has anything to trigger on, it is a defense-in-depth backstop. `placement.sameNodeMeasurement=true` switches both roles onto one shared pool (so the admin's `NodePool` behind `placement.sharedPoolValue` must be sized to fit both roles' combined GPU/EFA request on one instance, with `limits` capping it to exactly that one instance, so Karpenter cannot launch a second node for it). Within that shared-pool mode, `placement.enforceAntiAffinity=true` (still the default) turns it into a **fault-injection test**: prefill schedules first, decode's required anti-affinity then has nowhere to go (not a second node — the pool's own cap forbids it; not the same node — the anti-affinity rule forbids it), so decode stays `Pending` with a `FailedScheduling` event naming the anti-affinity rule — proving the backstop itself works, not merely that the default happens not to trigger it. Setting `placement.enforceAntiAffinity=false` in that same shared-pool mode is the actual **same-node measurement cell**: decode's required affinity now pulls it onto prefill's own node instead.
 
-Transport is explicit. With `transport.backend=LIBFABRIC` (the default), both roles get `FI_PROVIDER=efa` and `FI_EFA_USE_DEVICE_RDMA=1` and request `vpc.amazonaws.com/efa` devices. Those two variables do not decide what happens when prefill and decode are on the same host: libfabric's EFA provider then uses its own shared-memory path by default, and the EFA device sees no traffic. `transport.forceEfaSameNode=true` sets `FI_EFA_ENABLE_SHM_TRANSFER=0` on both roles, which forces even a same-host transfer onto the EFA device (see `fi_efa(7)`). The default `false` leaves the variable unset, so the library default applies. Which path a transfer really took is read from the EFA hardware counters, not inferred from these values; see [Check which path the KV cache took](#check-which-path-the-kv-cache-took).
+Transport is explicit. With `transport.backend=LIBFABRIC` (the default), both roles get `FI_PROVIDER=efa` and `FI_EFA_USE_DEVICE_RDMA=1` and request `vpc.amazonaws.com/efa` devices. Those two variables do not decide what happens when prefill and decode are on the same host: libfabric's EFA provider then uses its own shared-memory path by default, and the EFA device sees no traffic. `FI_EFA_ENABLE_SHM_TRANSFER` is always rendered explicitly, never left to the library's own default: `transport.forceEfaSameNode=true` sets it to `0`, forcing even a same-host transfer onto the EFA device (see `fi_efa(7)`); the default `false` sets it to `1`, the library's own default value, stated rather than omitted. `forceEfaSameNode=true` only renders when `placement.sameNodeMeasurement=true` (the chart fails to render otherwise, since forcing the same-host path has no effect on a cross-node run). Which path a transfer really took is read from the EFA hardware counters, not inferred from these values; see [Check which path the KV cache took](#check-which-path-the-kv-cache-took).
 
 ## Prerequisites
 
@@ -124,8 +124,8 @@ To measure the same-node path on purpose, reinstall with both roles on one node 
 ```bash
 helm upgrade "$RELEASE" examples/inference/vllm/disagg-pd -n "$NAMESPACE" \
   --set model.name="$MODEL_ID" \
-  --set placement.allowSameNode=true \
-  --set decode.nodeSelectorValue=prefill \
+  --set placement.sameNodeMeasurement=true \
+  --set placement.enforceAntiAffinity=false \
   --set transport.forceEfaSameNode=true
 ```
 
@@ -146,10 +146,12 @@ Use the in-cluster load replay and the scorer in [`../../_shared/`](../../_share
 | `image.repository` / `.tag` / `.digest` | `vllm/vllm-openai` / `v0.34.0-efa` / pinned | Engine and proxy image; the `-efa` variant is built with vLLM's KV connectors and the AWS EFA userspace |
 | `accelerator.resourceName` | `nvidia.com/gpu` | Extended resource the GPU device plugin advertises |
 | `placement.nodeSelectorKey` | `distai.dev/pd-role` | Node label key that tells the roles apart |
-| `placement.allowSameNode` | `false` | `true` removes the prefill/decode anti-affinity rule |
+| `placement.sameNodeMeasurement` | `false` | `true` targets both roles' `nodeSelector` at `placement.sharedPoolValue` instead of their own `nodeSelectorValue` |
+| `placement.sharedPoolValue` | `shared` | The pool value both roles target when `sameNodeMeasurement=true` |
+| `placement.enforceAntiAffinity` | `true` | `false` swaps decode's required anti-affinity (against prefill) for a required affinity (toward prefill) — only meaningful combined with `sameNodeMeasurement=true` |
 | `placement.tolerations` | `[]` | Tolerations for both roles, for example for GPU node taints |
 | `transport.backend` | `LIBFABRIC` | NIXL backend, `LIBFABRIC` or `UCX` |
-| `transport.forceEfaSameNode` | `false` | `true` sets `FI_EFA_ENABLE_SHM_TRANSFER=0` on both roles; requires `LIBFABRIC` |
+| `transport.forceEfaSameNode` | `false` | `true` sets `FI_EFA_ENABLE_SHM_TRANSFER=0` on both roles (else explicitly `1`); requires `LIBFABRIC` and `placement.sameNodeMeasurement=true` |
 | `transport.efaResourceName` | `vpc.amazonaws.com/efa` | Extended resource the EFA device plugin advertises |
 | `transport.sideChannelPort` | `5600` | NIXL handshake port (`VLLM_NIXL_SIDE_CHANNEL_PORT`); the host is the pod IP |
 | `transport.kvLoadFailurePolicy` | `fail` | `fail` or `recompute` when decode cannot load a transferred KV cache |
