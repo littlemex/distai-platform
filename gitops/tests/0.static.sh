@@ -108,7 +108,13 @@ required_files=(
   "addons/karpenter-crd/addon.yaml"
   "addons/karpenter/addon.yaml"
   "addons/kueue/addon.yaml"
+  "addons/accel-nvidia-device-plugin/addon.yaml"
+  "addons/accel-nvidia-dra/addon.yaml"
+  "addons/accel-neuron-device-plugin/addon.yaml"
+  "addons/accel-neuron-dra/addon.yaml"
+  "addons/accel-device-classes/addon.yaml"
   "charts/capacity-pool/Chart.yaml"
+  "charts/accel-device-classes/Chart.yaml"
   "charts/smoke/Chart.yaml"
 )
 missing=()
