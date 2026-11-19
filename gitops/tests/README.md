@@ -137,16 +137,22 @@ every other disposable branch here), and bootstraps from that branch
 instead of the literal `GITOPS_REVISION` for the rest of the run. `NAME`
 and `example-cell` collide with nothing: a run with `NAME=example-cell`
 finds the checked-in directory already there and creates no branch at
-all. Two more cell directories ship as of #28, `dp-a19-gpu` and
-`dp-a19-trn` (one NVIDIA GPU pool and one Trainium pool, issue #28's own
-light-tier accelerator fixtures, each carrying a method label
+all. Two more cell directories ship as of #28, `dp-a19-gpu-r3` and
+`dp-a19-trn-r3` (one NVIDIA GPU pool and one Trainium pool, issue #28's
+own light-tier accelerator fixtures, each carrying a method label
 `ensure_cell_fixture()`'s own plain copy of `example-cell` would not).
-With `GITOPS_RUN_ACCEL_E2E=1` (below), **`NAME` must be `dp-a19-gpu`**:
+With `GITOPS_RUN_ACCEL_E2E=1` (below), **`NAME` must be `dp-a19-gpu-r3`**:
 that extension builds only one cell directly (the plain `1.e2e.sh` flow
-already above), and treats it as the GPU accelerator cell; `dp-a19-trn`
-is never a valid value for `NAME` itself, only for `ACCEL_TRN_CELL_NAME`
--- the Trainium cell is a second, separate foundation cell the extension
-builds and destroys on its own, in `ACCEL_TRN_REGION`:
+already above), and treats it as the GPU accelerator cell;
+`dp-a19-trn-r3` is never a valid value for `NAME` itself, only for
+`ACCEL_TRN_CELL_NAME` -- the Trainium cell is a second, separate
+foundation cell the extension builds and destroys on its own, in
+`ACCEL_TRN_REGION`. (Both fixture names carry an `-r3` suffix: an
+unrelated agent working on a different issue independently created a
+cell also named `dp-a19-gpu` in another Region, and since IAM role names
+are account-global, its own teardown deleted and recreated roles this
+PR's own verification cluster was using mid-run -- renamed once to a
+name nobody else has used, never reused again.):
 
 ```bash
 export AWS_PROFILE="${AWS_PROFILE:-default}"
@@ -184,9 +190,9 @@ unaffected.
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `GITOPS_RUN_ACCEL_E2E` | no (default `0`) | Set to `1` to run this extension |
-| `NAME` | yes, when set to `1` | Must equal `ACCEL_GPU_CELL_NAME` (default `dp-a19-gpu`) -- the GPU accelerator check reuses this script's own existing cell, it does not build a third one |
-| `ACCEL_GPU_CELL_NAME` | no (default `dp-a19-gpu`) | Must match `NAME` and the `gitops/cells/<name>/` fixture this cell's pool comes from |
-| `ACCEL_TRN_CELL_NAME` | no (default `dp-a19-trn`) | Name of the second, Trainium-only foundation cell this extension builds and destroys itself |
+| `NAME` | yes, when set to `1` | Must equal `ACCEL_GPU_CELL_NAME` (default `dp-a19-gpu-r3`) -- the GPU accelerator check reuses this script's own existing cell, it does not build a third one |
+| `ACCEL_GPU_CELL_NAME` | no (default `dp-a19-gpu-r3`) | Must match `NAME` and the `gitops/cells/<name>/` fixture this cell's pool comes from |
+| `ACCEL_TRN_CELL_NAME` | no (default `dp-a19-trn-r3`) | Name of the second, Trainium-only foundation cell this extension builds and destroys itself |
 | `ACCEL_TRN_REGION` | no (default `ap-southeast-4`) | Region offering `trn2.3xlarge` spot capacity; the Identity Center instance stays wherever `ARGOCD_IDC_REGION` already points (#28 section E) |
 | `ACCEL_GPU_TEST_IMAGE` | yes, when set to `1` | Container image with `nvidia-smi` on `PATH` (for example a CUDA base image), no default pinned in this repository |
 | `ACCEL_TRN_TEST_IMAGE` | yes, when set to `1` | Container image with `neuron-ls` on `PATH` (a Neuron SDK image), no default pinned in this repository |
@@ -194,7 +200,7 @@ unaffected.
 
 ```bash
 runner/run.sh --ref "${GITOPS_REVISION}" \
-  --env NAME=dp-a19-gpu \
+  --env NAME=dp-a19-gpu-r3 \
   --env AWS_REGION=<Region offering g7/g6e/g5 spot capacity> \
   ... (every variable the plain 1.e2e.sh invocation above already needs) \
   --env GITOPS_RUN_ACCEL_E2E=1 \
