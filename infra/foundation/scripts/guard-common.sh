@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # Shared by the destroy-time guards of infra/foundation (teardown-guard.sh,
 # network-guard.sh). Sourced, not executed. The caller sets LOG_PREFIX,
-# ACCOUNT_ID and AWS_REGION before sourcing this file.
+# ACCOUNT_ID and AWS_REGION before sourcing this file, and VPC_ID before
+# calling delete_detached_cni_interfaces.
 
 export AWS_REGION AWS_PAGER=""
 
@@ -35,7 +36,10 @@ tolerate_not_found() {
 # Deletes the network interfaces that the VPC CNI created in VPC_ID and that
 # are detached (status "available"). Any such interface in this cell's VPC
 # belongs to this cell's cluster: the VPC holds one cluster only. Interfaces
-# that are still attached are left alone and listed by the caller.
+# that are still attached are left alone (network-guard.sh lists those
+# itself, while waiting for them to settle; teardown-guard.sh does not,
+# since it runs while the cluster is still up and attached interfaces there
+# are still in normal use).
 delete_detached_cni_interfaces() {
   local enis eni
   enis="$(aws ec2 describe-network-interfaces \

@@ -24,8 +24,12 @@
 #   detached network interfaces, launch templates and instance profiles. It
 #   needs the node role and the cluster, and it must run while the cluster,
 #   the NAT gateway and the routes are still there, so it depends on all of
-#   them and is created last. If an apply fails before it is created, Karpenter
-#   was never installed, so there is nothing for it to do.
+#   them and is created last. If an apply fails before it is created, on the
+#   first apply of a cell Karpenter was never installed, so there is nothing
+#   for it to do; an apply that re-applies this layer onto a cell where
+#   Karpenter already runs is a different case this fix does not cover (the
+#   cell's own terraform_data.teardown_guard, from the earlier successful
+#   apply, is unaffected either way).
 #
 #   terraform_data.network_guard (scripts/network-guard.sh) terminates no
 #   instance. It waits for the VPC CNI interfaces left in the VPC to settle,

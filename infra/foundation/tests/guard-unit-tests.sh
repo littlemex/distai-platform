@@ -18,24 +18,21 @@
 #
 # Prints PASS/FAIL per case and exits non-zero if any failed.
 # Run from this directory: ./guard-unit-tests.sh
+#
+# check() and the fake sleep are shared with network-guard-unit-tests.sh
+# through guard-unit-test-lib.sh.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GUARDS_DIR="$(cd "${SCRIPT_DIR}/../scripts" && pwd)"
+# shellcheck source=SCRIPTDIR/guard-unit-test-lib.sh
+. "${SCRIPT_DIR}/guard-unit-test-lib.sh"
 
 FAKE_BIN="$(mktemp -d)"
 CALL_LOG="$(mktemp)"
 trap 'rm -rf "${FAKE_BIN}"; rm -f "${CALL_LOG}"' EXIT
 
-# A no-op sleep: teardown-guard.sh sleeps 15s once, by design, to see "no
-# instances" twice before concluding none are left (see its comment). These
-# are unit tests of the IAM instance-profile step (step 4) and must not pay
-# that real wait.
-cat >"${FAKE_BIN}/sleep" <<'FAKE_SLEEP'
-#!/usr/bin/env bash
-exit 0
-FAKE_SLEEP
-chmod +x "${FAKE_BIN}/sleep"
+install_fake_sleep "${FAKE_BIN}"
 
 # Scripted fake of the AWS CLI. Reads each call's canned result from an
 # environment variable the test case sets; everything the guard needs
@@ -109,23 +106,6 @@ run_guard() {
   OUT="$(PATH="${FAKE_BIN}:${PATH}" bash "${GUARDS_DIR}/teardown-guard.sh" 2>&1)"
   RC=$?
   set -e
-}
-
-# check LABEL DESCRIPTION COMMAND...
-# Runs COMMAND (no shell re-parsing of its arguments - safe even if OUT or a
-# call log contains shell metacharacters) and reports PASS/FAIL by its exit
-# code.
-check() {
-  local label="$1" desc="$2"
-  shift 2
-  if "$@"; then
-    echo "PASS ${label}: ${desc}"
-  else
-    echo "FAIL ${label}: ${desc}"
-    echo "  exit=${RC} call_log=[$(tr '\n' ';' <"${CALL_LOG}")]"
-    echo "  output: ${OUT}"
-    failures=$((failures + 1))
-  fi
 }
 
 export CLUSTER_NAME=test-cluster ACCOUNT_ID=123456789012 AWS_REGION=us-east-1 \
