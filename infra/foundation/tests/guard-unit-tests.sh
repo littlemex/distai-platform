@@ -71,10 +71,16 @@ case "${service} ${action}" in
     echo "${FAKE_PROFILES_RESULT:-}"
     ;;
   "iam list-instance-profile-tags")
-    if [[ "${FAKE_TAGS_RESULT:-}" == "NoSuchEntity" ]]; then
-      echo "An error occurred (NoSuchEntity) when calling the ListInstanceProfileTags operation: Instance profile not found." >&2
-      exit 254
-    fi
+    case "${FAKE_TAGS_RESULT:-}" in
+      NoSuchEntity)
+        echo "An error occurred (NoSuchEntity) when calling the ListInstanceProfileTags operation: Instance profile not found." >&2
+        exit 254
+        ;;
+      AccessDenied)
+        echo "An error occurred (AccessDenied) when calling the ListInstanceProfileTags operation: User is not authorized to perform iam:ListInstanceProfileTags." >&2
+        exit 254
+        ;;
+    esac
     echo "${FAKE_TAGS_RESULT:-}"
     ;;
   "iam remove-role-from-instance-profile")
@@ -105,12 +111,14 @@ run_guard() {
   set -e
 }
 
-# check LABEL CONDITION_DESCRIPTION CONDITION...
-# CONDITION is evaluated with `[[ ... ]]` via eval, so callers pass it as one
-# quoted string; keeps each case's assertions on one line below.
+# check LABEL DESCRIPTION COMMAND...
+# Runs COMMAND (no shell re-parsing of its arguments - safe even if OUT or a
+# call log contains shell metacharacters) and reports PASS/FAIL by its exit
+# code.
 check() {
-  local label="$1" desc="$2" cond="$3"
-  if eval "[[ ${cond} ]]"; then
+  local label="$1" desc="$2"
+  shift 2
+  if "$@"; then
     echo "PASS ${label}: ${desc}"
   else
     echo "FAIL ${label}: ${desc}"
@@ -128,18 +136,18 @@ export CLUSTER_NAME=test-cluster ACCOUNT_ID=123456789012 AWS_REGION=us-east-1 \
 # is nothing under a role that does not exist).
 export FAKE_PROFILES_RESULT="NoSuchEntity" FAKE_TAGS_RESULT=""
 run_guard
-check "node role already gone (issue #26)" "exit 0" "${RC} -eq 0"
-check "node role already gone (issue #26)" "logs it" "\"${OUT}\" == *'already gone: node role'*"
-check "node role already gone (issue #26)" "deletes nothing" "! -s '${CALL_LOG}'"
+check "node role already gone (issue #26)" "exit 0" test "${RC}" -eq 0
+check "node role already gone (issue #26)" "logs it" grep -qF "already gone: node role" <<<"${OUT}"
+check "node role already gone (issue #26)" "deletes nothing" test ! -s "${CALL_LOG}"
 
 # Case 2: the role still exists and lists one profile, but that profile was
 # deleted between being listed and being read again. Must exit 0, log it,
 # and delete nothing (that one profile is skipped).
 export FAKE_PROFILES_RESULT="test-profile" FAKE_TAGS_RESULT="NoSuchEntity"
 run_guard
-check "instance profile already gone" "exit 0" "${RC} -eq 0"
-check "instance profile already gone" "logs it" "\"${OUT}\" == *'already gone: instance profile test-profile'*"
-check "instance profile already gone" "deletes nothing" "! -s '${CALL_LOG}'"
+check "instance profile already gone" "exit 0" test "${RC}" -eq 0
+check "instance profile already gone" "logs it" grep -qF "already gone: instance profile test-profile" <<<"${OUT}"
+check "instance profile already gone" "deletes nothing" test ! -s "${CALL_LOG}"
 
 # Case 3 (regression check): the ordinary path, a profile Karpenter owns,
 # still gets removed from the role and deleted - the two fixes above did not
@@ -148,9 +156,9 @@ check "instance profile already gone" "deletes nothing" "! -s '${CALL_LOG}'"
 # this.
 export FAKE_PROFILES_RESULT="owned-profile" FAKE_TAGS_RESULT="owned"
 run_guard
-check "owned instance profile still deleted" "exit 0" "${RC} -eq 0"
-check "owned instance profile still deleted" "calls remove-role-from-instance-profile" "\"\$(cat '${CALL_LOG}')\" == *'remove-role-from-instance-profile owned-profile'*"
-check "owned instance profile still deleted" "calls delete-instance-profile" "\"\$(cat '${CALL_LOG}')\" == *'delete-instance-profile owned-profile'*"
+check "owned instance profile still deleted" "exit 0" test "${RC}" -eq 0
+check "owned instance profile still deleted" "calls remove-role-from-instance-profile" grep -qF "remove-role-from-instance-profile owned-profile" "${CALL_LOG}"
+check "owned instance profile still deleted" "calls delete-instance-profile" grep -qF "delete-instance-profile owned-profile" "${CALL_LOG}"
 
 # Case 4: an error that is not NoSuchEntity (here, AccessDenied) must still
 # be fatal - the fix above must not have turned step 4 into "every error is
@@ -158,9 +166,19 @@ check "owned instance profile still deleted" "calls delete-instance-profile" "\"
 # nothing.
 export FAKE_PROFILES_RESULT="AccessDenied" FAKE_TAGS_RESULT=""
 run_guard
-check "other IAM error stays fatal" "exit non-zero" "${RC} -ne 0"
-check "other IAM error stays fatal" "does not claim already gone" "\"${OUT}\" != *'already gone'*"
-check "other IAM error stays fatal" "deletes nothing" "! -s '${CALL_LOG}'"
+check "other IAM error stays fatal (list-instance-profiles-for-role)" "exit non-zero" test "${RC}" -ne 0
+check "other IAM error stays fatal (list-instance-profiles-for-role)" "does not claim already gone" bash -c '! grep -qF "already gone" <<<"$1"' _ "${OUT}"
+check "other IAM error stays fatal (list-instance-profiles-for-role)" "deletes nothing" test ! -s "${CALL_LOG}"
+
+# Case 5: same as case 4, one level later - the role lists one profile, but
+# reading its tags fails with a non-NoSuchEntity error. Must still be
+# fatal: the fix at this call site must not have turned it into "every
+# error is fine" either.
+export FAKE_PROFILES_RESULT="test-profile" FAKE_TAGS_RESULT="AccessDenied"
+run_guard
+check "other IAM error stays fatal (list-instance-profile-tags)" "exit non-zero" test "${RC}" -ne 0
+check "other IAM error stays fatal (list-instance-profile-tags)" "does not claim already gone" bash -c '! grep -qF "already gone" <<<"$1"' _ "${OUT}"
+check "other IAM error stays fatal (list-instance-profile-tags)" "deletes nothing" test ! -s "${CALL_LOG}"
 
 echo
 if [[ "${failures}" -eq 0 ]]; then
