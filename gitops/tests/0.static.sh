@@ -11,7 +11,8 @@
 #      1, 2, 3, 4, 6 and 8 of the issue (check_gitops_contract.py);
 #   5. `helm lint` and `helm template` of charts/capacity-pool and
 #      charts/smoke, each against one real cells/*/{capacity-pool,smoke}/*.yaml
-#      parameter file's own `values:`;
+#      parameter file's own `values:`; charts/accel-device-classes (#28)
+#      against its own chart defaults, since nothing in it varies per cell;
 #   6. kubeconform of the rendered chart output, both ApplicationSets and
 #      the root Application, against pinned upstream + CRD-catalog schemas;
 #   7. every pinned add-on's own exact chart version (never a generic,
@@ -228,6 +229,16 @@ if [[ "${#cell_smoke_files[@]}" -ge 1 ]]; then
     bash -c "'${HELM}' template smoke-e2e '${GITOPS_ROOT}/charts/smoke' -f '${SMOKE_VALUES}' > '${RENDERED_DIR}/smoke.yaml'"
 fi
 
+# charts/accel-device-classes (#28) has no cell-specific values (one
+# cluster-scoped DeviceClass, nothing varies per cell) and no
+# cells/*/*.yaml parameter file to extract values from -- helm lint/
+# template run against the chart's own defaults only.
+if [[ -f "${GITOPS_ROOT}/charts/accel-device-classes/Chart.yaml" ]]; then
+  run_check "helm lint charts/accel-device-classes" "${HELM}" lint "${GITOPS_ROOT}/charts/accel-device-classes"
+  run_check "helm template charts/accel-device-classes" \
+    bash -c "'${HELM}' template accel-device-classes-e2e '${GITOPS_ROOT}/charts/accel-device-classes' > '${RENDERED_DIR}/accel-device-classes.yaml'"
+fi
+
 # ------------------------------------------------------- 6. kubeconform
 
 KUBECONFORM_BIN="${WORK_DIR}/kubeconform"
@@ -260,6 +271,7 @@ KUBECONFORM_ARGS=(
 kubeconform_targets=("${GITOPS_ROOT}/appsets/platform.ApplicationSet.yaml" "${GITOPS_ROOT}/appsets/cells.ApplicationSet.yaml" "${GITOPS_ROOT}/bootstrap/root-application.yaml")
 [[ -f "${RENDERED_DIR}/capacity-pool.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/capacity-pool.yaml")
 [[ -f "${RENDERED_DIR}/smoke.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/smoke.yaml")
+[[ -f "${RENDERED_DIR}/accel-device-classes.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/accel-device-classes.yaml")
 
 run_check "kubeconform (${#kubeconform_targets[@]} file(s), k8s 1.37.0 + pinned CRD schemas)" \
   "${KUBECONFORM_BIN}" "${KUBECONFORM_ARGS[@]}" "${kubeconform_targets[@]}"
