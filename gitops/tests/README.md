@@ -13,7 +13,7 @@ check them either.
 | --- | --- | --- | --- |
 | `0.static.sh` | Required files, `bash -n`/`shellcheck` on every `*.sh` under `gitops/` (including this suite's own three scripts, not only `bootstrap.sh`), `yamllint` on every literal (non-templated) tracked YAML file, the structural contract of every `addon.yaml`/cells parameter file and both ApplicationSets (`check_gitops_contract.py`), `helm lint`/`helm template` of `charts/capacity-pool` and `charts/smoke`, `kubeconform` of the rendered output plus both ApplicationSets and the root Application against pinned upstream + CRD-catalog schemas, and `check_pinned_crds.py` validating the rendered CRD-backed objects against each pinned chart's own exact CRD versions | No | About 2 to 3 minutes |
 | `1.e2e.sh` | Builds one foundation cell (with a temporary Identity Center group), the before/after RBAC change on the capability's own access entry, bootstrap idempotency / `--revision`-only re-run / wrong-cluster abort, the `crds`→`controllers`→`capacity` ordering (including two deliberately broken steps), the OCI chart and Git-file-generator-revision checks, no shared CRD between `karpenter-crd` and `karpenter`, the admin smoke canary through Kueue and Karpenter, one accidental generator-entry loss, one full bootstrap-object teardown and re-adopt, then destroy and leftovers | Yes | About 45 to 60 minutes |
-| `2.upgrade.sh` | The mechanical version-pair check (decision 6) on a mismatched `karpenter`/`karpenter-crd` bump, then a matched bump against a live cell: no `Application` goes `Degraded`, the `NodePool`-launched instance is not replaced, and the canary pod stays `Running` throughout | Yes | About 50 to 65 minutes |
+| `2.upgrade.sh` | The mechanical version-pair check (decision 6) on a mismatched `karpenter`/`karpenter-crd` bump, then a matched bump against a live cell: no `Application` goes `Degraded`, the `NodePool`-launched instance is not replaced, and the canary pod stays `Running` throughout | Yes | About 35 to 50 minutes |
 
 ## Prerequisites
 
@@ -21,28 +21,34 @@ Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
 
 - Helm `>= 3.8` (OCI charts), for `0.static.sh` only (`1.e2e.sh`/`2.upgrade.sh`
   never call `helm` themselves -- Argo CD installs every chart in-cluster).
-- `uv` (for `0.static.sh`'s pinned `yamllint`/`pyyaml`), `curl` and
+- `uv` (for `0.static.sh`'s pinned `yamllint`/`pyyaml`), `curl`,
   `sha256sum` (for pinning `kubeconform` by checksum if it is not already on
-  `PATH`). All three, plus Terraform, `kubectl`, the AWS CLI v2, `git` and
-  `python3`, are already on the distai-platform EC2 test runner (see the
-  "Running on the EC2 test runner" section below).
+  `PATH`) and `shellcheck` (required, not optional - `0.static.sh` fails
+  closed if it is missing, rather than silently skipping that check).
 - An IAM Identity Center instance in the test account/Region, and an IAM
   principal that can call `identitystore:CreateGroup`/`DeleteGroup`
   (`1.e2e.sh`/`2.upgrade.sh` create and delete their own temporary group;
   unlike `infra/foundation/tests/1.e2e.sh`, no pre-existing group ID is
-  taken as input), `eks:ListAccessEntries`, `eks:DescribeAccessEntry`,
-  `eks:ListAssociatedAccessPolicies`, `eks:DescribeCapability`,
-  `eks:ListCapabilities`.
-- A GitHub token with **Contents: write** on the repository named by
-  `GITOPS_TEST_REPO_URL` (default `https://github.com/littlemex/distai-platform.git`
-  -- override to run against a fork you have write access to), read
-  fresh from AWS SSM Parameter Store (SecureString) at `GITOPS_TEST_TOKEN_SSM_PARAM`
-  (default `/relay/github/distai-platform`) in `GITOPS_TEST_TOKEN_SSM_REGION`
+  taken as input), `eks:ListAssociatedAccessPolicies`,
+  `eks:DescribeCapability`, `eks:ListCapabilities`.
+- A GitHub token with **Contents: write** on `littlemex/distai-platform`
+  itself (`GITOPS_TEST_REPO_URL` defaults to it, and every manifest this
+  suite bootstraps - both `ApplicationSet`s, the root Application,
+  `bootstrap.sh`'s own `platform` `AppProject` - hard-codes that same
+  repository URL as its Git source, so pointing `GITOPS_TEST_REPO_URL` at
+  a fork does not actually make Argo CD read the fork's branches; there
+  is no supported way to run this suite against a fork today), read
+  fresh from AWS SSM Parameter Store (SecureString) at
+  `GITOPS_TEST_TOKEN_SSM_PARAM` (a parameter you create; the default,
+  `/relay/github/distai-platform`, is only this environment's own naming
+  convention, not a requirement) in `GITOPS_TEST_TOKEN_SSM_REGION`
   (default `us-east-1`) -- never passed as an env var, a command-line
   argument, or written to `.git/config`: both scripts read it through a
   one-shot `GIT_ASKPASS` helper, deleted immediately after the one `git`
-  command that needs it. `1.e2e.sh` and `2.upgrade.sh` each push one to
-  three small, disposable branches, every one of them under
+  command that needs it. `1.e2e.sh` pushes up to four small, disposable
+  branches (one per-run cell fixture if `NAME` needs one, `break-crds`,
+  `break-kueue`, `remove-kueue`); `2.upgrade.sh` pushes up to two (the
+  cell fixture, `upgrade-match`). Every one of them lives under
   `refs/heads/e2e/<run-id>/*` (a guard function refuses pushing or
   deleting anything outside that namespace), to exercise the ordering,
   generator-loss and upgrade experiments on a real Argo CD sync; `main`
@@ -101,21 +107,23 @@ all.
 
 ```bash
 export AWS_PROFILE="${AWS_PROFILE:-default}"
-export AWS_REGION=<region with an IAM Identity Center instance>
-export NAME=<cell name unused by any other cell in this account, any region>
-export STATE_BUCKET=<your Terraform state bucket>
-export STATE_REGION=<region of that bucket>
-export ADMIN_PRINCIPAL_ARN=<the principal running this test>
+export AWS_REGION="<region with an IAM Identity Center instance>"
+export NAME="<cell name unused by any other cell in this account, any region>"
+export STATE_BUCKET="<your Terraform state bucket>"
+export STATE_REGION="<region of that bucket>"
+export ADMIN_PRINCIPAL_ARN="<the principal running this test>"
 export MY_CIDR="$(curl -fsS https://checkip.amazonaws.com)/32"
-export GITOPS_REVISION=<this PR's branch, already pushed to GitHub>
-export ARGOCD_IDC_INSTANCE_ARN=<arn:aws:sso:::instance/ssoins-...>
-export ARGOCD_IDC_REGION=<region of the Identity Center instance>
-export ARGOCD_IDC_IDENTITY_STORE_ID=$(aws sso-admin describe-instance \
-  --instance-arn "${ARGOCD_IDC_INSTANCE_ARN}" --query IdentityStoreId --output text)
+export GITOPS_REVISION="<this PR's branch, already pushed to GitHub>"
+export GITOPS_BASE_REF="<a ref of infra/foundation before issue #25's access-policy-association change>"
+export ARGOCD_IDC_INSTANCE_ARN="<arn:aws:sso:::instance/ssoins-...>"
+export ARGOCD_IDC_REGION="<region of the Identity Center instance>"
+export ARGOCD_IDC_IDENTITY_STORE_ID="$(aws sso-admin describe-instance \
+  --instance-arn "${ARGOCD_IDC_INSTANCE_ARN}" --query IdentityStoreId --output text)"
 cd gitops/tests
 ./1.e2e.sh 2>&1 | tee "/tmp/gitops-e2e-$(date +%Y%m%d%H%M%S).log"
-# ./2.upgrade.sh instead, plus export UPGRADE_TO_KARPENTER_VERSION=<x>
 ```
+
+For `2.upgrade.sh` instead, additionally export `UPGRADE_TO_KARPENTER_VERSION` (a real, published Karpenter version different from `addons/karpenter/addon.yaml`'s pinned one) and run `./2.upgrade.sh` in place of `./1.e2e.sh` above.
 
 ## Acceptance criteria -> checks
 
@@ -165,14 +173,34 @@ silently:
 - **`cluster_arn`'s partition is not pinned to `aws`.** The regex accepts
   any partition, since the issue only specifies "an ARN, never an API
   server URL."
-- **The ordering experiment (acceptance criterion 4) does not assume which
-  branch of decision 4 is live.** `RollingSync` availability on the
-  managed capability is marked "not confirmed" in the issue's own facts;
-  `check_gitops_contract.py` accepts either `RollingSync` steps or no
-  `strategy.type` (an `INFO` line records which), and `1.e2e.sh`'s breakage
-  checks assert only what decision 4 claims is true in both branches
-  (dependents fail to create; an unrelated chain is unaffected), not a
-  specific controller mechanism.
+- **The ordering experiment (acceptance criterion 4) confirms, rather than
+  assumes, which branch of decision 4 is live, and is honest about what it
+  can and cannot prove post-build.** `1.e2e.sh` reads
+  `platform.ApplicationSet`'s own `status.applicationStatus` directly: on
+  a real cluster this is empty, confirming `RollingSync` is **not**
+  active on the managed capability as of this PR, and that every
+  `Application` syncs independently with `automated.selfHeal` instead
+  (`check_gitops_contract.py` accepts either `RollingSync` steps or no
+  `strategy.type` for this reason, in case a future capability version
+  changes the answer). What the breakage checks can actually observe is
+  narrower than decision 4's own "capacity fails to create NEW objects
+  depending on a broken crds step": by the time either break experiment
+  runs, the `capacity` step has already created its `NodePool`/
+  `EC2NodeClass`/`ResourceFlavor` once, and a Kubernetes CRD, once
+  installed, persists regardless of whether the `Application` that
+  installed it later goes unsynced -- so breaking `crds` after a
+  successful build cannot show capacity-pool failing to create something
+  it has no new reason to create. What this suite instead evidences,
+  confirmed on a real cluster: the broken `Application` itself (`crds` or
+  `kueue`) leaves `Synced` and recovers once restored, within the retry
+  bound; a chain that does not depend on the broken one (the `NodePool`
+  depending on `crds`, unaffected by breaking `kueue`) stays unaffected;
+  and capacity-pool's own already-created objects are not retroactively
+  un-synced merely because a step they once depended on is now broken.
+  Proving the stronger "fails to create NEW objects" claim would need a
+  from-scratch bootstrap directly from a broken revision, before any CRD
+  of the broken chart is ever installed -- a different experiment this
+  suite does not attempt.
 - **The idempotency check uses `resourceVersion` for the Secret and
   AppProject, but a `.spec`-only fingerprint for the root Application.**
   A `kubectl apply` of byte-identical content does not change
