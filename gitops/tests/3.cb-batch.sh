@@ -263,8 +263,28 @@ if run_step 27; then
   NODE_A="$(gpu_node_a)"
   NODE_B="$(gpu_node_b)"
   if [[ -z "${NODE_B}" || "${NODE_A}" == "${NODE_B}" ]]; then
-    info "step27: SKIPPED — only one GPU node present (node_a=${NODE_A:-<none>}, node_b=${NODE_B:-<none>}). Must re-run against a real 2-node pool before trusting any per-node-lane test's isolation."
-    pass "step27: skipped, 1-node pool (expected on a 1-node dry run)"
+    # Only one node exists yet — force a second one rather than report a
+    # false "1-node pool" skip on a pool that is actually sized for two:
+    # two concurrent pods each holding nvidia.com/gpu:1 cannot both land
+    # on a 1-GPU-per-node instance type, so the scheduler/Karpenter must
+    # put the second one on a different, freshly launched node.
+    info "step27: only one node visible yet (${NODE_A:-<none>}) — launching a second GPU-holding pod to force Karpenter to provision a second node"
+    k run cb-force-2node --restart=Never --image=public.ecr.aws/amazonlinux/amazonlinux:2023 \
+      --overrides='{"metadata":{"annotations":{"karpenter.sh/do-not-disrupt":"true"}},"spec":{"tolerations":[{"operator":"Exists"}]}}' \
+      --limits=nvidia.com/gpu=1 \
+      -- sh -c 'sleep 600' >/dev/null 2>&1 || true
+    wait_until 420 10 "a second distinct GPU node exists" bash -c "
+      a=\$(kubectl get nodes -l 'karpenter.sh/nodepool' -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | sort | sed -n '1p')
+      b=\$(kubectl get nodes -l 'karpenter.sh/nodepool' -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | sort | sed -n '2p')
+      [[ -n \"\$b\" && \"\$a\" != \"\$b\" ]]
+    " || info "step27: a second node did not appear within 7 minutes — pool may be capped at 1 node (check pool.limits.cpu) or spot capacity for the requested instance type was unavailable"
+    k delete pod cb-force-2node --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    NODE_A="$(gpu_node_a)"
+    NODE_B="$(gpu_node_b)"
+  fi
+  if [[ -z "${NODE_B}" || "${NODE_A}" == "${NODE_B}" ]]; then
+    info "step27: SKIPPED — still only one GPU node present after attempting to force a second (node_a=${NODE_A:-<none>}, node_b=${NODE_B:-<none>}). Must re-run against a real 2-node pool before trusting any per-node-lane test's isolation."
+    pass "step27: skipped, 1-node pool even after forcing a second (recorded as a real finding, not a false pass)"
   else
     info "step27: node_a=${NODE_A} node_b=${NODE_B} (distinct)"
     for pair in "a:${NODE_A}" "b:${NODE_B}"; do
