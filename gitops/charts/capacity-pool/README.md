@@ -75,18 +75,29 @@ fails the render.
 
 `pool.limits` is the only quota-shaped field this chart renders; the
 `ResourceFlavor` carries no quota. For an `on-demand` or `flex` pool it is
-the budget the admin chooses. For a `reserved` pool, set it to the
-reservation's own size as a ceiling -- the reservation's instance count
-times each instance's own **allocatable** resources, never the instance
-type's full advertised resources, which no pod can actually request in
-full once `kubelet`/system overhead is reserved -- and set the
-`nominalQuota` of the `ClusterQueue` naming this flavor (for example the
-smoke chart's `clusterQueue.cpuQuota` and `clusterQueue.memQuota`) to the
-same, allocatable-based amounts (Kueue admits against pod requests, which
-must fit in a node's allocatable capacity, never its full advertised
-capacity). Nothing links `pool.limits` and the `ClusterQueue`'s
-`nominalQuota`: keep them in step by hand, as with the smoke chart's
-`clusterQueue.resourceFlavor`.
+the budget the admin chooses. For a `reserved` pool, `pool.limits` is a
+Karpenter-side ceiling Karpenter itself accounts in instance-type
+capacity, not in Kubernetes allocatable: set it to the reservation's
+instance count times each instance type's own full, advertised resources
+(this PR's own real-cluster verification sets `pool.limits` this way --
+the reservation's own vCPU and memory, read from `DescribeInstanceTypes` --
+and a single reserved node launched and admitted a workload under it). A
+smaller, allocatable-based number here would already read as "at or over
+limit" the moment one reserved instance is running, before any pod is
+even scheduled, since the launched instance's own full capacity would
+already exceed it -- that pool would then never launch a node at all.
+The `nominalQuota` of the `ClusterQueue` naming this flavor (for example
+the smoke chart's `clusterQueue.cpuQuota` and `clusterQueue.memQuota`) is
+a separate number for a separate purpose: Kueue admits against pod
+requests, so a pod's own request must still fit in a node's real
+Kubernetes allocatable capacity regardless of what `nominalQuota` says;
+sizing `nominalQuota` to the same full-capacity number as `pool.limits`
+(as tested here) is a workable budget as long as individual pod requests
+stay below the node's actual allocatable, with no safety margin if a
+request approaches the full number; a more conservative, smaller
+`nominalQuota` trades some admittable capacity for that margin. Nothing
+links `pool.limits` and the `ClusterQueue`'s `nominalQuota`: keep them in
+step by hand, as with the smoke chart's `clusterQueue.resourceFlavor`.
 
 ## Known limits
 
@@ -102,26 +113,28 @@ capacity). Nothing links `pool.limits` and the `ClusterQueue`'s
 - This PR's own real-cluster verification exercised an On-Demand Capacity
   Reservation, not a Capacity Block; `capacityReservationSelectorTerms`
   does not distinguish the two (Karpenter's own docs: both are selected
-  the same way), but a Capacity Block's own start/end behavior (nodes
-  drained before it ends, per the foundation layer's interruption-queue
-  wiring) was not itself observed by this PR. Two symptoms outside this
-  pool's own control, not solved here: before a Capacity Block's own
-  start time, `capacityReservationSelectorTerms` resolves nothing yet, so
-  a `-rsv` pool with no other capacity type behaves as if no capacity
-  exists at all (Kueue admits, Karpenter cannot launch); after a
-  reservation's own `EndDate`, or a Capacity Block's own end, AWS reclaims
-  the capacity regardless of what is still running on it, and the
-  foundation layer's interruption-queue wiring is what gives Karpenter a
-  chance to drain first, not anything in this chart.
+  the same way), but their own ending is not the same event. An On-Demand
+  Capacity Reservation's own `EndDate` only ends the reservation itself:
+  any instance already running in it keeps running, billed as an
+  ordinary On-Demand instance from then on, with nothing forcibly
+  stopped. A Capacity Block for ML has a hard end AWS enforces by
+  reclaiming the capacity, which is why the foundation layer wires its
+  own `capacity-reservation` EventBridge rule to Karpenter's
+  interruption queue (per #20/#21): without it, Karpenter has no warning
+  before a Capacity Block's instances are taken back. This PR's own
+  verification exercised neither a Capacity Block nor that interruption
+  path. Before a Capacity Block's own start time (or an ODCR not yet
+  active), `capacityReservationSelectorTerms` resolves nothing yet, so a
+  `-rsv` pool with no other capacity type behaves as if no capacity
+  exists at all (Kueue admits, Karpenter cannot launch) -- not solved
+  here.
 - If `pool.limits` or the matching `ClusterQueue`'s `nominalQuota`
   (Quotas, above) is set larger than the reservation can actually hold --
-  more than the reservation's own instance count times the instance
-  type's allocatable resources -- Kueue can admit a workload the
-  reservation has no room for; it is then stuck `Pending` after
-  admission, the exact "admission does not always mean capacity" failure
-  #17 describes for `-od`/`-flex`, now possible on a misconfigured `-rsv`
-  pool too. Size both to the reservation's own allocatable capacity, not
-  its advertised instance type's full capacity.
+  more instances' worth than the reservation's own instance count --
+  Kueue can admit a workload the reservation has no room for; it is then
+  stuck `Pending` after admission, the exact "admission does not always
+  mean capacity" failure #17 describes for `-od`/`-flex`, now possible on
+  a misconfigured `-rsv` pool too.
 - `accelerator` and `tenancy` are values only and enforce nothing by
   themselves. No device plugin selects `accelerator.methodLabel` until the
   accelerator advertisers ship

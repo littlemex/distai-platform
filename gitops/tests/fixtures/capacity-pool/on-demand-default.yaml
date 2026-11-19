@@ -1,9 +1,11 @@
 # Static-check input (0.static.sh): an on-demand pool that sets none of
 # issue #27's new values (no pool.capacityType, no reservation, no
-# accelerator, no tenancy). Its rendered output must match
-# ../../golden/capacity-pool/on-demand-default.yaml, the chart's own
-# output before #27, for every object field. clusterName and nodeRole
-# stand in for the two values a real cell supplies through valuesFrom.
+# accelerator, no tenancy). check_chart_renders.py checks its rendered
+# fields match this chart's pre-#27 shape: one NodePool/EC2NodeClass/
+# ResourceFlavor, the on-demand capacity-type requirement, no reservation
+# selector, no taint/toleration/label/annotation. clusterName and
+# nodeRole stand in for the two values a real cell supplies through
+# valuesFrom.
 clusterName: static-check-cluster
 nodeRole: static-check-node-role
 pool:

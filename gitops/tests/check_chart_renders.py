@@ -9,13 +9,14 @@ alone can evidence).
 This script checks what each values shape must render, including the
 unchanged `on-demand-default`/`default` fixtures, which carry none of
 issue #27's new values and must still render the exact same fields
-`capacity-pool`/`smoke` rendered before #27 (a checked-in golden file and
-a byte-level `diff` were tried for this and dropped: a template comment
-fix that changes no object field broke it twice during review -- once
-against a stale base branch, once against a different Helm version --
-with no way to tell "a real field regressed" apart from "the comment
-changed" from a byte diff alone; the field-level checks below are what
-the acceptance criterion actually needs, and do not have this problem):
+`capacity-pool`/`smoke` rendered before #27, checked field by field, not
+byte by byte: a checked-in golden file and a byte-level `diff` would also
+fail on an unrelated base-branch rebase or a different Helm version,
+neither a field regression, with no way to tell the two apart from a
+byte diff alone. These checks do not have that problem; the acceptance
+criterion is met at the level these checks assert, stated explicitly
+since the chart's own rendered comments are not byte-identical to #25's
+original (the capacity-pool chart's own README says so):
 
   * every capacity-pool fixture renders exactly one NodePool, one
     EC2NodeClass and one ResourceFlavor, joined by name and by the
