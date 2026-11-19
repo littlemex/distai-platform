@@ -7,8 +7,13 @@
 #
 # Issue #25 (the delivery layer) adds the one AWS-API call that closes the
 # gap this comment used to describe: the capability's own access entry
-# starts with no Kubernetes RBAC (an EKS access policy association below
-# grants it), and gitops/bootstrap/bootstrap.sh (run once per cell, outside
+# starts with only the two built-in Argo-CD-capability-management policies
+# (AmazonEKSArgoCDClusterPolicy, AmazonEKSArgoCDPolicy -- letting the
+# capability manage itself, confirmed on a real cluster), never
+# AmazonEKSClusterAdminPolicy or anything else letting it create a
+# Namespace/ClusterRole/CustomResourceDefinition for the things it is meant
+# to deliver (an EKS access policy association below grants that), and
+# gitops/bootstrap/bootstrap.sh (run once per cell, outside
 # Terraform) still has to write the three in-cluster objects that let the
 # capability discover its own cluster and have something to deliver. The
 # "argo_cd.namespace" argument is set explicitly rather than left to default,
@@ -86,8 +91,11 @@ resource "aws_eks_capability" "argocd" {
 }
 
 # Issue #25 Decision 1: the access entry EKS creates for the capability role
-# carries no Kubernetes RBAC by default (Facts checked). This association is
-# itself a direct AWS API call (never a Kubernetes object), so it stays in
+# carries only the two built-in Argo-CD-capability-management policies by
+# default (confirmed on a real cluster: AmazonEKSArgoCDClusterPolicy,
+# AmazonEKSArgoCDPolicy -- these let the capability manage itself, not
+# arbitrary cluster objects), never AmazonEKSClusterAdminPolicy. This
+# association is itself a direct AWS API call (never a Kubernetes object), so it stays in
 # Terraform, alongside the capability it grants access for, exactly like the
 # admin_principal_arns association in eks.tf. Full cluster-admin is used
 # because neither AmazonEKSEditPolicy nor AmazonEKSAdminPolicy can create a
