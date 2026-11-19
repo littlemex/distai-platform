@@ -324,7 +324,7 @@ PY
 
 # #28: loop over every cells/*/capacity-pool/*.yaml and cells/*/smoke/*.yaml
 # parameter file, not only the first in sorted order -- issue #28 added a
-# second and third pair (dp-a19-gpu, dp-a19-trn) whose own values
+# second and third pair (dp-a19-gpu-r3, dp-a19-trn-r3) whose own values
 # (pool.labels, a widened pool.requirements) are exactly the content a
 # single-file check would never render or kubeconform. Each file's own
 # cell/pool name keeps its rendered output from colliding with another's
