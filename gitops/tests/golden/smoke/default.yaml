@@ -4,7 +4,6 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: "distai-smoke"
-
 ---
 # Source: smoke/templates/clusterqueue.yaml
 # A single-flavor ClusterQueue naming one capacity-pool ResourceFlavor.
@@ -27,7 +26,6 @@ spec:
               nominalQuota: "32"
             - name: "memory"
               nominalQuota: "64Gi"
-
 ---
 # Source: smoke/templates/localqueue.yaml
 apiVersion: kueue.x-k8s.io/v1beta2
