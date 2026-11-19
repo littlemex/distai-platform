@@ -258,6 +258,17 @@ for b in (docs or []):
   token=""
 }
 
+# checkout_revision_as CLONE_DIR NEW_BRANCH REVISION: see 1.e2e.sh's own
+# identical function for why -- `-B` with an explicit start point skips
+# `git checkout <name>`'s DWIM auto-tracking-branch creation, and a fresh
+# clone of GITOPS_REPO_URL only has GITOPS_REVISION as a remote-tracking
+# ref, confirmed on a real clone.
+checkout_revision_as() {
+  local clone="$1" branch="$2" revision="$3"
+  git -C "${clone}" checkout --quiet -B "${branch}" "${revision}" 2>/dev/null \
+    || git -C "${clone}" checkout --quiet -B "${branch}" "origin/${revision}"
+}
+
 delete_broken_branches() {
   local b
   for b in "${BROKEN_BRANCHES[@]}"; do
@@ -460,7 +471,7 @@ pass "canary Pod Running on node ${CANARY_NODE} (instance ${CANARY_INSTANCE_ID})
 UPGRADE_CLONE="${WORK_DIR}/upgrade-match"
 UPGRADE_BRANCH="e2e/${RUN_ID}/upgrade-match"
 git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${UPGRADE_CLONE}" || fail "git clone (upgrade-match)"
-git -C "${UPGRADE_CLONE}" checkout --quiet -B "${UPGRADE_BRANCH}" "${GITOPS_REVISION}" || fail "git checkout (upgrade-match)"
+checkout_revision_as "${UPGRADE_CLONE}" "${UPGRADE_BRANCH}" "${GITOPS_REVISION}" || fail "git checkout (upgrade-match)"
 for f in addons/karpenter/addon.yaml addons/karpenter-crd/addon.yaml; do
   sed -i.bak -E "s/^(\\s*version:\\s*).*/\\1\"${UPGRADE_TO_KARPENTER_VERSION}\"/" "${UPGRADE_CLONE}/gitops/${f}" \
     || fail "could not bump ${f} in the upgrade-match clone"
