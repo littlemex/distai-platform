@@ -8,6 +8,10 @@ clusterQueue:
   # name is cell-specific.
   resourceFlavor: ""
   cpuQuota: "32"
+  # Nominal memory quota on the flavor above. Size it to the pool's real
+  # capacity when Kueue, not a failed node launch, must be what stops the
+  # next workload (for example a reserved pool's own reservation size).
+  memQuota: "64Gi"
 
 localQueue:
   name: smoke

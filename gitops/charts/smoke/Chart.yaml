@@ -7,7 +7,7 @@ description: >-
   admits and Karpenter launches a node before any team's own queue exists
   (#22 is not delivered yet). Not a team workload: owned here, not by #22.
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "1.0.0"
 home: https://github.com/littlemex/distai-platform
 sources:
