@@ -1,0 +1,10 @@
+# Static-check input (0.static.sh): an on-demand pool that sets none of
+# issue #27's new values (no pool.capacityType, no reservation, no
+# accelerator, no tenancy). Its rendered output must match
+# ../../golden/capacity-pool/on-demand-default.yaml, the chart's own
+# output before #27, for every object field. clusterName and nodeRole
+# stand in for the two values a real cell supplies through valuesFrom.
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: cpu

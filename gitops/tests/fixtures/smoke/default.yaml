@@ -1,0 +1,5 @@
+# Static-check input (0.static.sh): a smoke queue that does not set
+# clusterQueue.memQuota. Its rendered output must match
+# ../../golden/smoke/default.yaml, the chart's own output before issue #27.
+clusterQueue:
+  resourceFlavor: cpu

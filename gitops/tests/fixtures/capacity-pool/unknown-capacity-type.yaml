@@ -1,0 +1,9 @@
+# Static-check input (0.static.sh), expected to FAIL `helm template`:
+# pool.capacityType is an enum (on-demand, reserved, flex); a typo must not
+# silently render as some other capacity type. Identical to flex.yaml
+# except for the capacityType value.
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: cpu-flex
+  capacityType: spot
