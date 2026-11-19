@@ -1,0 +1,52 @@
+# The Neuron DRA driver: publishes each Neuron device as a DRA device
+# (ResourceSlice, driver neuron.aws.com) on every node whose NodePool opts
+# into the DRA method. One of four accelerator add-ons in the
+# "accelerators" step (#25 Decision 5, #28 section A).
+#
+# Same chart and version as accel-neuron-device-plugin/addon.yaml, opposite
+# toggles:
+#   - devicePlugin.enabled: false and draDriver.enabled: true. The Neuron
+#     DRA docs: "Do not install the Neuron device plugin on the cluster!"
+#     when the DRA driver runs, and the chart's values say the two "cannot
+#     run on the same node".
+#   - draDriver.nodeSelector selects distai.dev/neuron-method=dra (#19
+#     Decision 2); the chart's own default affinity (Neuron instance types)
+#     stays and the method label narrows it.
+#   - scheduler, npd and observer are all off: the device-plugin release
+#     owns the single copy of each (#25 Decision 5).
+#
+# The chart creates its own DeviceClass neuron.aws.com, which has no
+# extendedResourceName, so a Layer 1 pod (resources.limits
+# aws.amazon.com/neuron) would not reach a DRA node through it alone. The
+# platform's DeviceClass neuron-extended-resource
+# (accel-device-classes/addon.yaml) adds that mapping (#19 Decision 1(c),
+# E4b). The DRA kubelet plugin goes to the chart's own namespace
+# (draDriver.namespaceOverride, default neuron-dra-driver), for which the
+# chart ships a Namespace object.
+#
+# Not launched on a real node in #28: #19 E4c showed a dynamically
+# provisioned DRA pool never initializes a Neuron node
+# (ResourceNotRegistered); a static NodePool for DRA is #19 Decision 4's
+# and #27's scope. This file is statically checked only (#28, Acceptance
+# criteria).
+#
+# Chart source: see accel-neuron-device-plugin/addon.yaml.
+addon: accel-neuron-dra
+chart: neuron-helm-chart
+repoURL: public.ecr.aws/neuron
+version: "1.11.2"
+wave: accelerators
+namespace: neuron-dra
+values:
+  devicePlugin:
+    enabled: false
+  draDriver:
+    enabled: true
+    nodeSelector:
+      distai.dev/neuron-method: dra
+  scheduler:
+    enabled: false
+  npd:
+    enabled: false
+  observer:
+    enabled: false
