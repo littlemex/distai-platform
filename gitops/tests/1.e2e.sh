@@ -557,26 +557,7 @@ crds_owned_by_karpenter="$(app_field "${APP_KARPENTER}" '{.status.resources[?(@.
 pass "${APP_KARPENTER_CRD} owns the CRDs (${crds_owned_by_karpenter_crd}); ${APP_KARPENTER} owns none -- no shared-resource conflict"
 
 # -------------------------------------------------------------- 10. capacity
-#
-# capacity-pool's own ResourceFlavor is a kueue.x-k8s.io CRD that
-# controllers-step kueue only just installed (the "capacity" step's own
-# retry-based dependency on "controllers", decision 4). Confirmed on a
-# real cluster: Argo CD's sync failed repeatedly with "failed to discover
-# server resources for group version kueue.x-k8s.io/v1beta1: the server
-# could not find the requested resource" even though the CRD already
-# existed -- Argo CD's own cluster cache of available API resources had
-# not yet noticed the CRD its controller-manager process did not itself
-# install. This is exactly decision 4's residual risk ("a bounded retry
-# can run out against a dependency broken longer than the bound") and
-# exactly what its own retry policy (limit 20, backoff to 5m) exists to
-# ride out -- but the stock retry/cache-refresh timers took longer than
-# this check's own wait window to notice a CRD that, from the API
-# server's perspective, was available the whole time. A hard refresh
-# (Argo CD's own documented mechanism for "re-check now, do not wait for
-# the next cache cycle") forces that discovery immediately rather than
-# leaving it to chance timing.
-k annotate application "${APP_CAPACITY_POOL}" -n "${ARGOCD_NS}" argocd.argoproj.io/refresh=hard --overwrite >/dev/null
-k annotate application "${APP_SMOKE}" -n "${ARGOCD_NS}" argocd.argoproj.io/refresh=hard --overwrite >/dev/null
+
 wait_until 900 15 "capacity-pool Application Healthy and Synced" app_healthy_synced "${APP_CAPACITY_POOL}" \
   || fail "${APP_CAPACITY_POOL} did not reach Healthy+Synced: health=$(app_health "${APP_CAPACITY_POOL}") sync=$(app_sync "${APP_CAPACITY_POOL}")"
 wait_until 900 15 "smoke Application Healthy and Synced" app_healthy_synced "${APP_SMOKE}" \
