@@ -155,7 +155,7 @@ cleanup() {
       info "cleanup: the test did not reach a successful destroy; cleaning up"
       if [[ "${BOOTSTRAP_RAN}" -eq 1 ]] && k get ns "${ARGOCD_NS:-}" >/dev/null 2>&1; then
         k delete job canary --ignore-not-found --wait=false >/dev/null 2>&1
-        k delete application root-application -n "${ARGOCD_NS}" --cascade=background --ignore-not-found >/dev/null 2>&1
+        k delete application root -n "${ARGOCD_NS}" --cascade=background --ignore-not-found >/dev/null 2>&1
       fi
       if tf "${FOUNDATION_ROOT}" destroy -auto-approve -input=false -var-file="${TFVARS}"; then
         info "cleanup: terraform destroy completed"
@@ -345,7 +345,7 @@ BROKEN_BRANCHES+=("${UPGRADE_BRANCH}")
 pass "pushed the matched version bump to disposable branch ${UPGRADE_BRANCH}"
 
 run_bootstrap --revision "${UPGRADE_BRANCH}" || fail "bootstrap.sh --revision ${UPGRADE_BRANCH}"
-pass "re-pointed root-application's targetRevision and the registration Secret's revision annotation at ${UPGRADE_BRANCH}"
+pass "re-pointed root Application's targetRevision and the registration Secret's revision annotation at ${UPGRADE_BRANCH}"
 
 # Sample the canary pod and every tracked Application every few seconds
 # while Argo CD syncs the bump, exactly as #24's upgrade e2e samples a
