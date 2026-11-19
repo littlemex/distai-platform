@@ -41,8 +41,9 @@
 # plane is deleted. The security group that EKS still leaves behind can only
 # be removed after EKS has deleted the cluster. A single guard placed early
 # (the cluster depending on it) would terminate the instances only after the
-# cluster is gone; a single guard placed late is missing after a failed apply. The detached-interface cleanup is one
-# function (scripts/guard-common.sh) that both call.
+# cluster is gone; a single guard placed late is missing after a failed
+# apply. The detached-interface cleanup is one function
+# (scripts/guard-common.sh) that both call.
 #
 # Destroy order (Terraform destroys a resource before the resources it depends
 # on):
