@@ -105,10 +105,13 @@ if run_step 20; then
   # 2026-11-19 dry-run finding: this pod never requested nvidia.com/gpu, so
   # the device plugin never injected the driver/nvidia-smi into it at all --
   # this was the real cause of "nvidia-smi: command not found", not the base
-  # image. --limits=nvidia.com/gpu=1 is required for the device plugin to
-  # grant access regardless of which image is used.
-  k run cb-health --rm -i --restart=Never --image="${CB_HEALTH_IMAGE}" --limits=nvidia.com/gpu=1 \
-    --overrides="{\"metadata\":{\"annotations\":{\"karpenter.sh/do-not-disrupt\":\"true\"}},\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"${NODE}\"},\"tolerations\":[{\"operator\":\"Exists\"}]}}" \
+  # image. The --limits flag used in an earlier fix attempt does not exist
+  # on this kubectl version ("unknown flag: --limits") -- the request has to
+  # go through --overrides instead, merged onto the generated container by
+  # its name (Pod.spec.containers has patchMergeKey: name, so a partial
+  # entry here does not need to repeat image/command).
+  k run cb-health --rm -i --restart=Never --image="${CB_HEALTH_IMAGE}" \
+    --overrides="{\"metadata\":{\"annotations\":{\"karpenter.sh/do-not-disrupt\":\"true\"}},\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"${NODE}\"},\"tolerations\":[{\"operator\":\"Exists\"}],\"containers\":[{\"name\":\"cb-health\",\"resources\":{\"limits\":{\"nvidia.com/gpu\":\"1\"}}}]}}" \
     -- bash -c '
       echo "--- nvidia-smi -L ---"; nvidia-smi -L
       echo "--- driver/CUDA ---"; nvidia-smi --query-gpu=driver_version,name,memory.total --format=csv
@@ -274,9 +277,11 @@ if run_step 27; then
     # on a 1-GPU-per-node instance type, so the scheduler/Karpenter must
     # put the second one on a different, freshly launched node.
     info "step27: only one node visible yet (${NODE_A:-<none>}) — launching a second GPU-holding pod to force Karpenter to provision a second node"
+    # --limits is not a valid kubectl-run flag on this kubectl version
+    # (same finding as step20); the GPU request goes through --overrides,
+    # merged onto the generated container by name (patchMergeKey: name).
     k run cb-force-2node --restart=Never --image=public.ecr.aws/amazonlinux/amazonlinux:2023 \
-      --overrides='{"metadata":{"annotations":{"karpenter.sh/do-not-disrupt":"true"}},"spec":{"tolerations":[{"operator":"Exists"}]}}' \
-      --limits=nvidia.com/gpu=1 \
+      --overrides='{"metadata":{"annotations":{"karpenter.sh/do-not-disrupt":"true"}},"spec":{"tolerations":[{"operator":"Exists"}],"containers":[{"name":"cb-force-2node","resources":{"limits":{"nvidia.com/gpu":"1"}}}]}}' \
       -- sh -c 'sleep 600' >/dev/null 2>&1 || true
     wait_until 420 10 "a second distinct GPU node exists" bash -c "
       a=\$(kubectl get nodes -l 'karpenter.sh/nodepool' -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | sort | sed -n '1p')
