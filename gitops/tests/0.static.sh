@@ -13,7 +13,14 @@
 #      charts/smoke, each against one real cells/*/{capacity-pool,smoke}/*.yaml
 #      parameter file's own `values:`;
 #   6. kubeconform of the rendered chart output, both ApplicationSets and
-#      the root Application, against pinned upstream + CRD-catalog schemas.
+#      the root Application, against pinned upstream + CRD-catalog schemas;
+#   7. every pinned add-on's own exact chart version (never a generic,
+#      multi-version schema catalog) is `helm template`-d fresh and its
+#      real CustomResourceDefinitions extracted, to check that the
+#      rendered charts/{capacity-pool,smoke} output only uses an
+#      apiVersion that pinned chart version actually serves
+#      (check_pinned_crds.py; needs network access to each add-on's own
+#      OCI registry, the same one Argo CD itself pulls from).
 #
 # Every check prints PASS or FAIL. Exits non-zero if any failed.
 #
@@ -250,6 +257,21 @@ kubeconform_targets=("${GITOPS_ROOT}/appsets/platform.ApplicationSet.yaml" "${GI
 
 run_check "kubeconform (${#kubeconform_targets[@]} file(s), k8s 1.37.0 + pinned CRD schemas)" \
   "${KUBECONFORM_BIN}" "${KUBECONFORM_ARGS[@]}" "${kubeconform_targets[@]}"
+
+# -------------------------------------- 7. pinned-chart-version CRD check
+#
+# kubeconform above validates against a generic, multi-version schema
+# catalog: it answers "is this a valid shape for *some* version of this
+# CRD", never "is this the version the chart version we actually pinned
+# serves". check_pinned_crds.py helm-templates each addons/*/addon.yaml's
+# own exact pinned chart version fresh and checks gitops/charts' already-
+# rendered output (this section's own RENDERED_DIR) against the real
+# CRDs that version ships -- the gap that let gitops/charts/{capacity-pool,
+# smoke}'s templates hardcode kueue.x-k8s.io/v1beta1 straight through this
+# script while Kueue 0.20.6 (the pinned version) serves only v1beta2.
+run_check "pinned-chart-version CRDs (check_pinned_crds.py)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_pinned_crds.py" "${REPO_ROOT}" "${RENDERED_DIR}"
 
 echo
 if [[ "${failures}" -eq 0 ]]; then
