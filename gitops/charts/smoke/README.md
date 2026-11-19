@@ -16,6 +16,7 @@ permanent.
 | `clusterQueue.name` | no | `ClusterQueue` name; default `smoke` |
 | `clusterQueue.resourceFlavor` | yes | Name of a `ResourceFlavor` this cell's own `capacity-pool` release creates; cell-specific, never defaulted here |
 | `clusterQueue.cpuQuota` | no | Nominal CPU quota; default `"32"` |
+| `clusterQueue.memQuota` | no | Nominal memory quota; default `"64Gi"` |
 | `localQueue.name` | no | `LocalQueue` name (its own `spec.clusterQueue` always points at `clusterQueue.name`, so the two names may differ); default `smoke` |
 
 Not a team workload: owned by this issue (#25), not by the tenancy layer
