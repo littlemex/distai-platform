@@ -84,12 +84,33 @@ done
 #    with the tag Karpenter puts on its own (kubernetes.io/cluster/<name> =
 #    owned, the same tag its IAM policy requires) are removed; any other
 #    profile that holds the role is left alone and reported.
-profiles="$(aws iam list-instance-profiles-for-role \
+#
+#    Both list calls below read a target (the node role, then each profile)
+#    that something else can delete between being listed and being read
+#    again: another destroy of the same cell racing this one, or an operator
+#    cleaning up by hand. Under set -e a plain "var=$(...)" assignment aborts
+#    the script on any failure of the command it runs, including a
+#    NoSuchEntity that only means "nothing to clean here", so each call below
+#    is guarded explicitly rather than left as a bare assignment (seen for
+#    real: exit 254 on list-instance-profiles-for-role after the node role
+#    had already been deleted by another process, right after this guard had
+#    just finished terminating every instance - see issue #26).
+if ! profiles="$(aws iam list-instance-profiles-for-role \
   --role-name "$NODE_ROLE_NAME" \
-  --query 'InstanceProfiles[].InstanceProfileName' --output text)"
+  --query 'InstanceProfiles[].InstanceProfileName' --output text 2>&1)"; then
+  case "$profiles" in
+    *NoSuchEntity*) log "already gone: node role ${NODE_ROLE_NAME}, nothing to clean"; profiles="" ;;
+    *) echo "$profiles" >&2; exit 1 ;;
+  esac
+fi
 for p in $profiles; do
-  owner="$(aws iam list-instance-profile-tags --instance-profile-name "$p" \
-    --query "Tags[?Key=='kubernetes.io/cluster/${CLUSTER_NAME}'].Value" --output text)"
+  if ! owner="$(aws iam list-instance-profile-tags --instance-profile-name "$p" \
+    --query "Tags[?Key=='kubernetes.io/cluster/${CLUSTER_NAME}'].Value" --output text 2>&1)"; then
+    case "$owner" in
+      *NoSuchEntity*) log "already gone: instance profile ${p}"; continue ;;
+      *) echo "$owner" >&2; exit 1 ;;
+    esac
+  fi
   if [ "$owner" != "owned" ]; then
     log "keeping instance profile ${p}: not tagged as owned by cluster ${CLUSTER_NAME}" >&2
     continue
