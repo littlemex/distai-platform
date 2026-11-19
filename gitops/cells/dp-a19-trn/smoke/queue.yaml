@@ -1,0 +1,16 @@
+# Parameter file for cells.ApplicationSet.yaml's Git file generator
+# (RFC #25 Decision 2/3/9), same shape as
+# gitops/cells/example-cell/smoke/queue.yaml. Requests the "trn"
+# ResourceFlavor this cell's own capacity-pool/trn.yaml creates (#28
+# section D) - needed so #25's own e2e steps (the admin smoke canary
+# through Kueue and Karpenter) still pass on this cell name, independent
+# of #28's own accelerator-specific checks, which use a separate bare pod
+# requesting aws.amazon.com/neuron directly (the smoke ClusterQueue's own
+# resourceGroups cover only cpu/memory, never an accelerator resource).
+addon: smoke
+wave: capacity
+dir: gitops/charts/smoke
+namespace: distai-smoke
+values:
+  clusterQueue:
+    resourceFlavor: trn
