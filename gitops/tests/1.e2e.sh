@@ -180,7 +180,7 @@ cleanup() {
       info "cleanup: the test did not reach a successful destroy; cleaning up"
       if [[ "${BOOTSTRAP_RAN}" -eq 1 ]] && k get ns "${ARGOCD_NS:-}" >/dev/null 2>&1; then
         k delete job canary --ignore-not-found --wait=false >/dev/null 2>&1
-        k delete application root-application -n "${ARGOCD_NS}" --cascade=background --ignore-not-found >/dev/null 2>&1
+        k delete application root -n "${ARGOCD_NS}" --cascade=background --ignore-not-found >/dev/null 2>&1
       fi
       tf "${FOUNDATION_ROOT}" destroy -auto-approve -input=false -var-file="${TFVARS}"
       local destroy_rc=$?
@@ -363,9 +363,9 @@ k get secret cell-registration -n "${ARGOCD_NS}" >/dev/null 2>&1 \
   || fail "cell-registration Secret was not created in namespace ${ARGOCD_NS}"
 k get appproject platform -n "${ARGOCD_NS}" >/dev/null 2>&1 \
   || fail "platform AppProject was not created in namespace ${ARGOCD_NS}"
-k get application root-application -n "${ARGOCD_NS}" >/dev/null 2>&1 \
-  || fail "root-application Application was not created in namespace ${ARGOCD_NS}"
-pass "bootstrap.sh's three objects exist: cell-registration Secret, platform AppProject, root-application Application"
+k get application root -n "${ARGOCD_NS}" >/dev/null 2>&1 \
+  || fail "root Application was not created in namespace ${ARGOCD_NS}"
+pass "bootstrap.sh's three objects exist: cell-registration Secret, platform AppProject, root Application"
 
 SECRET_SERVER="$(k get secret cell-registration -n "${ARGOCD_NS}" -o jsonpath='{.data.server}' | base64 -d)"
 SECRET_NAME_FIELD="$(k get secret cell-registration -n "${ARGOCD_NS}" -o jsonpath='{.data.name}' | base64 -d)"
@@ -382,11 +382,11 @@ SECRET_REVISION_ANNOTATION="$(k get secret cell-registration -n "${ARGOCD_NS}" \
   || fail "cell-registration Secret's revision annotation (${SECRET_REVISION_ANNOTATION}) is not ${GITOPS_REVISION}"
 pass "cell-registration Secret: server is the cluster ARN, stringData.name is the cluster name, revision annotation matches --revision"
 
-ROOT_APP_TARGET_REVISION="$(k get application root-application -n "${ARGOCD_NS}" \
+ROOT_APP_TARGET_REVISION="$(k get application root -n "${ARGOCD_NS}" \
   -o jsonpath='{.spec.source.targetRevision}')"
 [[ "${ROOT_APP_TARGET_REVISION}" == "${GITOPS_REVISION}" ]] \
-  || fail "root-application's targetRevision (${ROOT_APP_TARGET_REVISION}) is not ${GITOPS_REVISION}"
-pass "root-application's targetRevision matches --revision"
+  || fail "root Application's targetRevision (${ROOT_APP_TARGET_REVISION}) is not ${GITOPS_REVISION}"
+pass "root Application's targetRevision matches --revision"
 
 # ---------------------------------------------- 5. bootstrap idempotency
 #
@@ -400,7 +400,7 @@ object_resource_versions() {
   printf '%s %s %s' \
     "$(k get secret cell-registration -n "${ARGOCD_NS}" -o jsonpath='{.metadata.resourceVersion}')" \
     "$(k get appproject platform -n "${ARGOCD_NS}" -o jsonpath='{.metadata.resourceVersion}')" \
-    "$(k get application root-application -n "${ARGOCD_NS}" -o jsonpath='{.metadata.resourceVersion}')"
+    "$(k get application root -n "${ARGOCD_NS}" -o jsonpath='{.metadata.resourceVersion}')"
 }
 
 rv_before_rerun="$(object_resource_versions)"
@@ -425,18 +425,18 @@ REVISION_B="${GITOPS_REVISION}+e2e-revision-probe"
 run_bootstrap --revision "${REVISION_B}" || fail "bootstrap.sh (--revision-only re-run to ${REVISION_B})"
 secret_revision_b="$(k get secret cell-registration -n "${ARGOCD_NS}" \
   -o jsonpath='{.metadata.annotations.distai\.dev\.annotations/revision}')"
-app_target_revision_b="$(k get application root-application -n "${ARGOCD_NS}" \
+app_target_revision_b="$(k get application root -n "${ARGOCD_NS}" \
   -o jsonpath='{.spec.source.targetRevision}')"
 [[ "${secret_revision_b}" == "${REVISION_B}" ]] \
   || fail "Secret's revision annotation did not update to ${REVISION_B}: got ${secret_revision_b}"
 [[ "${app_target_revision_b}" == "${REVISION_B}" ]] \
-  || fail "root-application's targetRevision did not update to ${REVISION_B}: got ${app_target_revision_b}"
-pass "a --revision-only re-run updates the Secret annotation and root-application's targetRevision together"
+  || fail "root Application's targetRevision did not update to ${REVISION_B}: got ${app_target_revision_b}"
+pass "a --revision-only re-run updates the Secret annotation and root Application's targetRevision together"
 
 # Put the real revision back before anything downstream (steps 7 onward)
 # tries to resolve REVISION_B against the Git file generators.
 run_bootstrap --revision "${GITOPS_REVISION}" || fail "bootstrap.sh (restoring --revision ${GITOPS_REVISION})"
-[[ "$(k get application root-application -n "${ARGOCD_NS}" -o jsonpath='{.spec.source.targetRevision}')" == "${GITOPS_REVISION}" ]] \
+[[ "$(k get application root -n "${ARGOCD_NS}" -o jsonpath='{.spec.source.targetRevision}')" == "${GITOPS_REVISION}" ]] \
   || fail "could not restore targetRevision to ${GITOPS_REVISION} after the revision-probe re-run"
 pass "restored --revision to ${GITOPS_REVISION}"
 
@@ -766,13 +766,13 @@ CANARY_INSTANCE_ID="$(instance_of_node "${CANARY_NODE}")"
 NODECLASS_CREATED="$(k get ec2nodeclass "${NODECLASS}" -o jsonpath='{.metadata.creationTimestamp}')"
 NODEPOOL_CREATED="$(k get nodepool "${NODEPOOL}" -o jsonpath='{.metadata.creationTimestamp}')"
 
-k delete application root-application -n "${ARGOCD_NS}" --cascade=background --wait=true --timeout=120s \
-  || fail "kubectl delete application root-application"
+k delete application root -n "${ARGOCD_NS}" --cascade=background --wait=true --timeout=120s \
+  || fail "kubectl delete application root"
 k delete appproject platform -n "${ARGOCD_NS}" --wait=true --timeout=60s \
   || fail "kubectl delete appproject platform"
 k delete secret cell-registration -n "${ARGOCD_NS}" --wait=true --timeout=60s \
   || fail "kubectl delete secret cell-registration"
-pass "deleted the three bootstrap objects in decision 8's order: root-application, platform AppProject, cell-registration Secret"
+pass "deleted the three bootstrap objects in decision 8's order: root, platform AppProject, cell-registration Secret"
 
 sleep 10 # let any cascade finalizer that would (wrongly) propagate have a moment to act
 k get nodepool "${NODEPOOL}" >/dev/null 2>&1 || fail "NodePool ${NODEPOOL} was deleted by the bootstrap-object teardown (should be orphaned, not deleted)"
