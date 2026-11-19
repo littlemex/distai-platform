@@ -11,6 +11,14 @@ pool:
   # Shared by the NodePool, its EC2NodeClass and the matching ResourceFlavor.
   name: ""
 
+  # Labels every node launched from this NodePool carries
+  # (spec.template.metadata.labels). This is where a pool declares its
+  # accelerator method label, one key per device class
+  # (distai.dev/nvidia-gpu-method, distai.dev/neuron-method - #19 Decision
+  # 2); the matching accel-* add-on's advertiser selects nodes by it. Empty
+  # by default: a pool with no method label gets no advertiser.
+  labels: {}
+
   # CPU-only, on-demand, amd64: the minimal skeleton this PR ships. #17's PR
   # adds spot/flex requirements and per-capacity-type pools (-rsv/-od/-flex)
   # on top of this same chart.
