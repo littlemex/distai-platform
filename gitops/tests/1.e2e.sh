@@ -1014,6 +1014,23 @@ if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
   pass "GPU cell ${CLUSTER}: accelerators step verified on ${ACCEL_NODE} (#28 acceptance criteria 2, 4, 5)"
 fi
 
+# --------------------- verify/cb-batch dry-run hook (NOT part of #25/#28,
+# not for merge; inserted on this verification-only branch so the Capacity
+# Block batch steps in 3.cb-batch.sh can be dry-run against a real, live
+# GPU cell before this script's own teardown at step 14-15 destroys it).
+if [[ "${CB_BATCH_INLINE:-0}" == "1" ]]; then
+  info "cb-batch dry run: invoking 3.cb-batch.sh inline against this live cell"
+  CB_EVIDENCE_DIR="${WORK_DIR}/cb-evidence" \
+    KUBECONFIG="${KUBECONFIG}" AWS_REGION="${AWS_REGION}" NAME="${CLUSTER}" \
+    CB_STEPS="${CB_BATCH_STEPS:-20 21 22 24}" \
+    bash "${GITOPS_ROOT}/tests/3.cb-batch.sh" 2>&1 | tee "${WORK_DIR}/cb-batch.log"
+  CB_BATCH_EXIT="${PIPESTATUS[0]:-$?}"
+  if [[ "${CB_BATCH_EXIT}" != "0" ]]; then
+    info "cb-batch dry run exited ${CB_BATCH_EXIT} -- not fatal to this e2e script, logged for the dry-run report"
+  fi
+  info "cb-batch dry-run evidence: ${WORK_DIR}/cb-evidence (will be lost when this run's WORK_DIR is cleaned up unless copied out before teardown)"
+fi
+
 # ------------------------------------------- 11. canary through the smoke queue
 #
 # Acceptance criterion 6, first half: the admin smoke workload is admitted
