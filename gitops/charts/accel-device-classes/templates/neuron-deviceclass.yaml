@@ -1,0 +1,17 @@
+# Maps every device the Neuron DRA driver publishes (driver neuron.aws.com,
+# the same selector the driver chart's own DeviceClass neuron.aws.com uses)
+# to the extended resource aws.amazon.com/neuron. The chart's own
+# DeviceClass carries no extendedResourceName, so without this object a
+# Layer 1 pod (resources.limits aws.amazon.com/neuron: 1) is never
+# scheduled onto a node whose Neuron devices are published only through DRA
+# (#19 E4b). On a device-plugin-method node the extended resource comes from
+# the device plugin instead and this DeviceClass matches nothing there.
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: neuron-extended-resource
+spec:
+  selectors:
+    - cel:
+        expression: device.driver == "neuron.aws.com"
+  extendedResourceName: aws.amazon.com/neuron
