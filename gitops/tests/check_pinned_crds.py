@@ -45,11 +45,45 @@ def load_docs(path):
         return [d for d in yaml.safe_load_all(f) if d]
 
 
-def helm_template_chart(repo_url, chart, version, skip_crds, workdir):
-    ref = f"oci://{repo_url}/{chart}"
+def set_path(d, dotted_key, value):
+    parts = dotted_key.split(".")
+    cur = d
+    for p in parts[:-1]:
+        cur = cur.setdefault(p, {})
+    cur[parts[-1]] = value
+
+
+def placeholder_values(addon_doc):
+    """Same technique 0.static.sh's own extract_values() uses: an addon.yaml's
+    `valuesFrom` entries are resolved only by Argo CD's templatePatch, from a
+    live cluster's Cluster generator params / registration Secret
+    annotations -- neither exists here. Filling each entry's own `helmKey`
+    path with an inert placeholder is enough to get a chart whose templates
+    `required()`-guard a cell-specific value (karpenter's settings.clusterName)
+    past that guard, so its real CRD content (if any; karpenter itself ships
+    none once --skip-crds is honored) still renders instead of this script
+    reporting every such chart as broken."""
+    values = dict(addon_doc.get("values") or {})
+    for entry in addon_doc.get("valuesFrom", []) or []:
+        set_path(values, entry["helmKey"], "pinned-crd-check-placeholder")
+    return values
+
+
+def helm_template_chart(addon_doc, workdir):
+    chart = addon_doc["chart"]
+    version = str(addon_doc["version"])
+    skip_crds = bool(addon_doc.get("skipCrds"))
+    ref = f"oci://{addon_doc['repoURL']}/{chart}"
     cmd = ["helm", "template", f"{chart}-pinned-crd-check", ref, "--version", version]
     if skip_crds:
         cmd.append("--skip-crds")
+    values = placeholder_values(addon_doc)
+    values_path = None
+    if values:
+        values_path = os.path.join(workdir, f"{chart}-values.yaml")
+        with open(values_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(values, f)
+        cmd += ["-f", values_path]
     proc = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True, timeout=300)
     if proc.returncode != 0:
         print(f"FAIL helm template {ref}:{version} (for CRD extraction): {proc.stderr.strip()}")
@@ -87,10 +121,7 @@ def main(repo_root, rendered_dir):
                 # future one might, and it is simply out of this script's
                 # scope (its CRDs, if any, would be checked in tree).
                 continue
-            repo_url = doc["repoURL"]
-            version = str(doc["version"])
-            skip_crds = bool(doc.get("skipCrds"))
-            rendered = helm_template_chart(repo_url, chart, version, skip_crds, workdir)
+            rendered = helm_template_chart(doc, workdir)
             if rendered is None:
                 failures += 1
                 continue
@@ -98,8 +129,9 @@ def main(repo_root, rendered_dir):
             for key, versions in crds.items():
                 served.setdefault(key, set()).update(versions)
             label = doc.get("addon", chart)
+            skip_crds = bool(doc.get("skipCrds"))
             suffix = " (skipCrds: its own crds/-folder CRDs are not applied)" if skip_crds else ""
-            print(f"INFO {label} ({chart}:{version}) ships {len(crds)} CustomResourceDefinition kind(s){suffix}")
+            print(f"INFO {label} ({chart}:{doc['version']}) ships {len(crds)} CustomResourceDefinition kind(s){suffix}")
 
     if failures:
         return 1
