@@ -153,8 +153,8 @@ setting a method label through `capacity-pool`'s `pool.labels`
 
 A `NodePool` without a method label gets no advertiser, so every
 advertiser is always delivered and costs nothing on a cell that does not
-use it. `cells/dp-a19-gpu/capacity-pool/gpu.yaml` and
-`cells/dp-a19-trn/capacity-pool/trn.yaml` are the device-plugin-method
+use it. `cells/dp-a19-gpu-r3/capacity-pool/gpu.yaml` and
+`cells/dp-a19-trn-r3/capacity-pool/trn.yaml` are the device-plugin-method
 pools the light-tier e2e launches nodes from.
 
 ## Adding a cell

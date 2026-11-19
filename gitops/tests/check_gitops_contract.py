@@ -640,15 +640,15 @@ def main(root: str) -> int:
     # The two real cells 1.e2e.sh (GITOPS_RUN_ACCEL_E2E=1) and the
     # real-machine verification launch nodes from. Their names and label
     # values must be exact, not just present: 1.e2e.sh runs with
-    # NAME=dp-a19-gpu and ACCEL_TRN_CELL_NAME=dp-a19-trn, and
+    # NAME=dp-a19-gpu-r3 and ACCEL_TRN_CELL_NAME=dp-a19-trn-r3, and
     # cells.ApplicationSet reads gitops/cells/<that name>/.
     #
     # Exactly one capacity-pool file per accelerator cell: 1.e2e.sh's
     # existing step 10 (which runs unchanged on the GPU cell) asserts
     # exactly one NodePool/EC2NodeClass/ResourceFlavor in the cell.
     accel_cells = {
-        "dp-a19-gpu": {"pool": "gpu", "label": "distai.dev/nvidia-gpu-method", "family": "g7"},
-        "dp-a19-trn": {"pool": "trn", "label": "distai.dev/neuron-method", "family": "trn2"},
+        "dp-a19-gpu-r3": {"pool": "gpu", "label": "distai.dev/nvidia-gpu-method", "family": "g7"},
+        "dp-a19-trn-r3": {"pool": "trn", "label": "distai.dev/neuron-method", "family": "trn2"},
     }
     for cell, want in accel_cells.items():
         files = sorted(glob.glob(os.path.join(gitops, "cells", cell, "capacity-pool", "*.yaml")))
@@ -682,11 +682,11 @@ def main(root: str) -> int:
             )
 
     # The GPU cell also runs 1.e2e.sh's existing steps 8-11 unchanged
-    # (NAME=dp-a19-gpu): they need one smoke LocalQueue, whose
+    # (NAME=dp-a19-gpu-r3): they need one smoke LocalQueue, whose
     # ClusterQueue must name that cell's own (only) ResourceFlavor.
-    gpu_smoke = sorted(glob.glob(os.path.join(gitops, "cells", "dp-a19-gpu", "smoke", "*.yaml")))
+    gpu_smoke = sorted(glob.glob(os.path.join(gitops, "cells", "dp-a19-gpu-r3", "smoke", "*.yaml")))
     check(
-        "cells/dp-a19-gpu/smoke/ has exactly one parameter file (1.e2e.sh steps 8-11 run on this cell when GITOPS_RUN_ACCEL_E2E=1)",
+        "cells/dp-a19-gpu-r3/smoke/ has exactly one parameter file (1.e2e.sh steps 8-11 run on this cell when GITOPS_RUN_ACCEL_E2E=1)",
         len(gpu_smoke) == 1,
         f"found {[os.path.relpath(p, root) for p in gpu_smoke]!r}",
     )
@@ -695,7 +695,7 @@ def main(root: str) -> int:
         flavor = (((doc.get("values") or {}).get("clusterQueue") or {}).get("resourceFlavor")) if isinstance(doc, dict) else None
         check(
             f"{os.path.relpath(path, root)}'s clusterQueue.resourceFlavor names the cell's own pool 'gpu'",
-            flavor == accel_cells["dp-a19-gpu"]["pool"],
+            flavor == accel_cells["dp-a19-gpu-r3"]["pool"],
             f"got {flavor!r}",
         )
 
