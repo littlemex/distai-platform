@@ -59,7 +59,19 @@ runner/run.sh --ref <this-PR's-branch> -- bash gitops/tests/0.static.sh
 For `1.e2e.sh`/`2.upgrade.sh`, export the same variables
 `infra/foundation/tests/README.md`'s "End-to-end test" section documents
 (`AWS_REGION`, `NAME`, `STATE_BUCKET`, `STATE_REGION`,
-`ADMIN_PRINCIPAL_ARN`, `MY_CIDR`), plus this layer's own:
+`ADMIN_PRINCIPAL_ARN`, `MY_CIDR`), plus this layer's own. **`NAME` must be
+`example-cell`** for this PR: `cells.ApplicationSet.yaml`'s Git file
+generator reads `gitops/cells/{{ .name }}/capacity-pool/*.yaml` and
+`.../smoke/*.yaml` from the checked-in repository itself (decision 9
+ships exactly one such pair, under `gitops/cells/example-cell/`, matching
+`infra/foundation/README.md`'s own `NAME=example-cell` convention); any
+other `NAME` has no matching directory, so the `capacity`/smoke step
+never generates an Application at all (confirmed on a real cluster: "no
+Application named `<NAME>-capacity-pool-<pool>` appeared" with any other
+`NAME`) -- the mechanism is otherwise fine, there is just nothing at that
+path to generate from. Future PRs that make the `capacity-pool`/`smoke`
+fixture discoverable by any cell name (not just this one checked-in
+example) should relax this:
 
 ```bash
 export GITOPS_REVISION=<this PR's branch, already pushed to GitHub>
