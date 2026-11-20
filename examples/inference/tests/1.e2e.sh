@@ -766,14 +766,16 @@ delta_forced="$(transfer_delta forced)"
   || fail "criterion 3: with transport.forceEfaSameNode=true the EFA counters on ${SAME_NODE} did not increase during ${TRANSFER_REQUESTS} requests"
 pass "criterion 3: transport.forceEfaSameNode=true, same node -- EFA counters increased by ${delta_forced} bytes during the requests"
 
-# NOT a flat-vs-rising contrast: confirmed on real hardware (g7.48xlarge,
+# NOT a flat-vs-rising contrast: observed on real hardware (g7.48xlarge,
 # 2026-11-20) that forceEfaSameNode=false ALSO moves real EFA bytes here,
-# the same magnitude as =true, because each role's Pod already owns its
-# own distinct physical EFA interface under this chart's two-Pod model --
-# libfabric's same-host shm bypass is keyed to both endpoints resolving to
-# the SAME device, which never happens across two separate Pods, so there
-# is nothing for forceEfaSameNode to force either way (see disagg-pd's own
-# README, "Known issues"). This asserts both cases move real traffic, not
+# the same magnitude as =true - a measurement, not a fully isolated
+# explanation. The likely reason is that each role's Pod already owns its
+# own distinct physical EFA interface under this chart's two-Pod model,
+# and libfabric's same-host shm bypass is keyed to both endpoints
+# resolving to the SAME device, which never happens across two separate
+# Pods; a difference in IPC/shared-memory namespace between two separate
+# Pods was not ruled out either (see disagg-pd's own README, "Known
+# issues"). This asserts both cases move real traffic, not
 # that they differ.
 same_node_cell false
 delta_default="$(transfer_delta default)"

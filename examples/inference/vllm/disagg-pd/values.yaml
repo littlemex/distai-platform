@@ -190,21 +190,27 @@ metrics:
 # separate, older "LMCacheConnectorV1" this chart does not use).
 #   gpu-only (default): no change from today - NixlConnector only, no
 #     cache tiering, vLLM's own GPU-resident KV cache only.
-#   local / remote: both add LMCacheMPConnector, pointed at LMCache's own
-#     separate "mp server" process via kv_connector_extra_config's
+#   local / remote: both add LMCacheMPConnector, pointed at ONE LMCache
+#     "mp server" endpoint via kv_connector_extra_config's
 #     "lmcache.mp.host"/"lmcache.mp.port" (confirmed,
 #     docs.lmcache.ai/mp/configuration.html, fetched 2026-11-21). This
-#     chart's own vLLM-side rendering is IDENTICAL for local and remote:
-#     the distinction between a node-local backend and an off-node one
-#     (for example Amazon ElastiCache) lives entirely in that mp server's
-#     own adapter configuration (its own CLI flags, e.g. --l2-adapter), not
-#     in anything vLLM's client config carries - this chart does not
-#     render the mp server itself (no Deployment, no --l2-adapter), so
-#     mode is kept as a three-value, forward-documenting choice (matching
-#     SGLang HiCache's genuinely distinct L1/L2/L3, and this directory's
-#     own measurement vocabulary) even though today it only changes
-#     whether kvCacheTier.lmcache.mpServerEndpoint is required, not what
-#     gets rendered beyond that.
+#     chart's own vLLM-side rendering is IDENTICAL for local and remote,
+#     and mode does NOT actually select between a node-local and an
+#     off-node backend: kvCacheTier.lmcache.mpServerEndpoint is a single
+#     static value, rendered the same way into every prefill and decode
+#     Pod, which by Decision 3 run on DIFFERENT nodes - so this chart has
+#     no way to express "a separate mp server local to each node" at all,
+#     only "one shared mp server address every Pod dials." Whichever
+#     backend that one mp server's own adapter configuration (its own CLI
+#     flags, e.g. --l2-adapter, not rendered here) actually uses - genuinely
+#     node-local storage, or something off-node like Amazon ElastiCache -
+#     is entirely that external process's own property, invisible to and
+#     unenforced by this chart. "local"/"remote" are kept as two words of
+#     this directory's own measurement vocabulary (matching the names
+#     used elsewhere for SGLang HiCache's genuinely distinct L1/L2/L3), to
+#     be recorded by hand alongside whichever backend the mp server was
+#     actually given for that run - not as a value this chart's rendering
+#     can tell apart or enforce.
 #
 # NOT built here, stated rather than silently assumed: (1) whether the
 # pinned vllm/vllm-openai:v0.34.0-efa image's own bundled LMCache version
@@ -215,18 +221,27 @@ metrics:
 # (2) whether LMCache's current RESP (Redis/Valkey) adapter's TLS behavior
 # is compatible with what Amazon ElastiCache's distributed KV caching
 # feature needs - that adapter's own docs do not mention TLS at all
-# (checked 2026-11-21). (3) whether vLLM's own KV-event publisher
-# (consumed by llm-d-kv-cache-manager's indexer for cross-node routing,
-# Decision 11) has any visibility at all into blocks LMCacheMPConnector
-# placed in this remote tier - those events describe vLLM's own
-# GPU-resident block pool (confirmed by reading vLLM's KV-event code path),
-# not an LMCache-side store, so routing a request to the node that already
-# holds a given prefix in the remote tier is, as of this writing, an
-# unsolved problem this chart does not claim to solve. (4) SGLang has no
-# confirmed Redis/ElastiCache L3 backend as of this writing
+# (checked 2026-11-21). (3) vLLM's own KV-event publisher (consumed by
+# llm-d-kv-cache-manager's indexer for cross-node routing, Decision 11)
+# describes vLLM's own GPU-resident block pool only, confirmed by reading
+# vLLM's KV-event code path - it has no visibility into anything
+# LMCacheMPConnector holds. Since the remote tier above is one shared
+# endpoint every Pod can already reach directly, this gap does not block
+# a hit on that tier (no "the node that holds it" to route to); what it
+# actually causes is the indexer/EPP's own reuse scoring under-counting
+# what is reusable at all (it only ever sees GPU-resident hits, never an
+# LMCache one), and it would block routing outright for a genuinely
+# node-local tier, if one is ever actually built (see (1) above - this
+# chart does not build one today). Not solved here either way. (4) SGLang
+# has no confirmed Redis/ElastiCache L3 backend as of this writing
 # (docs.sglang.io/advanced_features/hicache_design.html lists Mooncake,
-# DeepSeek 3FS, NIXL, AIBrix KVCache, file/fast_file - no RESP/Redis entry)
-# - this tiering is vLLM-only until that changes or is otherwise confirmed.
+# DeepSeek 3FS, NIXL, AIBrix KVCache, file/fast_file - no RESP/Redis entry),
+# even though AWS's own ElastiCache announcement names SGLang as a
+# supported engine via a LMCache connector - this chart does not reconcile
+# that discrepancy, and treats SGLang's own upstream docs as the more
+# specific, more current source for what SGLang itself actually ships;
+# this tiering is vLLM-only here until that changes or is otherwise
+# confirmed.
 #
 # Prerequisite this chart does not provide: an LMCache mp server already
 # running and reachable at kvCacheTier.lmcache.mpServerEndpoint. If that
@@ -238,10 +253,15 @@ kvCacheTier:
   mode: gpu-only
   lmcache:
     # host:port of LMCache's own separate "mp server" process (see this
-    # block's own comment above). Required whenever mode != gpu-only, for
-    # BOTH local and remote - this chart's own rendering does not change
-    # between them beyond that requirement. Empty: mode != gpu-only fails
-    # to render rather than silently running with no connector at all.
+    # block's own comment above), for example "10.0.1.23:5555" (5555 is
+    # LMCache's own confirmed default mp port). No scheme: the chart
+    # prepends tcp:// itself (LMCache's own mp.host requires one -
+    # docs.lmcache.ai/mp/configuration.html) and fails to render if this
+    # value already has one, rather than silently mis-parsing it. Required
+    # whenever mode != gpu-only, for BOTH local and remote - this chart's
+    # own rendering does not change between them beyond that requirement.
+    # Empty: mode != gpu-only fails to render rather than silently running
+    # with no connector at all.
     mpServerEndpoint: ""
     # Merged into kv_connector_extra_config as-is. Unconfirmed beyond
     # lmcache.mp.host/lmcache.mp.port above - see (1) in this block's own

@@ -67,6 +67,9 @@ app.kubernetes.io/component: {{ .component }}
 {{- if and (ne $kvt.mode "gpu-only") (not $kvt.lmcache.mpServerEndpoint) -}}
 {{- fail "kvCacheTier.mode=local or remote requires kvCacheTier.lmcache.mpServerEndpoint (host:port of LMCache's own mp server)" -}}
 {{- end -}}
+{{- if and $kvt.lmcache.mpServerEndpoint (not (regexMatch "^[^:/]+:[0-9]+$" $kvt.lmcache.mpServerEndpoint)) -}}
+{{- fail (printf "kvCacheTier.lmcache.mpServerEndpoint must be host:port with a numeric port and no scheme (the chart adds tcp:// itself), got %q" $kvt.lmcache.mpServerEndpoint) -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -74,14 +77,20 @@ app.kubernetes.io/component: {{ .component }}
   (vLLM's confirmed stacking shape, docs.vllm.ai "disaggregated prefilling",
   fetched 2026-11-21), skeleton only - see values.yaml's own kvCacheTier
   comment for what is and is not confirmed about the exact config keys
-  below, and for why local and remote render identically here. Call with
+  below, and for why local and remote render identically here. "tcp://" is
+  prepended to the host explicitly (LMCache's own mp configuration
+  confirms a scheme is required on lmcache.mp.host - docs.lmcache.ai/mp/configuration.html,
+  fetched 2026-11-21 - rather than relying on that doc's own, narrower
+  "a bare localhost/127.0.0.1 is normalized" note, which this chart does
+  not read as covering an arbitrary hostname). grpc:// is a documented
+  alternative transport this chart does not expose a value for. Call with
   the root context ($).
 */}}
 {{- define "disagg.lmcacheConnector" -}}
 {{- $kvt := .Values.kvCacheTier -}}
 {{- $lm := $kvt.lmcache -}}
 {{- $parts := splitList ":" $lm.mpServerEndpoint -}}
-{{- $cfg := dict "lmcache.mp.host" (first $parts) "lmcache.mp.port" (atoi (last $parts)) -}}
+{{- $cfg := dict "lmcache.mp.host" (printf "tcp://%s" (first $parts)) "lmcache.mp.port" (atoi (last $parts)) -}}
 {{- $cfg = merge $cfg (deepCopy $lm.extraConfig) -}}
 {{- dict "kv_connector" "LMCacheMPConnector" "kv_role" "kv_both" "kv_connector_extra_config" $cfg | toJson -}}
 {{- end -}}

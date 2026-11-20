@@ -516,6 +516,15 @@ def main():
     # local and remote both require kvCacheTier.lmcache.mpServerEndpoint
     # and render identically on the vLLM side (see values.yaml's own
     # kvCacheTier comment for why) -- tested together per mode.
+    def kv_transfer_config(w):
+        """The parsed KV_TRANSFER_CONFIG env value of a workload's gpu container(s), keyed by container name."""
+        out = {}
+        for c in gpu_containers(pod_spec(w)):
+            for e in c.get("env") or []:
+                if e["name"] == "KV_TRANSFER_CONFIG":
+                    out[c["name"]] = json.loads(e.get("value") or "{}")
+        return out
+
     for mode in ("local", "remote"):
         _, err = R.render(a.disagg, sets=[f"kvCacheTier.mode={mode}"])
         check(f"disagg-pd: kvCacheTier.mode={mode} without mpServerEndpoint: helm template fails",
@@ -524,32 +533,52 @@ def main():
         check(f"agg-baseline: kvCacheTier.mode={mode} without mpServerEndpoint: helm template fails",
               err is not None and "kvCacheTier.lmcache.mpServerEndpoint" in (err or ""), err)
 
+        # A scheme in the endpoint value is rejected: disagg.lmcacheConnector
+        # always prepends tcp:// itself, so "tcp://host:5555" would otherwise
+        # parse host as "tcp".
+        _, err = R.render(a.disagg, sets=[
+            f"kvCacheTier.mode={mode}", "kvCacheTier.lmcache.mpServerEndpoint=tcp://cache.example.internal:5555",
+        ])
+        check(f"disagg-pd: kvCacheTier.mode={mode} with a scheme in mpServerEndpoint: helm template fails",
+              err is not None and "mpServerEndpoint" in (err or ""), err)
+
         ddocs, err = R.render(a.disagg, sets=[
-            f"kvCacheTier.mode={mode}", "kvCacheTier.lmcache.mpServerEndpoint=cache.example.internal:6379",
+            f"kvCacheTier.mode={mode}", "kvCacheTier.lmcache.mpServerEndpoint=cache.example.internal:5555",
         ])
         if check(f"disagg-pd: kvCacheTier.mode={mode} with mpServerEndpoint: helm template", ddocs is not None, err):
             droles = check_roles_present(f"disagg-pd kvCacheTier.mode={mode}", ddocs)
             if droles:
-                cm = configmap_text(ddocs)
                 for r in ROLES:
                     for w in droles[r]:
-                        text = " ".join(container_text(c) for c in gpu_containers(pod_spec(w))) + " " + cm
-                        check(f"disagg-pd kvCacheTier.mode={mode}: {name_of(w)} ({r}) stacks "
-                              "MultiConnector(NixlConnector, LMCacheMPConnector), keeping NixlConnector, "
-                              "and carries the mp server host",
-                              "MultiConnector" in text and "NixlConnector" in text
-                              and "LMCacheMPConnector" in text and "cache.example.internal" in text)
+                        for cname, kvcfg in kv_transfer_config(w).items():
+                            label = f"disagg-pd kvCacheTier.mode={mode}: {name_of(w)} ({r}) container {cname}"
+                            check(f"{label}: kv_connector is MultiConnector",
+                                  kvcfg.get("kv_connector") == "MultiConnector", kvcfg)
+                            check(f"{label}: kv_load_failure_policy is set at the top level too",
+                                  kvcfg.get("kv_load_failure_policy") == "fail", kvcfg)
+                            conns = ((kvcfg.get("kv_connector_extra_config") or {}).get("connectors")) or []
+                            check(f"{label}: NixlConnector is first in the connectors list",
+                                  bool(conns) and conns[0].get("kv_connector") == "NixlConnector", conns)
+                            lm = conns[1] if len(conns) > 1 else {}
+                            check(f"{label}: LMCacheMPConnector is second, host has tcp:// and port is numeric 5555",
+                                  lm.get("kv_connector") == "LMCacheMPConnector"
+                                  and (lm.get("kv_connector_extra_config") or {}).get("lmcache.mp.host") == "tcp://cache.example.internal"
+                                  and (lm.get("kv_connector_extra_config") or {}).get("lmcache.mp.port") == 5555,
+                                  lm)
 
         radocs, err = R.render(a.agg, sets=[
-            f"kvCacheTier.mode={mode}", "kvCacheTier.lmcache.mpServerEndpoint=cache.example.internal:6379",
+            f"kvCacheTier.mode={mode}", "kvCacheTier.lmcache.mpServerEndpoint=cache.example.internal:5555",
         ])
         if check(f"agg-baseline: kvCacheTier.mode={mode} with mpServerEndpoint: helm template", radocs is not None, err):
-            aw2 = workloads(radocs)
-            text = " ".join(json.dumps(w) for w in aw2) + " " + configmap_text(radocs)
-            check(f"agg-baseline kvCacheTier.mode={mode}: LMCacheMPConnector alone, no MultiConnector "
-                  "(there is no NixlConnector here to stack it with), carries the mp server host",
-                  "LMCacheMPConnector" in text and "MultiConnector" not in text
-                  and "cache.example.internal" in text)
+            for w in workloads(radocs):
+                for cname, kvcfg in kv_transfer_config(w).items():
+                    label = f"agg-baseline kvCacheTier.mode={mode}: {name_of(w)} container {cname}"
+                    check(f"{label}: kv_connector is LMCacheMPConnector alone, no MultiConnector",
+                          kvcfg.get("kv_connector") == "LMCacheMPConnector", kvcfg)
+                    check(f"{label}: host has tcp:// and port is numeric 5555",
+                          (kvcfg.get("kv_connector_extra_config") or {}).get("lmcache.mp.host") == "tcp://cache.example.internal"
+                          and (kvcfg.get("kv_connector_extra_config") or {}).get("lmcache.mp.port") == 5555,
+                          kvcfg)
 
     # ----------------------------- exposure and pinning (AGENTS.md section 6)
     for chart_label, rendered in (("disagg-pd", docs), ("agg-baseline", adocs)):

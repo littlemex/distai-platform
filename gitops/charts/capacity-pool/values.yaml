@@ -52,14 +52,14 @@ pool:
   #       deviceIndex: 1
   #       interfaceType: efa-only
   #
-  # A two-network-card type (two EFA interfaces, for example g7.48xlarge or
-  # p5en.48xlarge) needs one efa-only interface per card instead - the only
-  # way two separate EFA-requesting Pods (for example disagg-pd's prefill
-  # and decode under placement.sameNodeMeasurement) can land on the SAME
-  # node at all, since the EFA device plugin allocates one physical
-  # interface per Pod and never gives the same interface to two Pods
-  # (confirmed on real hardware, g7.48xlarge, 2026-11-20 - a single-
-  # network-card size left the second Pod Pending forever):
+  # A two-network-card type (two EFA interfaces, for example g7.48xlarge)
+  # needs one efa-only interface per card instead - the only way two
+  # separate EFA-requesting Pods (for example disagg-pd's prefill and
+  # decode under placement.sameNodeMeasurement) can land on the SAME node
+  # at all, since the EFA device plugin allocates one physical interface
+  # per Pod and never gives the same interface to two Pods (confirmed on
+  # real hardware, g7.48xlarge, 2026-11-20 - a single-network-card size
+  # left the second Pod Pending forever):
   #   networkInterfaces:
   #     - networkCardIndex: 0
   #       deviceIndex: 0
@@ -70,6 +70,12 @@ pool:
   #     - networkCardIndex: 1
   #       deviceIndex: 0
   #       interfaceType: efa-only
+  # Network card counts vary widely by instance type - p5en.48xlarge has
+  # 16, not 2 (confirmed via aws ec2 describe-instance-types, 2026-11-21),
+  # not the two-card example above. Extend the pattern with one more
+  # {networkCardIndex: N, deviceIndex: 0, interfaceType: efa-only} entry
+  # per additional card actually wanted; this chart does not generate the
+  # list for you.
   networkInterfaces: []
 
   # EC2NodeClass.spec.blockDeviceMappings' root volume size, as a plain

@@ -74,7 +74,14 @@
 # `app: nvidia-dcgm-exporter` instead, with no `app.kubernetes.io/name` at
 # all - the OR below matches either label alone, not both at once. A
 # different workload entirely from this directory's vllm-metrics label,
-# one per node rather than one per engine pod.
+# one per node rather than one per engine pod. The GPU Operator's own
+# DaemonSet also runs a port-less init container ("toolkit-validation")
+# in the same Pod; kubernetes_sd_configs emits one target per declared
+# port, not per container, so a second relabel keeps only the port
+# actually named "metrics" (both distributions' own exporter container
+# names its port "metrics", confirmed from each project's own source,
+# 2026-11-21) rather than scraping whatever other port a Pod happens to
+# expose.
 - job_name: 'dcgm-gpu'
   scrape_interval: 10s
   metrics_path: /metrics
@@ -84,6 +91,9 @@
   - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_label_app]
     action: keep
     regex: "dcgm-exporter;.*|.*;nvidia-dcgm-exporter"
+  - source_labels: [__meta_kubernetes_pod_container_port_name]
+    action: keep
+    regex: "metrics"
   - source_labels: [__meta_kubernetes_pod_node_name]
     action: replace
     target_label: kubernetes_node

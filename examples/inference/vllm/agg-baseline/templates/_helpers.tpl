@@ -34,6 +34,9 @@ app.kubernetes.io/component: aggregated
 {{- if and (ne $kvt.mode "gpu-only") (not $kvt.lmcache.mpServerEndpoint) -}}
 {{- fail "kvCacheTier.mode=local or remote requires kvCacheTier.lmcache.mpServerEndpoint (host:port of LMCache's own mp server)" -}}
 {{- end -}}
+{{- if and $kvt.lmcache.mpServerEndpoint (not (regexMatch "^[^:/]+:[0-9]+$" $kvt.lmcache.mpServerEndpoint)) -}}
+{{- fail (printf "kvCacheTier.lmcache.mpServerEndpoint must be host:port with a numeric port and no scheme (the chart adds tcp:// itself), got %q" $kvt.lmcache.mpServerEndpoint) -}}
+{{- end -}}
 {{- end -}}
 
 {{/* Skeleton only; see ../disagg-pd/templates/_helpers.tpl's own
@@ -43,7 +46,7 @@ app.kubernetes.io/component: aggregated
 {{- $kvt := .Values.kvCacheTier -}}
 {{- $lm := $kvt.lmcache -}}
 {{- $parts := splitList ":" $lm.mpServerEndpoint -}}
-{{- $cfg := dict "lmcache.mp.host" (first $parts) "lmcache.mp.port" (atoi (last $parts)) -}}
+{{- $cfg := dict "lmcache.mp.host" (printf "tcp://%s" (first $parts)) "lmcache.mp.port" (atoi (last $parts)) -}}
 {{- $cfg = merge $cfg (deepCopy $lm.extraConfig) -}}
 {{- dict "kv_connector" "LMCacheMPConnector" "kv_role" "kv_both" "kv_connector_extra_config" $cfg | toJson -}}
 {{- end -}}

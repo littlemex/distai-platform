@@ -71,17 +71,22 @@ metrics:
   enabled: true
 
 # Skeleton only (values and rendering, not built or measured on real
-# hardware yet). Same three tiers as ../disagg-pd/values.yaml's own
-# kvCacheTier (see that chart's comment for what is and is not confirmed
-# about the exact LMCache config keys, the LMCacheMPConnector name, and why
-# local and remote render identically) - this chart has no NixlConnector to
-# stack onto, so local/remote set kv-transfer-config to LMCacheMPConnector
-# alone instead of a MultiConnector list. A shared remote tier is this
-# aggregated baseline's own way to show cross-replica prefix reuse, which
-# an aggregated deployment cannot get from a bigger single-process cache
-# alone once it has more than one replica.
+# hardware yet). Same kvCacheTier shape as ../disagg-pd/values.yaml's own
+# (see that chart's comment for what is and is not confirmed about the
+# exact LMCache config keys, the LMCacheMPConnector name, and why local
+# and remote render identically and do not actually select a node-local
+# vs. off-node backend - mpServerEndpoint is one static value rendered
+# into every replica here too) - this chart has no NixlConnector to stack
+# onto, so local/remote set kv-transfer-config to LMCacheMPConnector alone
+# instead of a MultiConnector list. The one shared mp server this does
+# express is this aggregated baseline's own way to show cross-replica
+# prefix reuse, which a bigger single-process cache cannot get once
+# engine.replicas is more than 1.
 kvCacheTier:
   mode: gpu-only
   lmcache:
+    # host:port of LMCache's own separate "mp server" process; see
+    # ../disagg-pd/values.yaml's own mpServerEndpoint comment for the
+    # format (no scheme, numeric port) and default port.
     mpServerEndpoint: ""
     extraConfig: {}
