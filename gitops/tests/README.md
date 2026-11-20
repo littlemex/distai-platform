@@ -133,7 +133,7 @@ For `2.upgrade.sh` instead, additionally export `UPGRADE_TO_KARPENTER_VERSION` (
 | OCI chart reference accepted; Git-file-generator `revision:` resolves from the same Matrix's Cluster generator | `1.e2e.sh` step 9 (`${APP_KARPENTER}` Healthy+Synced from an `oci://` source; `${APP_CAPACITY_POOL}`'s `targetRevision` -- the `cells` ApplicationSet's own Git-file-generator `revision:` field, resolved from the Cluster generator's annotation -- matches the Secret's annotation; `${APP_KARPENTER}`'s own `targetRevision` is its pinned chart version, never a git revision, so it cannot be the check for this criterion) |
 | Before this PR's foundation change: no `AmazonEKSClusterAdminPolicy` association on the capability's access entry (it already carries the two built-in Argo-CD-capability-management policies); after: `AmazonEKSClusterAdminPolicy` added | `1.e2e.sh` steps 2-3 (same cell, `GITOPS_BASE_REF` then this checkout's `infra/foundation`) |
 | bootstrap.sh idempotent; `--revision`-only re-run updates the Secret annotation and root `Application`'s `targetRevision` together; wrong-cluster attempt aborts before any write | `1.e2e.sh` steps 5-7 (a `.spec`/annotation write-fingerprint, not a raw `resourceVersion`, compared before/after each re-run; step 7's 7a and 7b each forge one of decision 1's two fields independently) |
-| Cross-`Application` ordering evidenced by breaking `crds` and `kueue`, not asserted from documentation | `1.e2e.sh` step 12 (two disposable branches, each reverted and recovery confirmed) |
+| Cross-`Application` ordering evidenced by breaking `crds` and `kueue`, not asserted from documentation | `1.e2e.sh` step 3c stages A-C (this cell's own first-ever bootstrap, pristinely proving capacity fails to create NEW objects while either chart is broken) and step 12 (breaking each chart on an already-converged cell, reverted and recovery confirmed) |
 | `karpenter-crd`/`karpenter` report no shared CRD | `1.e2e.sh` step 9 (`status.resources` kind=CustomResourceDefinition lists compared) |
 | `kueue`/`karpenter` Healthy before any `NodePool`-launched node exists; smoke canary admitted and a node launches | `1.e2e.sh` steps 9 and 11 |
 | Removing one `addon.yaml` orphans nothing; deleting the three bootstrap objects orphans `NodePool`/`EC2NodeClass`/the instance; re-running bootstrap.sh re-adopts without duplicating; destroy still terminates the instance | `1.e2e.sh` steps 13-15 (creationTimestamp/instance-state comparisons) |
@@ -175,33 +175,54 @@ silently:
   any partition, since the issue only specifies "an ARN, never an API
   server URL."
 - **The ordering experiment (acceptance criterion 4) confirms, rather than
-  assumes, which branch of decision 4 is live, and is honest about what it
-  can and cannot prove post-build.** `1.e2e.sh` reads
-  `platform.ApplicationSet`'s own `status.applicationStatus` directly: on
-  a real cluster this is empty, confirming `RollingSync` is **not**
-  active on the managed capability as of this PR, and that every
-  `Application` syncs independently with `automated.selfHeal` instead
-  (`check_gitops_contract.py` accepts either `RollingSync` steps or no
-  `strategy.type` for this reason, in case a future capability version
-  changes the answer). What the breakage checks can actually observe is
-  narrower than decision 4's own "capacity fails to create NEW objects
-  depending on a broken crds step": by the time either break experiment
-  runs, the `capacity` step has already created its `NodePool`/
-  `EC2NodeClass`/`ResourceFlavor` once, and a Kubernetes CRD, once
+  assumes, which branch of decision 4 is live, and proves both the
+  pristine and the already-converged form of the claim, on the same
+  cell.** `1.e2e.sh` reads `platform.ApplicationSet`'s own
+  `status.applicationStatus` directly: on a real cluster this is empty,
+  confirming `RollingSync` is **not** active on the managed capability as
+  of this PR, and that every `Application` syncs independently with
+  `automated.selfHeal` instead (`check_gitops_contract.py` accepts either
+  `RollingSync` steps or no `strategy.type` for this reason, in case a
+  future capability version changes the answer).
+  Decision 4's stronger claim ("capacity fails to create NEW objects
+  depending on a broken crds step") cannot be observed once a chart's
+  CRDs have ever synced successfully, since a Kubernetes CRD, once
   installed, persists regardless of whether the `Application` that
-  installed it later goes unsynced -- so breaking `crds` after a
-  successful build cannot show capacity-pool failing to create something
-  it has no new reason to create. What this suite instead evidences,
-  confirmed on a real cluster: the broken `Application` itself (`crds` or
-  `kueue`) leaves `Synced` and recovers once restored, within the retry
-  bound; a chain that does not depend on the broken one (the `NodePool`
-  depending on `crds`, unaffected by breaking `kueue`) stays unaffected;
-  and capacity-pool's own already-created objects are not retroactively
-  un-synced merely because a step they once depended on is now broken.
-  Proving the stronger "fails to create NEW objects" claim would need a
-  from-scratch bootstrap directly from a broken revision, before any CRD
-  of the broken chart is ever installed -- a different experiment this
-  suite does not attempt.
+  installed it later goes unsynced. The only moment a cell is ever in a
+  state where `karpenter-crd`'s and `kueue`'s own CRDs have never existed
+  is its own first-ever bootstrap, so `1.e2e.sh` stages that first
+  bootstrap itself in three steps (A/B/C), right after the "after"
+  foundation apply and before any `capacity`/`smoke` object has ever been
+  created: (A) both `karpenter-crd` and `kueue` broken -- nothing new can
+  be created; (B) `kueue` still broken, `karpenter-crd` fixed; (C) fully
+  restored. Stage B's result, confirmed on a real cluster and not
+  assumed: `karpenter-crd`'s own `Application` reaches `Synced` and its
+  CRDs become `Established`, but `capacity-pool` as a whole still cannot
+  create `NodePool`/`EC2NodeClass` either, despite neither depending on
+  `kueue`. `capacity-pool`'s own `status.operationState.message` shows
+  why -- `"one or more synchronization tasks are not valid: failed to
+  discover server resources for group version kueue.x-k8s.io/v1beta2:
+  the server could not find the requested resource. Retrying attempt
+  #N"` -- because Argo CD validates every resource kind in one
+  `Application`'s manifest set before applying any of them in one sync
+  operation, not per-resource; a mixed-dependency `Application` is only
+  as available as its least-available dependency. This is a stronger
+  form of decision 4's own claim than "only the dependent resource fails
+  to create," and the earlier design of this test (expecting
+  `NodePool`/`EC2NodeClass` to converge in stage B while only
+  `ResourceFlavor` stayed blocked) was wrong for the same reason, caught
+  only by running it against a real cluster.
+  Separately, step 12's break/restore experiments run against this same
+  cell once already converged, and evidence the narrower, already-
+  converged-cell claim that stage A/B/C above cannot re-observe once
+  `capacity-pool`'s objects already exist: the broken `Application`
+  itself (`crds` or `kueue`) leaves `Synced` and recovers once restored,
+  within the retry bound; a chain that does not depend on the broken one
+  (the `NodePool` depending on `crds`, unaffected by breaking `kueue`)
+  stays unaffected; and capacity-pool's own already-created objects are
+  not retroactively un-synced merely because a step they once depended on
+  is now broken (Argo CD does not prune on a blocked/invalid sync by
+  default).
 - **The idempotency check uses `resourceVersion` for the Secret and
   AppProject, but a `.spec`-only fingerprint for the root Application.**
   A `kubectl apply` of byte-identical content does not change
