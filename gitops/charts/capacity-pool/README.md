@@ -164,8 +164,16 @@ step by hand, as with the smoke chart's `clusterQueue.resourceFlavor`.
   (`"pod-count":0`) a short time later -- read in isolation, this last
   log line alone is indistinguishable from "the pod was never bound",
   and two earlier, less complete investigations of the same failure each
-  concluded exactly that before this full trace corrected them. Any
-  consumer of this chart running a realistically-sized image on any pool
-  it creates, reserved/on-demand/flex alike, is exposed to the identical
-  failure until `pool.rootVolumeSizeGi` is set large enough for that
-  image.
+  concluded exactly that before this full trace corrected them. One of
+  those two earlier investigations captured Karpenter's own controller
+  log in isolation (a `trn2.3xlarge` node reaching `"initialized
+  nodeclaim"` with `aws.amazon.com/neuron` already `allocatable`, then
+  3m47s later `"disrupting node(s)"` with `"pod-count":0`) and proposed
+  raising `pool.disruption.consolidateAfter` above its `60s` default as
+  the fix; a control run with `consolidateAfter: 15m` reproduced the
+  identical eviction failure 17m44s in, disproving that fix -- raising
+  `consolidateAfter` only delays the same root-volume exhaustion, it does
+  not address it. Any consumer of this chart running a realistically-sized
+  image on any pool it creates, reserved/on-demand/flex alike, is exposed
+  to the identical failure until `pool.rootVolumeSizeGi` is set large
+  enough for that image.
