@@ -495,9 +495,19 @@ def main():
     if check("agg-baseline: helm template with default values", adocs is not None, err):
         aw = workloads(adocs)
         check("agg-baseline: exactly one vLLM workload", len(aw) == 1, str([name_of(w) for w in aw]))
-        text = " ".join(json.dumps(w) for w in aw) + " " + configmap_text(adocs)
-        check("agg-baseline: no KV connector configured (no kv-transfer-config, no NixlConnector)",
-              "kv-transfer-config" not in text and "kv_transfer_config" not in text and "NixlConnector" not in text)
+        # The command script always carries the literal "--kv-transfer-config"
+        # text (it is a shell conditional on KV_TRANSFER_CONFIG's own value,
+        # present whether or not kvCacheTier is gpu-only) - the actual
+        # contract is that the env var's own *value* is empty by default,
+        # not that the flag name never renders anywhere.
+        kv_envs = set()
+        for w in aw:
+            for c in gpu_containers(pod_spec(w)):
+                for e in c.get("env") or []:
+                    if e["name"] == "KV_TRANSFER_CONFIG":
+                        kv_envs.add(e.get("value", "<valueFrom>"))
+        check("agg-baseline: no KV connector configured by default (KV_TRANSFER_CONFIG is empty)",
+              kv_envs == {""}, repr(kv_envs))
         aroles = roles_by(adocs, ROLE_KEY)
         check("agg-baseline: no workload is pinned to a prefill/decode role node",
               not any(aroles[r] for r in ROLES))
