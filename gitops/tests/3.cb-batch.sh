@@ -377,23 +377,54 @@ if run_step 27; then
     # on a 1-GPU-per-node instance type, so the scheduler/Karpenter must
     # put the second one on a different, freshly launched node.
     info "step27: only one node visible yet (${NODE_A:-<none>}) — launching a second GPU-holding pod to force Karpenter to provision a second node"
-    # 2026-11-20 finding: an earlier version of this pod had NO placement
-    # constraint beyond the bare GPU request, and the force pod simply
-    # scheduled onto Node A's own idle GPU (every earlier step's own
-    # check pods are --rm'd by the time step27 runs, so Node A's GPU is
-    # free) -- it never created scheduling pressure for a second node, so
-    # "wait for a second node" waited out its own 7-minute timeout against
-    # a request that could always be satisfied by the node that already
-    # existed. Fix: an explicit nodeAffinity NotIn against Node A's own
-    # hostname makes the request genuinely unsatisfiable without a new
-    # node, so Karpenter has to provision one (or report, via NodeClaim
-    # conditions, exactly why it can't).
+    # 2026-11-20 findings, two rounds. Round 1: an earlier version of this
+    # pod had NO placement constraint beyond the bare GPU request, and the
+    # force pod simply scheduled onto Node A's own idle GPU (every earlier
+    # step's own check pods are --rm'd by the time step27 runs, so Node
+    # A's GPU is free) -- it never created scheduling pressure for a
+    # second node. Round 1's own fix (nodeAffinity NotIn against Node A's
+    # hostname) was ALSO wrong, confirmed by a real pod describe/events on
+    # a live cluster: Karpenter's own FailedScheduling event says plainly
+    # "using label kubernetes.io/hostname is not allowed as it might
+    # interfere with the internal provisioning logic" -- Karpenter
+    # blanket-refuses to even attempt provisioning a node for a pod whose
+    # own scheduling constraints reference kubernetes.io/hostname at all,
+    # regardless of operator, since a not-yet-launched node has no
+    # hostname yet to reason about. Round 2 fix: podAntiAffinity with
+    # topologyKey kubernetes.io/hostname against a real label on a
+    # concrete anchor pod -- a Karpenter-supported, well-understood
+    # "spread across nodes" pattern (unlike a raw nodeAffinity hostname
+    # match), confirmed in Karpenter's own FailedScheduling message as one
+    # of the well-known labels it reasons about for provisioning
+    # (topology.kubernetes.io/zone etc. are listed there; topologyKey in
+    # podAntiAffinity is handled by the generic pod-affinity scheduling
+    # path, not the disallowed raw-label path).
     #
-    # Same finding and fix as step20 for the pod spec itself: "k run
-    # --overrides" with a partial containers[0] entry replaces the whole
-    # array (no strategic merge by name on this kubectl version), so apply
-    # a complete Pod manifest directly instead of relying on "k run" +
-    # generator/override.
+    # Anchor pod, pinned to Node A by name (ordinary nodeSelector against
+    # an EXISTING node -- not a provisioning decision, so the "no
+    # kubernetes.io/hostname" rule above does not apply here).
+    cat <<PODEOF | k apply -f - || fail "step27: could not create cb-anchor pod"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cb-anchor
+  labels:
+    cb-batch/role: anchor
+  annotations:
+    karpenter.sh/do-not-disrupt: "true"
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: "${NODE_A}"
+  tolerations:
+    - operator: Exists
+  containers:
+    - name: cb-anchor
+      image: public.ecr.aws/amazonlinux/amazonlinux:2023
+      command: ["sh", "-c", "sleep 600"]
+PODEOF
+    wait_until 60 5 "cb-anchor pod Running on Node A" bash -c "kubectl get pod cb-anchor -o jsonpath='{.status.phase}' 2>/dev/null | grep -q Running" \
+      || fail "step27: cb-anchor pod did not reach Running on Node A within 60s"
     cat <<PODEOF | k apply -f - || fail "step27: could not create cb-force-2node pod"
 apiVersion: v1
 kind: Pod
@@ -406,13 +437,12 @@ spec:
   tolerations:
     - operator: Exists
   affinity:
-    nodeAffinity:
+    podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-          - matchExpressions:
-              - key: kubernetes.io/hostname
-                operator: NotIn
-                values: ["${NODE_A}"]
+        - labelSelector:
+            matchLabels:
+              cb-batch/role: anchor
+          topologyKey: kubernetes.io/hostname
   containers:
     - name: cb-force-2node
       image: public.ecr.aws/amazonlinux/amazonlinux:2023
@@ -451,7 +481,7 @@ PODEOF
       k get workloads -A 2>&1 || true
       echo "=== DIAG end ==="
     }
-    k delete pod cb-force-2node --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    k delete pod cb-force-2node cb-anchor --ignore-not-found --wait=false >/dev/null 2>&1 || true
     NODE_A="$(gpu_node_a)"
     NODE_B="$(gpu_node_b)"
   fi
