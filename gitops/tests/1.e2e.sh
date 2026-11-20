@@ -840,10 +840,17 @@ wait_until 300 10 "karpenter-crd Application reaches Synced" app_synced "${APP_K
 # app_synced on the whole Application here never succeeds (not a timing
 # issue - ResourceFlavor's own CRD is deliberately still broken), so the
 # two karpenter-owned objects are checked directly instead.
-hard_refresh_app "${APP_CAPACITY_POOL}"
-wait_until 180 10 "NodePool cpu is created" nodepool_exists \
+# A single hard refresh right after karpenter-crd's own Synced is not
+# enough on its own (confirmed on a real run): capacity-pool's own prior
+# sync attempt (stage A, when the CRD did not exist) can leave it in Argo
+# CD's own exponential sync-retry backoff, which 180s does not reliably
+# outlast. Refreshing on every poll, not once, keeps forcing Argo CD to
+# re-attempt rather than waiting out whatever backoff it landed on.
+nodepool_exists_refreshing() { hard_refresh_app "${APP_CAPACITY_POOL}"; nodepool_exists; }
+ec2nodeclass_exists_refreshing() { hard_refresh_app "${APP_CAPACITY_POOL}"; ec2nodeclass_exists; }
+wait_until 300 15 "NodePool cpu is created" nodepool_exists_refreshing \
   || fail "NodePool cpu was not created even after karpenter-crd's CRDs became available"
-wait_until 60 5 "EC2NodeClass cpu is created" ec2nodeclass_exists \
+wait_until 60 10 "EC2NodeClass cpu is created" ec2nodeclass_exists_refreshing \
   || fail "EC2NodeClass cpu was not created even after karpenter-crd's CRDs became available"
 app_not_synced "${APP_CAPACITY_POOL}" \
   || fail "capacity-pool Application unexpectedly reached fully Synced although kueue's ResourceFlavor CRD is still broken"
@@ -859,17 +866,19 @@ run_bootstrap --revision "${GITOPS_REVISION}" \
 wait_until 300 10 "kueue Application reaches Synced" app_synced "${APP_KUEUE}" \
   || fail "${APP_KUEUE} did not reach Synced (sync=$(app_sync "${APP_KUEUE}")) after restoring --revision"
 # Same reasoning as capacity-pool in stage B: kueue's own CRDs
-# (ResourceFlavor, ClusterQueue, ...) are also brand new here.
-hard_refresh_app "${APP_SMOKE}"
-wait_until 600 15 "smoke Application reaches Synced" app_synced "${APP_SMOKE}" \
+# (ResourceFlavor, ClusterQueue, ...) are also brand new here, and a
+# single refresh does not reliably outlast Argo CD's own sync-retry
+# backoff from the earlier failed attempts -- refresh on every poll.
+smoke_synced_refreshing() { hard_refresh_app "${APP_SMOKE}"; app_synced "${APP_SMOKE}"; }
+wait_until 600 15 "smoke Application reaches Synced" smoke_synced_refreshing \
   || fail "${APP_SMOKE} did not reach Synced (sync=$(app_sync "${APP_SMOKE}")) after restoring --revision"
 # Closes the loop on stage B's own observation: capacity-pool's
 # Application stayed OutOfSync there specifically because its
 # ResourceFlavor object needed kueue's still-broken CRD; now that kueue
 # is fixed too, the whole Application (not just NodePool/EC2NodeClass)
 # should finally reach Synced.
-hard_refresh_app "${APP_CAPACITY_POOL}"
-wait_until 300 10 "capacity-pool Application reaches Synced" app_synced "${APP_CAPACITY_POOL}" \
+capacity_pool_synced_refreshing() { hard_refresh_app "${APP_CAPACITY_POOL}"; app_synced "${APP_CAPACITY_POOL}"; }
+wait_until 300 15 "capacity-pool Application reaches Synced" capacity_pool_synced_refreshing \
   || fail "${APP_CAPACITY_POOL} did not reach Synced (sync=$(app_sync "${APP_CAPACITY_POOL}")) once both karpenter-crd and kueue were fixed"
 pass "restored --revision to ${GITOPS_REVISION}: kueue, capacity-pool (now including ResourceFlavor) and the smoke ClusterQueue/LocalQueue all converge -- this cell's first-ever bootstrap sequence is complete"
 
