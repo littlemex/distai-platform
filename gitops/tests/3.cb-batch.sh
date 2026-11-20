@@ -102,26 +102,55 @@ if run_step 20; then
   # default and that disk/disruption fix are deliberately two independent
   # layers of the same fix, not a substitute for each other.
   CB_HEALTH_IMAGE="${CB_HEALTH_IMAGE:-public.ecr.aws/amazonlinux/amazonlinux:2023}"
-  # 2026-11-19 dry-run finding: this pod never requested nvidia.com/gpu, so
-  # the device plugin never injected the driver/nvidia-smi into it at all --
-  # this was the real cause of "nvidia-smi: command not found", not the base
-  # image. The --limits flag used in an earlier fix attempt does not exist
-  # on this kubectl version ("unknown flag: --limits") -- the request has to
-  # go through --overrides instead, merged onto the generated container by
-  # its name (Pod.spec.containers has patchMergeKey: name, so a partial
-  # entry here does not need to repeat image/command).
-  k run cb-health --rm -i --restart=Never --image="${CB_HEALTH_IMAGE}" \
-    --overrides="{\"metadata\":{\"annotations\":{\"karpenter.sh/do-not-disrupt\":\"true\"}},\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"${NODE}\"},\"tolerations\":[{\"operator\":\"Exists\"}],\"containers\":[{\"name\":\"cb-health\",\"resources\":{\"limits\":{\"nvidia.com/gpu\":\"1\"}}}]}}" \
-    -- bash -c '
-      echo "--- nvidia-smi -L ---"; nvidia-smi -L
-      echo "--- driver/CUDA ---"; nvidia-smi --query-gpu=driver_version,name,memory.total --format=csv
-      echo "--- Fabric Manager (if present) ---"; (systemctl is-active nvidia-fabricmanager 2>&1 || echo "not applicable on this instance type")
-      echo "--- dcgmi diag -r 3 ---"; (command -v dcgmi >/dev/null && dcgmi diag -r 3 || echo "dcgmi not in this image; run from a DCGM-enabled image on the real block")
-      echo "--- nvbandwidth (if present) ---"; (command -v nvbandwidth >/dev/null && nvbandwidth || echo "nvbandwidth not in this image; add to the pre-block image for the real block")
-      echo "--- lspci PCIe topology ---"; (command -v lspci >/dev/null && lspci -t || echo "lspci not in this image; the real block pinned NCCL/EFA test image includes pciutils")
-      echo "--- aws-ofi-nccl / libfabric ---"; (fi_info -p efa 2>&1 || echo "no EFA on this node (expected on cheap dry-run instances)")
-      echo "--- NCCL/libfabric versions baked into this image ---"
-    ' 2>&1 | tee "${CB_EVIDENCE_DIR}/step20-node-health.raw.log" || fail "step20: health pod did not complete"
+  # 2026-11-19 dry-run findings, two rounds: (1) this pod never requested
+  # nvidia.com/gpu, so the device plugin never injected the driver/nvidia-smi
+  # into it at all ("nvidia-smi: command not found" -- not a base-image
+  # problem); (2) the fix for that via "k run --limits=..." failed because
+  # this kubectl version has no --limits flag, and the follow-up fix via
+  # "k run --overrides" with a PARTIAL containers[0] entry (just name +
+  # resources) failed too ("spec.containers[0].image: Required value") --
+  # --overrides here does a plain array replace, not a strategic merge by
+  # name, so a partial container entry destroys the image/command the base
+  # generator set. Fix: stop using "k run" for this pod; apply a complete
+  # Pod manifest directly, so there is no generator/override interaction to
+  # get wrong.
+  cat <<PODEOF | k apply -f - || fail "step20: could not create cb-health pod"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cb-health
+  annotations:
+    karpenter.sh/do-not-disrupt: "true"
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: "${NODE}"
+  tolerations:
+    - operator: Exists
+  containers:
+    - name: cb-health
+      image: "${CB_HEALTH_IMAGE}"
+      command: ["bash", "-c"]
+      args:
+        - |
+          echo "--- nvidia-smi -L ---"; nvidia-smi -L
+          echo "--- driver/CUDA ---"; nvidia-smi --query-gpu=driver_version,name,memory.total --format=csv
+          echo "--- Fabric Manager (if present) ---"; (systemctl is-active nvidia-fabricmanager 2>&1 || echo "not applicable on this instance type")
+          echo "--- dcgmi diag -r 3 ---"; (command -v dcgmi >/dev/null && dcgmi diag -r 3 || echo "dcgmi not in this image; run from a DCGM-enabled image on the real block")
+          echo "--- nvbandwidth (if present) ---"; (command -v nvbandwidth >/dev/null && nvbandwidth || echo "nvbandwidth not in this image; add to the pre-block image for the real block")
+          echo "--- lspci PCIe topology ---"; (command -v lspci >/dev/null && lspci -t || echo "lspci not in this image; the real block pinned NCCL/EFA test image includes pciutils")
+          echo "--- aws-ofi-nccl / libfabric ---"; (fi_info -p efa 2>&1 || echo "no EFA on this node (expected on cheap dry-run instances)")
+          echo "--- NCCL/libfabric versions baked into this image ---"
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+PODEOF
+  wait_until 120 5 "cb-health pod finished (Succeeded or Failed)" bash -c "
+    phase=\$(kubectl get pod cb-health -o jsonpath='{.status.phase}' 2>/dev/null)
+    [[ \"\${phase}\" == 'Succeeded' || \"\${phase}\" == 'Failed' ]]
+  " || fail "step20: cb-health pod did not finish within 120s"
+  k logs cb-health > "${CB_EVIDENCE_DIR}/step20-node-health.raw.log" 2>&1 || fail "step20: could not read cb-health logs"
+  k delete pod cb-health --ignore-not-found --wait=false >/dev/null 2>&1 || true
 
   cp "${CB_EVIDENCE_DIR}/step20-node-health.raw.log" "${CB_EVIDENCE_DIR}/step20-node-health.log"
   grep -qi "driver_version" "${CB_EVIDENCE_DIR}/step20-node-health.log" || fail "step20: nvidia-smi query did not return a driver version (if CB_HEALTH_IMAGE was overridden to a minimal image, the NVIDIA toolkit may not have injected nvidia-smi into it — retry with the default or the full NCCL/EFA test image before concluding the node itself is unhealthy)"
@@ -277,12 +306,29 @@ if run_step 27; then
     # on a 1-GPU-per-node instance type, so the scheduler/Karpenter must
     # put the second one on a different, freshly launched node.
     info "step27: only one node visible yet (${NODE_A:-<none>}) — launching a second GPU-holding pod to force Karpenter to provision a second node"
-    # --limits is not a valid kubectl-run flag on this kubectl version
-    # (same finding as step20); the GPU request goes through --overrides,
-    # merged onto the generated container by name (patchMergeKey: name).
-    k run cb-force-2node --restart=Never --image=public.ecr.aws/amazonlinux/amazonlinux:2023 \
-      --overrides='{"metadata":{"annotations":{"karpenter.sh/do-not-disrupt":"true"}},"spec":{"tolerations":[{"operator":"Exists"}],"containers":[{"name":"cb-force-2node","resources":{"limits":{"nvidia.com/gpu":"1"}}}]}}' \
-      -- sh -c 'sleep 600' >/dev/null 2>&1 || true
+    # Same finding and fix as step20: "k run --overrides" with a partial
+    # containers[0] entry replaces the whole array (no strategic merge by
+    # name on this kubectl version), so apply a complete Pod manifest
+    # directly instead of relying on "k run" + generator/override.
+    cat <<PODEOF | k apply -f - >/dev/null 2>&1 || true
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cb-force-2node
+  annotations:
+    karpenter.sh/do-not-disrupt: "true"
+spec:
+  restartPolicy: Never
+  tolerations:
+    - operator: Exists
+  containers:
+    - name: cb-force-2node
+      image: public.ecr.aws/amazonlinux/amazonlinux:2023
+      command: ["sh", "-c", "sleep 600"]
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+PODEOF
     wait_until 420 10 "a second distinct GPU node exists" bash -c "
       a=\$(kubectl get nodes -l 'karpenter.sh/nodepool' -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | sort | sed -n '1p')
       b=\$(kubectl get nodes -l 'karpenter.sh/nodepool' -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | sort | sed -n '2p')
