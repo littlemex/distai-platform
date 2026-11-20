@@ -59,3 +59,23 @@ match it "targeted" by default.
     httpProtocolIPv6: disabled
     httpPutResponseHopLimit: 1
     httpTokens: required
+  {{- /*
+    EFA (and any other non-default ENI attachment) is opt-in and empty by
+    default: Karpenter does not attach an EFA device on its own just
+    because the selected instance type supports one (confirmed against the
+    upstream NodeClasses doc, 2026-11-20 - EC2NodeClass.spec.networkInterfaces
+    is the only field that requests it). A pool that targets an
+    EFA-capable instance type without setting this still boots, but with
+    no EFA device at all, which then fails silently at the pod level (the
+    EFA device plugin simply advertises zero of the extended resource the
+    pod's EFA request names) rather than at node launch. Each entry must
+    repeat interfaceType even when Karpenter's own default differs per
+    networkCardIndex, since this chart's values are a flat list applied
+    as-is - see values.yaml's own comment for the one-EFA-device shape
+    this pairs with (networkCardIndex 0, deviceIndex 0 "interface" +
+    deviceIndex 1 "efa-only").
+  */}}
+  {{- with .Values.pool.networkInterfaces }}
+  networkInterfaces:
+{{ toYaml . | indent 4 }}
+  {{- end }}
