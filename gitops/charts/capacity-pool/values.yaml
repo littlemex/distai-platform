@@ -43,12 +43,20 @@ pool:
     consolidationPolicy: WhenEmptyOrUnderutilized
     consolidateAfter: 60s
 
-  # Opt-in, empty by default (omitted from the EC2NodeClass template when
-  # unset, so existing pools keep the AMI's own default root volume). Set
-  # this on pools whose checks pull large images (e.g. the GPU pool's CB
-  # health-check image) so a transient disk-pressure eviction cannot be
-  # mistaken by Karpenter for an empty node mid-pull.
-  blockDeviceMappings: []
+  # EC2NodeClass.spec.blockDeviceMappings' root volume size, as a plain
+  # Kubernetes quantity string (e.g. "100Gi" or "150Gi"). Empty by
+  # default: the EC2NodeClass renders no blockDeviceMappings at all, so a
+  # node's root volume stays whatever the AMI's own default is -- no
+  # behavior change for an existing pool that does not set this. Set it
+  # on pools whose checks pull large images (e.g. this plan's own GPU
+  # pool, 150Gi, after a disk-fill-eviction-consolidation incident) so a
+  # transient disk-pressure eviction cannot be mistaken by Karpenter for
+  # an empty node mid-pull. Shared mechanism with branch
+  # fix/capacity-pool-root-volume (commit 9635e46): two independent
+  # efforts (this Capacity Block plan, and a real trn2.3xlarge failure on
+  # #28) hit the same chart-level gap and standardized on this one value
+  # name rather than each carrying its own scheme.
+  rootVolumeSizeGi: ""
 
 amiFamily: AL2023
 amiSelectorTerms:

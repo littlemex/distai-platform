@@ -25,15 +25,19 @@ spec:
     httpProtocolIPv6: disabled
     httpPutResponseHopLimit: 1
     httpTokens: required
-{{- if .Values.pool.blockDeviceMappings }}
-  # Opt-in only (unset by default, so the existing CPU/trn pools keep
-  # inheriting the AMI's own root volume size unchanged). The GPU pool sets
-  # this explicitly because its own health-check pulls a multi-GB CUDA/EFA/
-  # NCCL test image on top of the base AMI image set; the AMI's own default
-  # root volume was not sized for that and filled up during a dry run,
-  # which triggered kubelet disk-pressure eviction and, from there, a
-  # Karpenter consolidation of the now-empty-looking node (CB rebalance,
-  # 2026-11-20).
+{{- if .Values.pool.rootVolumeSizeGi }}
+  # Overrides the AMI's own default root volume size; see
+  # pool.rootVolumeSizeGi's own comment in values.yaml for why a pool
+  # would need this. deviceName matches every AL2023 AMI's own root
+  # device. Shared mechanism (branch fix/capacity-pool-root-volume,
+  # commit 9635e46, built on feat/17-capacity-pools) -- this branch's own
+  # earlier pool.blockDeviceMappings opt-in is retired in favor of this
+  # one value name, so a disk-fill fix written on either branch lands the
+  # same way once both merge.
   blockDeviceMappings:
-{{ toYaml .Values.pool.blockDeviceMappings | indent 4 }}
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: {{ .Values.pool.rootVolumeSizeGi | quote }}
+        volumeType: gp3
+        deleteOnTermination: true
 {{- end }}

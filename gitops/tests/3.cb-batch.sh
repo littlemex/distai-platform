@@ -248,8 +248,17 @@ helm repo add dcgm-exporter https://nvidia.github.io/dcgm-exporter/helm-charts >
 helm repo update dcgm-exporter >/dev/null 2>&1 || true
 if run_step 24; then
   log "=== step 24: DCGM exporter quick-add ==="
+  # 2026-11-20 finding: the chart's default values create a ServiceMonitor
+  # (a Prometheus Operator CRD), which this dry-run cluster does not have
+  # installed -- "no matches for kind ServiceMonitor". The chart's own
+  # deployment/README.md names exactly this fix: install the Prometheus
+  # Operator CRDs first, or disable serviceMonitor. This dry-run cluster
+  # has no Prometheus Operator, so disable it; the real block, if it runs
+  # a monitoring stack with Prometheus Operator already installed, should
+  # NOT pass this flag, so the ServiceMonitor is created for real scraping.
   helm upgrade --install dcgm-exporter-cb dcgm-exporter/dcgm-exporter \
-    --namespace cb-batch --create-namespace --wait --timeout 5m 2>&1 | tee "${CB_EVIDENCE_DIR}/step24-dcgm-install.log" \
+    --namespace cb-batch --create-namespace --wait --timeout 5m \
+    --set serviceMonitor.enabled=false 2>&1 | tee "${CB_EVIDENCE_DIR}/step24-dcgm-install.log" \
     || { info "step24: chart repo dcgm-exporter/dcgm-exporter (https://nvidia.github.io/dcgm-exporter/helm-charts) -- confirm it is still reachable and the chart name/version are current before the real block"; fail "step24: dcgm-exporter install failed"; }
   wait_until 120 5 "dcgm-exporter pod Running" bash -c "kubectl -n cb-batch get pods -l app.kubernetes.io/name=dcgm-exporter -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q Running" \
     || fail "step24: dcgm-exporter did not reach Running"

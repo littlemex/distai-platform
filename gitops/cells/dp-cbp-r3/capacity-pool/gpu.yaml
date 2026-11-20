@@ -47,15 +47,12 @@ values:
     # 150Gi root volume: the 2026-11-20 dry-run failure (disk-pressure
     # eviction from a multi-GB CUDA/EFA/NCCL check image on an undersized
     # default root volume, which Karpenter then read as an empty node and
-    # consolidated) is fixed at the chart level (gitops/charts/capacity-
-    # pool/templates/ec2nodeclass.yaml, opt-in blockDeviceMappings) --
-    # this cell turns that opt-in on.
-    blockDeviceMappings:
-      - deviceName: /dev/xvda
-        ebs:
-          volumeSize: 150Gi
-          volumeType: gp3
-          deleteOnTermination: true
+    # consolidated) is fixed at the chart level via pool.rootVolumeSizeGi
+    # (gitops/charts/capacity-pool/templates/ec2nodeclass.yaml) -- the
+    # shared mechanism also used by branch fix/capacity-pool-root-volume
+    # (commit 9635e46), which hit the same chart-level gap independently
+    # on a real trn2.3xlarge failure (#28).
+    rootVolumeSizeGi: "150Gi"
     # 10m, not the chart default 60s: gives a health-check pod's image
     # pull room to finish before Karpenter considers the node for
     # consolidation (same incident).
