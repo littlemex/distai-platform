@@ -111,7 +111,7 @@ The summary has exactly these fields: `planned_requests`, `successful_requests`,
 | `dcgm-gpu` | [`dashboards/scrape-configs.yaml`](dashboards/scrape-configs.yaml); selects NVIDIA's own [`dcgm-exporter`](https://nvidia.github.io/dcgm-exporter/helm-charts) DaemonSet |
 | `distai-pd-score` | [`dashboards/scrape-configs.yaml`](dashboards/scrape-configs.yaml); a Prometheus Pushgateway holding the pushed scores |
 
-Append the three jobs from `scrape-configs.yaml` to the collector's `scrape_configs` of that observability stack (it sends to Amazon Managed Service for Prometheus, per `disagg-rfc.md`'s own Decision 7), and import `vllm-pd.json` in Grafana with that Prometheus data source.
+Append the three jobs from `scrape-configs.yaml` to the collector's `scrape_configs` of that observability stack (it sends to Amazon Managed Service for Prometheus, per the RFC's own Decision 7, [#37](https://github.com/littlemex/distai-platform/issues/37)), and import `vllm-pd.json` in Grafana with that Prometheus data source.
 
 Install `dcgm-exporter` itself with its own `serviceMonitor.enabled` turned off, since this pipeline has no Prometheus Operator CRDs for that chart's own default `ServiceMonitor` to attach to (this pipeline's own collector discovers targets through `scrape-configs.yaml`'s `kubernetes_sd_configs` above instead):
 

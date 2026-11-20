@@ -63,7 +63,7 @@
 # --set serviceMonitor.enabled=false) or the NVIDIA GPU Operator's own
 # bundled copy, whichever the cluster actually runs (see this directory's
 # own README). This platform's own metrics pipeline is the ADOT Collector
-# -> Amazon Managed Prometheus path RFC disagg-rfc.md's own Decision 7
+# -> Amazon Managed Prometheus path the RFC's own Decision 7 (issue #37)
 # already names, not a Prometheus Operator, so there is no ServiceMonitor
 # CRD for either path's own default ServiceMonitor to attach to; this job
 # is this pipeline's own discovery path instead. The two paths label their

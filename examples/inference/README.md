@@ -19,7 +19,7 @@ How to measure with them is described in [`_shared/README.md`](_shared/README.md
 
 ## Status
 
-Only the vLLM examples above exist and have run on real hardware (`disagg-rfc.md`'s own follow-up issue B). SGLang's own disaggregated example (follow-up issue C) and llm-d's own router mode (follow-up issue A) are not built here and have not run on any hardware yet — time-boxed out of the first real-machine round (`spain-disagg-evidence/07-same-node-root-cause.md`), not found broken. Before either is measured on a Capacity Block window or any other paid hardware, run it first on a smaller, cheaper GPU instance to produce a real, if rough, timing the way `disagg-window.md`'s own dry run did for the vLLM path.
+Only the vLLM examples above exist and have run on real hardware (see the RFC, [#37](https://github.com/littlemex/distai-platform/issues/37), follow-up issue B). SGLang's own disaggregated example (follow-up issue C) and llm-d's own router mode (follow-up issue A) are not built here and have not run on any hardware yet — time-boxed out of the first real-machine round, not found broken. Before either is measured on a Capacity Block window or any other paid hardware, run it first on a smaller, cheaper GPU instance to produce a real, if rough, timing, the same way the vLLM path's own dry run already did.
 
 ## Conventions
 
