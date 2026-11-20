@@ -100,7 +100,12 @@
 #   ACCEL_TRN_REGION (ap-southeast-4 -- where trn2.3xlarge spot is
 #   available), ACCEL_POD_TIMEOUT_SECONDS (1800 -- how long a Layer 1 pod
 #   may take to reach Running, spot launch and driver/plugin start
-#   included).
+#   included), EXPECT_CAPACITY_TYPE (spot -- the capacity-type acceptance
+#   criteria 2/3 require the Layer 1 pod's node to carry; set explicitly
+#   to on-demand if the cell's own capacity-pool fixture was intentionally
+#   built on-demand, e.g. after a confirmed spot exhaustion -- never
+#   skipped or downgraded to a warning, only ever a different expected
+#   value).
 set -euo pipefail
 
 : "${AWS_PROFILE:?export AWS_PROFILE}"
@@ -978,32 +983,29 @@ YAML
   allocatable="$(k get node "${node}" -o jsonpath="{.status.allocatable.${resource_jp}}")"
   [[ "${allocatable}" =~ ^[0-9]+$ && "${allocatable}" -ge 1 ]] \
     || fail "node ${node} advertises ${resource} allocatable='${allocatable}' (expected >= 1)"
-  # Acceptance criteria 2/3 name a real spot node, not merely "whatever
-  # Karpenter happened to pick" -- #28's own capacity-pool fixtures allow
-  # only karpenter.sh/capacity-type=spot (no on-demand fallback), so this
-  # is a real assertion on the node Karpenter actually launched, not a
-  # restatement of the NodePool's own requirements.
+  # Acceptance criteria 2/3 name a real node of a SPECIFIC capacity type,
+  # not merely "whatever Karpenter happened to pick" -- #28's own
+  # capacity-pool fixtures allow only karpenter.sh/capacity-type=spot (no
+  # on-demand fallback), so this is a real assertion on the node Karpenter
+  # actually launched, not a restatement of the NodePool's own
+  # requirements.
   #
-  # verify/cb-batch addition (not for merge): under ACCEL_SKIP_TRN=1 (a
-  # unique dry-run cell name, not #28's own dp-a19-gpu fixture), this one
-  # assertion is relaxed to a warning rather than a hard fail. 2026-11-20:
-  # three consecutive spot CreateFleet attempts, across two instance
-  # families (g6e.2xlarge, g4dn.2xlarge) and three AZs in ap-northeast-1,
-  # all returned UnfulfillableCapacity (CloudTrail-confirmed, recorded in
-  # launch-ledger.jsonl) -- a real regional spot shortage, not a config
-  # defect -- forcing this dry-run's own pool to on-demand. The spot-node
-  # assertion is #28's own fixture-specific assumption; a dry run of a
-  # DIFFERENT subject (the disk-fill fix and 2-node isolation items) does
-  # not need to re-certify it. The GPU-count, device-plugin-label and
-  # DRA-namespace-absence assertions around this one are NOT relaxed.
+  # verify/cb-batch addition (not for merge): EXPECT_CAPACITY_TYPE makes
+  # the expected value an explicit, named input (default "spot", so #28's
+  # own dp-a19-gpu run is byte-for-byte unchanged) instead of silently
+  # weakening this check to a warning. A 2026-11-20 dry run on a different
+  # cell (dp-cbp-r2) hit three consecutive spot CreateFleet exhaustions
+  # across two instance families and three AZs in ap-northeast-1, all
+  # CloudTrail-confirmed UnfulfillableCapacity (launch-ledger.jsonl) -- a
+  # real regional shortage, not a config defect -- and that dry run's own
+  # pool was switched to on-demand as a result. This assertion still
+  # fails hard if the live node's capacity-type does not match whatever
+  # EXPECT_CAPACITY_TYPE says it should be; it is never skipped or
+  # downgraded to an info/warning.
+  EXPECT_CAPACITY_TYPE="${EXPECT_CAPACITY_TYPE:-spot}"
   node_capacity_type="$(k get node "${node}" -o jsonpath='{.metadata.labels.karpenter\.sh/capacity-type}')"
-  if [[ "${node_capacity_type}" != "spot" ]]; then
-    if [[ "${ACCEL_SKIP_TRN:-0}" == "1" ]]; then
-      info "node ${node} has karpenter.sh/capacity-type='${node_capacity_type}', not spot -- NOT failing (ACCEL_SKIP_TRN=1, confirmed regional spot shortage, see launch-ledger.jsonl); #28's own dp-a19-gpu run must still see spot"
-    else
-      fail "node ${node} has karpenter.sh/capacity-type='${node_capacity_type}', not spot (#28 acceptance criteria 2/3 name a spot node)"
-    fi
-  fi
+  [[ "${node_capacity_type}" == "${EXPECT_CAPACITY_TYPE}" ]] \
+    || fail "node ${node} has karpenter.sh/capacity-type='${node_capacity_type}', expected '${EXPECT_CAPACITY_TYPE}' (export EXPECT_CAPACITY_TYPE to change the expectation; #28's own acceptance criteria 2/3 default to spot)"
   instance_type="$(k get node "${node}" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}')"
   pass "Layer 1 pod scheduled on ${node} (${instance_type}, capacity-type=${node_capacity_type}, ${label}=device-plugin, allocatable ${resource}=${allocatable})"
 
