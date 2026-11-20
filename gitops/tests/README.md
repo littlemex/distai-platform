@@ -38,8 +38,13 @@ Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
   `bootstrap.sh`'s own `platform` `AppProject` - hard-codes that same
   repository URL as its Git source, so pointing `GITOPS_TEST_REPO_URL` at
   a fork does not actually make Argo CD read the fork's branches; there
-  is no supported way to run this suite against a fork today), read
-  fresh from AWS SSM Parameter Store (SecureString) at
+  is no supported way to run this suite against a fork today). This
+  token can move the `stable` tag (nothing scopes it to `refs/heads/e2e/*`
+  branches), which every cell's own root Application and every
+  `cells`-generated Application are pinned to - until a maintainer
+  configures the tag-protection ruleset Decision 6's Residual risks
+  names, holding this token is equivalent to cluster-admin on every cell
+  tracking `stable`. Read fresh from AWS SSM Parameter Store (SecureString) at
   `GITOPS_TEST_TOKEN_SSM_PARAM` (a parameter you create; the default,
   `/relay/github/distai-platform`, is only this environment's own naming
   convention, not a requirement) in `GITOPS_TEST_TOKEN_SSM_REGION`

@@ -106,11 +106,22 @@ LIVE_SERVER="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.s
 # set -e/pipefail would otherwise abort here on "not found" (exit 1), which
 # is an expected outcome on a first bootstrap, not an error: guard it with
 # an explicit existence check instead of relying on `|| true` inside a
-# pipeline.
+# pipeline. A transient failure (API server timeout, a permissions error,
+# anything other than the Secret genuinely not existing) must NOT be read
+# the same way: proceeding to write on a `kubectl get` failure for the
+# wrong reason is exactly the write this safety check exists to prevent.
 EXISTING_SERVER=""
-if kubectl get secret cell-registration -n "${ARGOCD_NAMESPACE}" >/dev/null 2>&1; then
+GET_SECRET_ERR="$(mktemp)"
+if kubectl get secret cell-registration -n "${ARGOCD_NAMESPACE}" >/dev/null 2>"${GET_SECRET_ERR}"; then
   EXISTING_SERVER="$(kubectl get secret cell-registration -n "${ARGOCD_NAMESPACE}" -o jsonpath='{.data.server}' | base64 -d)"
+else
+  if ! grep -q "NotFound" "${GET_SECRET_ERR}"; then
+    echo "could not check for an existing cell-registration Secret in namespace ${ARGOCD_NAMESPACE} (not a \"not found\" response): $(cat "${GET_SECRET_ERR}")" >&2
+    rm -f "${GET_SECRET_ERR}"
+    exit 1
+  fi
 fi
+rm -f "${GET_SECRET_ERR}"
 if [[ -n "${EXISTING_SERVER}" && "${EXISTING_SERVER}" != "${CLUSTER_ARN}" ]]; then
   echo "a cell-registration Secret already exists in namespace ${ARGOCD_NAMESPACE} naming a different cluster (${EXISTING_SERVER}); refusing to overwrite it with ${CLUSTER_ARN}" >&2
   exit 1
