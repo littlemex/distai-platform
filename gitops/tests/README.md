@@ -63,16 +63,15 @@ Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
   `e2e/*` branch older than a day at its own start (reported, for a human
   to clean up) and deletes the ones already in its own `e2e/<run-id>/*`
   namespace. Branches are deleted again when the run ends, on success and
-  on failure alike. Set `GITOPS_SKIP_ORDERING_EXPERIMENT=1` on `1.e2e.sh`
-  if this token is unavailable; this skips only step 12's already-
-  converged-cell re-confirmation of acceptance criterion 4 (two more
-  disposable branches, `break-crds`/`break-kueue`) -- the criterion
-  itself is still exercised by the pristine stage A/B/C sequence (two
-  disposable branches, `pristine-both-broken`/`pristine-kueue-broken`),
-  this cell's own first-ever bootstrap, which pushes unconditionally,
-  same as `2.upgrade.sh` and `1.e2e.sh`'s own step 13 generator-entry-loss
-  experiment (`remove-kueue`), since the write is exactly what their own
-  acceptance criteria need.
+  on failure alike. This token is not optional: the pristine stage A/B/C
+  sequence (two disposable branches, `pristine-both-broken`/
+  `pristine-kueue-broken`), this cell's own first-ever bootstrap, pushes
+  unconditionally, same as `2.upgrade.sh` and `1.e2e.sh`'s own step 13
+  generator-entry-loss experiment (`remove-kueue`), since the write is
+  exactly what their own acceptance criteria need; `GITOPS_SKIP_ORDERING_EXPERIMENT=1`
+  on `1.e2e.sh` skips only step 12's own two further disposable branches
+  (`break-crds`/`break-kueue`, its already-converged-cell re-confirmation
+  of the same criterion), not the token requirement itself.
 - For `2.upgrade.sh`: a real, currently published Karpenter version
   different from `addons/karpenter/addon.yaml`'s pinned one (confirm with
   `helm show chart oci://public.ecr.aws/karpenter/karpenter --version <x>`);
@@ -211,19 +210,31 @@ silently:
   assumed: `karpenter-crd`'s own `Application` reaches `Synced` and its
   CRDs become `Established`, but `capacity-pool` as a whole still cannot
   create `NodePool`/`EC2NodeClass` either, despite neither depending on
-  `kueue`. `capacity-pool`'s own `status.operationState.message` shows
-  why -- `"one or more synchronization tasks are not valid: failed to
-  discover server resources for group version kueue.x-k8s.io/v1beta2:
-  the server could not find the requested resource. Retrying attempt
-  #N"` -- because Argo CD validates every resource kind in one
+  `kueue`, because Argo CD validates every resource kind in one
   `Application`'s manifest set before applying any of them in one sync
   operation, not per-resource; a mixed-dependency `Application` is only
-  as available as its least-available dependency. This is a stronger
-  form of decision 4's own claim than "only the dependent resource fails
-  to create," and the earlier design of this test (expecting
-  `NodePool`/`EC2NodeClass` to converge in stage B while only
-  `ResourceFlavor` stayed blocked) was wrong for the same reason, caught
-  only by running it against a real cluster.
+  as available as its least-available dependency. `capacity-pool`'s own
+  `status.operationState.message` is read as the evidence for *why*, not
+  only inferred from the outcome -- with one caveat confirmed on a real
+  run: capacity-pool already tried and failed to sync once in stage A,
+  while `karpenter-crd`'s own CRDs did not exist yet, and that failure's
+  message is a cached result Argo CD's own retry backoff can leave
+  untouched for minutes; read right after `karpenter-crd` becomes
+  `Established` with no fresh attempt forced first, the message can
+  still name `karpenter.k8s.aws/v1`/`karpenter.sh/v1` as undiscoverable
+  too, left over from before this stage's own bootstrap. `1.e2e.sh`
+  forces a fresh sync attempt on every poll throughout stage B's own
+  180s hold (not merely once), then one more explicit refresh
+  immediately before the final read, and rejects a message that still
+  names karpenter's own groups as undiscoverable -- the message actually
+  asserted on is tied to an attempt made after `karpenter-crd` was
+  already fixed, naming only `kueue.x-k8s.io`'s own resources. This is a
+  stronger form of decision 4's own claim than "only the dependent
+  resource fails to create," and the earlier design of this test
+  (expecting `NodePool`/`EC2NodeClass` to converge in stage B while only
+  `ResourceFlavor` stayed blocked, then later reading a stale message
+  with no fresh attempt forced) was wrong for the same reason twice,
+  caught only by running it against a real cluster both times.
   Separately, step 12's break/restore experiments run against this same
   cell once already converged, and evidence the narrower, already-
   converged-cell claim that stage A/B/C above cannot re-observe once

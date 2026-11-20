@@ -133,8 +133,8 @@ resource "aws_eks_capability" "argocd" {
 # AssociateAccessPolicy fire before EKS has created the access entry at
 # all, failing with ResourceNotFoundException (reproduced on the runner:
 # both resources logged "Creating..." in the same second, the association
-# failed immediately while the capability itself took 6m41s to reach
-# ACTIVE). A two-apply sequence (capability first, association added in a
+# failed immediately while the capability itself took several minutes to
+# reach ACTIVE). A two-apply sequence (capability first, association added in a
 # later, separate apply -- gitops/tests/1.e2e.sh's own before/after RBAC
 # check) never races, since the capability is already long-ACTIVE by the
 # second apply; this depends_on makes a single apply safe the same way,
