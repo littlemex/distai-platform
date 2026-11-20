@@ -56,6 +56,14 @@ Delete the Job with `kubectl delete job load-replay -n "$NAMESPACE"` before the 
 
 `queue_times` is the time vLLM's client recorded between a request's dispatch from its arrival schedule and the moment it was sent. It catches a client that is too busy to start requests on time; it does not include a delay in waking up for a scheduled arrival, which vLLM does not record. Keep the request rate well within what one client process sustains, and treat the bound as a necessary check, not a proof that every arrival was on time.
 
+### Controlling prefix reuse, to compare KV cache tiers (skeleton, not built or measured on real hardware yet)
+
+`run-load.sh` needs no change for this: everything after `--` already goes to `vllm bench serve` unchanged, and that tool's own `--dataset-name prefix_repetition` dataset is the reuse-ratio knob (confirmed, `docs.vllm.ai/en/latest/cli/bench/serve.html`, fetched 2026-11-21) — `--prefix-repetition-num-prefixes K` splits `--num-prompts` requests across `K` shared prefixes (so `num-prompts / K` requests reuse each prefix) and `--prefix-repetition-prefix-len` sets the shared prefix's own token length. Comparing the three `kvCacheTier` tiers (`gpu-only`, `local`, `remote`) means holding this trace fixed and varying `kvCacheTier.mode` only, the same one-variable-at-a-time rule Decision 10 already applies to every other comparison in this directory.
+
+**Warm cache, stated as an acceptance criterion, not left implicit**: a `remote` or `local` tier's own prefix hits only show up once something has actually written those blocks there. Scoring a cold cache against a warm one is not a tier comparison, it is a warm-up-time comparison wearing a tier-comparison's clothes. Run one untimed, unscored warm-up pass of the same trace (same prefixes, same `--seed`) before every scored run of every tier, discard its results, then run the scored pass — the same trace both times, so the only thing that differs between a cold and a warm number is whether the warm-up happened, not a different prompt set.
+
+**[KVTrace](https://github.com/aws-samples/amazon-elasticache-samples/tree/main/kvtrace)**, the tool named alongside Amazon ElastiCache's distributed KV caching announcement, is a candidate second check on the trace above, not a replacement for `score.py`: it records the KV-cache events vLLM (V1) or SGLang already emit over ZMQ, replays them offline against a hypothetical shared-cache capacity, and reports a hit rate — independent of this directory's own bookkeeping, so it can confirm (or contradict) that `--prefix-repetition-num-prefixes` actually produced the intended reuse ratio on the live engine, rather than trusting the load generator's own arithmetic. Not wired into `run-load.sh` or `score.py` here (its own license is listed as "TBD" in its README as of 2026-11-21, and recording its trace needs a real engine run, which this platform's own verification rules do not let a design task run) — a candidate step for follow-up issue B's own real-machine run: enable vLLM's/SGLang's KV-event publisher, run `kvtrace record` for the duration of a scored pass, then `kvtrace simulate`/`report` on the result as a second, independent number next to this directory's own `score.json`.
+
 ## Scoring
 
 `score.py` needs only the Python standard library:
@@ -89,15 +97,27 @@ The summary has exactly these fields: `planned_requests`, `successful_requests`,
 
 ## Dashboard and the goodput panel
 
-[`dashboards/vllm-pd.json`](dashboards/vllm-pd.json) shows engine latency histograms, queue depth, KV cache use, engine count and placement per role, NIXL KV transfer time and volume, EFA TX/RX and RDMA write bytes per node, and the joint-SLO goodput and attainment of scored runs. It reads three scrape jobs:
+[`dashboards/vllm-pd.json`](dashboards/vllm-pd.json) shows engine latency histograms, queue depth, KV cache use, engine count and placement per role, NIXL KV transfer time and volume, EFA TX/RX and RDMA write bytes per node, GPU utilization and memory per node, and the joint-SLO goodput and attainment of scored runs. It reads four scrape jobs:
 
 | Job | Source |
 | --- | --- |
 | `vllm` | [`dashboards/scrape-configs.yaml`](dashboards/scrape-configs.yaml); selects the engine pods of both charts by their `vllm-metrics=true` label |
 | `efa-exporter` | the efa-node-exporter job of [awsome-distributed-ai eks-managed-observability](https://github.com/awslabs/awsome-distributed-ai/tree/main/observability/prometheus-grafana/eks-managed-observability) |
+| `dcgm-gpu` | [`dashboards/scrape-configs.yaml`](dashboards/scrape-configs.yaml); selects NVIDIA's own [`dcgm-exporter`](https://nvidia.github.io/dcgm-exporter/helm-charts) DaemonSet |
 | `distai-pd-score` | [`dashboards/scrape-configs.yaml`](dashboards/scrape-configs.yaml); a Prometheus Pushgateway holding the pushed scores |
 
-Append the two jobs from `scrape-configs.yaml` to the collector's `scrape_configs` of that observability stack (it sends to Amazon Managed Service for Prometheus), and import `vllm-pd.json` in Grafana with that Prometheus data source.
+Append the three jobs from `scrape-configs.yaml` to the collector's `scrape_configs` of that observability stack (it sends to Amazon Managed Service for Prometheus, per `disagg-rfc.md`'s own Decision 7), and import `vllm-pd.json` in Grafana with that Prometheus data source.
+
+Install `dcgm-exporter` itself with its own `serviceMonitor.enabled` turned off, since this pipeline has no Prometheus Operator CRDs for that chart's own default `ServiceMonitor` to attach to (this pipeline's own collector discovers targets through `scrape-configs.yaml`'s `kubernetes_sd_configs` above instead):
+
+```bash
+helm repo add dcgm-exporter https://nvidia.github.io/dcgm-exporter/helm-charts
+helm upgrade --install dcgm-exporter dcgm-exporter/dcgm-exporter \
+  --namespace monitoring --create-namespace \
+  --set serviceMonitor.enabled=false
+```
+
+If the cluster already runs the NVIDIA GPU Operator for driver/toolkit management, it bundles `dcgm-exporter` itself (`dcgmExporter.enabled: true` by default) and a separate install above is redundant — check which path the cluster actually uses before installing a second copy. The `GPU utilization percent, per node` and `GPU memory used bytes, per node` panels (`DCGM_FI_DEV_GPU_UTIL`, `DCGM_FI_DEV_FB_USED`) are skeleton panels: no real run has fed the `dcgm-gpu` job yet, so their numbers are unverified until a follow-up issue's own real-machine run confirms them.
 
 Grafana cannot read a one-shot JSON file, so each score is pushed to a Pushgateway, which keeps the last push per run for the collector to scrape. Install it once, cluster-internal only:
 

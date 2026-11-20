@@ -1091,6 +1091,141 @@
           "sort": "desc"
         }
       }
+    },
+    {
+      "type": "row",
+      "id": 19,
+      "title": "GPU utilization (DCGM, skeleton - no real run yet)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "GPU utilization percent, per node (DCGM_FI_DEV_GPU_UTIL)",
+      "description": "DCGM_FI_DEV_GPU_UTIL from the dcgm-gpu scrape job (examples/inference/_shared/dashboards/scrape-configs.yaml). Skeleton panel: no real run has fed this job yet, see this directory's own README.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 61
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "avg by (kubernetes_node) (DCGM_FI_DEV_GPU_UTIL{job=\"dcgm-gpu\",kubernetes_node=~\"$node\"})",
+          "legendFormat": "{{kubernetes_node}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "GPU memory used bytes, per node (DCGM_FI_DEV_FB_USED)",
+      "description": "DCGM_FI_DEV_FB_USED (framebuffer/HBM used, MiB in DCGM's own unit, converted here) from the dcgm-gpu scrape job. Skeleton panel: no real run has fed this job yet, see this directory's own README.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 61
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "avg by (kubernetes_node) (DCGM_FI_DEV_FB_USED{job=\"dcgm-gpu\",kubernetes_node=~\"$node\"} * 1024 * 1024)",
+          "legendFormat": "{{kubernetes_node}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     }
   ],
   "templating": {

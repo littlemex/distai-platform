@@ -56,3 +56,33 @@
   honor_labels: true
   static_configs:
   - targets: ['pushgateway.monitoring.svc:9091']
+
+# GPU utilization and memory, from NVIDIA's own dcgm-exporter DaemonSet
+# (helm repo https://nvidia.github.io/dcgm-exporter/helm-charts, installed
+# with --set serviceMonitor.enabled=false - this platform's own metrics
+# pipeline is the ADOT Collector -> Amazon Managed Prometheus path RFC
+# disagg-rfc.md's own Decision 7 already names, not a Prometheus Operator,
+# so there is no ServiceMonitor CRD for this chart's own default
+# ServiceMonitor to attach to; this job is this pipeline's own discovery
+# path instead). Selects dcgm-exporter's own standard Service/Pod labels
+# (app.kubernetes.io/name: dcgm-exporter), not this directory's vllm-metrics
+# label - a different workload entirely, one per node rather than one per
+# engine pod.
+- job_name: 'dcgm-gpu'
+  scrape_interval: 10s
+  metrics_path: /metrics
+  kubernetes_sd_configs:
+  - role: pod
+  relabel_configs:
+  - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+    action: keep
+    regex: "dcgm-exporter"
+  - source_labels: [__meta_kubernetes_pod_node_name]
+    action: replace
+    target_label: kubernetes_node
+  - source_labels: [__meta_kubernetes_pod_name]
+    action: replace
+    target_label: pod
+  - source_labels: [__meta_kubernetes_namespace]
+    action: replace
+    target_label: namespace
