@@ -53,20 +53,21 @@ pool:
   #       interfaceType: efa-only
   networkInterfaces: []
 
-  # Empty (default): the AMI's own root volume size is left untouched,
-  # matching today's CPU-only skeleton exactly. A GPU/ML pool pulling a
-  # large image (a CUDA-bundled vLLM image alone can exceed a default
-  # AL2023 EKS-optimized AMI's root volume) sets this, or the node fills
-  # its disk mid-pull and every pod on it gets evicted (see
-  # ec2nodeclass.yaml's own comment). Example, 200GiB gp3:
-  #   blockDeviceMappings:
-  #     - deviceName: /dev/xvda
-  #       ebs:
-  #         volumeSize: 200Gi
-  #         volumeType: gp3
-  #         encrypted: true
-  #         deleteOnTermination: true
-  blockDeviceMappings: []
+  # EC2NodeClass.spec.blockDeviceMappings' root volume size, as a plain
+  # Kubernetes quantity string (e.g. "100Gi" or "150Gi"). Empty by
+  # default: the EC2NodeClass renders no blockDeviceMappings at all, so a
+  # node's root volume stays whatever the AMI's own default is -- no
+  # behavior change for an existing pool that does not set this. Set it
+  # when a pool's own workloads need more room than that default leaves
+  # free for container images. Confirmed necessary on real hardware: a
+  # g7.8xlarge node's default root volume ran out of space mid-pull of a
+  # CUDA-bundled vLLM image ("no space left on device" while extracting a
+  # layer); kubelet's own disk-pressure eviction then turned that into a
+  # pod that was genuinely Scheduled and bound, evicted, and whose
+  # now-pod-less node Karpenter reclaimed as idle shortly after - a
+  # failure that reads, from Karpenter's own side alone, as an unrelated
+  # empty-node consolidation.
+  rootVolumeSizeGi: ""
 
 # Pinned, not "latest": confirmed against the public SSM parameter
 # /aws/service/eks/optimized-ami/1.37/amazon-linux-2023/x86_64/standard/recommended/release_version
