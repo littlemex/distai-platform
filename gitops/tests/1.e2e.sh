@@ -211,6 +211,63 @@ app_health() { app_field "$1" '{.status.health.status}'; }
 app_sync() { app_field "$1" '{.status.sync.status}'; }
 app_healthy_synced() { [[ "$(app_health "$1")" == "Healthy" && "$(app_sync "$1")" == "Synced" ]]; }
 
+# app_operation_state APP: reads status.operationState's phase, message,
+# retryCount and syncResult, plus status.conditions, in one single
+# `kubectl get -o json` call -- so all of them come from the same
+# server-side snapshot, never racing across several separate app_field
+# jsonpath calls each hitting the API at a slightly different instant.
+# Issue #45: Argo CD's own controller (controller/appcontroller.go, the
+# retry-preparation branch reached once a finished sync attempt's backoff
+# has elapsed) writes a generic "Retrying operation. Attempt #N" message
+# and sets syncResult to nil in the very same state write, while
+# preparing the next attempt -- reading message and syncResult with two
+# separate calls could therefore see one from before that write and one
+# from after, misreporting which window the read actually landed in.
+# Prints six tab-separated fields on one line: phase, message,
+# retryCount, whether syncResult is present (1) or nil (0), a '|'-joined
+# "kind/name: message" summary of syncResult.resources[] (empty when
+# syncResult is nil or carries no resources), and a '|'-joined
+# "type: message" summary of status.conditions[] (ComparisonError/
+# SyncError land here independently of operationState, confirmed by
+# controller/state.go's CompareAppState -- logged for diagnosis per
+# Issue #45's second proposed fix, not relied on as this test's primary
+# signal, since which error classes it covers for a GVK-discovery
+# failure specifically is not confirmed against a real cluster).
+app_operation_state() {
+  k get application "$1" -n "${ARGOCD_NS}" -o json 2>/dev/null | python3 -c '
+import json, sys
+
+def flatten(sep, items, fmt):
+    return sep.join(fmt(i) for i in items)
+
+try:
+    doc = json.load(sys.stdin)
+except ValueError:
+    doc = {}
+status = doc.get("status") or {}
+op = status.get("operationState") or {}
+phase = op.get("phase") or ""
+message = (op.get("message") or "").replace("\t", " ").replace("\n", " ")
+retry_count = op.get("retryCount")
+retry_count = "" if retry_count is None else str(retry_count)
+sync_result = op.get("syncResult")
+if sync_result is None:
+    has_sync_result = "0"
+    resources_summary = ""
+else:
+    has_sync_result = "1"
+    resources_summary = flatten(
+        "|", sync_result.get("resources") or [],
+        lambda r: "{}/{}: {}".format(r.get("kind", ""), r.get("name", ""), (r.get("message") or "").replace("\t", " ").replace("\n", " ")),
+    )
+conditions_summary = flatten(
+    "|", status.get("conditions") or [],
+    lambda c: "{}: {}".format(c.get("type", ""), (c.get("message") or "").replace("\t", " ").replace("\n", " ")),
+)
+print("\t".join([phase, message, retry_count, has_sync_result, resources_summary, conditions_summary]))
+'
+}
+
 # ------------------------------------- authenticated disposable branches
 #
 # Every branch this test ever pushes lives under refs/heads/e2e/<RUN_ID>/*
@@ -976,21 +1033,67 @@ wait
 [[ "$(cat "${STAGE_B_WORK}/kueue")" == PASS ]] \
   || fail "${APP_KUEUE} reached Synced despite still being broken"
 hard_refresh_app "${APP_CAPACITY_POOL}"
-sleep 20
-capacity_pool_operation_message="$(app_field "${APP_CAPACITY_POOL}" '{.status.operationState.message}')"
+# Issue #45: a single jsonpath read of only status.operationState.message,
+# even right after a fresh refresh, can land while Argo CD's own
+# controller is between a finished sync attempt and the next scheduled
+# retry -- in that exact window (see app_operation_state() above) the
+# controller overwrites this field with a generic "Retrying operation.
+# Attempt #N" string and sets syncResult to nil in the same write, so the
+# earlier version of this check could fail on a real, current read that
+# simply told it nothing, not a stale or wrong one. Poll
+# app_operation_state (no further hard_refresh_app here -- the one call
+# above is this stage's one deliberate fresh attempt; refreshing again on
+# every poll would only restart the same race against the same backoff)
+# until the read lands outside that window: either a terminal phase
+# (Error/Failed -- Argo CD itself gave up retrying, so whatever it
+# reports is final) or phase Running with a non-nil syncResult (a read
+# tied to a real, in-progress or just-completed attempt). Bounded by
+# STAGE_B_READ_TIMEOUT so a cell that is, for some other reason, stuck in
+# the nil window permanently still fails instead of hanging.
+STAGE_B_READ_TIMEOUT=90
+STAGE_B_READ_INTERVAL=5
+stage_b_read_start="$(date +%s)"
+stage_b_phase="" stage_b_message="" stage_b_retry_count="" stage_b_has_sync_result="0" stage_b_resources_summary="" stage_b_conditions_summary=""
+while true; do
+  IFS=$'\t' read -r stage_b_phase stage_b_message stage_b_retry_count stage_b_has_sync_result stage_b_resources_summary stage_b_conditions_summary \
+    < <(app_operation_state "${APP_CAPACITY_POOL}")
+  # Logged on every single poll, pass or fail (requirement: the values a
+  # judgement is based on must be visible without re-running anything) --
+  # not only once a verdict is reached.
+  info "${APP_CAPACITY_POOL} operationState read: phase=[${stage_b_phase}] retryCount=[${stage_b_retry_count}] syncResult=[$([[ "${stage_b_has_sync_result}" == "1" ]] && echo present || echo nil)] message=[${stage_b_message}] resources=[${stage_b_resources_summary}] conditions=[${stage_b_conditions_summary}]"
+  if [[ "${stage_b_phase}" == "Error" || "${stage_b_phase}" == "Failed" ]]; then
+    break
+  fi
+  if [[ "${stage_b_phase}" == "Running" && "${stage_b_has_sync_result}" == "1" ]]; then
+    break
+  fi
+  if (( $(date +%s) - stage_b_read_start >= STAGE_B_READ_TIMEOUT )); then
+    fail "${APP_CAPACITY_POOL}'s operationState never settled into a readable state (phase Error/Failed, or Running with a non-nil syncResult) within ${STAGE_B_READ_TIMEOUT}s of polling after the final refresh -- every read landed in Argo CD's own between-attempts window (last read: phase=${stage_b_phase}, retryCount=${stage_b_retry_count}, message=${stage_b_message})"
+  fi
+  sleep "${STAGE_B_READ_INTERVAL}"
+done
+# Prefer syncResult.resources[]'s own per-resource messages (populated
+# whenever the loop above accepted a Running+non-nil-syncResult read);
+# fall back to the top-level message only if syncResult carried no
+# resources entries at all -- a resource-discovery validation failure can
+# fail the whole sync before any per-resource ResourceResult is ever
+# created, leaving resources[] empty while the top-level message (now
+# confirmed, by the same read, not to be the nil-window placeholder)
+# still names the real cause.
+capacity_pool_operation_message="${stage_b_resources_summary:-${stage_b_message}}"
 case "${capacity_pool_operation_message}" in
   *"karpenter.k8s.aws/v1"*|*"karpenter.sh/v1"*)
-    fail "${APP_CAPACITY_POOL}'s own operationState.message still names karpenter's own CRDs as undiscoverable (got: ${capacity_pool_operation_message}) even after a fresh refresh -- either karpenter-crd is not actually Established, or this message is stale and does not reflect a sync attempt made since it was fixed" ;;
+    fail "${APP_CAPACITY_POOL}'s own operationState still names karpenter's own CRDs as undiscoverable (got: ${capacity_pool_operation_message}; phase=${stage_b_phase}, retryCount=${stage_b_retry_count}, top-level message=${stage_b_message}) even after this read settled outside Argo CD's retry-preparation window -- either karpenter-crd is not actually Established, or this message is stale and does not reflect a sync attempt made since it was fixed" ;;
 esac
 case "${capacity_pool_operation_message}" in
   *"kueue.x-k8s.io"*"could not find the requested resource"*) ;;
-  *) fail "${APP_CAPACITY_POOL}'s own operationState.message does not mention kueue.x-k8s.io's own resources being undiscoverable (got: ${capacity_pool_operation_message}) -- the claimed cause is not what this run's own Application actually reports" ;;
+  *) fail "${APP_CAPACITY_POOL}'s own operationState does not mention kueue.x-k8s.io's own resources being undiscoverable (got: ${capacity_pool_operation_message}; phase=${stage_b_phase}, retryCount=${stage_b_retry_count}, top-level message=${stage_b_message}, conditions=${stage_b_conditions_summary}) -- the claimed cause is not what this run's own Application actually reports" ;;
 esac
 nodepool_exists && fail "NodePool cpu was created although capacity-pool's own Application-wide sync should still be blocked by kueue's undiscoverable ResourceFlavor"
 ec2nodeclass_exists && fail "EC2NodeClass cpu was created although capacity-pool's own Application-wide sync should still be blocked by kueue's undiscoverable ResourceFlavor"
 resourceflavor_exists && fail "ResourceFlavor cpu was created although kueue is still broken on this cell (its CRD still cannot exist)"
 clusterqueue_exists && fail "ClusterQueue smoke was created although kueue is still broken on this cell (its CRD still cannot exist)"
-pass "pristine: fixing only karpenter-crd (now Established) does not unblock capacity-pool while kueue stays broken for ${STAGE_B_TIMEOUT}s of continuously-refreshed polling -- capacity-pool's own operationState.message, read immediately after one final fresh refresh (\"${capacity_pool_operation_message}\"), names kueue.x-k8s.io's own resources as undiscoverable and does not name karpenter's, confirming the cause is specifically kueue's ResourceFlavor CRD and that this is a current result, not a stale one left over from stage A -- Argo CD's own resource-discovery validation blocks the WHOLE Application, NodePool/EC2NodeClass included, when even one of its resource kinds cannot be discovered, confirming decision 4's claim at the Application level, not merely per-resource"
+pass "pristine: fixing only karpenter-crd (now Established) does not unblock capacity-pool while kueue stays broken for ${STAGE_B_TIMEOUT}s of continuously-refreshed polling -- capacity-pool's own operationState, read atomically and only once settled outside Argo CD's own retry-preparation window (phase=${stage_b_phase}, retryCount=${stage_b_retry_count}: \"${capacity_pool_operation_message}\"), names kueue.x-k8s.io's own resources as undiscoverable and does not name karpenter's, confirming the cause is specifically kueue's ResourceFlavor CRD and that this is a current result, not a stale one left over from stage A nor a transient between-attempts placeholder -- Argo CD's own resource-discovery validation blocks the WHOLE Application, NodePool/EC2NodeClass included, when even one of its resource kinds cannot be discovered, confirming decision 4's claim at the Application level, not merely per-resource"
 
 # ---- C. fully restored: the real GITOPS_REVISION this cell settles on
 
