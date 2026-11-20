@@ -231,11 +231,26 @@ fi
 # platform addon later) and confirm it scrapes GPU metrics. Closes: no
 # Issue yet (see new-issues/observability-dcgm-exporter.md, drafted,
 # not posted).
+#
+# 2026-11-20 finding and fix: the old URL (a GitHub Release asset,
+# dcgm-exporter-helm-4.4.1.tgz at tag 4.4.1-4.5.1) 404s -- that specific
+# tag/asset no longer exists. This was WRONGLY reported in an earlier round
+# as "the project stopped distributing a chart, now build-from-source
+# only" -- that conclusion was reached from the repo's own README quick
+# start alone, without checking for a live Helm chart repository, and was
+# incorrect. NVIDIA does actively maintain one, confirmed against its own
+# index.yaml: https://nvidia.github.io/dcgm-exporter/helm-charts/index.yaml
+# lists current versions (4.9.0, 4.8.4, 4.8.3, ...) with working .tgz URLs
+# on that same domain (HTTP 200 confirmed for the 4.9.0 asset on
+# 2026-11-20). Use the live Helm repo, not a pinned GitHub Release URL, so
+# this does not go stale the same way again.
+helm repo add dcgm-exporter https://nvidia.github.io/dcgm-exporter/helm-charts >/dev/null 2>&1 || true
+helm repo update dcgm-exporter >/dev/null 2>&1 || true
 if run_step 24; then
   log "=== step 24: DCGM exporter quick-add ==="
-  helm upgrade --install dcgm-exporter-cb https://github.com/NVIDIA/dcgm-exporter/releases/download/4.4.1-4.5.1/dcgm-exporter-helm-4.4.1.tgz \
+  helm upgrade --install dcgm-exporter-cb dcgm-exporter/dcgm-exporter \
     --namespace cb-batch --create-namespace --wait --timeout 5m 2>&1 | tee "${CB_EVIDENCE_DIR}/step24-dcgm-install.log" \
-    || { info "step24: chart URL/version may have moved — confirm the current release asset at github.com/NVIDIA/dcgm-exporter/releases before the real block"; fail "step24: dcgm-exporter install failed"; }
+    || { info "step24: chart repo dcgm-exporter/dcgm-exporter (https://nvidia.github.io/dcgm-exporter/helm-charts) -- confirm it is still reachable and the chart name/version are current before the real block"; fail "step24: dcgm-exporter install failed"; }
   wait_until 120 5 "dcgm-exporter pod Running" bash -c "kubectl -n cb-batch get pods -l app.kubernetes.io/name=dcgm-exporter -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q Running" \
     || fail "step24: dcgm-exporter did not reach Running"
   POD="$(k -n cb-batch get pods -l app.kubernetes.io/name=dcgm-exporter -o jsonpath='{.items[0].metadata.name}')"
@@ -306,11 +321,24 @@ if run_step 27; then
     # on a 1-GPU-per-node instance type, so the scheduler/Karpenter must
     # put the second one on a different, freshly launched node.
     info "step27: only one node visible yet (${NODE_A:-<none>}) — launching a second GPU-holding pod to force Karpenter to provision a second node"
-    # Same finding and fix as step20: "k run --overrides" with a partial
-    # containers[0] entry replaces the whole array (no strategic merge by
-    # name on this kubectl version), so apply a complete Pod manifest
-    # directly instead of relying on "k run" + generator/override.
-    cat <<PODEOF | k apply -f - >/dev/null 2>&1 || true
+    # 2026-11-20 finding: an earlier version of this pod had NO placement
+    # constraint beyond the bare GPU request, and the force pod simply
+    # scheduled onto Node A's own idle GPU (every earlier step's own
+    # check pods are --rm'd by the time step27 runs, so Node A's GPU is
+    # free) -- it never created scheduling pressure for a second node, so
+    # "wait for a second node" waited out its own 7-minute timeout against
+    # a request that could always be satisfied by the node that already
+    # existed. Fix: an explicit nodeAffinity NotIn against Node A's own
+    # hostname makes the request genuinely unsatisfiable without a new
+    # node, so Karpenter has to provision one (or report, via NodeClaim
+    # conditions, exactly why it can't).
+    #
+    # Same finding and fix as step20 for the pod spec itself: "k run
+    # --overrides" with a partial containers[0] entry replaces the whole
+    # array (no strategic merge by name on this kubectl version), so apply
+    # a complete Pod manifest directly instead of relying on "k run" +
+    # generator/override.
+    cat <<PODEOF | k apply -f - || fail "step27: could not create cb-force-2node pod"
 apiVersion: v1
 kind: Pod
 metadata:
@@ -321,6 +349,14 @@ spec:
   restartPolicy: Never
   tolerations:
     - operator: Exists
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values: ["${NODE_A}"]
   containers:
     - name: cb-force-2node
       image: public.ecr.aws/amazonlinux/amazonlinux:2023
@@ -333,14 +369,38 @@ PODEOF
       a=\$(kubectl get nodes -l 'karpenter.sh/nodepool' -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | sort | sed -n '1p')
       b=\$(kubectl get nodes -l 'karpenter.sh/nodepool' -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | sort | sed -n '2p')
       [[ -n \"\$b\" && \"\$a\" != \"\$b\" ]]
-    " || info "step27: a second node did not appear within 7 minutes — pool may be capped at 1 node (check pool.limits.cpu) or spot capacity for the requested instance type was unavailable"
+    " || {
+      # Capture real evidence before concluding anything, per the
+      # coordinator's own instruction: pod-level scheduling events,
+      # whether Karpenter even created a NodeClaim and what it says,
+      # Karpenter's own controller log around this window, and Kueue's
+      # admission view of the pod (expected to show the pod bypasses
+      # Kueue entirely, since it carries no queue-name label -- confirmed
+      # here, not assumed).
+      info "step27: a second node did not appear within 7 minutes -- capturing diagnostics to the log before concluding anything"
+      echo "=== DIAG: cb-force-2node pod describe (events/FailedScheduling) ==="
+      k describe pod cb-force-2node 2>&1 || true
+      echo "=== DIAG: NodeClaims (does one exist for this pod, and what does it say) ==="
+      k get nodeclaims -o wide 2>&1 || true
+      k get nodeclaims -o yaml 2>&1 || true
+      echo "=== DIAG: Karpenter controller log, last 200 lines ==="
+      karpenter_pod="$(k -n kube-system get pods -l app.kubernetes.io/name=karpenter -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+      if [[ -n "${karpenter_pod}" ]]; then
+        k -n kube-system logs "${karpenter_pod}" --tail=200 2>&1 || true
+      else
+        echo "no Karpenter pod found under app.kubernetes.io/name=karpenter in kube-system"
+      fi
+      echo "=== DIAG: Kueue admission view of cb-force-2node (expected: not queued, no queue-name label) ==="
+      k get pod cb-force-2node -o jsonpath='{.metadata.labels}' 2>&1 || true
+      k get workloads -A 2>&1 || true
+      echo "=== DIAG end ==="
+    }
     k delete pod cb-force-2node --ignore-not-found --wait=false >/dev/null 2>&1 || true
     NODE_A="$(gpu_node_a)"
     NODE_B="$(gpu_node_b)"
   fi
   if [[ -z "${NODE_B}" || "${NODE_A}" == "${NODE_B}" ]]; then
-    info "step27: SKIPPED — still only one GPU node present after attempting to force a second (node_a=${NODE_A:-<none>}, node_b=${NODE_B:-<none>}). Must re-run against a real 2-node pool before trusting any per-node-lane test's isolation."
-    pass "step27: skipped, 1-node pool even after forcing a second (recorded as a real finding, not a false pass)"
+    fail "step27: still only one GPU node present after attempting to force a second with an anti-affinity constraint (node_a=${NODE_A:-<none>}, node_b=${NODE_B:-<none>}) -- see the DIAG blocks above for the real cause; this is the foundational mechanism for the Capacity Block's own 2-node parallel lanes and must not be waved through as a skip"
   else
     info "step27: node_a=${NODE_A} node_b=${NODE_B} (distinct)"
     for pair in "a:${NODE_A}" "b:${NODE_B}"; do
