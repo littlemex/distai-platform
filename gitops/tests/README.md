@@ -214,27 +214,58 @@ silently:
   `Application`'s manifest set before applying any of them in one sync
   operation, not per-resource; a mixed-dependency `Application` is only
   as available as its least-available dependency. `capacity-pool`'s own
-  `status.operationState.message` is read as the evidence for *why*, not
-  only inferred from the outcome -- with one caveat confirmed on a real
-  run: capacity-pool already tried and failed to sync once in stage A,
-  while `karpenter-crd`'s own CRDs did not exist yet, and that failure's
-  message is a cached result Argo CD's own retry backoff can leave
-  untouched for minutes; read right after `karpenter-crd` becomes
-  `Established` with no fresh attempt forced first, the message can
-  still name `karpenter.k8s.aws/v1`/`karpenter.sh/v1` as undiscoverable
-  too, left over from before this stage's own bootstrap. `1.e2e.sh`
-  forces a fresh sync attempt on every poll throughout stage B's own
-  180s hold (not merely once), then one more explicit refresh
-  immediately before the final read, and rejects a message that still
-  names karpenter's own groups as undiscoverable -- the message actually
-  asserted on is tied to an attempt made after `karpenter-crd` was
-  already fixed, naming only `kueue.x-k8s.io`'s own resources. This is a
-  stronger form of decision 4's own claim than "only the dependent
-  resource fails to create," and the earlier design of this test
-  (expecting `NodePool`/`EC2NodeClass` to converge in stage B while only
-  `ResourceFlavor` stayed blocked, then later reading a stale message
-  with no fresh attempt forced) was wrong for the same reason twice,
-  caught only by running it against a real cluster both times.
+  `status.operationState` is read as the evidence for *why*, not only
+  inferred from the outcome -- with two caveats, both confirmed on a real
+  run and both now (issue #45) handled by `app_operation_state()`'s own
+  single atomic `kubectl get -o json` read, never a plain jsonpath read
+  of `.status.operationState.message` alone. First: capacity-pool already
+  tried and failed to sync once in stage A, while `karpenter-crd`'s own
+  CRDs did not exist yet, and that failure's message is a cached result
+  Argo CD's own retry backoff can leave untouched for minutes; read right
+  after `karpenter-crd` becomes `Established` with no fresh attempt
+  forced first, the message can still name `karpenter.k8s.aws/v1`/
+  `karpenter.sh/v1` as undiscoverable too, left over from before this
+  stage's own bootstrap. `1.e2e.sh` forces a fresh sync attempt on every
+  poll throughout stage B's own 180s hold (not merely once), then one
+  more explicit refresh immediately before the final read, and rejects a
+  message that still names karpenter's own groups as undiscoverable --
+  the message actually asserted on is tied to an attempt made after
+  `karpenter-crd` was already fixed, naming only `kueue.x-k8s.io`'s own
+  resources. Second (issue #45, found running a PR stacked on this one):
+  Argo CD's own controller (`controller/appcontroller.go`'s
+  retry-preparation branch) overwrites `operationState.message` with a
+  generic `"Retrying operation. Attempt #N"` string and sets
+  `operationState.syncResult` to `nil`, in the same write, whenever a
+  finished sync attempt's backoff has elapsed and the next retry is
+  about to start -- a plain message-only read landing in that window
+  sees neither the real cause nor any per-resource detail, by Argo CD's
+  own design, not staleness or a bug on either side. `app_operation_state()`
+  reads `phase`, `message`, `retryCount`, whether `syncResult` is present,
+  `syncResult.resources[]`'s own per-resource messages, and
+  `status.conditions[]`, all from one `kubectl get -o json` call (so
+  none of them can be read from two different instants); the final check
+  polls it, with no further `hard_refresh_app` call of its own, until a
+  read lands with `phase` terminal (`Error`/`Failed`) or with `phase`
+  `Running` and `syncResult` non-nil, bounded by `STAGE_B_READ_TIMEOUT`
+  (90s), and prefers `syncResult.resources[]`'s per-resource messages
+  over the top-level `message` when both are present. Every read, not
+  only the one finally asserted on, is logged (`phase`, `message`,
+  `retryCount`, whether `syncResult` was present, the resources and
+  conditions summaries), so a future flake in this same check leaves
+  evidence of all of them, not only the one field the pre-#45 version
+  captured. `status.conditions[]` is logged for diagnosis only, not
+  matched on: whether Argo CD's `ComparisonError`/`SyncError` conditions
+  (`controller/state.go`'s `CompareAppState`) cover this specific
+  GVK-discovery failure class was not confirmed against a real cluster
+  (issue #45's own root-cause writeup says so explicitly) at the time of
+  this fix. This is a stronger form of decision 4's own claim than "only
+  the dependent resource fails to create," and the earlier design of
+  this test (expecting `NodePool`/`EC2NodeClass` to converge in stage B
+  while only `ResourceFlavor` stayed blocked, then later reading a stale
+  message with no fresh attempt forced, then later still reading a
+  real-but-uninformative "Retrying operation" message with no settle-past-
+  the-nil-window logic) was wrong for the same underlying reason three
+  times, each caught only by running it against a real cluster.
   Separately, step 12's break/restore experiments run against this same
   cell once already converged, and evidence the narrower, already-
   converged-cell claim that stage A/B/C above cannot re-observe once
