@@ -44,6 +44,7 @@ final_teardown() {
   if [ "${TORN_DOWN}" = "1" ]; then return 0; fi
   TORN_DOWN=1
   say "7. teardown: delete workloads, uninstall shared infra, destroy terraform"
+  kubectl delete pod nodepool-pacer --ignore-not-found >/dev/null 2>&1
   for ns in t-kyv t-gk t-cap t-cap-2 t-m-a t-m-b mimir kyverno gatekeeper-system capsule-system; do
     kubectl delete ns "${ns}" --ignore-not-found --wait=true --timeout=120s >/dev/null 2>&1
   done
@@ -52,6 +53,12 @@ final_teardown() {
   kubectl delete tenant --all --ignore-not-found >/dev/null 2>&1
   kubectl delete clusterqueue --all --ignore-not-found >/dev/null 2>&1
   kubectl delete resourceflavor --all --ignore-not-found >/dev/null 2>&1
+  # drain the Karpenter-launched node(s) before terraform destroy tears down
+  # the network under them (same ordering the real teardown guard uses).
+  kubectl delete nodepool test-workloads --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+  kubectl delete ec2nodeclass test-workloads --ignore-not-found >/dev/null 2>&1
+  helm uninstall cert-manager -n cert-manager --wait >/dev/null 2>&1
+  kubectl delete ns cert-manager --ignore-not-found --wait=true --timeout=120s >/dev/null 2>&1
   helm uninstall kueue -n kueue-system --wait >/dev/null 2>&1
   helm uninstall karpenter -n kube-system --wait >/dev/null 2>&1
   helm uninstall karpenter-crd -n kube-system --wait >/dev/null 2>&1
@@ -98,6 +105,7 @@ if ! terraform apply -auto-approve; then
   exit 1
 fi
 INTERRUPTION_QUEUE="$(terraform output -raw karpenter_interruption_queue_name)"
+NODE_ROLE_NAME="$(terraform output -raw karpenter_node_role_name)"
 popd >/dev/null
 
 aws eks update-kubeconfig --name "${NAME}" --region "${AWS_REGION}"
@@ -119,6 +127,85 @@ helm install kueue oci://registry.k8s.io/kueue/charts/kueue --version 0.20.6 -n 
   --set controllerManager.tolerations[0].key=CriticalAddonsOnly \
   --set controllerManager.tolerations[0].operator=Exists
 capture "01-karpenter-kueue.txt" bash -c 'kubectl -n kube-system get deploy karpenter; kubectl -n kueue-system get deploy'
+
+# kubectl's client-side discovery cache (~/.kube/cache/discovery) can be
+# primed stale by the "kubectl get nodes" call above, before Kueue's CRDs
+# existed, and reused for its ~10-minute TTL by every later kubectl process
+# that shares the same cache directory. Drop it now that new CRDs exist.
+rm -rf ~/.kube/cache/discovery/* 2>/dev/null || true
+for i in $(seq 1 30); do
+  kubectl get crd clusterqueues.kueue.x-k8s.io >/dev/null 2>&1 && break
+  sleep 2
+done
+
+# cert-manager: Capsule's chart (phase 5) needs its Certificate/Issuer CRDs
+# for the admission webhook's TLS. Installed once here, shared infra like
+# Karpenter/Kueue, uninstalled in the final teardown.
+helm repo add jetstack https://charts.jetstack.io >/dev/null 2>&1
+helm repo update jetstack >/dev/null 2>&1
+helm install cert-manager jetstack/cert-manager -n cert-manager --create-namespace --set crds.enabled=true --wait --timeout 5m \
+  --set 'tolerations[0].key=CriticalAddonsOnly' --set 'tolerations[0].operator=Exists'
+rm -rf ~/.kube/cache/discovery/* 2>/dev/null || true
+
+# None of the test workloads below (Kyverno/Gatekeeper/Capsule/Mimir/Prometheus)
+# tolerate the system node group's CriticalAddonsOnly taint, and no
+# Karpenter NodePool exists yet -- every one of them would stay Pending
+# forever. Give Karpenter one small, untainted, on-demand NodePool to
+# provision real nodes for them (light tier: on-demand m/t-family only).
+cat <<EOF | apply_capture "01-nodepool-apply.txt"
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: test-workloads
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+  - alias: al2023@latest
+  role: ${NODE_ROLE_NAME}
+  subnetSelectorTerms:
+  - tags:
+      karpenter.sh/discovery: ${NAME}
+  securityGroupSelectorTerms:
+  - tags:
+      karpenter.sh/discovery: ${NAME}
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: test-workloads
+spec:
+  template:
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: test-workloads
+      requirements:
+      - key: karpenter.k8s.aws/instance-category
+        operator: In
+        values: ["m", "t"]
+      - key: karpenter.k8s.aws/instance-generation
+        operator: Gt
+        values: ["6"]
+      - key: kubernetes.io/arch
+        operator: In
+        values: ["amd64"]
+      - key: karpenter.sh/capacity-type
+        operator: In
+        values: ["on-demand"]
+  limits:
+    cpu: "8"
+    memory: 16Gi
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 60s
+EOF
+# force at least one node to exist before any phase below needs one: a
+# throwaway pacer pod with no toleration, so Karpenter provisions for it.
+kubectl run nodepool-pacer --image=public.ecr.aws/docker/library/pause:3.9 --restart=Never >/dev/null 2>&1 || true
+kubectl wait --for=condition=Ready pod/nodepool-pacer --timeout=180s || true
+capture "01-nodepool-nodes.txt" kubectl get nodes -o wide
+kubectl delete pod nodepool-pacer --ignore-not-found >/dev/null 2>&1
 
 #############################################
 say "2. Kueue-native test: ClusterQueue.namespaceSelector, no policy engine involved"
