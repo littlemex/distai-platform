@@ -5,9 +5,10 @@
 # Decision 5's unit, #28 section A.
 #
 # Opt-in by method label only (#19 Decision 2): a capacity-pool NodePool
-# sets distai.dev/nvidia-gpu-method=device-plugin through pool.labels
-# (gitops/charts/capacity-pool), and this release selects exactly that
-# label. A node labeled for the DRA method is never selected here, so the
+# sets distai.dev/nvidia-gpu-method=device-plugin through
+# accelerator.methodLabel (gitops/charts/capacity-pool, #17's own shape),
+# and this release selects exactly that label. A node labeled for the DRA
+# method is never selected here, so the
 # same GPU is never advertised by two advertisers at once - #19 E1 showed
 # that a double advertisement silently double-allocates.
 #
