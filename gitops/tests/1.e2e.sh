@@ -18,7 +18,8 @@
 #   3. bootstrap.sh's three objects are idempotent, a --revision-only
 #      re-run updates the Secret annotation and root Application's
 #      targetRevision together, and a wrong-cluster attempt aborts before
-#      any write -- on a first bootstrap and on a re-run;
+#      any write -- decision 1's two conditions checked independently,
+#      each against this cell's own already-bootstrapped registration;
 #   4. a deliberately broken `crds` step and a deliberately broken `kueue`
 #      step each show this platform's real cross-Application ordering;
 #   5. karpenter-crd and karpenter (skipCrds) report no shared CRD;
@@ -177,7 +178,7 @@ wait_until() {
     if "$@"; then return 0; fi
     now="$(date +%s)"
     if ((now - start >= timeout)); then
-      log "timed out after ${timeout}s waiting for: ${desc}"
+      info "timed out after ${timeout}s waiting for: ${desc}"
       return 1
     fi
     sleep "${interval}"
@@ -205,6 +206,7 @@ aws_text() {
 
 # app_field APP JSONPATH: reads one field of one generated Application.
 app_field() { k get application "$1" -n "${ARGOCD_NS}" -o jsonpath="$2" 2>/dev/null; }
+app_exists() { k get application "$1" -n "${ARGOCD_NS}" >/dev/null 2>&1; }
 app_health() { app_field "$1" '{.status.health.status}'; }
 app_sync() { app_field "$1" '{.status.sync.status}'; }
 app_healthy_synced() { [[ "$(app_health "$1")" == "Healthy" && "$(app_sync "$1")" == "Synced" ]]; }
@@ -240,6 +242,7 @@ assert_disposable_ref() {
 # it. Returns non-zero (printing nothing) if the token cannot be read, so
 # a caller's `||` always sees a real failure instead of an empty path.
 github_askpass_script() {
+  set +x
   local token askpass
   token="$(aws ssm get-parameter --with-decryption --name "${GITOPS_TEST_TOKEN_SSM_PARAM}" \
     --region "${GITOPS_TEST_TOKEN_SSM_REGION}" --query Parameter.Value --output text 2>/dev/null)" || return 1
@@ -360,6 +363,7 @@ ensure_cell_fixture() {
 # yet at preflight time; this guards a RUN_ID collision, not the normal
 # case).
 report_stale_disposable_branches() {
+  set +x
   local token api_repo branches_json curl_config token_file
   token="$(aws ssm get-parameter --with-decryption --name "${GITOPS_TEST_TOKEN_SSM_PARAM}" \
     --region "${GITOPS_TEST_TOKEN_SSM_REGION}" --query Parameter.Value --output text 2>/dev/null)" || { info "could not read the GitHub token from SSM; skipping the stale e2e/ branch check"; return 0; }
@@ -746,15 +750,20 @@ APP_KUEUE="${CLUSTER}-kueue"
 APP_SMOKE="${CLUSTER}-smoke"
 app_synced() { [[ "$(app_sync "$1")" == "Synced" ]]; }
 app_not_synced() { [[ "$(app_sync "$1")" != "Synced" ]]; }
-# hard_refresh_app: Argo CD's own documented mechanism for "a CRD this
-# Application's objects need just appeared; stop trusting the cached list
-# of API resources". Needed only here, in the pristine A/B/C sequence: this
-# is the only place in this whole test suite where a brand new CRD kind
-# (one that did not exist anywhere on this cluster a moment ago) appears
-# mid-run for an already-generated Application to pick up -- every other
-# break/restore experiment in this file re-syncs an Application whose
-# dependency's CRD already existed before the break, which Argo CD's own
-# steady-state watch-based cache invalidation already handles without this.
+# hard_refresh_app: Argo CD's own documented mechanism for "force a fresh
+# sync attempt now, do not wait out whatever retry backoff this
+# Application is already in". Needed only here, in the pristine A/B/C
+# sequence: this is the only place in this whole test suite where an
+# Application has already tried and failed to sync because a CRD it
+# needs did not exist yet, and later needs to be checked again after
+# that CRD appears -- confirmed on a real run that reading
+# status.operationState.message (or waiting for app_synced) without
+# forcing a fresh attempt first can still reflect the earlier failed
+# attempt, stale, for minutes. Every other break/restore experiment in
+# this file re-syncs an Application whose dependency's CRD already
+# existed before the break (so it never cached a failure against a
+# missing CRD in the first place), which Argo CD's own steady-state
+# watch-based cache invalidation already handles without this.
 hard_refresh_app() {
   k annotate application "$1" -n "${ARGOCD_NS}" argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
 }
@@ -791,6 +800,32 @@ assert_stays_not_synced() {
 assert_stays_not_synced_bg() {
   local app="$1" timeout="$2" interval="$3" result_file="$4"
   ( if assert_stays_not_synced "${app}" "${timeout}" "${interval}"; then echo PASS >"${result_file}"; else echo FAIL >"${result_file}"; fi ) &
+}
+# assert_stays_not_synced_refreshing/_bg: same as above, but hard-refreshes
+# the Application on every single poll, not merely once up front. Needed
+# specifically where an Application's own sync has already failed and
+# cached that failure (stage B: capacity-pool tried and failed to sync
+# while karpenter-crd's CRDs did not exist yet) -- Argo CD's own retry
+# backoff can otherwise go several minutes before trying again on its
+# own, during which status.operationState.message is a stale leftover
+# from before the one thing that changed (karpenter-crd becoming
+# Established) rather than a result of ever having been re-tried against
+# the current state. A plain assert_stays_not_synced here would still
+# pass (correctly) but could not back any claim about *why* it stays
+# not-Synced with current evidence; forcing a fresh attempt on every
+# poll makes "it never reaches Synced" apply to this cell's actual,
+# continuously-re-evaluated current state, not a snapshot from before
+# the bootstrap that started this stage.
+assert_stays_not_synced_refreshing() {
+  local app="$1" timeout="$2" interval="$3"
+  refreshing_predicate() { hard_refresh_app "${app}"; app_synced "${app}"; }
+  wait_until "${timeout}" "${interval}" "${app} reaches Synced (expected not to within this window)" refreshing_predicate \
+    && return 1
+  return 0
+}
+assert_stays_not_synced_refreshing_bg() {
+  local app="$1" timeout="$2" interval="$3" result_file="$4"
+  ( if assert_stays_not_synced_refreshing "${app}" "${timeout}" "${interval}"; then echo PASS >"${result_file}"; else echo FAIL >"${result_file}"; fi ) &
 }
 
 # break_addon_branches SUFFIX ADDON_RELPATH...: creates
@@ -847,7 +882,16 @@ APP_CAPACITY_POOL=""
 discover_capacity_pool_app() { APP_CAPACITY_POOL="$(find_capacity_pool_app)"; [[ -n "${APP_CAPACITY_POOL}" ]]; }
 wait_until 300 10 "a capacity-pool Application exists" discover_capacity_pool_app \
   || fail "no Application named ${CLUSTER}-capacity-pool-<pool> appeared"
-pass "discovered generated Applications: ${APP_KARPENTER_CRD}, ${APP_KARPENTER}, ${APP_KUEUE}, ${APP_CAPACITY_POOL}, ${APP_SMOKE}"
+# Checked explicitly, not only implied by the "stays not Synced" waits
+# below: app_field/app_sync return empty on a missing Application the
+# same as on one that exists but has no sync status yet, so a "never
+# reaches Synced" check alone would also pass on an Application the
+# ApplicationSet never generated at all -- confirmed as a real gap, not
+# a hypothetical one.
+for app in "${APP_KARPENTER_CRD}" "${APP_KARPENTER}" "${APP_KUEUE}" "${APP_SMOKE}"; do
+  app_exists "${app}" || fail "Application ${app} does not exist -- the cells/platform ApplicationSet never generated it"
+done
+pass "discovered generated Applications, each confirmed to exist: ${APP_KARPENTER_CRD}, ${APP_KARPENTER}, ${APP_KUEUE}, ${APP_CAPACITY_POOL}, ${APP_SMOKE}"
 
 # 180s, comfortably longer than any convergence this whole suite has
 # observed on a real cluster (the slowest, 2.upgrade.sh's matched-version
@@ -895,34 +939,48 @@ k get crd nodepools.karpenter.sh -o jsonpath='{.status.conditions[?(@.type=="Est
 # original design here expected NodePool/EC2NodeClass to converge anyway,
 # on the assumption that Argo CD applies what it can per-resource even
 # when one resource in the same Application cannot. Confirmed wrong on a
-# real cluster, via capacity-pool's own status.operationState.message:
-# "one or more synchronization tasks are not valid: failed to discover
-# server resources for group version kueue.x-k8s.io/v1beta2: the server
-# could not find the requested resource. Retrying attempt #N". Argo CD
-# validates every resource's own API group/version before
-# applying ANY of them in one sync operation, so kueue's still-
-# undiscoverable ResourceFlavor blocks the entire capacity-pool
-# Application, including NodePool/EC2NodeClass, which have nothing to do
-# with kueue. This is a *stronger* form of decision 4's own claim than
-# "only the dependent resource fails to create": a mixed-dependency
-# Application is only as available as its least-available dependency.
-# Asserted below on every run, pass or fail -- not only read off a
-# diagnostic dump on failure -- since the mechanism this stage claims to
-# demonstrate (resource-discovery validation blocking the whole
-# Application) is otherwise never actually checked on the path that
-# passes, only inferred from the Application staying not-Synced, which a
-# retry backoff or a stale discovery cache would also produce.
+# real cluster, via capacity-pool's own status.operationState.message
+# naming kueue.x-k8s.io's own resources as undiscoverable. Argo CD
+# validates every resource's own API group/version before applying ANY
+# of them in one sync operation, so kueue's still-undiscoverable
+# ResourceFlavor blocks the entire capacity-pool Application, including
+# NodePool/EC2NodeClass, which have nothing to do with kueue. This is a
+# *stronger* form of decision 4's own claim than "only the dependent
+# resource fails to create": a mixed-dependency Application is only as
+# available as its least-available dependency.
+#
+# capacity-pool already tried and failed to sync once, while
+# karpenter-crd's own CRDs did not exist yet (stage A); that failure's
+# own operationState.message is a cached result Argo CD's own retry
+# backoff can leave untouched for minutes. Reading it without forcing a
+# fresh attempt first risks asserting a stale message that still blames
+# karpenter's own CRDs too, confirmed on a real run: the message read
+# immediately after karpenter-crd became Established still named
+# karpenter.k8s.aws/v1 and karpenter.sh/v1 as undiscoverable alongside
+# kueue.x-k8s.io, left over from before this stage's own bootstrap.
+# assert_stays_not_synced_refreshing forces a fresh sync attempt on
+# every single poll (not merely once), so "never reaches Synced" is
+# evidenced against this cell's continuously re-evaluated current state;
+# one more explicit refresh plus a short settle wait right before the
+# final read below gives Argo CD time to act on it and gets a message
+# tied to an attempt made after karpenter-crd was already fixed.
 STAGE_B_TIMEOUT=180
 STAGE_B_WORK="${WORK_DIR}/stage-b"
 mkdir -p "${STAGE_B_WORK}"
-assert_stays_not_synced_bg "${APP_CAPACITY_POOL}" "${STAGE_B_TIMEOUT}" 15 "${STAGE_B_WORK}/capacity-pool"
+assert_stays_not_synced_refreshing_bg "${APP_CAPACITY_POOL}" "${STAGE_B_TIMEOUT}" 15 "${STAGE_B_WORK}/capacity-pool"
 assert_stays_not_synced_bg "${APP_KUEUE}" "${STAGE_B_TIMEOUT}" 15 "${STAGE_B_WORK}/kueue"
 wait
 [[ "$(cat "${STAGE_B_WORK}/capacity-pool")" == PASS ]] \
   || fail "${APP_CAPACITY_POOL} reached Synced despite kueue's ResourceFlavor CRD still being undiscoverable"
 [[ "$(cat "${STAGE_B_WORK}/kueue")" == PASS ]] \
   || fail "${APP_KUEUE} reached Synced despite still being broken"
+hard_refresh_app "${APP_CAPACITY_POOL}"
+sleep 20
 capacity_pool_operation_message="$(app_field "${APP_CAPACITY_POOL}" '{.status.operationState.message}')"
+case "${capacity_pool_operation_message}" in
+  *"karpenter.k8s.aws/v1"*|*"karpenter.sh/v1"*)
+    fail "${APP_CAPACITY_POOL}'s own operationState.message still names karpenter's own CRDs as undiscoverable (got: ${capacity_pool_operation_message}) even after a fresh refresh -- either karpenter-crd is not actually Established, or this message is stale and does not reflect a sync attempt made since it was fixed" ;;
+esac
 case "${capacity_pool_operation_message}" in
   *"kueue.x-k8s.io"*"could not find the requested resource"*) ;;
   *) fail "${APP_CAPACITY_POOL}'s own operationState.message does not mention kueue.x-k8s.io's own resources being undiscoverable (got: ${capacity_pool_operation_message}) -- the claimed cause is not what this run's own Application actually reports" ;;
@@ -931,7 +989,7 @@ nodepool_exists && fail "NodePool cpu was created although capacity-pool's own A
 ec2nodeclass_exists && fail "EC2NodeClass cpu was created although capacity-pool's own Application-wide sync should still be blocked by kueue's undiscoverable ResourceFlavor"
 resourceflavor_exists && fail "ResourceFlavor cpu was created although kueue is still broken on this cell (its CRD still cannot exist)"
 clusterqueue_exists && fail "ClusterQueue smoke was created although kueue is still broken on this cell (its CRD still cannot exist)"
-pass "pristine: fixing only karpenter-crd (now Established) does not unblock capacity-pool while kueue stays broken for ${STAGE_B_TIMEOUT}s, polled for the whole window -- capacity-pool's own operationState.message (\"${capacity_pool_operation_message}\") confirms the cause is kueue's ResourceFlavor CRD still being undiscoverable, not merely that it stayed not-Synced for some other reason -- Argo CD's own resource-discovery validation blocks the WHOLE Application, NodePool/EC2NodeClass included, when even one of its resource kinds cannot be discovered, confirming decision 4's claim at the Application level, not merely per-resource"
+pass "pristine: fixing only karpenter-crd (now Established) does not unblock capacity-pool while kueue stays broken for ${STAGE_B_TIMEOUT}s of continuously-refreshed polling -- capacity-pool's own operationState.message, read immediately after one final fresh refresh (\"${capacity_pool_operation_message}\"), names kueue.x-k8s.io's own resources as undiscoverable and does not name karpenter's, confirming the cause is specifically kueue's ResourceFlavor CRD and that this is a current result, not a stale one left over from stage A -- Argo CD's own resource-discovery validation blocks the WHOLE Application, NodePool/EC2NodeClass included, when even one of its resource kinds cannot be discovered, confirming decision 4's claim at the Application level, not merely per-resource"
 
 # ---- C. fully restored: the real GITOPS_REVISION this cell settles on
 
@@ -954,7 +1012,7 @@ wait_until 600 15 "smoke Application reaches Synced" smoke_synced_refreshing \
 capacity_pool_synced_refreshing() { hard_refresh_app "${APP_CAPACITY_POOL}"; app_synced "${APP_CAPACITY_POOL}"; }
 wait_until 300 15 "capacity-pool Application reaches Synced" capacity_pool_synced_refreshing \
   || fail "${APP_CAPACITY_POOL} did not reach Synced (sync=$(app_sync "${APP_CAPACITY_POOL}")) once both karpenter-crd and kueue were fixed"
-pass "restored --revision to ${GITOPS_REVISION}: kueue converges on its own (no refresh needed -- it introduces no CRD anything else already depends on); capacity-pool (now including ResourceFlavor) and the smoke ClusterQueue/LocalQueue converge once told to recheck Argo CD's own API-resource cache (hard refresh), consistent with the documented limitation that a brand-new CRD is not picked up by steady-state watch-based cache invalidation on its own -- this is not a claim that either converges unattended; this cell's first-ever bootstrap sequence is complete"
+pass "restored --revision to ${GITOPS_REVISION}: kueue converges on its own (no refresh needed -- it never tried and failed to sync earlier in this sequence, so it has no cached discovery failure to invalidate); capacity-pool (now including ResourceFlavor) and the smoke ClusterQueue/LocalQueue converge once told to recheck (hard refresh), consistent with each having already tried and failed to sync in stage A/B while kueue's own CRDs did not exist yet, caching that failure until told otherwise -- this is not a claim that any brand-new CRD in general needs a refresh (2.upgrade.sh's own capacity-pool converges with no refresh call anywhere in that script, because its CRDs exist from that cell's own first bootstrap onward and it never cached a failed attempt against them), nor that either Application here converges unattended; this cell's first-ever bootstrap sequence is complete"
 
 # ------------------------------------------------- 4. first bootstrap
 #
@@ -1313,7 +1371,7 @@ pass "a Karpenter node (${CANARY_NODE}) launched from NodePool ${NODEPOOL} for t
 # cell's never-synced starting point).
 
 if [[ "${GITOPS_SKIP_ORDERING_EXPERIMENT}" == "1" ]]; then
-  info "GITOPS_SKIP_ORDERING_EXPERIMENT=1: skipping acceptance criterion 4 (no push access to ${GITOPS_TEST_REPO_URL} assumed)"
+  info "GITOPS_SKIP_ORDERING_EXPERIMENT=1: skipping step 12's already-converged-cell re-confirmation of acceptance criterion 4 (no push access to ${GITOPS_TEST_REPO_URL} assumed); the pristine stage A/B/C sequence above already exercised criterion 4 itself"
 else
   # Whether RollingSync is actually active is itself observable, not only
   # inferable from side effects: Argo CD's own ApplicationSet Progressive
