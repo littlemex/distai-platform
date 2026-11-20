@@ -6,16 +6,21 @@
 {{- /*
   gpu-only (default): NixlConnector alone, unchanged from before kvCacheTier
   existed. local/remote: NixlConnector's own mandatory PD handshake (Decision
-  6) stays first in the list, LMCacheConnector's cache tiering stacks after
+  6) stays first in the list, LMCacheMPConnector's cache tiering stacks after
   it - MultiConnector never replaces the connector a disagg-pd release needs
   to function, it only adds to it (see values.yaml's own kvCacheTier comment
   for the confirmed MultiConnector shape and what is not yet confirmed about
-  LMCacheConnector's own config keys).
+  LMCacheMPConnector's own config keys). kv_load_failure_policy is set at
+  the top level too, not only inside nixlConn's own entry: it is documented
+  as a KVTransferConfig-level field (vllm/config/kv_transfer.py), and
+  whether MultiConnector also honors a copy nested inside one connector's
+  own entry is unconfirmed - set both rather than risk the engine silently
+  falling back to its own default when wrapped.
 */}}
 {{- $kvConfig := $nixlConn -}}
 {{- if ne .Values.kvCacheTier.mode "gpu-only" }}
 {{- $lmcacheConn := fromJson (include "disagg.lmcacheConnector" $) }}
-{{- $kvConfig = dict "kv_connector" "MultiConnector" "kv_role" "kv_both" "kv_connector_extra_config" (dict "connectors" (list $nixlConn $lmcacheConn)) }}
+{{- $kvConfig = dict "kv_connector" "MultiConnector" "kv_role" "kv_both" "kv_load_failure_policy" $t.kvLoadFailurePolicy "kv_connector_extra_config" (dict "connectors" (list $nixlConn $lmcacheConn)) }}
 {{- end }}
 {{- range $role := list "prefill" "decode" }}
 {{- $r := index $.Values $role }}
@@ -216,17 +221,19 @@ spec:
             # Always set explicitly, never left to the library's own default:
             # 0 forces even a same-host transfer onto the EFA device instead
             # of libfabric's own shared-memory provider; 1 matches that
-            # library default, stated rather than omitted. Confirmed on real
-            # hardware (g7.48xlarge, 2026-11-20) that this value only has an
-            # observable effect when both roles' Kubernetes device-plugin
-            # allocations resolve to the SAME physical EFA interface, which
-            # two separate Pods under this chart's model never do (the
-            # device plugin is exclusive-per-unit): each role always gets
-            # its own distinct device, so libfabric's same-host shm bypass
-            # never engages in either case, and both values produce
-            # identical EFA counter traffic. See "Known issues" in this
-            # chart's README before relying on this value for a shm-vs-EFA
-            # comparison.
+            # library default, stated rather than omitted. Observed on real
+            # hardware (g7.48xlarge, 2026-11-20, two Pods each already
+            # holding their own distinct physical EFA interface): both
+            # values produced identical, nonzero EFA counter traffic -
+            # a measurement, not a theory. The likely explanation (not
+            # separately confirmed on this run) is that libfabric's
+            # same-host shm bypass is keyed to both endpoints resolving to
+            # the SAME device, which the Kubernetes device plugin's
+            # exclusive-per-unit allocation never gives two Pods; a
+            # difference in IPC/shared-memory namespace between two
+            # separate Pods was not ruled out as a contributing factor
+            # either. See "Known issues" in this chart's README before
+            # relying on this value for a shm-vs-EFA comparison.
             - name: FI_EFA_ENABLE_SHM_TRANSFER
               value: {{ if $t.forceEfaSameNode }}"0"{{ else }}"1"{{ end }}
             {{- end }}

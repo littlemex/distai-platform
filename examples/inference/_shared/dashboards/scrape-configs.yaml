@@ -57,26 +57,33 @@
   static_configs:
   - targets: ['pushgateway.monitoring.svc:9091']
 
-# GPU utilization and memory, from NVIDIA's own dcgm-exporter DaemonSet
-# (helm repo https://nvidia.github.io/dcgm-exporter/helm-charts, installed
-# with --set serviceMonitor.enabled=false - this platform's own metrics
-# pipeline is the ADOT Collector -> Amazon Managed Prometheus path RFC
-# disagg-rfc.md's own Decision 7 already names, not a Prometheus Operator,
-# so there is no ServiceMonitor CRD for this chart's own default
-# ServiceMonitor to attach to; this job is this pipeline's own discovery
-# path instead). Selects dcgm-exporter's own standard Service/Pod labels
-# (app.kubernetes.io/name: dcgm-exporter), not this directory's vllm-metrics
-# label - a different workload entirely, one per node rather than one per
-# engine pod.
+# GPU utilization and memory, from NVIDIA's own dcgm-exporter DaemonSet -
+# either the standalone chart (helm repo
+# https://nvidia.github.io/dcgm-exporter/helm-charts, installed with
+# --set serviceMonitor.enabled=false) or the NVIDIA GPU Operator's own
+# bundled copy, whichever the cluster actually runs (see this directory's
+# own README). This platform's own metrics pipeline is the ADOT Collector
+# -> Amazon Managed Prometheus path RFC disagg-rfc.md's own Decision 7
+# already names, not a Prometheus Operator, so there is no ServiceMonitor
+# CRD for either path's own default ServiceMonitor to attach to; this job
+# is this pipeline's own discovery path instead. The two paths label their
+# Pods differently (confirmed against each project's own source,
+# 2026-11-21): the standalone chart's own `dcgm-exporter.labels` helper
+# sets `app.kubernetes.io/name: dcgm-exporter`; the GPU Operator's own
+# bundled DaemonSet (assets/state-dcgm-exporter/0800_daemonset.yaml) sets
+# `app: nvidia-dcgm-exporter` instead, with no `app.kubernetes.io/name` at
+# all - the OR below matches either label alone, not both at once. A
+# different workload entirely from this directory's vllm-metrics label,
+# one per node rather than one per engine pod.
 - job_name: 'dcgm-gpu'
   scrape_interval: 10s
   metrics_path: /metrics
   kubernetes_sd_configs:
   - role: pod
   relabel_configs:
-  - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+  - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_label_app]
     action: keep
-    regex: "dcgm-exporter"
+    regex: "dcgm-exporter;.*|.*;nvidia-dcgm-exporter"
   - source_labels: [__meta_kubernetes_pod_node_name]
     action: replace
     target_label: kubernetes_node

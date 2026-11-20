@@ -513,47 +513,43 @@ def main():
               not any(aroles[r] for r in ROLES))
 
     # ------------------------------------------- kvCacheTier (skeleton)
-    _, err = R.render(a.disagg, sets=["kvCacheTier.mode=remote"])
-    check("disagg-pd: kvCacheTier.mode=remote without an endpoint: helm template fails",
-          err is not None and "kvCacheTier.lmcache.remote.endpoint" in (err or ""), err)
-    _, err = R.render(a.agg, sets=["kvCacheTier.mode=remote"])
-    check("agg-baseline: kvCacheTier.mode=remote without an endpoint: helm template fails",
-          err is not None and "kvCacheTier.lmcache.remote.endpoint" in (err or ""), err)
+    # local and remote both require kvCacheTier.lmcache.mpServerEndpoint
+    # and render identically on the vLLM side (see values.yaml's own
+    # kvCacheTier comment for why) -- tested together per mode.
+    for mode in ("local", "remote"):
+        _, err = R.render(a.disagg, sets=[f"kvCacheTier.mode={mode}"])
+        check(f"disagg-pd: kvCacheTier.mode={mode} without mpServerEndpoint: helm template fails",
+              err is not None and "kvCacheTier.lmcache.mpServerEndpoint" in (err or ""), err)
+        _, err = R.render(a.agg, sets=[f"kvCacheTier.mode={mode}"])
+        check(f"agg-baseline: kvCacheTier.mode={mode} without mpServerEndpoint: helm template fails",
+              err is not None and "kvCacheTier.lmcache.mpServerEndpoint" in (err or ""), err)
 
-    ldocs, err = R.render(a.disagg, sets=["kvCacheTier.mode=local"])
-    if check("disagg-pd: kvCacheTier.mode=local: helm template", ldocs is not None, err):
-        lroles = check_roles_present("disagg-pd kvCacheTier.mode=local", ldocs)
-        if lroles:
-            cm = configmap_text(ldocs)
-            for r in ROLES:
-                for w in lroles[r]:
-                    text = " ".join(container_text(c) for c in gpu_containers(pod_spec(w))) + " " + cm
-                    check(f"disagg-pd kvCacheTier.mode=local: {name_of(w)} ({r}) stacks "
-                          "MultiConnector(NixlConnector, LMCacheConnector), keeping NixlConnector",
-                          "MultiConnector" in text and "NixlConnector" in text and "LMCacheConnector" in text)
+        ddocs, err = R.render(a.disagg, sets=[
+            f"kvCacheTier.mode={mode}", "kvCacheTier.lmcache.mpServerEndpoint=cache.example.internal:6379",
+        ])
+        if check(f"disagg-pd: kvCacheTier.mode={mode} with mpServerEndpoint: helm template", ddocs is not None, err):
+            droles = check_roles_present(f"disagg-pd kvCacheTier.mode={mode}", ddocs)
+            if droles:
+                cm = configmap_text(ddocs)
+                for r in ROLES:
+                    for w in droles[r]:
+                        text = " ".join(container_text(c) for c in gpu_containers(pod_spec(w))) + " " + cm
+                        check(f"disagg-pd kvCacheTier.mode={mode}: {name_of(w)} ({r}) stacks "
+                              "MultiConnector(NixlConnector, LMCacheMPConnector), keeping NixlConnector, "
+                              "and carries the mp server host",
+                              "MultiConnector" in text and "NixlConnector" in text
+                              and "LMCacheMPConnector" in text and "cache.example.internal" in text)
 
-    rdocs, err = R.render(a.disagg, sets=[
-        "kvCacheTier.mode=remote", "kvCacheTier.lmcache.remote.endpoint=cache.example.internal:6379",
-    ])
-    if check("disagg-pd: kvCacheTier.mode=remote with an endpoint: helm template", rdocs is not None, err):
-        rroles = check_roles_present("disagg-pd kvCacheTier.mode=remote", rdocs)
-        if rroles:
-            cm = configmap_text(rdocs)
-            for r in ROLES:
-                for w in rroles[r]:
-                    text = " ".join(container_text(c) for c in gpu_containers(pod_spec(w))) + " " + cm
-                    check(f"disagg-pd kvCacheTier.mode=remote: {name_of(w)} ({r}) carries the remote endpoint",
-                          "cache.example.internal" in text)
-
-    radocs, err = R.render(a.agg, sets=[
-        "kvCacheTier.mode=remote", "kvCacheTier.lmcache.remote.endpoint=cache.example.internal:6379",
-    ])
-    if check("agg-baseline: kvCacheTier.mode=remote with an endpoint: helm template", radocs is not None, err):
-        aw2 = workloads(radocs)
-        text = " ".join(json.dumps(w) for w in aw2) + " " + configmap_text(radocs)
-        check("agg-baseline kvCacheTier.mode=remote: LMCacheConnector alone, no MultiConnector "
-              "(there is no NixlConnector here to stack it with)",
-              "LMCacheConnector" in text and "MultiConnector" not in text and "cache.example.internal" in text)
+        radocs, err = R.render(a.agg, sets=[
+            f"kvCacheTier.mode={mode}", "kvCacheTier.lmcache.mpServerEndpoint=cache.example.internal:6379",
+        ])
+        if check(f"agg-baseline: kvCacheTier.mode={mode} with mpServerEndpoint: helm template", radocs is not None, err):
+            aw2 = workloads(radocs)
+            text = " ".join(json.dumps(w) for w in aw2) + " " + configmap_text(radocs)
+            check(f"agg-baseline kvCacheTier.mode={mode}: LMCacheMPConnector alone, no MultiConnector "
+                  "(there is no NixlConnector here to stack it with), carries the mp server host",
+                  "LMCacheMPConnector" in text and "MultiConnector" not in text
+                  and "cache.example.internal" in text)
 
     # ----------------------------- exposure and pinning (AGENTS.md section 6)
     for chart_label, rendered in (("disagg-pd", docs), ("agg-baseline", adocs)):

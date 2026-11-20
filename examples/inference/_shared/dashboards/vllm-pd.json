@@ -1108,8 +1108,8 @@
     {
       "type": "timeseries",
       "id": 20,
-      "title": "GPU utilization percent, per node (DCGM_FI_DEV_GPU_UTIL)",
-      "description": "DCGM_FI_DEV_GPU_UTIL from the dcgm-gpu scrape job (examples/inference/_shared/dashboards/scrape-configs.yaml). Skeleton panel: no real run has fed this job yet, see this directory's own README.",
+      "title": "GPU utilization percent, per node, averaged across its GPUs (DCGM_FI_DEV_GPU_UTIL)",
+      "description": "avg by (kubernetes_node) of DCGM_FI_DEV_GPU_UTIL from the dcgm-gpu scrape job (examples/inference/_shared/dashboards/scrape-configs.yaml) - one value per GPU on the node, averaged, not a node-level metric DCGM itself reports. Skeleton panel: no real run has fed this job yet, see this directory's own README.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1169,8 +1169,8 @@
     {
       "type": "timeseries",
       "id": 21,
-      "title": "GPU memory used bytes, per node (DCGM_FI_DEV_FB_USED)",
-      "description": "DCGM_FI_DEV_FB_USED (framebuffer/HBM used, MiB in DCGM's own unit, converted here) from the dcgm-gpu scrape job. Skeleton panel: no real run has fed this job yet, see this directory's own README.",
+      "title": "GPU memory used bytes, per node, summed across its GPUs (DCGM_FI_DEV_FB_USED)",
+      "description": "sum by (kubernetes_node) of DCGM_FI_DEV_FB_USED (framebuffer/HBM used, MiB in DCGM's own unit, converted here) from the dcgm-gpu scrape job - summed across every GPU DCGM reports for that node, not a node-level metric DCGM itself reports. Skeleton panel: no real run has fed this job yet, see this directory's own README.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1187,7 +1187,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "avg by (kubernetes_node) (DCGM_FI_DEV_FB_USED{job=\"dcgm-gpu\",kubernetes_node=~\"$node\"} * 1024 * 1024)",
+          "expr": "sum by (kubernetes_node) (DCGM_FI_DEV_FB_USED{job=\"dcgm-gpu\",kubernetes_node=~\"$node\"} * 1024 * 1024)",
           "legendFormat": "{{kubernetes_node}}",
           "refId": "A",
           "range": true,

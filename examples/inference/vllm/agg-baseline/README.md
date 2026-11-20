@@ -42,7 +42,7 @@ kubectl run curl-agg --rm -i --restart=Never -n "$NAMESPACE" \
 
 ## KV cache tiers (skeleton, not built or measured on real hardware yet)
 
-`kvCacheTier.mode: local` or `remote` adds `LMCacheConnector` (no `MultiConnector` needed here, since this chart has no other KV connector to stack it with) for a node-local or off-node cache tier, on top of vLLM's own GPU-resident cache. A `remote` tier is this aggregated baseline's own way to get cross-replica prefix reuse (`engine.replicas > 1`), which a bigger single-process cache cannot give it. See [`../disagg-pd/README.md`'s own "KV cache tiers" section](../disagg-pd/README.md#kv-cache-tiers-skeleton-not-built-or-measured-on-real-hardware-yet) for what is and is not confirmed about the exact LMCache config shape — the same caveats apply here. Whether a `remote` tier backed by Amazon ElastiCache's distributed KV caching feature needs an EFA device on this chart's own engine pods (not only on the cache nodes) is unconfirmed; the "No EFA device is needed" line in Prerequisites above is about `kvCacheTier.mode=gpu-only`, this chart's own default.
+`kvCacheTier.mode: local` or `remote` adds `LMCacheMPConnector` (the registered connector name for LMCache's current "mp server" integration, not `LMCacheConnector`; no `MultiConnector` needed here, since this chart has no other KV connector to stack it with) for a cache tier on top of vLLM's own GPU-resident cache. `local` and `remote` render **identically** on this chart's own vLLM side — both point `LMCacheMPConnector` at the same `kvCacheTier.lmcache.mpServerEndpoint` (LMCache's own separate "mp server" process, not rendered by this chart); the actual difference between a node-local and an off-node backend lives in that mp server's own adapter configuration. A `remote` tier is this aggregated baseline's own way to get cross-replica prefix reuse (`engine.replicas > 1`), which a bigger single-process cache cannot give it. **Prerequisite this chart does not provide**: an LMCache mp server already reachable at `kvCacheTier.lmcache.mpServerEndpoint`; that server's own endpoint, VPC/subnet-count and TLS requirements if it points at Amazon ElastiCache are this prerequisite's own responsibility. See [`../disagg-pd/README.md`'s own "KV cache tiers" section](../disagg-pd/README.md#kv-cache-tiers-skeleton-not-built-or-measured-on-real-hardware-yet) for what is and is not confirmed — the same caveats apply here, including that vLLM's own KV-event publisher has no confirmed visibility into this remote tier's own contents. Whether a `remote` tier backed by Amazon ElastiCache's distributed KV caching feature needs an EFA device on this chart's own engine pods (not only on the cache nodes) is unconfirmed; the "No EFA device is needed" line in Prerequisites above is about `kvCacheTier.mode=gpu-only`, this chart's own default.
 
 ## Measure
 
@@ -71,9 +71,9 @@ Run the same load replay and scorer from [`../../_shared/`](../../_shared/) agai
 | `engine.podSecurityContext`, `engine.containerSecurityContext` | non-root UID 2000, all capabilities dropped | Security context of the engine pods |
 | `service.type` / `.port` | `ClusterIP` / `8000` | Client-facing Service |
 | `metrics.enabled` | `true` | Pod label and annotations for the `vllm` scrape job |
-| `kvCacheTier.mode` | `gpu-only` | `local` or `remote` adds `LMCacheConnector`; see "KV cache tiers" above. Skeleton only |
-| `kvCacheTier.lmcache.chunkSize`, `.hashAlgorithm`, `.localBackend` | `256`, `sha256`, `cpu` | Same meaning as the disaggregated chart's own values |
-| `kvCacheTier.lmcache.remote.endpoint`, `.enableTls` | `""`, `true` | Required when `mode=remote` |
+| `kvCacheTier.mode` | `gpu-only` | `local` or `remote` adds `LMCacheMPConnector`; see "KV cache tiers" above. Skeleton only |
+| `kvCacheTier.lmcache.mpServerEndpoint` | `""` | `host:port` of LMCache's own separate mp server; required whenever `mode` is `local` or `remote` |
+| `kvCacheTier.lmcache.extraConfig` | `{}` | Merged into `kv_connector_extra_config` as-is; unconfirmed beyond `lmcache.mp.host`/`lmcache.mp.port` |
 
 ## Known issues
 

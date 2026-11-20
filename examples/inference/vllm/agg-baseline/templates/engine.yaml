@@ -6,7 +6,7 @@
 {{- end -}}
 {{- $resources := deepCopy (default (dict) $e.resources) -}}
 {{- $_ := set $resources "limits" (merge (dict .Values.accelerator.resourceName (int $e.gpusPerEngine)) (default (dict) $resources.limits)) -}}
-{{- /* gpu-only (default): no kv-transfer-config at all, same as before kvCacheTier existed. local/remote: LMCacheConnector alone - there is no NixlConnector here to stack it onto. */ -}}
+{{- /* gpu-only (default): no kv-transfer-config at all, same as before kvCacheTier existed. local/remote: LMCacheMPConnector alone - there is no NixlConnector here to stack it onto. */ -}}
 {{- $kvConfig := "" -}}
 {{- if ne .Values.kvCacheTier.mode "gpu-only" -}}
 {{- $kvConfig = include "agg.lmcacheConnector" . -}}

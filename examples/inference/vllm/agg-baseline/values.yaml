@@ -73,8 +73,9 @@ metrics:
 # Skeleton only (values and rendering, not built or measured on real
 # hardware yet). Same three tiers as ../disagg-pd/values.yaml's own
 # kvCacheTier (see that chart's comment for what is and is not confirmed
-# about the exact LMCache config keys) - this chart has no NixlConnector to
-# stack onto, so local/remote set kv-transfer-config to LMCacheConnector
+# about the exact LMCache config keys, the LMCacheMPConnector name, and why
+# local and remote render identically) - this chart has no NixlConnector to
+# stack onto, so local/remote set kv-transfer-config to LMCacheMPConnector
 # alone instead of a MultiConnector list. A shared remote tier is this
 # aggregated baseline's own way to show cross-replica prefix reuse, which
 # an aggregated deployment cannot get from a bigger single-process cache
@@ -82,10 +83,5 @@ metrics:
 kvCacheTier:
   mode: gpu-only
   lmcache:
-    chunkSize: 256
-    hashAlgorithm: sha256
-    localBackend: cpu
-    remote:
-      endpoint: ""
-      enableTls: true
+    mpServerEndpoint: ""
     extraConfig: {}
