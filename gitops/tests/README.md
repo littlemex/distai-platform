@@ -46,10 +46,11 @@ Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
   (default `us-east-1`) -- never passed as an env var, a command-line
   argument, or written to `.git/config`: both scripts read it through a
   one-shot `GIT_ASKPASS` helper, deleted immediately after the one `git`
-  command that needs it. `1.e2e.sh` pushes up to four small, disposable
-  branches (one per-run cell fixture if `NAME` needs one, `break-crds`,
-  `break-kueue`, `remove-kueue`); `2.upgrade.sh` pushes up to two (the
-  cell fixture, `upgrade-match`). Every one of them lives under
+  command that needs it. `1.e2e.sh` pushes up to six small, disposable
+  branches (one per-run cell fixture if `NAME` needs one, `pristine-both-broken`
+  and `pristine-kueue-broken` for the pristine first-bootstrap stages,
+  `break-crds`, `break-kueue`, `remove-kueue`); `2.upgrade.sh` pushes up
+  to two (the cell fixture, `upgrade-match`). Every one of them lives under
   `refs/heads/e2e/<run-id>/*` (a guard function refuses pushing or
   deleting anything outside that namespace), to exercise the ordering,
   generator-loss and upgrade experiments on a real Argo CD sync; `main`
@@ -58,9 +59,15 @@ Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
   to clean up) and deletes the ones already in its own `e2e/<run-id>/*`
   namespace. Branches are deleted again when the run ends, on success and
   on failure alike. Set `GITOPS_SKIP_ORDERING_EXPERIMENT=1` on `1.e2e.sh`
-  if this token is unavailable; `2.upgrade.sh`, and `1.e2e.sh`'s own step
-  13 generator-entry-loss experiment, have no such flag, since the write
-  is exactly what their own acceptance criteria need.
+  if this token is unavailable; this skips only step 12's already-
+  converged-cell re-confirmation of acceptance criterion 4 (two more
+  disposable branches, `break-crds`/`break-kueue`) -- the criterion
+  itself is still exercised by the pristine stage A/B/C sequence (two
+  disposable branches, `pristine-both-broken`/`pristine-kueue-broken`),
+  this cell's own first-ever bootstrap, which pushes unconditionally,
+  same as `2.upgrade.sh` and `1.e2e.sh`'s own step 13 generator-entry-loss
+  experiment (`remove-kueue`), since the write is exactly what their own
+  acceptance criteria need.
 - For `2.upgrade.sh`: a real, currently published Karpenter version
   different from `addons/karpenter/addon.yaml`'s pinned one (confirm with
   `helm show chart oci://public.ecr.aws/karpenter/karpenter --version <x>`);
