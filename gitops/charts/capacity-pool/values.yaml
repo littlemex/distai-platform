@@ -58,6 +58,24 @@ pool:
   # unrelated empty-node consolidation.
   rootVolumeSizeGi: ""
 
+  # Empty (default): no extra ENI is requested, matching every existing
+  # pool exactly (no behavior change for a pool that does not set this). A
+  # pool targeting an EFA-capable instance type (for example the
+  # single-network-card g7/g7e sizes, which carry exactly one EFA
+  # interface) sets this to request it; otherwise the instance boots
+  # without an EFA device even though the type supports one (see
+  # ec2nodeclass.yaml's own comment). Example for one EFA device on
+  # network card 0, the only shape a single-network-card instance type
+  # supports:
+  #   networkInterfaces:
+  #     - networkCardIndex: 0
+  #       deviceIndex: 0
+  #       interfaceType: interface
+  #     - networkCardIndex: 0
+  #       deviceIndex: 1
+  #       interfaceType: efa-only
+  networkInterfaces: []
+
 # Used only when pool.capacityType is "reserved": renders
 # EC2NodeClass.spec.capacityReservationSelectorTerms as one term
 # [{tags, instanceMatchCriteria}]. Reservations are selected by tag, not by
