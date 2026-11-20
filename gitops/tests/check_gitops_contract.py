@@ -715,19 +715,23 @@ def main(root: str) -> int:
     # Exactly one capacity-pool file per accelerator cell: 1.e2e.sh's
     # existing step 10 (which runs unchanged on the GPU cell) asserts
     # exactly one NodePool/EC2NodeClass/ResourceFlavor in the cell.
-    # dp-a19-trn-r3 uses on-demand, not flex (#28 section H, root caused on a
-    # real run): its NodePool's requirements name exactly one instance type
+    # Both cells use flex (#28 section H has the full finding and its own
+    # history): dp-a19-trn-r3's NodePool names exactly one instance type
     # (trn2.3xlarge is the only Trainium2 size), and on a real run Karpenter's
     # own price-based offering ranking kept re-selecting spot every time its
     # unavailable-offerings cache entry expired, never actually trying
     # on-demand for real even though a dry-run CreateFleet confirmed on-demand
-    # capacity was available -- flex's fallback only works in practice when a
-    # NodePool has a second instance type to diversify across once spot is
-    # unavailable (dp-a19-gpu-r3's NodePool has three: g7/g6e/g5, and passed
-    # with flex on the same real run).
+    # capacity was available. Switching this cell to pool.capacityType:
+    # on-demand to work around that was tried and itself failed a real run a
+    # different, still-unexplained way (zero real launch attempts at all,
+    # "nodepool requirements filtered out all instance types" for the full
+    # wait, with no EC2NodeClass error of its own) -- not root caused with
+    # the same confidence, so reverted. flex stays the fixture's own value;
+    # dp-a19-gpu-r3's NodePool has three instance families (g7/g6e/g5) and
+    # has passed with flex on a real run.
     accel_cells = {
         "dp-a19-gpu-r3": {"pool": "gpu", "label": "distai.dev/nvidia-gpu-method", "family": "g7", "capacityType": "flex"},
-        "dp-a19-trn-r3": {"pool": "trn", "label": "distai.dev/neuron-method", "family": "trn2", "capacityType": "on-demand"},
+        "dp-a19-trn-r3": {"pool": "trn", "label": "distai.dev/neuron-method", "family": "trn2", "capacityType": "flex"},
     }
     for cell, want in accel_cells.items():
         files = sorted(glob.glob(os.path.join(gitops, "cells", cell, "capacity-pool", "*.yaml")))
