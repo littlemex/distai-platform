@@ -40,6 +40,10 @@ kubectl run curl-agg --rm -i --restart=Never -n "$NAMESPACE" \
   -d "{\"model\": \"$MODEL_ID\", \"prompt\": \"The capital of France is\", \"max_tokens\": 32}"
 ```
 
+## KV cache tiers (skeleton, not built or measured on real hardware yet)
+
+`kvCacheTier.mode: local` or `remote` adds `LMCacheConnector` (no `MultiConnector` needed here, since this chart has no other KV connector to stack it with) for a node-local or off-node cache tier, on top of vLLM's own GPU-resident cache. A `remote` tier is this aggregated baseline's own way to get cross-replica prefix reuse (`engine.replicas > 1`), which a bigger single-process cache cannot give it. See [`../disagg-pd/README.md`'s own "KV cache tiers" section](../disagg-pd/README.md#kv-cache-tiers-skeleton-not-built-or-measured-on-real-hardware-yet) for what is and is not confirmed about the exact LMCache config shape — the same caveats apply here. Whether a `remote` tier backed by Amazon ElastiCache's distributed KV caching feature needs an EFA device on this chart's own engine pods (not only on the cache nodes) is unconfirmed; the "No EFA device is needed" line in Prerequisites above is about `kvCacheTier.mode=gpu-only`, this chart's own default.
+
 ## Measure
 
 Run the same load replay and scorer from [`../../_shared/`](../../_shared/) against `http://$RELEASE-vllm-agg-baseline:8000`, with the same trace parameters and SLO as the disaggregated run, and `--gpu-count` set to the number the installation notes print.
@@ -67,6 +71,9 @@ Run the same load replay and scorer from [`../../_shared/`](../../_shared/) agai
 | `engine.podSecurityContext`, `engine.containerSecurityContext` | non-root UID 2000, all capabilities dropped | Security context of the engine pods |
 | `service.type` / `.port` | `ClusterIP` / `8000` | Client-facing Service |
 | `metrics.enabled` | `true` | Pod label and annotations for the `vllm` scrape job |
+| `kvCacheTier.mode` | `gpu-only` | `local` or `remote` adds `LMCacheConnector`; see "KV cache tiers" above. Skeleton only |
+| `kvCacheTier.lmcache.chunkSize`, `.hashAlgorithm`, `.localBackend` | `256`, `sha256`, `cpu` | Same meaning as the disaggregated chart's own values |
+| `kvCacheTier.lmcache.remote.endpoint`, `.enableTls` | `""`, `true` | Required when `mode=remote` |
 
 ## Known issues
 

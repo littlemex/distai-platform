@@ -60,4 +60,33 @@ app.kubernetes.io/component: {{ .component }}
 {{- fail (printf "%s.efaDevices must be at least 1 with transport.backend=LIBFABRIC (FI_PROVIDER=efa needs an EFA device)" $role) -}}
 {{- end -}}
 {{- end -}}
+{{- $kvt := .Values.kvCacheTier -}}
+{{- if not (has $kvt.mode (list "gpu-only" "local" "remote")) -}}
+{{- fail (printf "kvCacheTier.mode must be gpu-only, local or remote, got %q" $kvt.mode) -}}
+{{- end -}}
+{{- if and (eq $kvt.mode "remote") (not $kvt.lmcache.remote.endpoint) -}}
+{{- fail "kvCacheTier.mode=remote requires kvCacheTier.lmcache.remote.endpoint" -}}
+{{- end -}}
+{{- if not (has $kvt.lmcache.localBackend (list "cpu" "disk")) -}}
+{{- fail (printf "kvCacheTier.lmcache.localBackend must be cpu or disk, got %q" $kvt.lmcache.localBackend) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+  The LMCacheConnector entry of a MultiConnector's own "connectors" list
+  (vLLM's confirmed stacking shape, docs.vllm.ai "disaggregated prefilling",
+  fetched 2026-11-21), skeleton only - see values.yaml's own kvCacheTier
+  comment for what is and is not confirmed about the exact config keys
+  below. Call with the root context ($).
+*/}}
+{{- define "disagg.lmcacheConnector" -}}
+{{- $kvt := .Values.kvCacheTier -}}
+{{- $lm := $kvt.lmcache -}}
+{{- $cfg := dict "chunk_size" (int $lm.chunkSize) "hash_algorithm" $lm.hashAlgorithm "local_cpu" (eq $lm.localBackend "cpu") -}}
+{{- if eq $kvt.mode "remote" -}}
+{{- $_ := set $cfg "remote_url" $lm.remote.endpoint -}}
+{{- $_ := set $cfg "remote_enable_tls" $lm.remote.enableTls -}}
+{{- end -}}
+{{- $cfg = merge $cfg (deepCopy $lm.extraConfig) -}}
+{{- dict "kv_connector" "LMCacheConnector" "kv_role" "kv_both" "kv_connector_extra_config" $cfg | toJson -}}
 {{- end -}}
