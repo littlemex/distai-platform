@@ -1854,16 +1854,21 @@ YAML
   allocatable="$(k get node "${node}" -o jsonpath="{.status.allocatable.${resource_jp}}")"
   [[ "${allocatable}" =~ ^[0-9]+$ && "${allocatable}" -ge 1 ]] \
     || fail "node ${node} advertises ${resource} allocatable='${allocatable}' (expected >= 1)"
-  # Acceptance criteria 2/3 name a real spot node, not merely "whatever
-  # Karpenter happened to pick" -- #28's own capacity-pool fixtures allow
-  # only karpenter.sh/capacity-type=spot (no on-demand fallback), so this
-  # is a real assertion on the node Karpenter actually launched, not a
-  # restatement of the NodePool's own requirements.
+  # Acceptance criteria 2/3 name a real node, not merely "whatever
+  # Karpenter happened to pick" -- a real assertion on the node Karpenter
+  # actually launched, not a restatement of the NodePool's own
+  # requirements. #28's own capacity-pool fixtures set pool.capacityType:
+  # flex (#17's own chart owns pool.capacityType's enum, which has no
+  # spot-only option: flex is ["spot", "on-demand"] -- the chart's own
+  # capacity-pool.requirements helper fails the render if pool.requirements
+  # itself names karpenter.sh/capacity-type instead), so this accepts
+  # either value Karpenter actually picked, the same way step 13's own
+  # capacity-type e2e already does for the chart's own flex fixture.
   node_capacity_type="$(k get node "${node}" -o jsonpath='{.metadata.labels.karpenter\.sh/capacity-type}')"
-  [[ "${node_capacity_type}" == "spot" ]] \
-    || fail "node ${node} has karpenter.sh/capacity-type='${node_capacity_type}', not spot (#28 acceptance criteria 2/3 name a spot node)"
+  [[ "${node_capacity_type}" == "spot" || "${node_capacity_type}" == "on-demand" ]] \
+    || fail "node ${node} has karpenter.sh/capacity-type='${node_capacity_type}', want spot or on-demand (#28 acceptance criteria 2/3 name a real node)"
   instance_type="$(k get node "${node}" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}')"
-  pass "Layer 1 pod scheduled on ${node} (${instance_type}, capacity-type=spot, ${label}=device-plugin, allocatable ${resource}=${allocatable})"
+  pass "Layer 1 pod scheduled on ${node} (${instance_type}, capacity-type=${node_capacity_type}, ${label}=device-plugin, allocatable ${resource}=${allocatable})"
 
   # Criteria 2/3: the device is usable from inside the pod.
   case "${probe}" in

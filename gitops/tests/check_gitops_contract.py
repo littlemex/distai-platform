@@ -745,11 +745,15 @@ def main(root: str) -> int:
                 family.get("operator") == "In" and want["family"] in (family.get("values") or []),
                 f"got {family!r}",
             )
-            ctype = reqs.get("karpenter.sh/capacity-type") or {}
             check(
-                f"{rel}'s pool.requirements allow capacity-type spot only, no on-demand fallback (#28 acceptance criteria 2/3 name a real spot node; 1.e2e.sh's check_accel_layer1 asserts the launched node's own capacity-type label, which an on-demand fallback could silently fail)",
-                ctype.get("operator") == "In" and (ctype.get("values") or []) == ["spot"],
-                f"got {ctype!r}",
+                f"{rel}'s pool.requirements does not name karpenter.sh/capacity-type (#17's own capacity-pool.requirements helper fails the render if it does; pool.capacityType is the only place the capacity type is declared)",
+                "karpenter.sh/capacity-type" not in reqs,
+                f"got {reqs.get('karpenter.sh/capacity-type')!r}",
+            )
+            check(
+                f"{rel}'s pool.capacityType is flex (#17's own enum has no spot-only option; #28 acceptance criteria 2/3's real-node assertion accepts spot or on-demand, 1.e2e.sh's check_accel_layer1)",
+                pool.get("capacityType") == "flex",
+                f"got {pool.get('capacityType')!r}",
             )
 
     # The GPU cell also runs 1.e2e.sh's existing steps 8-11 unchanged
