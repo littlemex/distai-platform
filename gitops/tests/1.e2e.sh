@@ -1072,22 +1072,32 @@ while true; do
   fi
   sleep "${STAGE_B_READ_INTERVAL}"
 done
-# Prefer syncResult.resources[]'s own per-resource messages (populated
-# whenever the loop above accepted a Running+non-nil-syncResult read);
-# fall back to the top-level message only if syncResult carried no
-# resources entries at all -- a resource-discovery validation failure can
-# fail the whole sync before any per-resource ResourceResult is ever
-# created, leaving resources[] empty while the top-level message (now
-# confirmed, by the same read, not to be the nil-window placeholder)
-# still names the real cause.
-capacity_pool_operation_message="${stage_b_resources_summary:-${stage_b_message}}"
+# Search the top-level message and syncResult.resources[]'s own summary
+# together, never one in place of the other -- confirmed necessary, not
+# merely cautious, by this fix's own first real run: the top-level
+# message read "...failed to discover server resources for group
+# version kueue.x-k8s.io/v1beta2: the server could not find the
+# requested resource...", while syncResult.resources[]'s own per-resource
+# message for the exact same failure read "...The Kubernetes API could
+# not find kueue.x-k8s.io/ResourceFlavor for requested resource
+# kube-system/cpu...". Same cause, different wording and a different
+# substring order ("could not find" lands before "kueue.x-k8s.io" in the
+# per-resource message, after it in the top-level one) -- an earlier
+# version of this fix preferred resources[] whenever present and failed
+# this exact check on that real run, even though the loop above had
+# already correctly waited out five "Retrying operation" reads first.
+# Concatenating both (rather than choosing one) means whichever field
+# happens to carry the matched phrase's exact order does not depend on
+# which one this fix's author guessed would be more specific.
+capacity_pool_operation_message="${stage_b_message}"
+[[ -n "${stage_b_resources_summary}" ]] && capacity_pool_operation_message+=" | resources: ${stage_b_resources_summary}"
 case "${capacity_pool_operation_message}" in
   *"karpenter.k8s.aws/v1"*|*"karpenter.sh/v1"*)
-    fail "${APP_CAPACITY_POOL}'s own operationState still names karpenter's own CRDs as undiscoverable (got: ${capacity_pool_operation_message}; phase=${stage_b_phase}, retryCount=${stage_b_retry_count}, top-level message=${stage_b_message}) even after this read settled outside Argo CD's retry-preparation window -- either karpenter-crd is not actually Established, or this message is stale and does not reflect a sync attempt made since it was fixed" ;;
+    fail "${APP_CAPACITY_POOL}'s own operationState still names karpenter's own CRDs as undiscoverable (got: ${capacity_pool_operation_message}; phase=${stage_b_phase}, retryCount=${stage_b_retry_count}) even after this read settled outside Argo CD's retry-preparation window -- either karpenter-crd is not actually Established, or this message is stale and does not reflect a sync attempt made since it was fixed" ;;
 esac
 case "${capacity_pool_operation_message}" in
-  *"kueue.x-k8s.io"*"could not find the requested resource"*) ;;
-  *) fail "${APP_CAPACITY_POOL}'s own operationState does not mention kueue.x-k8s.io's own resources being undiscoverable (got: ${capacity_pool_operation_message}; phase=${stage_b_phase}, retryCount=${stage_b_retry_count}, top-level message=${stage_b_message}, conditions=${stage_b_conditions_summary}) -- the claimed cause is not what this run's own Application actually reports" ;;
+  *"kueue.x-k8s.io"*"could not find the requested resource"*|*"could not find"*"kueue.x-k8s.io"*) ;;
+  *) fail "${APP_CAPACITY_POOL}'s own operationState does not mention kueue.x-k8s.io's own resources being undiscoverable (got: ${capacity_pool_operation_message}; phase=${stage_b_phase}, retryCount=${stage_b_retry_count}, conditions=${stage_b_conditions_summary}) -- the claimed cause is not what this run's own Application actually reports" ;;
 esac
 nodepool_exists && fail "NodePool cpu was created although capacity-pool's own Application-wide sync should still be blocked by kueue's undiscoverable ResourceFlavor"
 ec2nodeclass_exists && fail "EC2NodeClass cpu was created although capacity-pool's own Application-wide sync should still be blocked by kueue's undiscoverable ResourceFlavor"
