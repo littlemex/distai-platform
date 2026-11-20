@@ -715,9 +715,19 @@ def main(root: str) -> int:
     # Exactly one capacity-pool file per accelerator cell: 1.e2e.sh's
     # existing step 10 (which runs unchanged on the GPU cell) asserts
     # exactly one NodePool/EC2NodeClass/ResourceFlavor in the cell.
+    # dp-a19-trn-r3 uses on-demand, not flex (#28 section H, root caused on a
+    # real run): its NodePool's requirements name exactly one instance type
+    # (trn2.3xlarge is the only Trainium2 size), and on a real run Karpenter's
+    # own price-based offering ranking kept re-selecting spot every time its
+    # unavailable-offerings cache entry expired, never actually trying
+    # on-demand for real even though a dry-run CreateFleet confirmed on-demand
+    # capacity was available -- flex's fallback only works in practice when a
+    # NodePool has a second instance type to diversify across once spot is
+    # unavailable (dp-a19-gpu-r3's NodePool has three: g7/g6e/g5, and passed
+    # with flex on the same real run).
     accel_cells = {
-        "dp-a19-gpu-r3": {"pool": "gpu", "label": "distai.dev/nvidia-gpu-method", "family": "g7"},
-        "dp-a19-trn-r3": {"pool": "trn", "label": "distai.dev/neuron-method", "family": "trn2"},
+        "dp-a19-gpu-r3": {"pool": "gpu", "label": "distai.dev/nvidia-gpu-method", "family": "g7", "capacityType": "flex"},
+        "dp-a19-trn-r3": {"pool": "trn", "label": "distai.dev/neuron-method", "family": "trn2", "capacityType": "on-demand"},
     }
     for cell, want in accel_cells.items():
         files = sorted(glob.glob(os.path.join(gitops, "cells", cell, "capacity-pool", "*.yaml")))
@@ -751,8 +761,8 @@ def main(root: str) -> int:
                 f"got {reqs.get('karpenter.sh/capacity-type')!r}",
             )
             check(
-                f"{rel}'s pool.capacityType is flex (#17's own enum has no spot-only option; #28 acceptance criteria 2/3's real-node assertion accepts spot or on-demand, 1.e2e.sh's check_accel_layer1)",
-                pool.get("capacityType") == "flex",
+                f"{rel}'s pool.capacityType is {want['capacityType']!r} (#17's own enum has no spot-only option; #28 section H for why the two cells differ)",
+                pool.get("capacityType") == want["capacityType"],
                 f"got {pool.get('capacityType')!r}",
             )
 

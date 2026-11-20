@@ -12,15 +12,24 @@
 # The pool stays dynamically provisioned and device-plugin method: #19 E4c
 # showed a dynamic DRA pool never initializes a Neuron node.
 #
-# pool.capacityType: flex (#17's own enum has no spot-only option: flex is
-# ["spot", "on-demand"], the chart's own capacity-pool.requirements helper
-# fails the render if pool.requirements itself names
-# karpenter.sh/capacity-type -- #17 owns this chart's shape, see
-# fix/capacity-pool-root-volume). #28's own acceptance criteria 2/3 named a
-# spot node explicitly when this pool had no on-demand fallback to fall
-# back to; with flex, 1.e2e.sh's check_accel_layer1 accepts spot or
-# on-demand on the node Karpenter actually launched, the same way the
-# capacity-type e2e already does for the chart's own flex fixture.
+# pool.capacityType: on-demand, not flex (#28 section H, root caused on a
+# real run after this NodePool was restacked onto flex). Karpenter's own
+# CreateFleet calls (CloudTrail, cluster dp-a19-trn-r3) over a 30-minute
+# wait were spot-only, nine times, each UnfulfillableCapacity, roughly
+# every 3m10s -- Karpenter's own unavailable-offerings cache TTL -- while
+# a dry-run on-demand CreateFleet for the same instance type at the very
+# start had already reported it would have succeeded. With exactly one
+# instance type in this NodePool's own requirements (trn2.3xlarge is the
+# only Trainium2 size), Karpenter's price-based ranking re-selects spot
+# every time its cache entry expires and never actually tries on-demand
+# for real; flex's fallback only works in practice when a NodePool has a
+# second instance type to diversify across once spot is unavailable (the
+# chart's own cpu-flex fixture, and this issue's own GPU NodePool with
+# three instance families, both do and both pass with flex). This pool's
+# only purpose is proving the device-plugin/method-label mechanism
+# launches a real node, not proving spot provisioning, so on-demand here
+# trades a cost saving this NodePool was never going to realize anyway
+# for determinism.
 #
 # pool.requirements replaces the chart default as a whole (Helm replaces
 # lists): the chart's instance-category/instance-generation terms describe
@@ -49,7 +58,7 @@ namespace: kube-system
 values:
   pool:
     name: trn
-    capacityType: flex
+    capacityType: on-demand
     requirements:
       - key: kubernetes.io/arch
         operator: In
