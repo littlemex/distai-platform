@@ -1723,7 +1723,7 @@ check_accel_layer1() {
   local cell="$1" nodepool="$2" advertiser_addon="$3" other_addon="$4" label="$5" resource="$6" image="$7" probe="$8"
   local app="${cell}-${advertiser_addon}" other_app="${cell}-${other_addon}"
   local label_jp="${label//./\\.}" resource_jp="${resource//./\\.}"
-  local advertiser_ns other_ns wave np_label node node_label allocatable probe_out count pods_on_node node_capacity_type instance_type karpenter_log_file karpenter_log_pid
+  local advertiser_ns other_ns wave np_label node node_label allocatable probe_out count pods_on_node node_capacity_type instance_type karpenter_log_file karpenter_log_pid accel_pod_trace_file accel_pod_trace_pid
 
   # Criterion 5: the accelerators step's device-plugin release is
   # Healthy+Synced before anything is asserted about it.
@@ -1803,16 +1803,46 @@ YAML
     >"${karpenter_log_file}" 2>&1 &
   karpenter_log_pid=$!
 
+  # Karpenter's own "pod-count" at the moment it disrupts a node only says
+  # the pod was not yet *bound* there (image pulls start after binding,
+  # never before) -- it does not say *why* binding had not happened.
+  # Sample the pod's own binding state, scheduling-relevant events, and
+  # whether Kueue's webhook ever created a Workload for it (the smoke
+  # ClusterQueue's own coveredResources never list an accelerator, but a
+  # cluster-wide Kueue "pod" integration, if one were ever enabled, would
+  # still gate it -- checked, not assumed) every 5s for the whole wait, so
+  # a FailedScheduling event, a late Bind, or a gated/suspended Workload
+  # each have their own timestamped record instead of a single end-of-wait
+  # snapshot that a deleted Node can no longer answer.
+  accel_pod_trace_file="${WORK_DIR}/accel-layer1-trace-${cell}-$(date -u +%H%M%S).log"
+  (
+    while true; do
+      {
+        printf '%s pod: ' "$(date -u +%H:%M:%S)"
+        k get pod accel-layer1 -n "${ACCEL_TEST_NS}" -o jsonpath='phase={.status.phase} nodeName={.spec.nodeName} nominatedNodeName={.status.nominatedNodeName} schedulingGates={.spec.schedulingGates} conditions={.status.conditions}' 2>&1
+        printf '\n'
+      } >>"${accel_pod_trace_file}"
+      sleep 5
+    done
+  ) &
+  accel_pod_trace_pid=$!
+
   accel_pod_running() { [[ "$(k get pod accel-layer1 -n "${ACCEL_TEST_NS}" -o jsonpath='{.status.phase}' 2>/dev/null)" == "Running" ]]; }
   if ! wait_until "${ACCEL_POD_TIMEOUT_SECONDS}" 20 "the Layer 1 ${resource} pod is Running" accel_pod_running; then
-    kill "${karpenter_log_pid}" 2>/dev/null; wait "${karpenter_log_pid}" 2>/dev/null || true
+    kill "${karpenter_log_pid}" "${accel_pod_trace_pid}" 2>/dev/null; wait "${karpenter_log_pid}" "${accel_pod_trace_pid}" 2>/dev/null || true
     info "Karpenter controller log during this wait (${cell}, saved at ${karpenter_log_file}), lines mentioning disruption/registration/initialization:"
     grep -iE "disrupt|consolidat|drift|expir|regist|initializ|liveness|terminat|empt" "${karpenter_log_file}" >&2 \
       || { info "no matching line; printing the whole log:"; cat "${karpenter_log_file}" >&2; }
+    info "Pod binding trace (${cell}, saved at ${accel_pod_trace_file}):"
+    cat "${accel_pod_trace_file}" >&2 || true
+    info "Events in ${ACCEL_TEST_NS} (${cell}):"
+    k get events -n "${ACCEL_TEST_NS}" --sort-by='.lastTimestamp' -o wide >&2 2>&1 || true
+    info "Workloads in ${ACCEL_TEST_NS} (${cell}) -- non-empty would mean a Kueue integration gated this bare pod, unexpectedly:"
+    k get workloads -n "${ACCEL_TEST_NS}" -o wide >&2 2>&1 || true
     fail "Layer 1 pod requesting ${resource}: 1 never reached Running on ${cell}: $(k get pod accel-layer1 -n "${ACCEL_TEST_NS}" -o jsonpath='{.status}' 2>&1) nodeclaims: $(k get nodeclaims -o wide 2>&1)"
   fi
-  kill "${karpenter_log_pid}" 2>/dev/null; wait "${karpenter_log_pid}" 2>/dev/null || true
-  info "Karpenter controller log for this pod's wait saved at ${karpenter_log_file} ($(wc -l <"${karpenter_log_file}" 2>/dev/null || echo 0) lines)"
+  kill "${karpenter_log_pid}" "${accel_pod_trace_pid}" 2>/dev/null; wait "${karpenter_log_pid}" "${accel_pod_trace_pid}" 2>/dev/null || true
+  info "Karpenter controller log for this pod's wait saved at ${karpenter_log_file} ($(wc -l <"${karpenter_log_file}" 2>/dev/null || echo 0) lines); pod binding trace saved at ${accel_pod_trace_file}"
   node="$(k get pod accel-layer1 -n "${ACCEL_TEST_NS}" -o jsonpath='{.spec.nodeName}')"
   [[ -n "${node}" ]] || fail "Layer 1 pod is Running but has no spec.nodeName"
   ACCEL_NODE="${node}"
