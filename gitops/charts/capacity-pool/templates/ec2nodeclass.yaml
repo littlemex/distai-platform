@@ -45,3 +45,23 @@ spec:
   networkInterfaces:
 {{ toYaml . | indent 4 }}
   {{- end }}
+  {{- /*
+    Root volume size is also opt-in and empty by default: with no
+    blockDeviceMappings, Karpenter leaves the AMI's own default root
+    volume size untouched, which is far too small for a GPU/ML image (a
+    CUDA-bundled vLLM image alone exceeds a default AL2023 EKS-optimized
+    AMI's root volume). Found on real hardware (2026-11-20, a from-scratch
+    g7.8xlarge pool): the node's root disk filled mid-pull, kubelet
+    evicted every pod on it for ephemeral-storage/inodes, the node then
+    looked "Empty" to Karpenter's own consolidation policy and was
+    terminated and relaunched, repeatedly - a disk-sizing gap masquerading
+    as a scheduling or capacity problem. Pinned at /dev/xvda: Karpenter's
+    EC2NodeClass requires an explicit deviceName per mapping (no
+    "root device" shorthand), and every AL2023 EKS-optimized AMI (the
+    family this chart's amiFamily is fixed to) uses /dev/xvda as its root
+    device (confirmed against the AMI this chart pins, 2026-11-20).
+  */}}
+  {{- with .Values.pool.blockDeviceMappings }}
+  blockDeviceMappings:
+{{ toYaml . | indent 4 }}
+  {{- end }}
