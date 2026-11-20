@@ -1435,6 +1435,11 @@ else
   pass "${APP_KARPENTER_CRD} recovered (Synced) within the retry bound after restoring --revision to ${GITOPS_REVISION}"
 
   # ---- 12b. break kueue ----------------------------------------------
+  # Recorded before the break itself (not merely before checking its
+  # effect): the comment and variable name below both say "before the
+  # break", so the capture has to actually happen there, not after
+  # run_bootstrap has already applied it.
+  NODEPOOL_UID_BEFORE_KUEUE_BREAK="$(k get nodepool "${NODEPOOL}" -o jsonpath='{.metadata.uid}')"
   # Same subshell-scoping note as break-crds above.
   BREAK_KUEUE_BRANCH="$(break_addon_branches "break-kueue" "gitops/addons/kueue/addon.yaml")" \
     || fail "could not create/push the break-kueue disposable branch"
@@ -1463,11 +1468,10 @@ else
   # break, the same vacuous shape this suite's own assert_stays_not_synced
   # comment already names and fixes elsewhere (confirmed as a real,
   # separate instance of it here too, not only in the pristine stage
-  # A/B checks). Record the NodePool's own UID before the break, then
-  # invert the poll: hold a 60s window for it to disappear OR come back
+  # A/B checks). Invert the poll against the UID already recorded above,
+  # before the break: hold a 60s window for it to disappear OR come back
   # with a different UID (replaced, not merely unchanged), and only pass
   # if neither ever happens in that whole window.
-  NODEPOOL_UID_BEFORE_KUEUE_BREAK="$(k get nodepool "${NODEPOOL}" -o jsonpath='{.metadata.uid}')"
   nodepool_changed_or_gone() {
     local uid
     uid="$(k get nodepool "${NODEPOOL}" -o jsonpath='{.metadata.uid}' 2>/dev/null)" || return 0
