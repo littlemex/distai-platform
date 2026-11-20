@@ -1272,7 +1272,15 @@ else
   BROKEN_BRANCHES+=("${BREAK_CRDS_BRANCH}")
   run_bootstrap --revision "${BREAK_CRDS_BRANCH}" || fail "bootstrap.sh --revision ${BREAK_CRDS_BRANCH}"
 
-  wait_until 300 10 "karpenter-crd Application leaves Synced once broken" app_not_synced "${APP_KARPENTER_CRD}" \
+  # hard_refresh_app on every poll, not just once: Argo CD's own Git repo
+  # cache (default TTL on the order of minutes) and poll interval can both
+  # delay noticing a new commit on a branch it is already tracking: a real
+  # run hit exactly this with a plain app_not_synced wait on kueue below
+  # (12b), timing out at 300s even though karpenter-crd's own otherwise-
+  # identical check (this one) happened to notice in time. Force Argo CD
+  # to recheck Git on every iteration instead of trusting either cache.
+  karpenter_crd_not_synced_refreshing() { hard_refresh_app "${APP_KARPENTER_CRD}"; app_not_synced "${APP_KARPENTER_CRD}"; }
+  wait_until 300 10 "karpenter-crd Application leaves Synced once broken" karpenter_crd_not_synced_refreshing \
     || fail "${APP_KARPENTER_CRD} stayed Synced after its chart version was broken"
   pass "${APP_KARPENTER_CRD} left Synced once its chart version was broken"
 
@@ -1289,7 +1297,8 @@ else
   fi
 
   run_bootstrap --revision "${GITOPS_REVISION}" || fail "bootstrap.sh (restoring --revision ${GITOPS_REVISION} after break-crds)"
-  wait_until 300 10 "karpenter-crd Application recovers" app_synced "${APP_KARPENTER_CRD}" \
+  karpenter_crd_synced_refreshing() { hard_refresh_app "${APP_KARPENTER_CRD}"; app_synced "${APP_KARPENTER_CRD}"; }
+  wait_until 300 10 "karpenter-crd Application recovers" karpenter_crd_synced_refreshing \
     || fail "${APP_KARPENTER_CRD} did not recover (sync=$(app_sync "${APP_KARPENTER_CRD}")) within the retry bound after restoring --revision"
   pass "${APP_KARPENTER_CRD} recovered (Synced) within the retry bound after restoring --revision to ${GITOPS_REVISION}"
 
@@ -1300,7 +1309,12 @@ else
   BROKEN_BRANCHES+=("${BREAK_KUEUE_BRANCH}")
   run_bootstrap --revision "${BREAK_KUEUE_BRANCH}" || fail "bootstrap.sh --revision ${BREAK_KUEUE_BRANCH}"
 
-  wait_until 300 10 "kueue Application leaves Synced once broken" app_not_synced "${APP_KUEUE}" \
+  # See the comment on karpenter_crd_not_synced_refreshing above (12a):
+  # same Argo CD Git-cache/poll-interval staleness risk, confirmed on a
+  # real run for this exact check (kueue stayed Synced at 300s with no
+  # refresh).
+  kueue_not_synced_refreshing() { hard_refresh_app "${APP_KUEUE}"; app_not_synced "${APP_KUEUE}"; }
+  wait_until 300 10 "kueue Application leaves Synced once broken" kueue_not_synced_refreshing \
     || fail "${APP_KUEUE} stayed Synced after its chart version was broken"
   pass "${APP_KUEUE} left Synced once its chart version was broken"
 
@@ -1317,7 +1331,8 @@ else
   pass "NodePool ${NODEPOOL} (depends on crds, not kueue) survives a broken kueue step unaffected"
 
   run_bootstrap --revision "${GITOPS_REVISION}" || fail "bootstrap.sh (restoring --revision ${GITOPS_REVISION} after break-kueue)"
-  wait_until 300 10 "kueue Application recovers" app_synced "${APP_KUEUE}" \
+  kueue_synced_refreshing() { hard_refresh_app "${APP_KUEUE}"; app_synced "${APP_KUEUE}"; }
+  wait_until 300 10 "kueue Application recovers" kueue_synced_refreshing \
     || fail "${APP_KUEUE} did not recover (sync=$(app_sync "${APP_KUEUE}")) within the retry bound after restoring --revision"
   pass "${APP_KUEUE} recovered (Synced) within the retry bound after restoring --revision to ${GITOPS_REVISION}"
 fi
