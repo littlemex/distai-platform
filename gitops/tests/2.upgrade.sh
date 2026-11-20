@@ -126,7 +126,7 @@ wait_until() {
     if "$@"; then return 0; fi
     now="$(date +%s)"
     if ((now - start >= timeout)); then
-      log "timed out after ${timeout}s waiting for: ${desc}"
+      info "timed out after ${timeout}s waiting for: ${desc}"
       return 1
     fi
     sleep "${interval}"
@@ -177,6 +177,7 @@ assert_disposable_ref() {
 }
 
 github_askpass_script() {
+  set +x
   local token askpass
   token="$(aws ssm get-parameter --with-decryption --name "${GITOPS_TEST_TOKEN_SSM_PARAM}" \
     --region "${GITOPS_TEST_TOKEN_SSM_REGION}" --query Parameter.Value --output text 2>/dev/null)" || return 1
@@ -222,6 +223,7 @@ delete_disposable_branch() {
 }
 
 report_stale_disposable_branches() {
+  set +x
   local token api_repo branches_json curl_config token_file
   token="$(aws ssm get-parameter --with-decryption --name "${GITOPS_TEST_TOKEN_SSM_PARAM}" \
     --region "${GITOPS_TEST_TOKEN_SSM_REGION}" --query Parameter.Value --output text 2>/dev/null)" || { info "could not read the GitHub token from SSM; skipping the stale e2e/ branch check"; return 0; }
@@ -467,7 +469,7 @@ grep -q "${UPGRADE_TO_KARPENTER_VERSION}" "${MISMATCH_CLONE}/gitops/addons/karpe
 if "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" python3 "${SCRIPT_DIR}/check_gitops_contract.py" "${MISMATCH_CLONE}" >"${WORK_DIR}/mismatch-check.log" 2>&1; then
   fail "check_gitops_contract.py did not catch the mismatched karpenter/karpenter-crd version pair (see ${WORK_DIR}/mismatch-check.log)"
 fi
-grep -q "pin the same version" "${WORK_DIR}/mismatch-check.log" \
+grep -q "^FAIL addons/karpenter/addon.yaml and addons/karpenter-crd/addon.yaml pin the same version" "${WORK_DIR}/mismatch-check.log" \
   || fail "check_gitops_contract.py failed, but not on the version-pair check (see ${WORK_DIR}/mismatch-check.log)"
 pass "check_gitops_contract.py's version-pair check caught the mismatched karpenter/karpenter-crd bump"
 
