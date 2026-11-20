@@ -10,7 +10,26 @@ metadata:
 spec:
   namespaceSelector: {}
   resourceGroups:
-    - coveredResources: ["cpu", "memory"]
+    # 2026-11-20 root-caused finding: an earlier version of this file put
+    # the opt-in nvidia.com/gpu quota in its OWN resourceGroup, repeating
+    # the same flavor name ("gpu") in two different resourceGroups. Kueue's
+    # own validating webhook (confirmed against kubernetes-sigs/kueue
+    # v0.20.6's webhooks/clusterqueue_webhook.go, validateResourceGroups:
+    # `seenFlavors` is a single set shared across the whole resourceGroups
+    # loop, not reset per group) rejects that as `field.Duplicate` on the
+    # flavor name -- the object is never admitted to the API server at
+    # all, which is why ArgoCD showed a perpetual OutOfSync against zero
+    # live objects (`kubectl get clusterqueue` returned none) rather than
+    # a readable error. The correct Kueue pattern is ONE resourceGroup per
+    # flavor, covering every resource that flavor quotas together -- so
+    # the opt-in GPU resource is added to THIS SAME resourceGroup/flavor
+    # entry below, not a second resourceGroup repeating the flavor name.
+    - coveredResources:
+        - "cpu"
+        - "memory"
+{{- if .Values.clusterQueue.gpuQuota }}
+        - "nvidia.com/gpu"
+{{- end }}
       flavors:
         - name: {{ required "clusterQueue.resourceFlavor is required" .Values.clusterQueue.resourceFlavor | quote }}
           resources:
@@ -19,18 +38,14 @@ spec:
             - name: "memory"
               nominalQuota: "64Gi"
 {{- if .Values.clusterQueue.gpuQuota }}
-    # Opt-in, omitted by default (the smoke ClusterQueue otherwise covers
-    # only cpu/memory, per this file's own header comment). Set
-    # clusterQueue.gpuQuota explicitly to the POOL'S REAL TOTAL
-    # (nodes-in-the-pool x GPUs-per-node), never one node's own count --
-    # a Kueue quota test that only proves "stays pending" against a
-    # one-node number can be silently admitted onto a second node in the
-    # same pool and pass for the wrong reason (CB plan.md section 2's
-    # isolation-mechanism #2, 2026-11-20).
-    - coveredResources: ["nvidia.com/gpu"]
-      flavors:
-        - name: {{ required "clusterQueue.resourceFlavor is required" .Values.clusterQueue.resourceFlavor | quote }}
-          resources:
+            # Opt-in, omitted by default (the smoke ClusterQueue otherwise
+            # covers only cpu/memory, per this file's own header comment).
+            # Set clusterQueue.gpuQuota explicitly to the POOL'S REAL
+            # TOTAL (nodes-in-the-pool x GPUs-per-node), never one node's
+            # own count -- a Kueue quota test that only proves "stays
+            # pending" against a one-node number can be silently admitted
+            # onto a second node in the same pool and pass for the wrong
+            # reason (CB plan.md section 2's isolation-mechanism #2).
             - name: "nvidia.com/gpu"
               nominalQuota: {{ .Values.clusterQueue.gpuQuota | quote }}
 {{- end }}
