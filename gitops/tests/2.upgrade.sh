@@ -554,12 +554,32 @@ wait_until 900 15 "kueue Healthy+Synced" app_healthy_synced "${APP_KUEUE}" || fa
 wait_until 600 15 "capacity-pool Healthy+Synced" app_healthy_synced "${APP_CAPACITY_POOL}" || fail "${APP_CAPACITY_POOL} not Healthy+Synced"
 pass "cell bootstrapped at ${GITOPS_REVISION}: karpenter-crd, karpenter, kueue and capacity-pool all converged"
 
-mapfile -t nodepools < <(k get nodepools -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$')
-[[ "${#nodepools[@]}" -eq 1 ]] || fail "expected exactly 1 NodePool, found ${#nodepools[@]}"
+nodepools=()
+one_nodepool_exists() {
+  mapfile -t nodepools < <(k get nodepools -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep -v '^$')
+  [[ "${#nodepools[@]}" -eq 1 ]]
+}
+# capacity-pool reaching Healthy+Synced above (line 554) does not, on its
+# own, guarantee the NodePool object it owns is already visible through
+# this same kubectl connection -- Argo CD's own health/sync status and a
+# subsequent `kubectl get` are two independent reads, so a direct,
+# unwaited `kubectl get nodepools` here raced that gap on a real cluster.
+# Same reasoning for the smoke chart's own LocalQueue below: nothing above
+# waits on a `${CLUSTER}-smoke` Application by name (capacity-pool and
+# smoke are two separate generated Applications), so a direct read risked
+# "expected exactly 1 LocalQueue, found 0" on a cell that has not finished
+# syncing yet.
+wait_until 120 10 "exactly one NodePool exists" one_nodepool_exists \
+  || fail "expected exactly 1 NodePool, found ${#nodepools[@]}"
 NODEPOOL="${nodepools[0]}"
 
-mapfile -t localqueues < <(k get localqueues -A -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' | grep -v '^$')
-[[ "${#localqueues[@]}" -eq 1 ]] || fail "expected exactly 1 LocalQueue, found ${#localqueues[@]}"
+localqueues=()
+one_localqueue_exists() {
+  mapfile -t localqueues < <(k get localqueues -A -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -v '^$')
+  [[ "${#localqueues[@]}" -eq 1 ]]
+}
+wait_until 120 10 "exactly one LocalQueue exists" one_localqueue_exists \
+  || fail "expected exactly 1 LocalQueue, found ${#localqueues[@]}"
 read -r SMOKE_NS SMOKE_LOCALQUEUE <<<"${localqueues[0]}"
 
 cat >"${WORK_DIR}/canary.yaml" <<YAML
@@ -586,7 +606,10 @@ wait_until 900 15 "canary Pod Running" canary_running || fail "canary Pod never 
 CANARY_NODE="$(k get pod canary -n "${SMOKE_NS}" -o jsonpath='{.spec.nodeName}')"
 CANARY_INSTANCE_ID="$(instance_of_node "${CANARY_NODE}")"
 NODEPOOL_CREATED="$(k get nodepool "${NODEPOOL}" -o jsonpath='{.metadata.creationTimestamp}')"
-pass "canary Pod Running on node ${CANARY_NODE} (instance ${CANARY_INSTANCE_ID})"
+CANARY_NODE_NODEPOOL_LABEL="$(k get node "${CANARY_NODE}" -o jsonpath='{.metadata.labels.karpenter\.sh/nodepool}')"
+[[ "${CANARY_NODE_NODEPOOL_LABEL}" == "${NODEPOOL}" ]] \
+  || fail "canary Pod's own node ${CANARY_NODE} carries karpenter.sh/nodepool=${CANARY_NODE_NODEPOOL_LABEL}, not the NodePool ${NODEPOOL} this test discovered -- the canary was not actually launched from the pool under test"
+pass "canary Pod Running on node ${CANARY_NODE} (instance ${CANARY_INSTANCE_ID}), confirmed launched from NodePool ${NODEPOOL} via the node's own karpenter.sh/nodepool label"
 
 # ------------------------------------- B. matched version bump passes
 #
