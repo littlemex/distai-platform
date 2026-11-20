@@ -917,7 +917,7 @@ wait
   || fail "${APP_CAPACITY_POOL} reached Synced although karpenter-crd has never synced on this cell"
 [[ "$(cat "${STAGE_A_WORK}/smoke")" == PASS ]] \
   || fail "${APP_SMOKE} reached Synced although kueue has never synced on this cell"
-pass "none of the four generated Applications reached Synced within ${STAGE_A_TIMEOUT}s of this cell's first-ever bootstrap, polled for the whole window, not sampled once"
+pass "none of the four generated Applications that depend on karpenter-crd's or kueue's own broken CRDs (karpenter-crd, kueue, capacity-pool, smoke -- karpenter itself is excluded: skipCrds, no CRD of its own to wait on) reached Synced within ${STAGE_A_TIMEOUT}s of this cell's first-ever bootstrap, polled for the whole window, not sampled once"
 nodepool_exists && fail "NodePool cpu was created although karpenter-crd has never synced on this cell (its CRD cannot exist yet)"
 ec2nodeclass_exists && fail "EC2NodeClass cpu was created although karpenter-crd has never synced on this cell (its CRD cannot exist yet)"
 resourceflavor_exists && fail "ResourceFlavor cpu was created although kueue has never synced on this cell (its CRD cannot exist yet)"
@@ -1457,10 +1457,26 @@ else
   # between ApplicationSets is retry-based convergence, never all cross-
   # dependencies at once" apart from a coarser "capacity-pool Application
   # not Synced" signal alone.
-  nodepool_still_present() { k get nodepool "${NODEPOOL}" >/dev/null 2>&1; }
-  wait_until 60 5 "NodePool survives a broken kueue step" nodepool_still_present \
-    || fail "NodePool ${NODEPOOL} disappeared merely because kueue was broken (it depends on crds, not kueue)"
-  pass "NodePool ${NODEPOOL} (depends on crds, not kueue) survives a broken kueue step unaffected"
+  # A plain "does it still exist" check, polled with wait_until, returns
+  # success on its very first poll -- the NodePool already exists before
+  # kueue is ever broken, so this would prove nothing about surviving the
+  # break, the same vacuous shape this suite's own assert_stays_not_synced
+  # comment already names and fixes elsewhere (confirmed as a real,
+  # separate instance of it here too, not only in the pristine stage
+  # A/B checks). Record the NodePool's own UID before the break, then
+  # invert the poll: hold a 60s window for it to disappear OR come back
+  # with a different UID (replaced, not merely unchanged), and only pass
+  # if neither ever happens in that whole window.
+  NODEPOOL_UID_BEFORE_KUEUE_BREAK="$(k get nodepool "${NODEPOOL}" -o jsonpath='{.metadata.uid}')"
+  nodepool_changed_or_gone() {
+    local uid
+    uid="$(k get nodepool "${NODEPOOL}" -o jsonpath='{.metadata.uid}' 2>/dev/null)" || return 0
+    [[ -z "${uid}" || "${uid}" != "${NODEPOOL_UID_BEFORE_KUEUE_BREAK}" ]]
+  }
+  if wait_until 60 5 "NodePool ${NODEPOOL} changes or disappears merely because kueue was broken" nodepool_changed_or_gone; then
+    fail "NodePool ${NODEPOOL} disappeared or was replaced (UID changed from ${NODEPOOL_UID_BEFORE_KUEUE_BREAK}) merely because kueue was broken (it depends on crds, not kueue)"
+  fi
+  pass "NodePool ${NODEPOOL} (depends on crds, not kueue) survived a broken kueue step unaffected for 60s, confirmed by its own unchanged UID held for the whole window, not merely found present once"
 
   run_bootstrap --revision "${GITOPS_REVISION}" || fail "bootstrap.sh (restoring --revision ${GITOPS_REVISION} after break-kueue)"
   kueue_synced_refreshing() { hard_refresh_app "${APP_KUEUE}"; app_synced "${APP_KUEUE}"; }
