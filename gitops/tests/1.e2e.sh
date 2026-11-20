@@ -731,6 +731,18 @@ APP_KUEUE="${CLUSTER}-kueue"
 APP_SMOKE="${CLUSTER}-smoke"
 app_synced() { [[ "$(app_sync "$1")" == "Synced" ]]; }
 app_not_synced() { [[ "$(app_sync "$1")" != "Synced" ]]; }
+# hard_refresh_app: Argo CD's own documented mechanism for "a CRD this
+# Application's objects need just appeared; stop trusting the cached list
+# of API resources". Needed only here, in the pristine A/B/C sequence: this
+# is the only place in this whole test suite where a brand new CRD kind
+# (one that did not exist anywhere on this cluster a moment ago) appears
+# mid-run for an already-generated Application to pick up -- every other
+# break/restore experiment in this file re-syncs an Application whose
+# dependency's CRD already existed before the break, which Argo CD's own
+# steady-state watch-based cache invalidation already handles without this.
+hard_refresh_app() {
+  k annotate application "$1" -n "${ARGOCD_NS}" argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
+}
 nodepool_exists() { k get nodepool cpu >/dev/null 2>&1; }
 ec2nodeclass_exists() { k get ec2nodeclass cpu >/dev/null 2>&1; }
 resourceflavor_exists() { k get resourceflavor cpu >/dev/null 2>&1; }
@@ -816,7 +828,12 @@ run_bootstrap --revision "${PRISTINE_KUEUE_BROKEN_BRANCH}" \
 
 wait_until 300 10 "karpenter-crd Application reaches Synced" app_synced "${APP_KARPENTER_CRD}" \
   || fail "${APP_KARPENTER_CRD} did not reach Synced (sync=$(app_sync "${APP_KARPENTER_CRD}")) after fixing its own version"
-wait_until 300 10 "capacity-pool Application reaches Synced" app_synced "${APP_CAPACITY_POOL}" \
+# karpenter-crd's own CRDs (EC2NodeClass, NodePool, ...) did not exist on
+# this cluster a moment ago; capacity-pool's Application needs them and
+# may still be working from an API-resource list cached before they
+# appeared (confirmed on a real run: 300s was not enough without this).
+hard_refresh_app "${APP_CAPACITY_POOL}"
+wait_until 600 15 "capacity-pool Application reaches Synced" app_synced "${APP_CAPACITY_POOL}" \
   || fail "${APP_CAPACITY_POOL} did not reach Synced (sync=$(app_sync "${APP_CAPACITY_POOL}")) once karpenter-crd's CRDs existed"
 wait_until 180 10 "NodePool cpu is created" nodepool_exists \
   || fail "NodePool cpu was not created even after karpenter-crd's CRDs became available"
@@ -832,7 +849,10 @@ run_bootstrap --revision "${GITOPS_REVISION}" \
   || fail "bootstrap.sh (restoring --revision ${GITOPS_REVISION} after the pristine A/B/C experiment)"
 wait_until 300 10 "kueue Application reaches Synced" app_synced "${APP_KUEUE}" \
   || fail "${APP_KUEUE} did not reach Synced (sync=$(app_sync "${APP_KUEUE}")) after restoring --revision"
-wait_until 300 10 "smoke Application reaches Synced" app_synced "${APP_SMOKE}" \
+# Same reasoning as capacity-pool in stage B: kueue's own CRDs
+# (ResourceFlavor, ClusterQueue, ...) are also brand new here.
+hard_refresh_app "${APP_SMOKE}"
+wait_until 600 15 "smoke Application reaches Synced" app_synced "${APP_SMOKE}" \
   || fail "${APP_SMOKE} did not reach Synced (sync=$(app_sync "${APP_SMOKE}")) after restoring --revision"
 pass "restored --revision to ${GITOPS_REVISION}: kueue and the smoke ClusterQueue/LocalQueue now converge too -- this cell's first-ever bootstrap sequence is complete"
 
