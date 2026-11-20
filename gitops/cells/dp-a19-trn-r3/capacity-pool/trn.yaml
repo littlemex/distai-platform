@@ -12,11 +12,19 @@
 # The pool stays dynamically provisioned and device-plugin method: #19 E4c
 # showed a dynamic DRA pool never initializes a Neuron node.
 #
+# pool.capacityType: flex (#17's own enum has no spot-only option: flex is
+# ["spot", "on-demand"], the chart's own capacity-pool.requirements helper
+# fails the render if pool.requirements itself names
+# karpenter.sh/capacity-type -- #17 owns this chart's shape, see
+# fix/capacity-pool-root-volume). #28's own acceptance criteria 2/3 named a
+# spot node explicitly when this pool had no on-demand fallback to fall
+# back to; with flex, 1.e2e.sh's check_accel_layer1 accepts spot or
+# on-demand on the node Karpenter actually launched, the same way the
+# capacity-type e2e already does for the chart's own flex fixture.
+#
 # pool.requirements replaces the chart default as a whole (Helm replaces
 # lists): the chart's instance-category/instance-generation terms describe
-# CPU families and are dropped; instance-family names trn2 directly, spot
-# only (#28 acceptance criteria name a spot node explicitly; this PR drops
-# the on-demand fallback rather than leave it un-asserted).
+# CPU families and are dropped; instance-family names trn2 directly.
 #
 # pool.disruption.consolidateAfter: 15m, not the chart default 60s. Root
 # caused on a real run (#28): CloudTrail showed Karpenter itself (user
@@ -41,10 +49,8 @@ namespace: kube-system
 values:
   pool:
     name: trn
+    capacityType: flex
     requirements:
-      - key: karpenter.sh/capacity-type
-        operator: In
-        values: ["spot"]
       - key: kubernetes.io/arch
         operator: In
         values: ["amd64"]
