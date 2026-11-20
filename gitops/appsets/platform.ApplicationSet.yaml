@@ -7,9 +7,13 @@
 # goTemplate is on (a decision this PR makes, not spelled out by the RFC's
 # own prose, which quotes the legacy fasttemplate form for a single field):
 # templatePatch below needs .values as a real nested object for toYaml, and
-# a flat, dot-flattened legacy parameter map cannot give it that. Verify
-# this choice on a real cluster before relying on it (Decision 9 - this PR
-# exists to isolate exactly this kind of mechanism failure).
+# a flat, dot-flattened legacy parameter map cannot give it that. Verified
+# on a real cluster: every generated Application reaches Synced with this
+# mechanism (karpenter and kueue also reach Healthy; karpenter-crd ships
+# only CustomResourceDefinition objects, with no Health status of its own
+# to report), confirming goTemplate plus templatePatch render correctly
+# end to end (Decision 9's own reason for this PR to exist first, in
+# isolation).
 #
 # The Cluster generator's selector excludes the capability's own built-in
 # local/in-cluster entry (no registration Secret, no annotations, a

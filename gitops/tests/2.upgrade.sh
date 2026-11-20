@@ -55,6 +55,8 @@ set -euo pipefail
 export AWS_PROFILE AWS_REGION
 
 TERRAFORM="${TERRAFORM:-terraform}"
+UV="${UV:-uv}"
+PYTHON_YAML_VERSION="${PYTHON_YAML_VERSION:-6.0.2}"
 KUBECTL="${KUBECTL:-kubectl}"
 E2E_KEEP_ON_FAILURE="${E2E_KEEP_ON_FAILURE:-0}"
 E2E_LEFTOVER_GRACE_SECONDS="${E2E_LEFTOVER_GRACE_SECONDS:-600}"
@@ -102,6 +104,7 @@ VPC_ID=""
 IDC_GROUP_ID=""
 BOOTSTRAP_RAN=0
 BROKEN_BRANCHES=()
+CLEANUP_FAILED=0
 DEGRADED_SEEN=""
 CELL_FIXTURE_BRANCH=""
 
@@ -339,9 +342,32 @@ ensure_cell_fixture() {
 delete_broken_branches() {
   local b
   for b in "${BROKEN_BRANCHES[@]}"; do
-    delete_disposable_branch "${b}" >/dev/null 2>&1 \
-      || info "cleanup: could not delete disposable branch refs/heads/${b} on ${GITOPS_TEST_REPO_URL} (remove it by hand)"
+    if delete_disposable_branch "${b}" >/dev/null 2>&1; then
+      :
+    else
+      info "cleanup: could not delete disposable branch refs/heads/${b} on ${GITOPS_TEST_REPO_URL} (remove it by hand)"
+      CLEANUP_FAILED=1
+    fi
   done
+}
+
+# verify_no_leftover_branches: an in-script check, not only a human
+# reading the INFO lines above -- confirmed on a real run that a cleanup
+# bug can leave every one of this run's own branches behind while every
+# INFO line above still only warns, never fails. Lists this run's own
+# refs/heads/e2e/${RUN_ID}/* namespace on GITOPS_TEST_REPO_URL directly;
+# anything still there, for any reason (a bug here, a transient network
+# failure, anything), fails this check and this run's own exit code,
+# rather than only a log line a human has to notice.
+verify_no_leftover_branches() {
+  local leftover
+  leftover="$(git ls-remote "${GITOPS_TEST_REPO_URL}" "refs/heads/e2e/${RUN_ID}/*" 2>/dev/null)"
+  if [[ -n "${leftover}" ]]; then
+    log "FAIL cleanup: branches remain under refs/heads/e2e/${RUN_ID}/* on ${GITOPS_TEST_REPO_URL}: $(printf '%s' "${leftover}" | tr '\n' ' ')"
+    CLEANUP_FAILED=1
+  else
+    info "cleanup: verified zero branches remain under refs/heads/e2e/${RUN_ID}/* on ${GITOPS_TEST_REPO_URL}"
+  fi
 }
 
 cleanup() {
@@ -353,6 +379,7 @@ cleanup() {
   # unconditionally would leave that cell unable to sync anything.
   if [[ "${E2E_KEEP_ON_FAILURE}" != "1" ]]; then
     delete_broken_branches
+    verify_no_leftover_branches
   fi
   if [[ -n "${IDC_GROUP_ID}" ]]; then
     if aws identitystore delete-group --identity-store-id "${ARGOCD_IDC_IDENTITY_STORE_ID}" \
@@ -360,6 +387,7 @@ cleanup() {
       info "cleanup: deleted temporary Identity Center group ${IDC_GROUP_ID}"
     else
       info "cleanup: could not delete Identity Center group ${IDC_GROUP_ID} (remove it by hand)"
+      CLEANUP_FAILED=1
     fi
   fi
   if [[ "${APPLY_ATTEMPTED}" -eq 1 && "${DESTROYED}" -eq 0 ]]; then
@@ -369,7 +397,11 @@ cleanup() {
     else
       info "cleanup: the test did not reach a successful destroy; cleaning up"
       if [[ "${BOOTSTRAP_RAN}" -eq 1 ]] && k get ns "${ARGOCD_NS:-}" >/dev/null 2>&1; then
-        k delete job canary --ignore-not-found --wait=false >/dev/null 2>&1
+        # The canary here is a bare Pod (gitops/tests/1.e2e.sh's own is a
+        # Job instead), and SMOKE_NS may not be set yet if cleanup ran
+        # before this script discovered it -- distai-smoke is the
+        # fixture's own default namespace either way.
+        k delete pod canary -n "${SMOKE_NS:-distai-smoke}" --ignore-not-found --wait=false >/dev/null 2>&1
         k delete application root -n "${ARGOCD_NS}" --cascade=background --ignore-not-found >/dev/null 2>&1
       fi
       if tf "${FOUNDATION_ROOT}" destroy -auto-approve -input=false -var-file="${TFVARS}"; then
@@ -378,6 +410,14 @@ cleanup() {
         log "FAIL cleanup: terraform destroy failed; remove the cell by hand"
       fi
     fi
+  fi
+  # A cleanup-side failure (a disposable branch or the Identity Center
+  # group left behind) must not read as RESULT PASS with exit 0 -- every
+  # acceptance-criteria check above can pass while this run still leaves
+  # something behind on a shared, public repository.
+  if [[ "${rc}" -eq 0 && "${CLEANUP_FAILED}" -eq 1 ]]; then
+    rc=1
+    FAILED_STEP="cleanup left something behind (see the FAIL/INFO lines above)"
   fi
   echo
   if [[ "${rc}" -eq 0 ]]; then
@@ -399,7 +439,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-for b in "${TERRAFORM}" aws "${KUBECTL}" git curl python3; do require_bin "${b}"; done
+for b in "${TERRAFORM}" aws "${KUBECTL}" git curl python3 "${UV}"; do require_bin "${b}"; done
 [[ "${MY_CIDR}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]] || fail "MY_CIDR must be an IPv4 CIDR"
 aws sts get-caller-identity --query Account --output text >/dev/null || fail "aws sts get-caller-identity"
 pass "preflight: tools present, credentials valid"
@@ -424,7 +464,7 @@ grep -q "${UPGRADE_TO_KARPENTER_VERSION}" "${MISMATCH_CLONE}/gitops/addons/karpe
   || fail "addons/karpenter/addon.yaml version bump did not take in the mismatch clone"
 # addons/karpenter-crd/addon.yaml is deliberately left at its old version.
 
-if python3 "${SCRIPT_DIR}/check_gitops_contract.py" "${MISMATCH_CLONE}" >"${WORK_DIR}/mismatch-check.log" 2>&1; then
+if "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" python3 "${SCRIPT_DIR}/check_gitops_contract.py" "${MISMATCH_CLONE}" >"${WORK_DIR}/mismatch-check.log" 2>&1; then
   fail "check_gitops_contract.py did not catch the mismatched karpenter/karpenter-crd version pair (see ${WORK_DIR}/mismatch-check.log)"
 fi
 grep -q "pin the same version" "${WORK_DIR}/mismatch-check.log" \
@@ -568,7 +608,7 @@ for f in addons/karpenter/addon.yaml addons/karpenter-crd/addon.yaml; do
     || fail "could not bump ${f} in the upgrade-match clone"
   grep -q "${UPGRADE_TO_KARPENTER_VERSION}" "${UPGRADE_CLONE}/gitops/${f}" || fail "${f} version bump did not take"
 done
-if ! python3 "${SCRIPT_DIR}/check_gitops_contract.py" "${UPGRADE_CLONE}" >"${WORK_DIR}/upgrade-match-check.log" 2>&1; then
+if ! "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" python3 "${SCRIPT_DIR}/check_gitops_contract.py" "${UPGRADE_CLONE}" >"${WORK_DIR}/upgrade-match-check.log" 2>&1; then
   fail "check_gitops_contract.py rejected the matched version bump (see ${WORK_DIR}/upgrade-match-check.log)"
 fi
 git -C "${UPGRADE_CLONE}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \

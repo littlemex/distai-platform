@@ -169,5 +169,7 @@ semver):
   PR's own construction, not a primary-sourced example from Argo CD's
   docs; Experiment 1's real-cluster verification is what this PR's own
   `gitops/tests/1.e2e.sh` now provides (every generated Application
-  reaching `Synced`/`Healthy`, including the OCI chart and the
-  cross-generator `revision:` templating), not an open item.
+  reaching `Synced`, `karpenter`/`kueue` also reaching `Healthy` -
+  `karpenter-crd` ships only `CustomResourceDefinition` objects, with no
+  `Health` status of its own; the OCI chart and the cross-generator
+  `revision:` templating are both evidenced too), not an open item.
