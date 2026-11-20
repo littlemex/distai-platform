@@ -225,10 +225,9 @@ KUBECONFORM_BIN="${WORK_DIR}/kubeconform"
 if command -v kubeconform >/dev/null 2>&1; then
   KUBECONFORM_BIN="$(command -v kubeconform)"
 else
-  # kubeconform is a single static binary with no package on the pinned
-  # runner image; download and checksum-verify it here the same way
-  # runner.yaml pins every other tool, instead of assuming it is
-  # preinstalled.
+  # kubeconform is a single static binary with no package manager entry
+  # on most machines this runs on; download and checksum-verify it here
+  # rather than assuming it is preinstalled.
   KUBECONFORM_SHA256="9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883"
   curl -fsSL -o "${WORK_DIR}/kubeconform.tar.gz" \
     "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
