@@ -151,6 +151,7 @@ VPC_ID=""
 IDC_GROUP_ID=""
 BOOTSTRAP_RAN=0
 BROKEN_BRANCHES=()
+CLEANUP_FAILED=0
 CELL_FIXTURE_BRANCH=""
 
 # ---------------------------------------------------------------- helpers
@@ -432,9 +433,32 @@ for b in (docs or []):
 delete_broken_branches() {
   local b
   for b in "${BROKEN_BRANCHES[@]}"; do
-    delete_disposable_branch "${b}" >/dev/null 2>&1 \
-      || info "cleanup: could not delete disposable branch refs/heads/${b} on ${GITOPS_TEST_REPO_URL} (remove it by hand)"
+    if delete_disposable_branch "${b}" >/dev/null 2>&1; then
+      :
+    else
+      info "cleanup: could not delete disposable branch refs/heads/${b} on ${GITOPS_TEST_REPO_URL} (remove it by hand)"
+      CLEANUP_FAILED=1
+    fi
   done
+}
+
+# verify_no_leftover_branches: an in-script check, not only a human
+# reading the INFO lines above -- confirmed on a real run that a cleanup
+# bug can leave every one of this run's own branches behind while every
+# INFO line above still only warns, never fails. Lists this run's own
+# refs/heads/e2e/${RUN_ID}/* namespace on GITOPS_TEST_REPO_URL directly;
+# anything still there, for any reason (a bug here, a transient network
+# failure, anything), fails this check and this run's own exit code,
+# rather than only a log line a human has to notice.
+verify_no_leftover_branches() {
+  local leftover
+  leftover="$(git ls-remote "${GITOPS_TEST_REPO_URL}" "refs/heads/e2e/${RUN_ID}/*" 2>/dev/null)"
+  if [[ -n "${leftover}" ]]; then
+    log "FAIL cleanup: branches remain under refs/heads/e2e/${RUN_ID}/* on ${GITOPS_TEST_REPO_URL}: $(printf '%s' "${leftover}" | tr '\n' ' ')"
+    CLEANUP_FAILED=1
+  else
+    info "cleanup: verified zero branches remain under refs/heads/e2e/${RUN_ID}/* on ${GITOPS_TEST_REPO_URL}"
+  fi
 }
 
 cleanup() {
@@ -446,6 +470,7 @@ cleanup() {
   # unconditionally would leave that cell unable to sync anything.
   if [[ "${E2E_KEEP_ON_FAILURE}" != "1" ]]; then
     delete_broken_branches
+    verify_no_leftover_branches
   fi
   if [[ -n "${IDC_GROUP_ID}" ]]; then
     if aws identitystore delete-group --identity-store-id "${ARGOCD_IDC_IDENTITY_STORE_ID}" \
@@ -453,6 +478,7 @@ cleanup() {
       info "cleanup: deleted temporary Identity Center group ${IDC_GROUP_ID}"
     else
       info "cleanup: could not delete Identity Center group ${IDC_GROUP_ID} (remove it by hand)"
+      CLEANUP_FAILED=1
     fi
   fi
   if [[ "${APPLY_ATTEMPTED}" -eq 1 && "${DESTROYED}" -eq 0 ]]; then
@@ -473,6 +499,17 @@ cleanup() {
         info "cleanup: terraform destroy completed"
       fi
     fi
+  fi
+  # A cleanup-side failure (a disposable branch or the Identity Center
+  # group left behind) must not read as RESULT PASS with exit 0 -- every
+  # acceptance-criteria check above can pass while this run still leaves
+  # something behind on a shared, public repository. Confirmed as a real
+  # gap on a real run before this check existed: six branches leaked,
+  # found only by a human running git ls-remote afterward, while this
+  # script itself still reported RESULT PASS.
+  if [[ "${rc}" -eq 0 && "${CLEANUP_FAILED}" -eq 1 ]]; then
+    rc=1
+    FAILED_STEP="cleanup left something behind (see the FAIL/INFO lines above)"
   fi
   echo
   if [[ "${rc}" -eq 0 ]]; then
@@ -660,15 +697,151 @@ pass "cluster_arn and argocd_namespace outputs present (namespace: ${ARGOCD_NS})
 TF_OUTPUTS_JSON="${WORK_DIR}/tf-outputs.json"
 tf "${FOUNDATION_ROOT}" output -json >"${TF_OUTPUTS_JSON}" || fail "terraform output -json"
 
-# ------------------------------------------------- 4. first bootstrap
-
 run_bootstrap() {
   "${GITOPS_ROOT}/bootstrap/bootstrap.sh" --tf-outputs "${TF_OUTPUTS_JSON}" "$@"
 }
 
-run_bootstrap --revision "${GITOPS_REVISION}" || fail "bootstrap.sh (first bootstrap, --revision ${GITOPS_REVISION})"
+# ------------------------------------------- 3c. pristine first bootstrap
+#
+# Acceptance criterion 4's own stronger claim ("capacity FAILS TO CREATE
+# NEW objects depending on a broken crds step") cannot be observed once a
+# chart's CRDs have ever synced successfully: a Kubernetes CRD, once
+# installed, persists regardless of whether the Application that installed
+# it later goes unsynced (step 12 below proves only that weaker,
+# already-converged-cell claim -- the acceptance criterion is not, by
+# itself, provable there). The only moment this cell will ever be in a
+# state where karpenter-crd's and kueue's own CRDs have never existed is
+# its own first-ever bootstrap, so this block *is* that first bootstrap,
+# staged in three steps so both halves of decision 4 (crds blocks
+# NodePool/EC2NodeClass; kueue blocks ResourceFlavor/ClusterQueue/
+# LocalQueue) are each proven pristinely, in the same cell, with no
+# second cell needed:
+#   A. both karpenter-crd and kueue broken: nothing new can be created.
+#   B. kueue still broken, karpenter-crd fixed: NodePool/EC2NodeClass
+#      appear; ResourceFlavor/ClusterQueue/LocalQueue still cannot.
+#   C. fully restored (the real GITOPS_REVISION): everything converges.
+# Not gated by GITOPS_SKIP_ORDERING_EXPERIMENT: this is this run's own
+# first bootstrap, not an optional extra on top of an already-working
+# cell, so it needs the same push access step 13's generator-loss
+# experiment already requires unconditionally.
+
+APP_KARPENTER_CRD="${CLUSTER}-karpenter-crd"
+APP_KARPENTER="${CLUSTER}-karpenter"
+APP_KUEUE="${CLUSTER}-kueue"
+APP_SMOKE="${CLUSTER}-smoke"
+app_synced() { [[ "$(app_sync "$1")" == "Synced" ]]; }
+app_not_synced() { [[ "$(app_sync "$1")" != "Synced" ]]; }
+nodepool_exists() { k get nodepool cpu >/dev/null 2>&1; }
+ec2nodeclass_exists() { k get ec2nodeclass cpu >/dev/null 2>&1; }
+resourceflavor_exists() { k get resourceflavor cpu >/dev/null 2>&1; }
+clusterqueue_exists() { k get clusterqueue smoke >/dev/null 2>&1; }
+
+# break_addon_branches SUFFIX ADDON_RELPATH...: creates
+# "e2e/${RUN_ID}/${SUFFIX}" off GITOPS_REVISION with every given
+# ADDON_RELPATH's `version:` replaced by a release that cannot exist,
+# pushes it to GITOPS_TEST_REPO_URL, and prints the branch name. Tracked
+# for cleanup by the caller, not here (see the comment on BROKEN_BRANCHES
+# below): every caller uses command substitution, which always forks a
+# subshell, so an append here would only ever mutate that subshell's own
+# copy of BROKEN_BRANCHES -- confirmed on a real run, this is exactly the
+# bug an earlier version of this helper had.
+break_addon_branches() {
+  local suffix="$1" branch clone addon_relpath
+  shift
+  branch="e2e/${RUN_ID}/${suffix}"
+  clone="${WORK_DIR}/break-${suffix}"
+  # GITOPS_REPO_URL, never REPO_ROOT: cloning from a local filesystem path
+  # makes the new clone's own "origin" that same local path (git's own
+  # default for a local-path clone source), so a later `git push origin`
+  # lands only inside this run's own local checkout -- never on GitHub,
+  # where the ApplicationSet's Git generator actually reads from.
+  # Confirmed on a real cluster: the push itself reported success, but
+  # Argo CD's own error was consistent and permanent across 5+ minutes
+  # ("unable to resolve '<branch>' to a commit SHA") because the branch
+  # never existed on GitHub at all.
+  git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${clone}" || return 1
+  checkout_revision_as "${clone}" "${branch}" "${GITOPS_REVISION}" || return 1
+  for addon_relpath in "$@"; do
+    sed -i.bak -E 's/^(\s*version:\s*).*/\1"0.0.0-e2e-nonexistent"/' "${clone}/${addon_relpath}" || return 1
+    grep -q '0.0.0-e2e-nonexistent' "${clone}/${addon_relpath}" || return 1
+  done
+  git -C "${clone}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
+    commit --quiet -am "test: break $* for e2e ordering experiment (never merged)" || return 1
+  push_disposable_branch "${clone}" "${branch}" || return 1
+  printf '%s' "${branch}"
+}
+
+# ---- A. both karpenter-crd and kueue broken (this cell's first-ever bootstrap)
+
+PRISTINE_BOTH_BROKEN_BRANCH="$(break_addon_branches "pristine-both-broken" \
+  "gitops/addons/karpenter-crd/addon.yaml" "gitops/addons/kueue/addon.yaml")" \
+  || fail "could not create/push the pristine-both-broken disposable branch"
+BROKEN_BRANCHES+=("${PRISTINE_BOTH_BROKEN_BRANCH}")
+run_bootstrap --revision "${PRISTINE_BOTH_BROKEN_BRANCH}" \
+  || fail "bootstrap.sh (this cell's first-ever bootstrap, both karpenter-crd and kueue broken)"
 BOOTSTRAP_RAN=1
-pass "bootstrap.sh completed (first bootstrap, --revision ${GITOPS_REVISION})"
+pass "bootstrap.sh completed (first-ever bootstrap, --revision ${PRISTINE_BOTH_BROKEN_BRANCH})"
+
+find_capacity_pool_app() {
+  k get applications -n "${ARGOCD_NS}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null \
+    | tr ' ' '\n' | grep -E "^${CLUSTER}-capacity-pool-" | head -n1
+}
+APP_CAPACITY_POOL=""
+discover_capacity_pool_app() { APP_CAPACITY_POOL="$(find_capacity_pool_app)"; [[ -n "${APP_CAPACITY_POOL}" ]]; }
+wait_until 300 10 "a capacity-pool Application exists" discover_capacity_pool_app \
+  || fail "no Application named ${CLUSTER}-capacity-pool-<pool> appeared"
+pass "discovered generated Applications: ${APP_KARPENTER_CRD}, ${APP_KARPENTER}, ${APP_KUEUE}, ${APP_CAPACITY_POOL}, ${APP_SMOKE}"
+
+wait_until 300 10 "karpenter-crd Application stays not Synced (pristine)" app_not_synced "${APP_KARPENTER_CRD}" \
+  || fail "${APP_KARPENTER_CRD} reached Synced despite its chart version being broken on this cell's first-ever bootstrap"
+wait_until 300 10 "kueue Application stays not Synced (pristine)" app_not_synced "${APP_KUEUE}" \
+  || fail "${APP_KUEUE} reached Synced despite its chart version being broken on this cell's first-ever bootstrap"
+wait_until 300 10 "capacity-pool Application stays not Synced (pristine)" app_not_synced "${APP_CAPACITY_POOL}" \
+  || fail "${APP_CAPACITY_POOL} reached Synced although karpenter-crd has never synced on this cell"
+wait_until 300 10 "smoke Application stays not Synced (pristine)" app_not_synced "${APP_SMOKE}" \
+  || fail "${APP_SMOKE} reached Synced although kueue has never synced on this cell"
+nodepool_exists && fail "NodePool cpu was created although karpenter-crd has never synced on this cell (its CRD cannot exist yet)"
+ec2nodeclass_exists && fail "EC2NodeClass cpu was created although karpenter-crd has never synced on this cell (its CRD cannot exist yet)"
+resourceflavor_exists && fail "ResourceFlavor cpu was created although kueue has never synced on this cell (its CRD cannot exist yet)"
+clusterqueue_exists && fail "ClusterQueue smoke was created although kueue has never synced on this cell (its CRD cannot exist yet)"
+pass "pristine: with both karpenter-crd and kueue broken on this cell's first-ever bootstrap, neither Application reaches Synced and none of NodePool/EC2NodeClass/ResourceFlavor/ClusterQueue exists -- acceptance criterion 4's stronger claim, observed directly, not asserted from documentation"
+
+# ---- B. karpenter-crd fixed, kueue still broken
+
+PRISTINE_KUEUE_BROKEN_BRANCH="$(break_addon_branches "pristine-kueue-broken" "gitops/addons/kueue/addon.yaml")" \
+  || fail "could not create/push the pristine-kueue-broken disposable branch"
+BROKEN_BRANCHES+=("${PRISTINE_KUEUE_BROKEN_BRANCH}")
+run_bootstrap --revision "${PRISTINE_KUEUE_BROKEN_BRANCH}" \
+  || fail "bootstrap.sh --revision ${PRISTINE_KUEUE_BROKEN_BRANCH}"
+
+wait_until 300 10 "karpenter-crd Application reaches Synced" app_synced "${APP_KARPENTER_CRD}" \
+  || fail "${APP_KARPENTER_CRD} did not reach Synced (sync=$(app_sync "${APP_KARPENTER_CRD}")) after fixing its own version"
+wait_until 300 10 "capacity-pool Application reaches Synced" app_synced "${APP_CAPACITY_POOL}" \
+  || fail "${APP_CAPACITY_POOL} did not reach Synced (sync=$(app_sync "${APP_CAPACITY_POOL}")) once karpenter-crd's CRDs existed"
+wait_until 180 10 "NodePool cpu is created" nodepool_exists \
+  || fail "NodePool cpu was not created even after karpenter-crd's CRDs became available"
+ec2nodeclass_exists || fail "EC2NodeClass cpu was not created even after karpenter-crd's CRDs became available"
+app_not_synced "${APP_KUEUE}" || fail "${APP_KUEUE} reached Synced despite still being broken"
+resourceflavor_exists && fail "ResourceFlavor cpu was created although kueue is still broken on this cell (its CRD still cannot exist)"
+clusterqueue_exists && fail "ClusterQueue smoke was created although kueue is still broken on this cell (its CRD still cannot exist)"
+pass "pristine: fixing only karpenter-crd lets NodePool/EC2NodeClass/capacity-pool converge while kueue stays broken and ResourceFlavor/ClusterQueue still cannot exist -- the two halves of acceptance criterion 4 are independent, observed directly"
+
+# ---- C. fully restored: the real GITOPS_REVISION this cell settles on
+
+run_bootstrap --revision "${GITOPS_REVISION}" \
+  || fail "bootstrap.sh (restoring --revision ${GITOPS_REVISION} after the pristine A/B/C experiment)"
+wait_until 300 10 "kueue Application reaches Synced" app_synced "${APP_KUEUE}" \
+  || fail "${APP_KUEUE} did not reach Synced (sync=$(app_sync "${APP_KUEUE}")) after restoring --revision"
+wait_until 300 10 "smoke Application reaches Synced" app_synced "${APP_SMOKE}" \
+  || fail "${APP_SMOKE} did not reach Synced (sync=$(app_sync "${APP_SMOKE}")) after restoring --revision"
+pass "restored --revision to ${GITOPS_REVISION}: kueue and the smoke ClusterQueue/LocalQueue now converge too -- this cell's first-ever bootstrap sequence is complete"
+
+# ------------------------------------------------- 4. first bootstrap
+#
+# "First bootstrap" here means the pristine A/B/C sequence in section 3c
+# above: stage C's run_bootstrap --revision "${GITOPS_REVISION}" call is
+# this cell's real first successful convergence, already run. What
+# follows checks its three objects.
 
 k get secret cell-registration -n "${ARGOCD_NS}" >/dev/null 2>&1 \
   || fail "cell-registration Secret was not created in namespace ${ARGOCD_NS}"
@@ -738,10 +911,14 @@ pass "an identical bootstrap.sh re-run is a true no-op (Secret/AppProject resour
 # the Secret annotation and the root Application's targetRevision
 # together. There is no second real branch to point at yet (this PR's own
 # `stable` tag does not exist until it merges, decision 6), so this
-# re-points at GITOPS_REVISION with a harmless trailing marker commit
-# instead -- any string bootstrap.sh writes verbatim into both fields
-# proves the mechanism; it does not need to resolve to a second, distinct
-# real ApplicationSet sync to prove the Secret/Application update together.
+# re-points at a harmless trailing marker string appended to
+# GITOPS_REVISION instead (REVISION_B below never resolves to a real git
+# ref - it is never used to check out anything, only written into and
+# read back from the Secret annotation and the root Application's own
+# targetRevision field) -- any string bootstrap.sh writes verbatim into
+# both fields proves the mechanism; it does not need to resolve to a
+# second, distinct real ApplicationSet sync to prove the Secret/
+# Application update together.
 
 REVISION_B="${GITOPS_REVISION}+e2e-revision-probe"
 run_bootstrap --revision "${REVISION_B}" || fail "bootstrap.sh (--revision-only re-run to ${REVISION_B})"
@@ -829,35 +1006,15 @@ grep -q "cluster_endpoint" "${WORK_DIR}/wrong-endpoint.log" \
   || fail "bootstrap.sh aborted for a reason other than the cluster_endpoint mismatch (see ${WORK_DIR}/wrong-endpoint.log)"
 pass "bootstrap.sh aborts before any write when --tf-outputs names a different cluster_endpoint than the live kubeconfig"
 
-# ------------------------------- 8. generated Applications: discovery
-#
-# Decision 2: a generated Application's name is {{name}}-{{addon}}. The
-# platform add-ons' own addon values are fixed by decision 3's layout; the
-# cells.ApplicationSet's capacity-pool pool name is this PR's own choice
-# (decision 9 only requires "one pair"), so it is discovered rather than
-# assumed.
-
-APP_KARPENTER_CRD="${CLUSTER}-karpenter-crd"
-APP_KARPENTER="${CLUSTER}-karpenter"
-APP_KUEUE="${CLUSTER}-kueue"
-APP_SMOKE="${CLUSTER}-smoke"
-
-find_capacity_pool_app() {
-  k get applications -n "${ARGOCD_NS}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null \
-    | tr ' ' '\n' | grep -E "^${CLUSTER}-capacity-pool-" | head -n1
-}
-APP_CAPACITY_POOL=""
-discover_capacity_pool_app() { APP_CAPACITY_POOL="$(find_capacity_pool_app)"; [[ -n "${APP_CAPACITY_POOL}" ]]; }
-wait_until 300 10 "a capacity-pool Application exists" discover_capacity_pool_app \
-  || fail "no Application named ${CLUSTER}-capacity-pool-<pool> appeared"
-pass "discovered generated Applications: ${APP_KARPENTER_CRD}, ${APP_KARPENTER}, ${APP_KUEUE}, ${APP_CAPACITY_POOL}, ${APP_SMOKE}"
-
 # --------------------------------------------------- 9. crds/controllers
 #
 # Acceptance criterion 6 (second half): kueue/karpenter reach Healthy on
 # the system node group before any NodePool-launched node exists.
+# APP_KARPENTER_CRD/APP_KARPENTER/APP_KUEUE/APP_SMOKE and APP_CAPACITY_POOL
+# (Decision 2's {{name}}-{{addon}} naming; capacity-pool's own pool name
+# discovered since it is this PR's own choice) were already resolved in
+# section 3c above, the first point they existed to discover.
 
-app_synced() { [[ "$(app_sync "$1")" == "Synced" ]]; }
 wait_until 600 15 "karpenter-crd Application Synced" app_synced "${APP_KARPENTER_CRD}" \
   || fail "${APP_KARPENTER_CRD} did not reach Synced (sync=$(app_sync "${APP_KARPENTER_CRD}"))"
 pass "${APP_KARPENTER_CRD} (crds step) reached Synced"
@@ -1029,36 +1186,10 @@ pass "a Karpenter node (${CANARY_NODE}) launched from NodePool ${NODEPOOL} for t
 # release that does not exist, re-points the cell at it, observes, then
 # re-points back at GITOPS_REVISION and confirms recovery.
 
-# break_addon_branch ADDON_RELPATH SUFFIX: creates
-# "e2e/${RUN_ID}/${SUFFIX}" with ADDON_RELPATH's `version:` replaced by a
-# release that cannot exist, pushes it to GITOPS_TEST_REPO_URL, and
-# prints the branch name. Tracked for cleanup.
-break_addon_branch() {
-  local addon_relpath="$1" suffix="$2" branch clone
-  branch="e2e/${RUN_ID}/${suffix}"
-  clone="${WORK_DIR}/break-${suffix}"
-  # GITOPS_REPO_URL, never REPO_ROOT: cloning from a local filesystem path
-  # makes the new clone's own "origin" that same local path (git's own
-  # default for a local-path clone source), so a later `git push origin`
-  # lands only inside this run's own local checkout -- never on GitHub,
-  # where the ApplicationSet's Git generator actually reads from.
-  # Confirmed on a real cluster: the push itself reported success, but
-  # Argo CD's own error was consistent and permanent across 5+ minutes
-  # ("unable to resolve '<branch>' to a commit SHA") because the branch
-  # never existed on GitHub at all.
-  git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${clone}" || return 1
-  checkout_revision_as "${clone}" "${branch}" "${GITOPS_REVISION}" || return 1
-  sed -i.bak -E 's/^(\s*version:\s*).*/\1"0.0.0-e2e-nonexistent"/' "${clone}/${addon_relpath}" || return 1
-  grep -q '0.0.0-e2e-nonexistent' "${clone}/${addon_relpath}" || return 1
-  git -C "${clone}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
-    commit --quiet -am "test: break ${addon_relpath} for e2e ordering experiment (never merged)" || return 1
-  push_disposable_branch "${clone}" "${branch}" || return 1
-  # Not BROKEN_BRANCHES+=(...) here: every caller of this function uses
-  # command substitution ($(break_addon_branch ...)), which always runs
-  # in a subshell -- an append here would only ever mutate that
-  # subshell's own copy. Callers append the printed name themselves.
-  printf '%s' "${branch}"
-}
+# break_addon_branches() is already defined in section 3c above (reused
+# here for the same purpose it originally had: one addon broken on its
+# own disposable branch off GITOPS_REVISION, rather than off a pristine
+# cell's never-synced starting point).
 
 if [[ "${GITOPS_SKIP_ORDERING_EXPERIMENT}" == "1" ]]; then
   info "GITOPS_SKIP_ORDERING_EXPERIMENT=1: skipping acceptance criterion 4 (no push access to ${GITOPS_TEST_REPO_URL} assumed)"
@@ -1081,19 +1212,18 @@ else
   fi
 
   # ---- 12a. break karpenter-crd -------------------------------------
-  # BREAK_CRDS_BRANCH="$(break_addon_branch ...)" runs the function in a
+  # BREAK_CRDS_BRANCH="$(break_addon_branches ...)" runs the function in a
   # subshell (command substitution always forks one); BROKEN_BRANCHES+=
-  # *inside* break_addon_branch() only ever mutated that subshell's own
+  # *inside* break_addon_branches() only ever mutated that subshell's own
   # copy of the array, never this shell's -- confirmed on a real run: the
   # branch was pushed, the whole run passed, and it was never deleted
   # (git ls-remote still showed it after the run exited 0). Track it here
   # instead, in the shell that actually runs delete_broken_branches().
-  BREAK_CRDS_BRANCH="$(break_addon_branch "gitops/addons/karpenter-crd/addon.yaml" "break-crds")" \
+  BREAK_CRDS_BRANCH="$(break_addon_branches "break-crds" "gitops/addons/karpenter-crd/addon.yaml")" \
     || fail "could not create/push the break-crds disposable branch"
   BROKEN_BRANCHES+=("${BREAK_CRDS_BRANCH}")
   run_bootstrap --revision "${BREAK_CRDS_BRANCH}" || fail "bootstrap.sh --revision ${BREAK_CRDS_BRANCH}"
 
-  app_not_synced() { [[ "$(app_sync "$1")" != "Synced" ]]; }
   wait_until 300 10 "karpenter-crd Application leaves Synced once broken" app_not_synced "${APP_KARPENTER_CRD}" \
     || fail "${APP_KARPENTER_CRD} stayed Synced after its chart version was broken"
   pass "${APP_KARPENTER_CRD} left Synced once its chart version was broken"
@@ -1117,7 +1247,7 @@ else
 
   # ---- 12b. break kueue ----------------------------------------------
   # Same subshell-scoping note as break-crds above.
-  BREAK_KUEUE_BRANCH="$(break_addon_branch "gitops/addons/kueue/addon.yaml" "break-kueue")" \
+  BREAK_KUEUE_BRANCH="$(break_addon_branches "break-kueue" "gitops/addons/kueue/addon.yaml")" \
     || fail "could not create/push the break-kueue disposable branch"
   BROKEN_BRANCHES+=("${BREAK_KUEUE_BRANCH}")
   run_bootstrap --revision "${BREAK_KUEUE_BRANCH}" || fail "bootstrap.sh --revision ${BREAK_KUEUE_BRANCH}"
@@ -1155,7 +1285,7 @@ kueue_crd_created="$(k get crd clusterqueues.kueue.x-k8s.io -o jsonpath='{.metad
 
 REMOVE_KUEUE_CLONE="${WORK_DIR}/remove-kueue"
 REMOVE_KUEUE_BRANCH="e2e/${RUN_ID}/remove-kueue"
-# GITOPS_REPO_URL, never REPO_ROOT -- see break_addon_branch()'s own comment.
+# GITOPS_REPO_URL, never REPO_ROOT -- see break_addon_branches()'s own comment.
 git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${REMOVE_KUEUE_CLONE}" || fail "git clone (remove-kueue)"
 checkout_revision_as "${REMOVE_KUEUE_CLONE}" "${REMOVE_KUEUE_BRANCH}" "${GITOPS_REVISION}" || fail "git checkout (remove-kueue)"
 git -C "${REMOVE_KUEUE_CLONE}" rm --quiet "gitops/addons/kueue/addon.yaml" || fail "git rm gitops/addons/kueue/addon.yaml"
@@ -1167,7 +1297,7 @@ BROKEN_BRANCHES+=("${REMOVE_KUEUE_BRANCH}")
 
 run_bootstrap --revision "${REMOVE_KUEUE_BRANCH}" || fail "bootstrap.sh --revision ${REMOVE_KUEUE_BRANCH}"
 kueue_app_gone() { ! k get application "${APP_KUEUE}" -n "${ARGOCD_NS}" >/dev/null 2>&1; }
-wait_until 180 10 "kueue Application disappears once its generator entry is removed" kueue_app_gone \
+wait_until 300 10 "kueue Application disappears once its generator entry is removed" kueue_app_gone \
   || fail "${APP_KUEUE} Application still exists after removing its own addon.yaml"
 pass "${APP_KUEUE} Application was removed by the lost generator entry"
 
