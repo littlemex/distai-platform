@@ -3,8 +3,9 @@
 need a cluster: the shape of the ApplicationSets, the root Application, and
 every add-on/cell parameter file, against the decisions in the issue body.
 Extended for issue #28 (the accelerator add-ons): the four accel-* add-ons,
-the platform's own Neuron DeviceClass chart, capacity-pool's pool.labels
-and the two light-tier accelerator cells, against that issue's
+the platform's own Neuron DeviceClass chart, capacity-pool's
+accelerator.methodLabel (#17's own shape) and the two light-tier
+accelerator cells, against that issue's
 "Interface" table and acceptance criteria.
 
 This is a static, content-only check. It knows nothing about whether Argo CD
@@ -681,22 +682,26 @@ def main(root: str) -> int:
             f"spec.selectors={selector_text.strip()!r}",
         )
 
-    # ---------------------------------------- capacity-pool pool.labels (#28 C)
+    # ------------------------------- capacity-pool accelerator.methodLabel (#28 C)
+    #
+    # #17 (feat/17-capacity-pools) owns this chart's shape: the method label
+    # #28 section C needs is accelerator.methodLabel.key/.value, not a
+    # chart-local pool.labels map (fix/capacity-pool-root-volume restack).
     cp_values_path = os.path.join(gitops, "charts/capacity-pool/values.yaml")
     cp_values = load_one_or_fail(cp_values_path) or {}
-    cp_pool = cp_values.get("pool") if isinstance(cp_values, dict) else None
+    cp_accelerator = cp_values.get("accelerator") if isinstance(cp_values, dict) else None
     check(
-        "charts/capacity-pool/values.yaml declares pool.labels (#28 section C; its default value is the chart's choice)",
-        isinstance(cp_pool, dict) and "labels" in cp_pool,
-        f"pool keys: {sorted(cp_pool) if isinstance(cp_pool, dict) else cp_pool!r}",
+        "charts/capacity-pool/values.yaml declares accelerator.methodLabel (#28 section C, #17's own shape; its default value is the chart's choice)",
+        isinstance(cp_accelerator, dict) and isinstance(cp_accelerator.get("methodLabel"), dict) and "key" in cp_accelerator["methodLabel"],
+        f"accelerator: {cp_accelerator!r}",
     )
     cp_nodepool_tpl = os.path.join(gitops, "charts/capacity-pool/templates/nodepool.yaml")
     if os.path.isfile(cp_nodepool_tpl):
         with open(cp_nodepool_tpl, encoding="utf-8") as f:
             nodepool_tpl_text = f.read()
         check(
-            "charts/capacity-pool/templates/nodepool.yaml reads .Values.pool.labels (#28 section C: rendered as spec.template.metadata.labels)",
-            ".Values.pool.labels" in nodepool_tpl_text,
+            "charts/capacity-pool/templates/nodepool.yaml reads .Values.accelerator.methodLabel (#28 section C: rendered as spec.template.metadata.labels)",
+            ".methodLabel" in nodepool_tpl_text and ".Values.accelerator" in nodepool_tpl_text,
         )
 
     # ------------------------------------ light-tier accelerator cells (#28 D)
@@ -724,12 +729,14 @@ def main(root: str) -> int:
         for path in files:
             rel = os.path.relpath(path, root)
             doc = load_one_or_fail(path) or {}
-            pool = ((doc.get("values") or {}).get("pool") or {}) if isinstance(doc, dict) else {}
+            values = (doc.get("values") or {}) if isinstance(doc, dict) else {}
+            pool = values.get("pool") or {}
+            accelerator = values.get("accelerator") or {}
             check(f"{rel}'s pool.name is {want['pool']!r} (#28 section D)", pool.get("name") == want["pool"], f"got {pool.get('name')!r}")
             check(
-                f"{rel}'s pool.labels is exactly {{{want['label']}: device-plugin}} (#28 section D: device-plugin method, never DRA, one key per device class)",
-                pool.get("labels") == {want["label"]: "device-plugin"},
-                f"got {pool.get('labels')!r}",
+                f"{rel}'s accelerator.methodLabel is exactly {{key: {want['label']}, value: device-plugin}} (#28 section D: device-plugin method, never DRA, one key per device class; #17's own shape, not a chart-local pool.labels map)",
+                accelerator.get("methodLabel") == {"key": want["label"], "value": "device-plugin"},
+                f"got {accelerator.get('methodLabel')!r}",
             )
             reqs = {r.get("key"): r for r in (pool.get("requirements") or []) if isinstance(r, dict)}
             family = reqs.get("karpenter.k8s.aws/instance-family") or {}
