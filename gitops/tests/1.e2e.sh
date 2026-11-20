@@ -69,11 +69,14 @@
 #   mode-600 temporary files removed immediately after each use (never
 #   .git/config or a log; see push_disposable_branch() and
 #   report_stale_disposable_branches()),
-#   GITOPS_SKIP_ORDERING_EXPERIMENT (0 -- set to 1 to skip acceptance
-#   criterion 4 if this token cannot write to GITOPS_TEST_REPO_URL; the
-#   step 13 generator-entry-loss experiment and 2.upgrade.sh's own two
-#   disposable branches have no such bypass, since their own acceptance
-#   criteria need exactly this write).
+#   GITOPS_SKIP_ORDERING_EXPERIMENT (0 -- set to 1 to skip only step 12's
+#   already-converged-cell re-confirmation of acceptance criterion 4 if
+#   this token cannot write to GITOPS_TEST_REPO_URL; criterion 4 itself
+#   is still exercised by the pristine stage A/B/C sequence in section 3c
+#   below, this cell's own first-ever bootstrap, which pushes
+#   unconditionally; the step 13 generator-entry-loss experiment and
+#   2.upgrade.sh's own disposable branches have no bypass either, since
+#   their own acceptance criteria need exactly this write).
 set -euo pipefail
 
 : "${AWS_PROFILE:?export AWS_PROFILE}"
@@ -514,7 +517,13 @@ cleanup() {
   echo
   if [[ "${rc}" -eq 0 ]]; then
     if [[ "${GITOPS_SKIP_ORDERING_EXPERIMENT}" == "1" ]]; then
-      log "RESULT PASS (acceptance criterion 4 skipped, GITOPS_SKIP_ORDERING_EXPERIMENT=1): run ${RUN_ID}, work dir ${WORK_DIR}"
+      # Acceptance criterion 4 itself is NOT skipped here: the pristine
+      # stage A/B/C sequence (section 3c) that proves its stronger claim
+      # pushes and bootstraps unconditionally, since it is this cell's
+      # own first-ever bootstrap, not an optional extra. Only step 12's
+      # weaker, already-converged-cell re-confirmation of the same
+      # ordering is gated by this flag.
+      log "RESULT PASS (step 12's already-converged-cell re-confirmation of acceptance criterion 4 skipped, GITOPS_SKIP_ORDERING_EXPERIMENT=1; the pristine stage A/B/C sequence above ran regardless): run ${RUN_ID}, work dir ${WORK_DIR}"
     else
       log "RESULT PASS: all checks passed (run ${RUN_ID}, work dir ${WORK_DIR})"
     fi
@@ -754,6 +763,36 @@ ec2nodeclass_exists() { k get ec2nodeclass cpu >/dev/null 2>&1; }
 resourceflavor_exists() { k get resourceflavor cpu >/dev/null 2>&1; }
 clusterqueue_exists() { k get clusterqueue smoke >/dev/null 2>&1; }
 
+# assert_stays_not_synced APP TIMEOUT INTERVAL: genuinely proves "this
+# Application never reaches Synced within TIMEOUT seconds", not merely
+# that it is not Synced at one instant. app_not_synced is trivially true
+# the moment a brand-new Application is first created (its sync status
+# starts empty/Unknown, never "Synced"), so `wait_until ... app_not_synced`
+# returns success on its very first poll -- a few seconds after bootstrap,
+# nowhere near long enough to tell "blocked" from "not yet reconciled" --
+# proving nothing about persistence (confirmed: this is exactly what the
+# first version of stage A/B below did, passing in 5-16 seconds).
+# Polls for the POSITIVE condition (app_synced becoming true) over the
+# full window instead, and only passes if it never does -- the same
+# inversion step 12 below already uses correctly for its own "leaves
+# Synced once broken" checks, applied here to "never becomes Synced" on
+# a cell that starts out already not-Synced.
+assert_stays_not_synced() {
+  local app="$1" timeout="$2" interval="$3"
+  wait_until "${timeout}" "${interval}" "${app} reaches Synced (expected not to within this window)" app_synced "${app}" \
+    && return 1
+  return 0
+}
+# assert_stays_not_synced_bg APP TIMEOUT INTERVAL RESULT_FILE: runs the
+# check above in a background subshell, writing PASS/FAIL to RESULT_FILE.
+# Several of these are launched together and waited on with `wait`, so N
+# checks that each have to hold for the whole window cost one window of
+# wall-clock, not N windows.
+assert_stays_not_synced_bg() {
+  local app="$1" timeout="$2" interval="$3" result_file="$4"
+  ( if assert_stays_not_synced "${app}" "${timeout}" "${interval}"; then echo PASS >"${result_file}"; else echo FAIL >"${result_file}"; fi ) &
+}
+
 # break_addon_branches SUFFIX ADDON_RELPATH...: creates
 # "e2e/${RUN_ID}/${SUFFIX}" off GITOPS_REVISION with every given
 # ADDON_RELPATH's `version:` replaced by a release that cannot exist,
@@ -810,14 +849,30 @@ wait_until 300 10 "a capacity-pool Application exists" discover_capacity_pool_ap
   || fail "no Application named ${CLUSTER}-capacity-pool-<pool> appeared"
 pass "discovered generated Applications: ${APP_KARPENTER_CRD}, ${APP_KARPENTER}, ${APP_KUEUE}, ${APP_CAPACITY_POOL}, ${APP_SMOKE}"
 
-wait_until 300 10 "karpenter-crd Application stays not Synced (pristine)" app_not_synced "${APP_KARPENTER_CRD}" \
+# 180s, comfortably longer than any convergence this whole suite has
+# observed on a real cluster (the slowest, 2.upgrade.sh's matched-version
+# rollout, took 79s) -- long enough that staying not-Synced for the whole
+# window is actual evidence of being blocked, not a timing coincidence.
+# Run concurrently: each of the four already has to hold for the full
+# window on its own, so checking them one after another would cost 4x
+# the wall-clock for no additional evidence.
+STAGE_A_TIMEOUT=180
+STAGE_A_WORK="${WORK_DIR}/stage-a"
+mkdir -p "${STAGE_A_WORK}"
+assert_stays_not_synced_bg "${APP_KARPENTER_CRD}" "${STAGE_A_TIMEOUT}" 10 "${STAGE_A_WORK}/karpenter-crd"
+assert_stays_not_synced_bg "${APP_KUEUE}" "${STAGE_A_TIMEOUT}" 10 "${STAGE_A_WORK}/kueue"
+assert_stays_not_synced_bg "${APP_CAPACITY_POOL}" "${STAGE_A_TIMEOUT}" 10 "${STAGE_A_WORK}/capacity-pool"
+assert_stays_not_synced_bg "${APP_SMOKE}" "${STAGE_A_TIMEOUT}" 10 "${STAGE_A_WORK}/smoke"
+wait
+[[ "$(cat "${STAGE_A_WORK}/karpenter-crd")" == PASS ]] \
   || fail "${APP_KARPENTER_CRD} reached Synced despite its chart version being broken on this cell's first-ever bootstrap"
-wait_until 300 10 "kueue Application stays not Synced (pristine)" app_not_synced "${APP_KUEUE}" \
+[[ "$(cat "${STAGE_A_WORK}/kueue")" == PASS ]] \
   || fail "${APP_KUEUE} reached Synced despite its chart version being broken on this cell's first-ever bootstrap"
-wait_until 300 10 "capacity-pool Application stays not Synced (pristine)" app_not_synced "${APP_CAPACITY_POOL}" \
+[[ "$(cat "${STAGE_A_WORK}/capacity-pool")" == PASS ]] \
   || fail "${APP_CAPACITY_POOL} reached Synced although karpenter-crd has never synced on this cell"
-wait_until 300 10 "smoke Application stays not Synced (pristine)" app_not_synced "${APP_SMOKE}" \
+[[ "$(cat "${STAGE_A_WORK}/smoke")" == PASS ]] \
   || fail "${APP_SMOKE} reached Synced although kueue has never synced on this cell"
+pass "none of the four generated Applications reached Synced within ${STAGE_A_TIMEOUT}s of this cell's first-ever bootstrap, polled for the whole window, not sampled once"
 nodepool_exists && fail "NodePool cpu was created although karpenter-crd has never synced on this cell (its CRD cannot exist yet)"
 ec2nodeclass_exists && fail "EC2NodeClass cpu was created although karpenter-crd has never synced on this cell (its CRD cannot exist yet)"
 resourceflavor_exists && fail "ResourceFlavor cpu was created although kueue has never synced on this cell (its CRD cannot exist yet)"
@@ -850,16 +905,33 @@ k get crd nodepools.karpenter.sh -o jsonpath='{.status.conditions[?(@.type=="Est
 # Application, including NodePool/EC2NodeClass, which have nothing to do
 # with kueue. This is a *stronger* form of decision 4's own claim than
 # "only the dependent resource fails to create": a mixed-dependency
-# Application is only as available as its least-available dependency,
-# confirmed directly rather than assumed.
-wait_until 300 15 "capacity-pool Application stays blocked by kueue's own break (pristine)" app_not_synced "${APP_CAPACITY_POOL}" \
+# Application is only as available as its least-available dependency.
+# Asserted below on every run, pass or fail -- not only read off a
+# diagnostic dump on failure -- since the mechanism this stage claims to
+# demonstrate (resource-discovery validation blocking the whole
+# Application) is otherwise never actually checked on the path that
+# passes, only inferred from the Application staying not-Synced, which a
+# retry backoff or a stale discovery cache would also produce.
+STAGE_B_TIMEOUT=180
+STAGE_B_WORK="${WORK_DIR}/stage-b"
+mkdir -p "${STAGE_B_WORK}"
+assert_stays_not_synced_bg "${APP_CAPACITY_POOL}" "${STAGE_B_TIMEOUT}" 15 "${STAGE_B_WORK}/capacity-pool"
+assert_stays_not_synced_bg "${APP_KUEUE}" "${STAGE_B_TIMEOUT}" 15 "${STAGE_B_WORK}/kueue"
+wait
+[[ "$(cat "${STAGE_B_WORK}/capacity-pool")" == PASS ]] \
   || fail "${APP_CAPACITY_POOL} reached Synced despite kueue's ResourceFlavor CRD still being undiscoverable"
-app_not_synced "${APP_KUEUE}" || fail "${APP_KUEUE} reached Synced despite still being broken"
+[[ "$(cat "${STAGE_B_WORK}/kueue")" == PASS ]] \
+  || fail "${APP_KUEUE} reached Synced despite still being broken"
+capacity_pool_operation_message="$(app_field "${APP_CAPACITY_POOL}" '{.status.operationState.message}')"
+case "${capacity_pool_operation_message}" in
+  *"kueue.x-k8s.io"*"could not find the requested resource"*) ;;
+  *) fail "${APP_CAPACITY_POOL}'s own operationState.message does not mention kueue.x-k8s.io's own resources being undiscoverable (got: ${capacity_pool_operation_message}) -- the claimed cause is not what this run's own Application actually reports" ;;
+esac
 nodepool_exists && fail "NodePool cpu was created although capacity-pool's own Application-wide sync should still be blocked by kueue's undiscoverable ResourceFlavor"
 ec2nodeclass_exists && fail "EC2NodeClass cpu was created although capacity-pool's own Application-wide sync should still be blocked by kueue's undiscoverable ResourceFlavor"
 resourceflavor_exists && fail "ResourceFlavor cpu was created although kueue is still broken on this cell (its CRD still cannot exist)"
 clusterqueue_exists && fail "ClusterQueue smoke was created although kueue is still broken on this cell (its CRD still cannot exist)"
-pass "pristine: fixing only karpenter-crd (now Established) does not unblock capacity-pool while kueue stays broken -- Argo CD's own resource-discovery validation blocks the WHOLE Application, NodePool/EC2NodeClass included, when even one of its resource kinds (kueue's ResourceFlavor) cannot be discovered, confirming decision 4's claim at the Application level, not merely per-resource"
+pass "pristine: fixing only karpenter-crd (now Established) does not unblock capacity-pool while kueue stays broken for ${STAGE_B_TIMEOUT}s, polled for the whole window -- capacity-pool's own operationState.message (\"${capacity_pool_operation_message}\") confirms the cause is kueue's ResourceFlavor CRD still being undiscoverable, not merely that it stayed not-Synced for some other reason -- Argo CD's own resource-discovery validation blocks the WHOLE Application, NodePool/EC2NodeClass included, when even one of its resource kinds cannot be discovered, confirming decision 4's claim at the Application level, not merely per-resource"
 
 # ---- C. fully restored: the real GITOPS_REVISION this cell settles on
 
@@ -882,7 +954,7 @@ wait_until 600 15 "smoke Application reaches Synced" smoke_synced_refreshing \
 capacity_pool_synced_refreshing() { hard_refresh_app "${APP_CAPACITY_POOL}"; app_synced "${APP_CAPACITY_POOL}"; }
 wait_until 300 15 "capacity-pool Application reaches Synced" capacity_pool_synced_refreshing \
   || fail "${APP_CAPACITY_POOL} did not reach Synced (sync=$(app_sync "${APP_CAPACITY_POOL}")) once both karpenter-crd and kueue were fixed"
-pass "restored --revision to ${GITOPS_REVISION}: kueue, capacity-pool (now including ResourceFlavor) and the smoke ClusterQueue/LocalQueue all converge -- this cell's first-ever bootstrap sequence is complete"
+pass "restored --revision to ${GITOPS_REVISION}: kueue converges on its own (no refresh needed -- it introduces no CRD anything else already depends on); capacity-pool (now including ResourceFlavor) and the smoke ClusterQueue/LocalQueue converge once told to recheck Argo CD's own API-resource cache (hard refresh), consistent with the documented limitation that a brand-new CRD is not picked up by steady-state watch-based cache invalidation on its own -- this is not a claim that either converges unattended; this cell's first-ever bootstrap sequence is complete"
 
 # ------------------------------------------------- 4. first bootstrap
 #
