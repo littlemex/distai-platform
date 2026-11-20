@@ -22,8 +22,12 @@ and the three kinds it renders do not change under that extension.
 This chart is never installed from an upstream chart registry: a cell's own
 `gitops/cells/<cluster-name>/capacity-pool/*.yaml` parameter file points
 `cells.ApplicationSet.yaml`'s Git file generator at this chart's own `dir`
-(RFC #25 Decision 2/3), and sets `clusterName`/`nodeRole`/`pool.name` through
-`valuesFrom`, not a static value in that file.
+(RFC #25 Decision 2/3), sets `clusterName`/`nodeRole` through `valuesFrom`
+(cell-specific, never a static value in that file - `clusterName` from the
+Cluster generator's own `name` param, `nodeRole` from the registration
+Secret's annotation), and sets `pool.name` as a static value under its own
+`values:` block instead (not cell-specific - the same pool name, `cpu`, is
+reused across every cell by this PR's own fixture).
 
 ## Known limits
 

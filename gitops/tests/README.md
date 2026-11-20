@@ -21,7 +21,8 @@ Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
 
 - Helm `>= 3.8` (OCI charts), for `0.static.sh` only (`1.e2e.sh`/`2.upgrade.sh`
   never call `helm` themselves -- Argo CD installs every chart in-cluster).
-- `uv` (for `0.static.sh`'s pinned `yamllint`/`pyyaml`), `curl`,
+- `uv` (for `0.static.sh`'s pinned `yamllint`/`pyyaml`, and for `2.upgrade.sh`'s
+  own `check_gitops_contract.py` calls, pinned the same way), `curl`,
   `sha256sum` (for pinning `kubeconform` by checksum if it is not already on
   `PATH`) and `shellcheck` (required, not optional - `0.static.sh` fails
   closed if it is missing, rather than silently skipping that check).
@@ -118,7 +119,7 @@ export GITOPS_BASE_REF="<a ref of infra/foundation before issue #25's access-pol
 export ARGOCD_IDC_INSTANCE_ARN="<arn:aws:sso:::instance/ssoins-...>"
 export ARGOCD_IDC_REGION="<region of the Identity Center instance>"
 export ARGOCD_IDC_IDENTITY_STORE_ID="$(aws sso-admin describe-instance \
-  --instance-arn "${ARGOCD_IDC_INSTANCE_ARN}" --query IdentityStoreId --output text)"
+  --instance-arn "${ARGOCD_IDC_INSTANCE_ARN}" --region "${ARGOCD_IDC_REGION}" --query IdentityStoreId --output text)"
 cd gitops/tests
 ./1.e2e.sh 2>&1 | tee "/tmp/gitops-e2e-$(date +%Y%m%d%H%M%S).log"
 ```
