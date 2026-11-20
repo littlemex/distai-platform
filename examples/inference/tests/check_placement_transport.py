@@ -550,7 +550,10 @@ def main():
             if droles:
                 for r in ROLES:
                     for w in droles[r]:
-                        for cname, kvcfg in kv_transfer_config(w).items():
+                        kvcfgs = kv_transfer_config(w)
+                        check(f"disagg-pd kvCacheTier.mode={mode}: {name_of(w)} ({r}) has a KV_TRANSFER_CONFIG env "
+                              "on at least one gpu container (not silently skipped)", bool(kvcfgs), kvcfgs)
+                        for cname, kvcfg in kvcfgs.items():
                             label = f"disagg-pd kvCacheTier.mode={mode}: {name_of(w)} ({r}) container {cname}"
                             check(f"{label}: kv_connector is MultiConnector",
                                   kvcfg.get("kv_connector") == "MultiConnector", kvcfg)
@@ -571,7 +574,10 @@ def main():
         ])
         if check(f"agg-baseline: kvCacheTier.mode={mode} with mpServerEndpoint: helm template", radocs is not None, err):
             for w in workloads(radocs):
-                for cname, kvcfg in kv_transfer_config(w).items():
+                kvcfgs = kv_transfer_config(w)
+                check(f"agg-baseline kvCacheTier.mode={mode}: {name_of(w)} has a KV_TRANSFER_CONFIG env "
+                      "on at least one gpu container (not silently skipped)", bool(kvcfgs), kvcfgs)
+                for cname, kvcfg in kvcfgs.items():
                     label = f"agg-baseline kvCacheTier.mode={mode}: {name_of(w)} container {cname}"
                     check(f"{label}: kv_connector is LMCacheMPConnector alone, no MultiConnector",
                           kvcfg.get("kv_connector") == "LMCacheMPConnector", kvcfg)

@@ -1170,7 +1170,7 @@
       "type": "timeseries",
       "id": 21,
       "title": "GPU memory used bytes, per node, summed across its GPUs (DCGM_FI_DEV_FB_USED)",
-      "description": "sum by (kubernetes_node) of DCGM_FI_DEV_FB_USED (framebuffer/HBM used, MiB in DCGM's own unit, converted here) from the dcgm-gpu scrape job - summed across every GPU DCGM reports for that node, not a node-level metric DCGM itself reports. Skeleton panel: no real run has fed this job yet, see this directory's own README.",
+      "description": "sum by (kubernetes_node) of DCGM_FI_DEV_FB_USED (framebuffer/HBM used, MiB in DCGM's own unit, converted here) from the dcgm-gpu scrape job - summed across every GPU DCGM reports for that node, not a node-level metric DCGM itself reports. Skeleton panel: no real run has fed this job yet, see this directory's own README. Double-counts if both the standalone dcgm-exporter chart and the GPU Operator's own bundled copy run at once on the same node - do not run both.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

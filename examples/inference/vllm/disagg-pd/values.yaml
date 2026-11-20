@@ -198,10 +198,10 @@ metrics:
 #     and mode does NOT actually select between a node-local and an
 #     off-node backend: kvCacheTier.lmcache.mpServerEndpoint is a single
 #     static value, rendered the same way into every prefill and decode
-#     Pod, which by Decision 3 run on DIFFERENT nodes - so this chart has
-#     no way to express "a separate mp server local to each node" at all,
-#     only "one shared mp server address every Pod dials." Whichever
-#     backend that one mp server's own adapter configuration (its own CLI
+#     Pod, which by Decision 3 run on DIFFERENT nodes - so this chart does
+#     not deploy, detect or enforce any particular topology for that
+#     endpoint, it renders the exact same value everywhere either way.
+#     Whichever backend that one mp server's own adapter configuration (its own CLI
 #     flags, e.g. --l2-adapter, not rendered here) actually uses - genuinely
 #     node-local storage, or something off-node like Amazon ElastiCache -
 #     is entirely that external process's own property, invisible to and
@@ -231,8 +231,9 @@ metrics:
 # actually causes is the indexer/EPP's own reuse scoring under-counting
 # what is reusable at all (it only ever sees GPU-resident hits, never an
 # LMCache one), and it would block routing outright for a genuinely
-# node-local tier, if one is ever actually built (see (1) above - this
-# chart does not build one today). Not solved here either way. (4) SGLang
+# node-local tier, if one is ever actually built (see the local/remote
+# paragraph above - this chart does not build or detect one today). Not
+# solved here either way. (4) SGLang
 # has no confirmed Redis/ElastiCache L3 backend as of this writing
 # (docs.sglang.io/advanced_features/hicache_design.html lists Mooncake,
 # DeepSeek 3FS, NIXL, AIBrix KVCache, file/fast_file - no RESP/Redis entry),
