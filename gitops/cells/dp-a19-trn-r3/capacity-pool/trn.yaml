@@ -12,24 +12,23 @@
 # The pool stays dynamically provisioned and device-plugin method: #19 E4c
 # showed a dynamic DRA pool never initializes a Neuron node.
 #
-# pool.capacityType: on-demand, not flex (#28 section H, root caused on a
-# real run after this NodePool was restacked onto flex). Karpenter's own
-# CreateFleet calls (CloudTrail, cluster dp-a19-trn-r3) over a 30-minute
-# wait were spot-only, nine times, each UnfulfillableCapacity, roughly
-# every 3m10s -- Karpenter's own unavailable-offerings cache TTL -- while
-# a dry-run on-demand CreateFleet for the same instance type at the very
-# start had already reported it would have succeeded. With exactly one
-# instance type in this NodePool's own requirements (trn2.3xlarge is the
-# only Trainium2 size), Karpenter's price-based ranking re-selects spot
-# every time its cache entry expires and never actually tries on-demand
-# for real; flex's fallback only works in practice when a NodePool has a
-# second instance type to diversify across once spot is unavailable (the
-# chart's own cpu-flex fixture, and this issue's own GPU NodePool with
-# three instance families, both do and both pass with flex). This pool's
-# only purpose is proving the device-plugin/method-label mechanism
-# launches a real node, not proving spot provisioning, so on-demand here
-# trades a cost saving this NodePool was never going to realize anyway
-# for determinism.
+# pool.capacityType: flex, reverted back from on-demand (#28 section H).
+# A first real run found flex sticking to spot for 30 minutes on this
+# single-instance-type NodePool (CloudTrail: 9 CreateFleet calls, all
+# spot, all UnfulfillableCapacity, while a dry-run on-demand CreateFleet
+# for the same instance type confirmed it would have succeeded) -- see
+# the chart's own README "Known limits" and #28 section H for that
+# finding, with evidence. Switching to pool.capacityType: on-demand to
+# work around it was tried next and itself failed on a real run, a
+# different and still-unexplained way: Karpenter's own provisioner logged
+# "nodepool requirements filtered out all instance types" continuously
+# for the full 30-minute wait, with EC2NodeClass "trn" showing zero
+# errors of its own the entire time (so not an EC2NodeClass-readiness
+# problem) -- not root caused with the same confidence as the flex
+# finding, so reverted rather than shipped as a fix. `flex` is restored
+# here as the known, already-documented behavior (sometimes sticks to
+# spot, but has launched a real node successfully before) rather than an
+# unexplained on-demand failure mode with zero launch attempts at all.
 #
 # pool.requirements replaces the chart default as a whole (Helm replaces
 # lists): the chart's instance-category/instance-generation terms describe
@@ -58,7 +57,7 @@ namespace: kube-system
 values:
   pool:
     name: trn
-    capacityType: on-demand
+    capacityType: flex
     requirements:
       - key: kubernetes.io/arch
         operator: In
