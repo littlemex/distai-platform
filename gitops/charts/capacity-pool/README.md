@@ -28,6 +28,7 @@ nodes while Kueue's quota on the flavor still describes the reservation.
 | `pool.requirements` | no | amd64, `c`/`m`/`r` instance categories, generation > 5 | Every other Karpenter `NodePool` requirement, rendered after the generated capacity-type entry. An entry with key `karpenter.sh/capacity-type` fails the render |
 | `pool.limits` | no | `cpu: "32"` | Karpenter `NodePool` resource limits (see Quotas below) |
 | `pool.disruption` | no | `WhenEmptyOrUnderutilized`, `60s` | Karpenter `NodePool` disruption settings |
+| `pool.rootVolumeSizeGi` | no | `""` | `EC2NodeClass` root volume size (e.g. `"100Gi"`); default renders no `blockDeviceMappings` at all, so the node's root volume stays the AMI's own default size |
 | `reservation.tags` | when `reserved` | `{}` | Tags selecting the Capacity Reservation(s) or Capacity Block(s) backing a `reserved` pool. Must be non-empty, with no empty key or value, when `pool.capacityType` is `reserved`; ignored otherwise |
 | `reservation.instanceMatchCriteria` | no | `targeted` | `targeted` or `open`; any other value fails the render. Used only when `pool.capacityType` is `reserved` |
 | `accelerator.resourceName` | no | `""` | When set, rendered as the annotation `distai.dev/accelerator-resource-name` on the `NodePool` and the `ResourceFlavor` (for example `nvidia.com/gpu`, `aws.amazon.com/neuron`). Provenance only: no template branches on its value |
@@ -147,3 +148,24 @@ step by hand, as with the smoke chart's `clusterQueue.resourceFlavor`.
   nothing shows up as a `reserved` pool that never launches a node.
 - `EC2NodeClass.spec.role` and the subnet/security-group discovery tags
   assume the foundation layer (`infra/foundation`) created this cell.
+- **Root caused on real hardware: a node's own root volume can be too
+  small for a realistic container image, and the failure this produces
+  reads as an unrelated scheduling or consolidation problem until traced
+  end to end.** Before this chart took `pool.rootVolumeSizeGi`, a
+  `trn2.3xlarge` node's `EC2NodeClass` rendered no `blockDeviceMappings`
+  at all, so its root volume stayed the AMI's own default. A `kubectl get
+  events` trace during a real failure showed a verification pod
+  genuinely `Scheduled` and bound to that node, then evicted twice by
+  kubelet as a 7.5 GiB container image's pull consumed the root volume
+  (`"The node was low on resource: ephemeral-storage"`), with the pull
+  itself failing (`"no space left on device"` while extracting a layer).
+  Only once the pod was evicted and gone did the node look idle to
+  Karpenter's own disruption controller, which reclaimed it as `Empty`
+  (`"pod-count":0`) a short time later -- read in isolation, this last
+  log line alone is indistinguishable from "the pod was never bound",
+  and two earlier, less complete investigations of the same failure each
+  concluded exactly that before this full trace corrected them. Any
+  consumer of this chart running a realistically-sized image on any pool
+  it creates, reserved/on-demand/flex alike, is exposed to the identical
+  failure until `pool.rootVolumeSizeGi` is set large enough for that
+  image.
