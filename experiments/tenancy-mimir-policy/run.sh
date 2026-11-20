@@ -128,30 +128,33 @@ helm install kueue oci://registry.k8s.io/kueue/charts/kueue --version 0.20.6 -n 
   --set controllerManager.tolerations[0].operator=Exists
 capture "01-karpenter-kueue.txt" bash -c 'kubectl -n kube-system get deploy karpenter; kubectl -n kueue-system get deploy'
 
-# kubectl's client-side discovery cache (~/.kube/cache/discovery) can be
-# primed stale by the "kubectl get nodes" call above, before Kueue's CRDs
-# existed, and reused for its ~10-minute TTL by every later kubectl process
-# that shares the same cache directory. Drop it now that new CRDs exist.
-rm -rf ~/.kube/cache/discovery/* 2>/dev/null || true
-for i in $(seq 1 30); do
-  kubectl get crd clusterqueues.kueue.x-k8s.io >/dev/null 2>&1 && break
-  sleep 2
+# kubectl's client-side discovery cache (~/.kube/cache) can be primed stale
+# by the "kubectl get nodes" call above, before Kueue's CRDs existed, and
+# reused for its ~10-minute TTL by every later kubectl process sharing the
+# same cache directory. Attempt 2 (dp-ten-x2) cleared only the discovery/
+# subdirectory and still saw "ensure CRDs are installed first" for
+# ResourceFlavor/ClusterQueue/LocalQueue minutes later -- clear the whole
+# cache directory this time and verify against the apiserver's own raw
+# discovery document (bypasses kubectl's RESTMapper cache entirely), not
+# just the existence of the CRD object.
+rm -rf ~/.kube/cache/* 2>/dev/null || true
+sleep 15
+for i in $(seq 1 40); do
+  kubectl get --raw "/apis/kueue.x-k8s.io/v1beta1" 2>/dev/null | grep -q '"kind":"ResourceFlavor"' && break
+  rm -rf ~/.kube/cache/* 2>/dev/null || true
+  sleep 3
 done
+capture "01-kueue-crd-check.txt" kubectl get --raw "/apis/kueue.x-k8s.io/v1beta1"
 
-# cert-manager: Capsule's chart (phase 5) needs its Certificate/Issuer CRDs
-# for the admission webhook's TLS. Installed once here, shared infra like
-# Karpenter/Kueue, uninstalled in the final teardown.
-helm repo add jetstack https://charts.jetstack.io >/dev/null 2>&1
-helm repo update jetstack >/dev/null 2>&1
-helm install cert-manager jetstack/cert-manager -n cert-manager --create-namespace --set crds.enabled=true --wait --timeout 5m \
-  --set 'tolerations[0].key=CriticalAddonsOnly' --set 'tolerations[0].operator=Exists'
-rm -rf ~/.kube/cache/discovery/* 2>/dev/null || true
-
-# None of the test workloads below (Kyverno/Gatekeeper/Capsule/Mimir/Prometheus)
-# tolerate the system node group's CriticalAddonsOnly taint, and no
-# Karpenter NodePool exists yet -- every one of them would stay Pending
-# forever. Give Karpenter one small, untainted, on-demand NodePool to
-# provision real nodes for them (light tier: on-demand m/t-family only).
+# None of the test workloads below (Kyverno/Gatekeeper/Capsule/cert-manager/
+# Mimir/Prometheus) tolerate the system node group's CriticalAddonsOnly
+# taint, and no Karpenter NodePool exists yet -- every one of them would
+# stay Pending forever (attempt 1, dp-ten-x1, showed exactly this; attempt 2,
+# dp-ten-x2, still hit it for cert-manager specifically because this
+# NodePool was created AFTER cert-manager's own install in that attempt).
+# Give Karpenter one small, untainted, on-demand NodePool now, before
+# anything else in this phase that needs a node (light tier: on-demand
+# m/t-family only).
 cat <<EOF | apply_capture "01-nodepool-apply.txt"
 apiVersion: karpenter.k8s.aws/v1
 kind: EC2NodeClass
@@ -203,9 +206,20 @@ EOF
 # force at least one node to exist before any phase below needs one: a
 # throwaway pacer pod with no toleration, so Karpenter provisions for it.
 kubectl run nodepool-pacer --image=public.ecr.aws/docker/library/pause:3.9 --restart=Never >/dev/null 2>&1 || true
-kubectl wait --for=condition=Ready pod/nodepool-pacer --timeout=180s || true
+kubectl wait --for=condition=Ready pod/nodepool-pacer --timeout=300s || true
 capture "01-nodepool-nodes.txt" kubectl get nodes -o wide
 kubectl delete pod nodepool-pacer --ignore-not-found >/dev/null 2>&1
+
+# cert-manager: Capsule's chart (phase 5) needs its Certificate/Issuer CRDs
+# for the admission webhook's TLS (attempt 2, dp-ten-x2, found this
+# installed after the NodePool above so its own pod had nowhere to
+# schedule and the install timed out). Installed here, after the NodePool
+# exists, as shared infra like Karpenter/Kueue, uninstalled in teardown.
+helm repo add jetstack https://charts.jetstack.io >/dev/null 2>&1
+helm repo update jetstack >/dev/null 2>&1
+helm install cert-manager jetstack/cert-manager -n cert-manager --create-namespace --set crds.enabled=true --wait --timeout 5m \
+  --set 'tolerations[0].key=CriticalAddonsOnly' --set 'tolerations[0].operator=Exists'
+rm -rf ~/.kube/cache/* 2>/dev/null || true
 
 #############################################
 say "2. Kueue-native test: ClusterQueue.namespaceSelector, no policy engine involved"
@@ -280,86 +294,31 @@ echo "kyverno chart version: ${KYVERNO_CHART_VERSION}" > "${EVIDENCE_DIR}/03-kyv
 helm install kyverno kyverno/kyverno -n kyverno --create-namespace --wait --timeout 5m
 kubectl -n kyverno get deploy -o wide >> "${EVIDENCE_DIR}/03-kyverno-version.txt"
 
+# Attempt 2 (dp-ten-x2) found this chart installs Kyverno v1.20, which
+# rejects creation of the legacy kyverno.io/v1 ClusterPolicy kind outright
+# ("Kyverno v1.20 removed execution of legacy kyverno.io policy types").
+# The replacement, CEL-based policies.kyverno.io/v1, ships ValidatingPolicy,
+# MutatingPolicy, GeneratingPolicy, DeletingPolicy and ImageValidatingPolicy.
+# Only the validating half is re-tested here (confirmed schema, from
+# kyverno.io's own ValidatingPolicy docs); the generate/mutate-on-create
+# half is not re-verified live this round -- noted as a gap in the report,
+# not claimed as tested.
 cat <<'EOF' | apply_capture "03-kyverno-policy-apply.txt"
-apiVersion: kyverno.io/v1
-kind: ClusterPolicy
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
 metadata:
-  name: gen-team-defaults
+  name: deny-privileged
 spec:
-  rules:
-  - name: gen-resourcequota
-    match:
-      any:
-      - resources:
-          kinds: ["Namespace"]
-          selector:
-            matchExpressions:
-            - key: distai.dev/team
-              operator: Exists
-    generate:
-      apiVersion: v1
-      kind: ResourceQuota
-      name: team-default-quota
-      namespace: "{{request.object.metadata.name}}"
-      synchronize: true
-      data:
-        spec:
-          hard:
-            requests.cpu: "2"
-            requests.memory: 4Gi
-            pods: "20"
-  - name: gen-networkpolicy
-    match:
-      any:
-      - resources:
-          kinds: ["Namespace"]
-          selector:
-            matchExpressions:
-            - key: distai.dev/team
-              operator: Exists
-    generate:
-      apiVersion: networking.k8s.io/v1
-      kind: NetworkPolicy
-      name: default-deny-cross-ns
-      namespace: "{{request.object.metadata.name}}"
-      synchronize: true
-      data:
-        spec:
-          podSelector: {}
-          policyTypes: ["Ingress"]
-          ingress:
-          - from:
-            - podSelector: {}
-  - name: mutate-psa-labels
-    match:
-      any:
-      - resources:
-          kinds: ["Namespace"]
-          selector:
-            matchExpressions:
-            - key: distai.dev/team
-              operator: Exists
-    mutate:
-      patchStrategicMerge:
-        metadata:
-          labels:
-            pod-security.kubernetes.io/enforce: baseline
-            pod-security.kubernetes.io/warn: baseline
-  - name: deny-privileged
-    match:
-      any:
-      - resources:
-          kinds: ["Pod"]
-    validate:
-      message: "privileged containers are not allowed"
-      pattern:
-        spec:
-          =(ephemeralContainers):
-          - securityContext:
-              =(privileged): "false"
-          containers:
-          - securityContext:
-              =(privileged): "false"
+  validationActions: ["Deny"]
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  validations:
+    - message: "privileged containers are not allowed"
+      expression: "!object.spec.containers.exists(c, has(c.securityContext) && has(c.securityContext.privileged) && c.securityContext.privileged == true)"
 EOF
 sleep 8
 capture "03-kyverno-gen-resourcequota.txt" kubectl -n t-kyv get resourcequota -o yaml
@@ -382,6 +341,7 @@ EOF
 echo "--- 03-kyverno-deny-privileged.txt ---"; cat "${EVIDENCE_DIR}/03-kyverno-deny-privileged.txt"
 kubectl -n t-kyv delete pod priv-test --ignore-not-found >/dev/null 2>&1
 
+kubectl delete validatingpolicy --all --ignore-not-found >/dev/null 2>&1
 helm uninstall kyverno -n kyverno --wait >/dev/null 2>&1
 kubectl delete clusterpolicy --all --ignore-not-found >/dev/null 2>&1
 kubectl delete ns kyverno --ignore-not-found --wait=true --timeout=120s >/dev/null 2>&1
@@ -463,7 +423,7 @@ metadata:
   name: cap-team
 spec:
   owners:
-  - name: cap-team-bot
+  - name: "system:serviceaccount:kube-system:cap-team-bot"
     kind: ServiceAccount
   namespaceOptions:
     quota: 1
