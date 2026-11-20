@@ -174,3 +174,84 @@ step by hand, as with the smoke chart's `clusterQueue.resourceFlavor`.
   it creates, reserved/on-demand/flex alike, is exposed to the identical
   failure until `pool.rootVolumeSizeGi` is set large enough for that
   image.
+- **A `flex` pool (`pool.capacityType: flex`, `karpenter.sh/capacity-type In
+  [spot, on-demand]`) whose `pool.requirements` name exactly one instance
+  type can retry spot forever and never actually launch on-demand, even
+  while on-demand capacity is confirmed available.** Root caused on a real
+  run ([#28](https://github.com/littlemex/distai-platform/issues/28)
+  section H), a `trn` `NodePool` whose only instance-type requirement is
+  `karpenter.k8s.aws/instance-family In [trn2]` (`trn2.3xlarge` is the only
+  Trainium2 size, so this is a single-offering `NodePool`, not a chart
+  defect specific to this fixture -- any consumer naming exactly one
+  instance type on a `flex` pool is exposed the same way). Over a 30-minute
+  wait for one pending pod:
+  - 9 real `CreateFleet` calls (confirmed via CloudTrail, filtered by the
+    cell's own `eks:eks-cluster-name` resource tag), roughly one every
+    `3m10s`, every one `TargetCapacitySpecification.DefaultTargetCapacityType:
+    spot`, every one returning `aws-status-code: 200` with a per-instance-type
+    fleet error `UnfulfillableCapacity` -- never a single real `on-demand`
+    attempt.
+  - A separate *dry-run* `CreateFleet` for the same instance type, issued at
+    the very start, set `DefaultTargetCapacityType: on-demand` and returned
+    `"errorCode":"Client.DryRunOperation"`,
+    `"errorMessage":"Request would have succeeded, but DryRun flag is set."`
+    -- on-demand capacity was confirmed available the whole time this
+    NodePool kept retrying spot only.
+  - The `~3m10s` cadence between retries is consistent with the AWS cloud
+    provider's own unavailable-offerings cache TTL (3 minutes), which is
+    directly cited, with its exact source line, in a closed upstream report
+    of the same cache behavior
+    ([kubernetes-sigs/karpenter#2275](https://github.com/kubernetes-sigs/karpenter/issues/2275)).
+    *What is directly observed is the three bullets above (timing, request
+    parameters, response codes); the explanation of **why** Karpenter
+    re-selects spot every time that cache entry expires -- its own
+    price-based offering ranking has no second instance type to diversify
+    across once the sole offering's cache entry clears, so the cheaper
+    (spot) option looks viable again and is re-tried -- is this
+    repository's own inference from the evidence and from the cited
+    upstream issues, not something confirmed by reading Karpenter's own
+    scheduling source directly.*
+  - This matches the top-level symptom of
+    [aws/karpenter-provider-aws#9616](https://github.com/aws/karpenter-provider-aws/issues/9616)
+    ("a NodePool with `capacity-type In [spot, on-demand]` keeps retrying
+    the same (spot) capacity type and never falls back to on-demand"), but
+    that report's own root cause is a *different* code path -- an
+    API-level `CreateFleet` error (e.g. `InternalError`) that bypasses the
+    unavailable-offerings cache entirely, so no offering is ever marked
+    unavailable at all. Every real attempt observed here returned a normal
+    `200` status with a per-instance-type fleet error, which the AWS
+    provider's own cache-update path does walk (consistent with the
+    observed `~3m10s` cache-driven cadence) -- the opposite starting
+    condition from #9616's bypassed-cache case, arriving at the same
+    "fallback never engages" outcome by a different route. No upstream
+    report matching this exact route (cache populated and expiring
+    normally, capacity-type fallback still never taken for a
+    single-instance-type pool) was found; see #28 for whether one is
+    worth filing.
+  - `pool.capacityType: on-demand` instead of `flex` was tried next as a
+    workaround, once a `NodePool`'s own `pool.requirements` narrow it to a
+    single instance type and the verification does not need spot
+    specifically. On a real run it failed a different way, now root
+    caused: `aws pricing get-products` for `trn2.3xlarge` returns an
+    **empty `PriceList` in every region checked**, including `us-east-1` --
+    AWS has not published an on-demand price for this instance type at
+    all yet. This matches
+    [aws/karpenter-provider-aws#3585](https://github.com/aws/karpenter-provider-aws/issues/3585)
+    ("Support Preview Instance Types"): a new instance type can show up in
+    `DescribeInstanceTypes`/`DescribeInstanceTypeOfferings` and pass a
+    dry-run `CreateFleet`, but with no `pricing.GetProducts` entry,
+    Karpenter's own price-based allocation strategy (`lowest-price` for
+    on-demand, confirmed in this chart's own `CreateFleet` request
+    parameters) can never select it for a real launch -- Karpenter issued
+    only `DryRunOperation` `CreateFleet` calls (every one reporting it
+    would have succeeded) and zero real ones for the full 30-minute wait.
+    Spot uses a different data source (EC2's own live Spot Price History,
+    not the centralized Price List API), which does have data for
+    `trn2.3xlarge`, so spot is the *only* capacity type Karpenter can
+    actually launch this instance type through right now -- `flex`'s own
+    "sticks to spot" behavior (above) is therefore not a preference
+    artifact to route around for this instance type, it is the only
+    structurally available path, until AWS publishes the missing price.
+    This chart renders either `capacityType` value; whether a given
+    instance type has a usable on-demand path at all is outside this
+    chart's own control.
