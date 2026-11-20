@@ -35,6 +35,24 @@ pool:
     consolidationPolicy: WhenEmptyOrUnderutilized
     consolidateAfter: 60s
 
+  # Empty (default): no extra ENI is requested, matching today's CPU-only
+  # skeleton exactly (no behavior change for an existing pool that does not
+  # set this). A pool targeting an EFA-capable instance type (for example
+  # the single-network-card g7/g7e sizes, which carry exactly one EFA
+  # interface) sets this to request it; otherwise the instance boots
+  # without an EFA device even though the type supports one (see
+  # ec2nodeclass.yaml's own comment). Example for one EFA device on
+  # network card 0, the only shape a single-network-card instance type
+  # supports:
+  #   networkInterfaces:
+  #     - networkCardIndex: 0
+  #       deviceIndex: 0
+  #       interfaceType: interface
+  #     - networkCardIndex: 0
+  #       deviceIndex: 1
+  #       interfaceType: efa-only
+  networkInterfaces: []
+
 # Pinned, not "latest": confirmed against the public SSM parameter
 # /aws/service/eks/optimized-ami/1.37/amazon-linux-2023/x86_64/standard/recommended/release_version
 # (value 1.37.1-20261112 on 2026-11-19), the same EKS-optimized AL2023

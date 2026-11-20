@@ -17,6 +17,7 @@ and the three kinds it renders do not change under that extension.
 | `pool.requirements` | no | Karpenter `NodePool` scheduling requirements; defaults to on-demand, amd64, `c`/`m`/`r` instance categories |
 | `pool.limits` | no | Karpenter `NodePool` resource limits; defaults to `cpu: "32"` |
 | `pool.disruption` | no | Karpenter `NodePool` disruption settings |
+| `pool.networkInterfaces` | no | `EC2NodeClass.spec.networkInterfaces`; empty by default (no extra ENI). Set this to request an EFA device on an EFA-capable instance type - Karpenter does not attach one on its own just because the instance type supports it (confirmed against upstream's NodeClasses doc, 2026-11-20). For a single-network-card type (one EFA interface, for example the `g7`/`g7e` sizes below `.24xlarge`): `[{networkCardIndex: 0, deviceIndex: 0, interfaceType: interface}, {networkCardIndex: 0, deviceIndex: 1, interfaceType: efa-only}]` |
 | `amiFamily`, `amiSelectorTerms` | no | `EC2NodeClass` AMI selection; defaults to a pinned AL2023 alias (`al2023@v20261112`), bumped only by a reviewed diff, never `latest` |
 
 This chart is never installed from an upstream chart registry: a cell's own

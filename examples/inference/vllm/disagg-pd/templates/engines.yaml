@@ -71,6 +71,24 @@ spec:
         off) - never both, never neither silently.
       */}}
       {{- if eq $role "decode" }}
+      {{- /*
+        EFA traffic cannot cross an Availability Zone or a VPC (AWS EFA
+        docs, "EFA limitations"). The hostname anti-affinity below only
+        keeps decode off prefill's own node; on its own, a NodePool whose
+        EC2NodeClass spans several AZs (the usual shape, so Karpenter is
+        not stuck if one AZ lacks capacity) is free to satisfy that rule
+        with a decode node in a different AZ from prefill's, and the NIXL
+        LIBFABRIC transfer then has no EFA path between the two pods at
+        all - a silent same-cluster, cross-zone hang rather than a
+        same-node fallback, and a different failure from the one
+        forceEfaSameNode addresses. Required (not preferred) because a
+        cross-zone pair is not a degraded-but-working placement here, it
+        is a non-functional one. Gated on either role actually requesting
+        an EFA device (the default), not on transport.backend, since a
+        config that requests EFA devices with a non-LIBFABRIC backend
+        still needs them in the same zone to be reachable at all.
+      */}}
+      {{- $wantsEfa := or (gt (int $.Values.prefill.efaDevices) 0) (gt (int $.Values.decode.efaDevices) 0) }}
       {{- if $.Values.placement.enforceAntiAffinity }}
       affinity:
         podAntiAffinity:
@@ -80,6 +98,17 @@ spec:
               labelSelector:
                 matchLabels:
                   {{- include "disagg.selector" (dict "root" $ "component" "prefill") | nindent 18 }}
+        {{- if $wantsEfa }}
+        podAffinity:
+          # Same zone as a prefill pod of this release (never required to
+          # be the same zone as any specific, hardcoded zone - whichever
+          # zone Karpenter actually placed prefill's node in).
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: topology.kubernetes.io/zone
+              labelSelector:
+                matchLabels:
+                  {{- include "disagg.selector" (dict "root" $ "component" "prefill") | nindent 18 }}
+        {{- end }}
       {{- else if $.Values.placement.sameNodeMeasurement }}
       affinity:
         podAffinity:

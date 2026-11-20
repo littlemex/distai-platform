@@ -29,6 +29,7 @@ ROLE_KEY = "distai.dev/pd-role"
 OVERRIDE_KEY = "example.test/pd-role-override"
 ROLES = ("prefill", "decode")
 HOSTNAME = "kubernetes.io/hostname"
+ZONE = "topology.kubernetes.io/zone"
 WORKLOAD_KINDS = ("Deployment", "StatefulSet")
 
 failures = []
@@ -145,8 +146,8 @@ def affinity_terms(spec):
     return req, pref
 
 
-def term_hits(term, labels):
-    return term.get("topologyKey") == HOSTNAME and selector_matches(term.get("labelSelector"), labels)
+def term_hits(term, labels, topology_key=HOSTNAME):
+    return term.get("topologyKey") == topology_key and selector_matches(term.get("labelSelector"), labels)
 
 
 def gpu_containers(spec):
@@ -254,6 +255,31 @@ def check_anti_affinity_absent(label, roles):
                   f"against the {other} pods -- dropped, not weakened", not hits, json.dumps(hits))
 
 
+def check_zone_affinity_present(label, roles):
+    # EFA traffic cannot cross an Availability Zone (AWS EFA docs). Without
+    # this, the hostname anti-affinity alone lets Karpenter satisfy decode's
+    # placement with a node in a different zone from prefill's, which has no
+    # EFA path between the two pods at all. Required podAffinity (not
+    # anti-affinity) on topology.kubernetes.io/zone, toward prefill's labels,
+    # alongside (not instead of) the hostname anti-affinity.
+    for w in roles["decode"]:
+        req, _ = affinity_terms(pod_spec(w))
+        other_ok = all(
+            any(term_hits(t, pod_labels(o), topology_key=ZONE) for t in req) for o in roles["prefill"]
+        )
+        check(f"{label}: {name_of(w)} (decode) has a required podAffinity term, topologyKey {ZONE}, "
+              f"selecting the prefill pods' labels", other_ok,
+              f"required terms={json.dumps(req)} prefill pod labels={[pod_labels(o) for o in roles['prefill']]}")
+
+
+def check_zone_affinity_absent(label, roles):
+    for w in roles["decode"]:
+        req, pref = affinity_terms(pod_spec(w))
+        hits = [t for t in req + pref if t.get("topologyKey") == ZONE]
+        check(f"{label}: {name_of(w)} (decode) has no podAffinity term on topologyKey {ZONE} "
+              "(no EFA device requested, so same-zone placement is not required)", not hits, json.dumps(hits))
+
+
 def check_affinity_present(label, roles):
     # The same-node measurement cell: decode carries a required podAffinity
     # (not anti-affinity) toward prefill, so it is actively pulled onto
@@ -311,6 +337,7 @@ def main():
     roles = check_roles_present("default", docs)
     if roles:
         check_anti_affinity_present("default", roles)
+        check_zone_affinity_present("default", roles)
         env_check("default", roles, "FI_EFA_ENABLE_SHM_TRANSFER",
                   lambda present, v: (not present) or v != "0",
                   "does not force FI_EFA_ENABLE_SHM_TRANSFER=0 (forceEfaSameNode=false)")
@@ -373,6 +400,18 @@ def main():
             check_affinity_present("sameNodeMeasurement=true,enforceAntiAffinity=false", aroles)
             check_anti_affinity_absent("sameNodeMeasurement=true,enforceAntiAffinity=false "
                                         "(no anti-affinity left once affinity replaces it)", aroles)
+
+    # ----- no EFA device requested at all (UCX backend, efaDevices=0 on
+    # both roles): the zone-affinity requirement must not render, since
+    # nothing about this placement needs EFA's same-zone restriction.
+    udocs, err = R.render(a.disagg, sets=[
+        "transport.backend=UCX", "prefill.efaDevices=0", "decode.efaDevices=0",
+    ])
+    if check("transport.backend=UCX,efaDevices=0: helm template", udocs is not None, err):
+        uroles = check_roles_present("transport.backend=UCX,efaDevices=0", udocs)
+        if uroles:
+            check_anti_affinity_present("transport.backend=UCX,efaDevices=0", uroles)
+            check_zone_affinity_absent("transport.backend=UCX,efaDevices=0", uroles)
 
     # ------ forceEfaSameNode=true alone (no sameNodeMeasurement): must fail
     _, err = R.render(a.disagg, sets=["transport.forceEfaSameNode=true"])
