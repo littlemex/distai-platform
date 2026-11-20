@@ -19,6 +19,6 @@
 addon: karpenter-crd
 chart: karpenter-crd
 repoURL: public.ecr.aws/karpenter
-version: "1.15.2"
+version: "0.0.0-e2e-nonexistent"
 wave: crds
 namespace: kube-system
