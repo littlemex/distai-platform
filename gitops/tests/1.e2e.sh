@@ -848,8 +848,14 @@ wait_until 300 10 "karpenter-crd Application reaches Synced" app_synced "${APP_K
 # re-attempt rather than waiting out whatever backoff it landed on.
 nodepool_exists_refreshing() { hard_refresh_app "${APP_CAPACITY_POOL}"; nodepool_exists; }
 ec2nodeclass_exists_refreshing() { hard_refresh_app "${APP_CAPACITY_POOL}"; ec2nodeclass_exists; }
-wait_until 300 15 "NodePool cpu is created" nodepool_exists_refreshing \
-  || fail "NodePool cpu was not created even after karpenter-crd's CRDs became available"
+if ! wait_until 300 15 "NodePool cpu is created" nodepool_exists_refreshing; then
+  log "diagnostic: nodepools.karpenter.sh CRD established: $(k get crd nodepools.karpenter.sh -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>&1)"
+  log "diagnostic: ${APP_CAPACITY_POOL} sync/health: $(k get application "${APP_CAPACITY_POOL}" -n "${ARGOCD_NS}" -o jsonpath='{.status.sync.status} {.status.health.status}' 2>&1)"
+  log "diagnostic: ${APP_CAPACITY_POOL} conditions: $(k get application "${APP_CAPACITY_POOL}" -n "${ARGOCD_NS}" -o jsonpath='{.status.conditions}' 2>&1)"
+  log "diagnostic: ${APP_CAPACITY_POOL} operationState message: $(k get application "${APP_CAPACITY_POOL}" -n "${ARGOCD_NS}" -o jsonpath='{.status.operationState.message}' 2>&1)"
+  log "diagnostic: ${APP_CAPACITY_POOL} resources: $(k get application "${APP_CAPACITY_POOL}" -n "${ARGOCD_NS}" -o jsonpath='{.status.resources}' 2>&1)"
+  fail "NodePool cpu was not created even after karpenter-crd's CRDs became available"
+fi
 wait_until 60 10 "EC2NodeClass cpu is created" ec2nodeclass_exists_refreshing \
   || fail "EC2NodeClass cpu was not created even after karpenter-crd's CRDs became available"
 app_not_synced "${APP_CAPACITY_POOL}" \
