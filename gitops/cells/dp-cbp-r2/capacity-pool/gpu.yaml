@@ -7,10 +7,12 @@
 # suite / a live cluster of that name elsewhere; this plan's own dry runs
 # get their own cell directory instead of touching it).
 #
-# Two cheap GPU instances (g6e.2xlarge, 1 GPU each) so the Node A/Node B
-# per-node-lane and 2-node isolation prep items (plan.md section 2, "three
-# specific isolation mechanisms") can actually be exercised with two real
-# nodes during this dry run, not just unit-tested in isolation.
+# Two cheap GPU instances (g4dn.2xlarge, 1 GPU each -- switched from
+# g6e.2xlarge after confirmed spot exhaustion, see the requirements block
+# below) so the Node A/Node B per-node-lane and 2-node isolation prep items
+# (plan.md section 2, "three specific isolation mechanisms") can actually
+# be exercised with two real nodes during this dry run, not just
+# unit-tested in isolation.
 addon: capacity-pool-gpu
 wave: capacity
 dir: gitops/charts/capacity-pool
@@ -20,28 +22,33 @@ values:
     name: gpu
     labels:
       distai.dev/nvidia-gpu-method: device-plugin
-    # on-demand, not spot: two consecutive 30+ minute windows (2026-11-19
-    # 22:55-23:32 and 2026-11-20 00:55-01:25 UTC, launch-ledger.jsonl) both
-    # exhausted g6e.2xlarge spot capacity in BOTH requested AZs
-    # (ap-northeast-1a, ap-northeast-1c), confirmed via CloudTrail
-    # CreateFleet errorSet (InsufficientInstanceCapacity/UnfulfillableCapacity,
-    # not a config defect). Per account policy (spot is test/demo only, no
-    # quota increases, switch to a small on-demand type if insufficient),
-    # switching this dry-run pool to on-demand rather than continuing to
-    # retry a persistently scarce spot pool.
+    # spot, g4dn.2xlarge, not g6e.2xlarge: two consecutive 30+ minute
+    # windows (2026-11-19 22:55-23:32 and 2026-11-20 00:55-01:25 UTC,
+    # launch-ledger.jsonl) both exhausted g6e.2xlarge spot capacity in BOTH
+    # requested AZs (ap-northeast-1a, ap-northeast-1c), confirmed via
+    # CloudTrail CreateFleet errorSet (InsufficientInstanceCapacity/
+    # UnfulfillableCapacity, not a config defect). An on-demand retry got a
+    # node immediately, but then failed a DIFFERENT, pre-existing check --
+    # #28's own accel acceptance criteria 2/3 assert a spot node by name,
+    # unrelated to this dry run's own subject -- so switching capacity-type
+    # back to on-demand was the wrong lever. g4dn.2xlarge (recent spot price
+    # history across 3 AZs in this region, a long-established, common
+    # instance family, still 1 GPU/node) is the better lever: keeps
+    # capacity-type=spot (satisfying #28's own criteria) while moving off
+    # the specific instance type that was exhausted.
     requirements:
       - key: karpenter.sh/capacity-type
         operator: In
-        values: ["on-demand"]
+        values: ["spot"]
       - key: kubernetes.io/arch
         operator: In
         values: ["amd64"]
       - key: karpenter.k8s.aws/instance-family
         operator: In
-        values: ["g6e"]
+        values: ["g4dn"]
       - key: node.kubernetes.io/instance-type
         operator: In
-        values: ["g6e.2xlarge"]
+        values: ["g4dn.2xlarge"]
     # 150Gi root volume: the 2026-11-20 dry-run failure (disk-pressure
     # eviction from a multi-GB CUDA/EFA/NCCL check image on an undersized
     # default root volume, which Karpenter then read as an empty node and
