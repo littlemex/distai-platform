@@ -270,11 +270,48 @@ if run_step 24; then
   # happens to be in a third-party image.
   DCGM_SVC="$(k -n cb-batch get svc -l app.kubernetes.io/name=dcgm-exporter -o jsonpath='{.items[0].metadata.name}')"
   [[ -n "${DCGM_SVC}" ]] || fail "step24: no Service found with label app.kubernetes.io/name=dcgm-exporter in namespace cb-batch"
-  k -n cb-batch run cb-dcgm-scrape --rm -i --restart=Never --image=public.ecr.aws/amazonlinux/amazonlinux:2023 \
-    -- bash -c "curl -s ${DCGM_SVC}.cb-batch.svc.cluster.local:9400/metrics" \
-    2>&1 | tee "${CB_EVIDENCE_DIR}/step24-metrics-scrape.raw.log" || true
+  # Do not assume curl is present in this image either (amazonlinux:2023's
+  # own minimal base is not guaranteed to carry it) -- try curl, then
+  # wget, then a plain bash /dev/tcp HTTP/1.0 request, so this does not
+  # depend on verifying ahead of time which HTTP client a given dry-run
+  # image happens to bundle. Also apply a full Pod manifest and read logs
+  # back explicitly instead of "k run"'s own interactive attach/streaming
+  # (which has shown a "couldn't attach... falling back to streaming
+  # logs" race on short-lived pods elsewhere in this script) -- apply,
+  # wait for a terminal phase, then `k logs`, the same reliable pattern
+  # step20 already uses.
+  cat <<PODEOF | k apply -f - || fail "step24: could not create cb-dcgm-scrape pod"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cb-dcgm-scrape
+  namespace: cb-batch
+spec:
+  restartPolicy: Never
+  containers:
+    - name: cb-dcgm-scrape
+      image: public.ecr.aws/amazonlinux/amazonlinux:2023
+      command: ["bash", "-c"]
+      args:
+        - |
+          if command -v curl >/dev/null; then
+            curl -s "${DCGM_SVC}.cb-batch.svc.cluster.local:9400/metrics"
+          elif command -v wget >/dev/null; then
+            wget -qO- "${DCGM_SVC}.cb-batch.svc.cluster.local:9400/metrics"
+          else
+            exec 3<>"/dev/tcp/${DCGM_SVC}.cb-batch.svc.cluster.local/9400"
+            printf 'GET /metrics HTTP/1.0\r\nHost: ${DCGM_SVC}\r\n\r\n' >&3
+            cat <&3
+          fi
+PODEOF
+  wait_until 60 5 "cb-dcgm-scrape pod finished (Succeeded or Failed)" bash -c "
+    phase=\$(kubectl -n cb-batch get pod cb-dcgm-scrape -o jsonpath='{.status.phase}' 2>/dev/null)
+    [[ \"\${phase}\" == 'Succeeded' || \"\${phase}\" == 'Failed' ]]
+  " || fail "step24: cb-dcgm-scrape pod did not finish within 60s"
+  k -n cb-batch logs cb-dcgm-scrape > "${CB_EVIDENCE_DIR}/step24-metrics-scrape.raw.log" 2>&1 || fail "step24: could not read cb-dcgm-scrape logs"
+  k -n cb-batch delete pod cb-dcgm-scrape --ignore-not-found --wait=false >/dev/null 2>&1 || true
   grep -c "^DCGM_FI_" "${CB_EVIDENCE_DIR}/step24-metrics-scrape.raw.log" > "${CB_EVIDENCE_DIR}/step24-metric-count.log" \
-    || fail "step24: could not scrape /metrics from dcgm-exporter (Service ${DCGM_SVC})"
+    || fail "step24: could not scrape /metrics from dcgm-exporter (Service ${DCGM_SVC}) -- see ${CB_EVIDENCE_DIR}/step24-metrics-scrape.raw.log"
   pass "step24: dcgm-exporter scraped, metric line count in ${CB_EVIDENCE_DIR}/step24-metric-count.log"
 fi
 
