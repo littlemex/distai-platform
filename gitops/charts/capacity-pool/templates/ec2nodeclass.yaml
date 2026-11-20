@@ -42,6 +42,18 @@ match it "targeted" by default.
 {{- end }}
       instanceMatchCriteria: {{ $r.instanceMatchCriteria }}
 {{- end }}
+{{- if .Values.pool.rootVolumeSizeGi }}
+  # Overrides the AMI's own default root volume size; see
+  # pool.rootVolumeSizeGi's own comment in values.yaml for why a pool
+  # would need this. deviceName matches every AL2023 AMI's own root
+  # device (confirmed against this chart's pinned al2023@v20261112 alias).
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: {{ .Values.pool.rootVolumeSizeGi | quote }}
+        volumeType: gp3
+        deleteOnTermination: true
+{{- end }}
   metadataOptions:
     httpEndpoint: enabled
     httpProtocolIPv6: disabled
