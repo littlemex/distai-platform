@@ -451,13 +451,30 @@ EOF
 sleep 8
 capture "05-capsule-tenant-status.txt" kubectl get tenant cap-team -o yaml
 
-# self-service: the owner identity creates its own namespace, no admin step
-capture "05-capsule-self-service-create.txt" kubectl create ns t-cap --as=system:serviceaccount:kube-system:cap-team-bot
+# Evidence for the actual mechanism, not just the outcome: the chart's
+# default CapsuleConfiguration only recognizes kind:Group name:projectcapsule.dev
+# as a Capsule user (chart default, confirmed from charts/capsule/values.yaml's
+# own manager.options.users), and the controller is expected to manage a
+# ClusterRoleBinding named after manager.options.rbac.provisioner
+# (default: capsule-namespace-provisioner) binding that group to the
+# namespace-create ClusterRole once this Tenant's owner is reconciled.
+capture "05-capsule-default-users-config.txt" kubectl get capsuleconfiguration -o jsonpath='{.items[0].spec.users}'
+capture "05-capsule-provisioner-binding.txt" kubectl get clusterrolebinding -o json
+capture "05-capsule-provisioner-binding-describe.txt" kubectl describe clusterrolebinding capsule-namespace-provisioner
+
+# self-service: the owner identity creates its own namespace, no admin step.
+# A bare `--as=system:serviceaccount:...` only carries kubectl's own
+# automatic SA groups (system:serviceaccounts, system:serviceaccounts:<ns>,
+# system:authenticated) -- not the custom "projectcapsule.dev" group the
+# default CapsuleConfiguration above actually recognizes, so it is passed
+# explicitly here, standing in for what an EKS access entry's own
+# kubernetesGroups would carry for a real IAM principal.
+capture "05-capsule-self-service-create.txt" kubectl create ns t-cap --as=system:serviceaccount:kube-system:cap-team-bot --as-group=projectcapsule.dev
 sleep 8
 capture "05-capsule-defaults-on-create.txt" bash -c 'kubectl get ns t-cap -o jsonpath="{.metadata.labels}"; echo; kubectl -n t-cap get resourcequota,networkpolicy -o yaml'
 
 # quota=1: a second namespace by the same owner must be denied
-capture "05-capsule-quota-denied.txt" kubectl create ns t-cap-2 --as=system:serviceaccount:kube-system:cap-team-bot
+capture "05-capsule-quota-denied.txt" kubectl create ns t-cap-2 --as=system:serviceaccount:kube-system:cap-team-bot --as-group=projectcapsule.dev
 
 helm uninstall capsule -n capsule-system --wait >/dev/null 2>&1
 kubectl delete tenant cap-team --ignore-not-found >/dev/null 2>&1
