@@ -262,9 +262,19 @@ if run_step 24; then
     || { info "step24: chart repo dcgm-exporter/dcgm-exporter (https://nvidia.github.io/dcgm-exporter/helm-charts) -- confirm it is still reachable and the chart name/version are current before the real block"; fail "step24: dcgm-exporter install failed"; }
   wait_until 120 5 "dcgm-exporter pod Running" bash -c "kubectl -n cb-batch get pods -l app.kubernetes.io/name=dcgm-exporter -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q Running" \
     || fail "step24: dcgm-exporter did not reach Running"
-  POD="$(k -n cb-batch get pods -l app.kubernetes.io/name=dcgm-exporter -o jsonpath='{.items[0].metadata.name}')"
-  k -n cb-batch exec "${POD}" -- curl -s localhost:9400/metrics | grep -c "^DCGM_FI_" > "${CB_EVIDENCE_DIR}/step24-metric-count.log" \
-    || fail "step24: could not scrape /metrics from dcgm-exporter"
+  # 2026-11-20 finding: the dcgm-exporter image does not bundle curl
+  # ("exec: curl: executable file not found in $PATH") -- scrape from a
+  # separate pod over the Service instead of execing into the target
+  # container, same pattern already used elsewhere in this script
+  # (cb-health, cb-nvme) rather than depending on whatever HTTP client
+  # happens to be in a third-party image.
+  DCGM_SVC="$(k -n cb-batch get svc -l app.kubernetes.io/name=dcgm-exporter -o jsonpath='{.items[0].metadata.name}')"
+  [[ -n "${DCGM_SVC}" ]] || fail "step24: no Service found with label app.kubernetes.io/name=dcgm-exporter in namespace cb-batch"
+  k -n cb-batch run cb-dcgm-scrape --rm -i --restart=Never --image=public.ecr.aws/amazonlinux/amazonlinux:2023 \
+    -- bash -c "curl -s ${DCGM_SVC}.cb-batch.svc.cluster.local:9400/metrics" \
+    2>&1 | tee "${CB_EVIDENCE_DIR}/step24-metrics-scrape.raw.log" || true
+  grep -c "^DCGM_FI_" "${CB_EVIDENCE_DIR}/step24-metrics-scrape.raw.log" > "${CB_EVIDENCE_DIR}/step24-metric-count.log" \
+    || fail "step24: could not scrape /metrics from dcgm-exporter (Service ${DCGM_SVC})"
   pass "step24: dcgm-exporter scraped, metric line count in ${CB_EVIDENCE_DIR}/step24-metric-count.log"
 fi
 
