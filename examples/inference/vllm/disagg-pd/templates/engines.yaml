@@ -2,7 +2,21 @@
 {{- $fullname := include "disagg.fullname" . -}}
 {{- $t := .Values.transport -}}
 {{- $extra := merge (dict "backends" (list $t.backend)) (deepCopy $t.extraConnectorConfig) -}}
-{{- $kvConfig := dict "kv_connector" "NixlConnector" "kv_role" "kv_both" "kv_load_failure_policy" $t.kvLoadFailurePolicy "kv_connector_extra_config" $extra -}}
+{{- $nixlConn := dict "kv_connector" "NixlConnector" "kv_role" "kv_both" "kv_load_failure_policy" $t.kvLoadFailurePolicy "kv_connector_extra_config" $extra -}}
+{{- /*
+  gpu-only (default): NixlConnector alone, unchanged from before kvCacheTier
+  existed. local/remote: NixlConnector's own mandatory PD handshake (Decision
+  6) stays first in the list, LMCacheConnector's cache tiering stacks after
+  it - MultiConnector never replaces the connector a disagg-pd release needs
+  to function, it only adds to it (see values.yaml's own kvCacheTier comment
+  for the confirmed MultiConnector shape and what is not yet confirmed about
+  LMCacheConnector's own config keys).
+*/}}
+{{- $kvConfig := $nixlConn -}}
+{{- if ne .Values.kvCacheTier.mode "gpu-only" }}
+{{- $lmcacheConn := fromJson (include "disagg.lmcacheConnector" $) }}
+{{- $kvConfig = dict "kv_connector" "MultiConnector" "kv_role" "kv_both" "kv_connector_extra_config" (dict "connectors" (list $nixlConn $lmcacheConn)) }}
+{{- end }}
 {{- range $role := list "prefill" "decode" }}
 {{- $r := index $.Values $role }}
 {{- $limits := dict $.Values.accelerator.resourceName (int $r.gpusPerEngine) }}
@@ -39,6 +53,25 @@ metadata:
     app.kubernetes.io/component: {{ $role }}
 spec:
   replicas: {{ $r.replicas }}
+  {{- /*
+    sameNodeMeasurement packs both roles onto one Karpenter-capped node with
+    no spare GPU/EFA capacity (placement.sharedPoolValue, limits sized to
+    fit exactly one instance - see values.yaml). The default RollingUpdate
+    strategy then deadlocks any later `helm upgrade` in this mode: Kubernetes
+    tries to schedule a surge pod for the new ReplicaSet before deleting the
+    old one, but the node has no free nvidia.com/gpu or vpc.amazonaws.com/efa
+    for it to land on, since the old pod is still holding them (confirmed on
+    real hardware, g7.48xlarge, 2026-11-20 - a transport.forceEfaSameNode
+    toggle via `helm upgrade` hung forever until the old ReplicaSet was
+    scaled to 0 by hand). Recreate accepts a short gap instead: the old pod
+    is deleted (freeing the node's GPU/EFA) before the new one is created.
+    Outside this mode there is no capacity cap to deadlock against, so the
+    default RollingUpdate stays in place.
+  */}}
+  {{- if $.Values.placement.sameNodeMeasurement }}
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 6 }}
@@ -183,7 +216,17 @@ spec:
             # Always set explicitly, never left to the library's own default:
             # 0 forces even a same-host transfer onto the EFA device instead
             # of libfabric's own shared-memory provider; 1 matches that
-            # library default, stated rather than omitted.
+            # library default, stated rather than omitted. Confirmed on real
+            # hardware (g7.48xlarge, 2026-11-20) that this value only has an
+            # observable effect when both roles' Kubernetes device-plugin
+            # allocations resolve to the SAME physical EFA interface, which
+            # two separate Pods under this chart's model never do (the
+            # device plugin is exclusive-per-unit): each role always gets
+            # its own distinct device, so libfabric's same-host shm bypass
+            # never engages in either case, and both values produce
+            # identical EFA counter traffic. See "Known issues" in this
+            # chart's README before relying on this value for a shm-vs-EFA
+            # comparison.
             - name: FI_EFA_ENABLE_SHM_TRANSFER
               value: {{ if $t.forceEfaSameNode }}"0"{{ else }}"1"{{ end }}
             {{- end }}

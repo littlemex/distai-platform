@@ -351,6 +351,11 @@ def main():
                 text = " ".join(container_text(c) for c in gpu_containers(pod_spec(w))) + " " + cm
                 check(f"default: {name_of(w)} ({r}) configures NixlConnector with the LIBFABRIC backend",
                       "NixlConnector" in text and "LIBFABRIC" in text)
+        for r in ROLES:
+            for w in roles[r]:
+                strategy = (w.get("spec") or {}).get("strategy")
+                check(f"default: {name_of(w)} ({r}) has no strategy override (RollingUpdate, Kubernetes' own default)",
+                      strategy is None, repr(strategy))
 
     # ----------------------------------- role key has a values override
     key_paths = find_paths(values, ROLE_KEY)
@@ -387,6 +392,12 @@ def main():
             check("sameNodeMeasurement=true: both roles' nodeSelector targets placement.sharedPoolValue (shared)",
                   shared_ok, json.dumps({r: [pod_spec(w).get("nodeSelector") for w in sroles[r]] for r in ROLES}))
             check_anti_affinity_present("sameNodeMeasurement=true, enforceAntiAffinity=true (default)", sroles)
+            for r in ROLES:
+                for w in sroles[r]:
+                    strategy = (w.get("spec") or {}).get("strategy")
+                    check(f"sameNodeMeasurement=true: {name_of(w)} ({r}) sets strategy.type=Recreate "
+                          "(the shared pool has no spare GPU/EFA for a RollingUpdate surge pod)",
+                          strategy == {"type": "Recreate"}, repr(strategy))
 
     # ----- sameNodeMeasurement=true, enforceAntiAffinity=false (same-node
     # transport measurement shape): decode carries required affinity toward
@@ -490,6 +501,49 @@ def main():
         aroles = roles_by(adocs, ROLE_KEY)
         check("agg-baseline: no workload is pinned to a prefill/decode role node",
               not any(aroles[r] for r in ROLES))
+
+    # ------------------------------------------- kvCacheTier (skeleton)
+    _, err = R.render(a.disagg, sets=["kvCacheTier.mode=remote"])
+    check("disagg-pd: kvCacheTier.mode=remote without an endpoint: helm template fails",
+          err is not None and "kvCacheTier.lmcache.remote.endpoint" in (err or ""), err)
+    _, err = R.render(a.agg, sets=["kvCacheTier.mode=remote"])
+    check("agg-baseline: kvCacheTier.mode=remote without an endpoint: helm template fails",
+          err is not None and "kvCacheTier.lmcache.remote.endpoint" in (err or ""), err)
+
+    ldocs, err = R.render(a.disagg, sets=["kvCacheTier.mode=local"])
+    if check("disagg-pd: kvCacheTier.mode=local: helm template", ldocs is not None, err):
+        lroles = check_roles_present("disagg-pd kvCacheTier.mode=local", ldocs)
+        if lroles:
+            cm = configmap_text(ldocs)
+            for r in ROLES:
+                for w in lroles[r]:
+                    text = " ".join(container_text(c) for c in gpu_containers(pod_spec(w))) + " " + cm
+                    check(f"disagg-pd kvCacheTier.mode=local: {name_of(w)} ({r}) stacks "
+                          "MultiConnector(NixlConnector, LMCacheConnector), keeping NixlConnector",
+                          "MultiConnector" in text and "NixlConnector" in text and "LMCacheConnector" in text)
+
+    rdocs, err = R.render(a.disagg, sets=[
+        "kvCacheTier.mode=remote", "kvCacheTier.lmcache.remote.endpoint=cache.example.internal:6379",
+    ])
+    if check("disagg-pd: kvCacheTier.mode=remote with an endpoint: helm template", rdocs is not None, err):
+        rroles = check_roles_present("disagg-pd kvCacheTier.mode=remote", rdocs)
+        if rroles:
+            cm = configmap_text(rdocs)
+            for r in ROLES:
+                for w in rroles[r]:
+                    text = " ".join(container_text(c) for c in gpu_containers(pod_spec(w))) + " " + cm
+                    check(f"disagg-pd kvCacheTier.mode=remote: {name_of(w)} ({r}) carries the remote endpoint",
+                          "cache.example.internal" in text)
+
+    radocs, err = R.render(a.agg, sets=[
+        "kvCacheTier.mode=remote", "kvCacheTier.lmcache.remote.endpoint=cache.example.internal:6379",
+    ])
+    if check("agg-baseline: kvCacheTier.mode=remote with an endpoint: helm template", radocs is not None, err):
+        aw2 = workloads(radocs)
+        text = " ".join(json.dumps(w) for w in aw2) + " " + configmap_text(radocs)
+        check("agg-baseline kvCacheTier.mode=remote: LMCacheConnector alone, no MultiConnector "
+              "(there is no NixlConnector here to stack it with)",
+              "LMCacheConnector" in text and "MultiConnector" not in text and "cache.example.internal" in text)
 
     # ----------------------------- exposure and pinning (AGENTS.md section 6)
     for chart_label, rendered in (("disagg-pd", docs), ("agg-baseline", adocs)):

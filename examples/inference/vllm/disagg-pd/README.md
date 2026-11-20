@@ -119,7 +119,7 @@ kubectl debug "node/$NODE" -n "$NAMESPACE" --profile=general --image=curlimages/
 kubectl get pods -n "$NAMESPACE" -o name | grep node-debugger | xargs kubectl delete -n "$NAMESPACE"
 ```
 
-To measure the same-node path on purpose, reinstall with both roles on one node and run the two cells one after the other. The node needs at least two EFA devices, one per engine pod.
+To measure the same-node path on purpose, reinstall with both roles on one node and run the two cells one after the other. The node needs **at least two EFA interfaces**, one allocation per engine pod, not just an EFA-capable instance type: Kubernetes' EFA device plugin hands out one physical interface per allocation and never shares one across two Pods, so a single-network-card instance (every `g7`/`g7e` size below `.48xlarge`, confirmed via `aws ec2 describe-instance-types`) leaves the second pod `Pending` forever with a `FailedScheduling` event naming `vpc.amazonaws.com/efa` — not a chart bug, a real resource-count conflict (found on real hardware, `g7.12xlarge`, 2026-11-20). Use a two-network-card size (`g7.48xlarge` or larger, or any instance with two EFA interfaces, for example `p5en.48xlarge`) and request one EFA-only interface per network card in the shared pool's `EC2NodeClass` (`capacity-pool`'s `pool.networkInterfaces`, see that chart's README for the exact two-network-card example).
 
 ```bash
 helm upgrade "$RELEASE" examples/inference/vllm/disagg-pd -n "$NAMESPACE" \
@@ -129,7 +129,13 @@ helm upgrade "$RELEASE" examples/inference/vllm/disagg-pd -n "$NAMESPACE" \
   --set transport.forceEfaSameNode=true
 ```
 
-With `transport.forceEfaSameNode=true` the counters on that node rise while requests run. Repeat with `--set transport.forceEfaSameNode=false`: the transfer now takes libfabric's shared-memory path and the counters stay flat while requests still succeed.
+**What this comparison actually shows, confirmed on real hardware (`g7.48xlarge`, 2026-11-20), and what it does not**: with two EFA interfaces, each role's Pod is allocated a *different* physical device (confirmed from each pod's own `rdmap*` interface name) — so `transport.forceEfaSameNode=true` and `=false` produce **identical** EFA counter traffic (same byte count, both cases) rather than the one-flat/one-rising contrast an earlier version of this README claimed. libfabric's same-host shared-memory bypass is keyed to both endpoints resolving to the *same* EFA device address, not merely "same host"; once each role already owns its own separate device, that bypass never engages in either case, so there is nothing for `forceEfaSameNode` to force. This cell still proves two real things — co-located placement, and that a disaggregated pair on one node still moves real KV bytes over EFA hardware — but it cannot show the shm-vs-forced-EFA contrast Decision 6 of the RFC originally described, because Kubernetes' exclusive, per-Pod device allocation does not let two separate Pods share one physical EFA interface on any instance type. Reproducing that contrast needs both roles inside one Pod (one EFA allocation shared by construction) instead of two Pods on one node — out of scope for this chart; see `disagg-rfc.md` Decision 6 (as amended) for the current status.
+
+## KV cache tiers (skeleton, not built or measured on real hardware yet)
+
+`kvCacheTier.mode` picks where KV blocks live, as tiers that stack rather than three exclusive choices: `gpu-only` (default, no change) keeps vLLM's own GPU-resident cache only; `local` adds `LMCacheConnector` with a node-local CPU-or-disk backend (still not shared across nodes); `remote` adds an off-node backend on top of that (for example Amazon ElastiCache's distributed KV caching feature), the only tier a prefix computed on one node can be reused from on another node or another aggregated replica. `local`/`remote` stack `LMCacheConnector` onto the same `MultiConnector` list this chart already uses for `NixlConnector` (vLLM's own confirmed stacking shape; `NixlConnector` is never replaced, since it carries the mandatory prefill-to-decode handshake this chart depends on).
+
+What is not yet confirmed, stated rather than assumed: which exact LMCache config shape the pinned image's own LMCache version speaks (two different shapes are documented across the sources checked 2026-11-21 — see `values.yaml`'s own `kvCacheTier` comment); whether LMCache's current RESP (Redis/Valkey) adapter's TLS behavior matches what Amazon ElastiCache's distributed KV caching feature needs (unconfirmed — not the same product as ElastiCache Serverless, which a separate, earlier source found EFA-incapable); and whether running LMCache's own separate "mp" server process needs its own Deployment in this chart (not rendered here). Follow-up issue B's own real-machine run settles these before `kvCacheTier.mode` is anything but `gpu-only` in a real measurement. SGLang's own HiCache has no confirmed Redis/ElastiCache backend as of this writing, so this tiering is vLLM-only until that changes.
 
 ## Measure
 
@@ -151,7 +157,7 @@ Use the in-cluster load replay and the scorer in [`../../_shared/`](../../_share
 | `placement.enforceAntiAffinity` | `true` | `false` swaps decode's required anti-affinity (against prefill) for a required affinity (toward prefill) — only meaningful combined with `sameNodeMeasurement=true` |
 | `placement.tolerations` | `[]` | Tolerations for both roles, for example for GPU node taints |
 | `transport.backend` | `LIBFABRIC` | NIXL backend, `LIBFABRIC` or `UCX` |
-| `transport.forceEfaSameNode` | `false` | `true` sets `FI_EFA_ENABLE_SHM_TRANSFER=0` on both roles (else explicitly `1`); requires `LIBFABRIC` and `placement.sameNodeMeasurement=true` |
+| `transport.forceEfaSameNode` | `false` | `true` sets `FI_EFA_ENABLE_SHM_TRANSFER=0` on both roles (else explicitly `1`); requires `LIBFABRIC` and `placement.sameNodeMeasurement=true`. Has no observable effect on real hardware (see "Known issues") since each role always gets its own physical EFA interface |
 | `transport.efaResourceName` | `vpc.amazonaws.com/efa` | Extended resource the EFA device plugin advertises |
 | `transport.sideChannelPort` | `5600` | NIXL handshake port (`VLLM_NIXL_SIDE_CHANNEL_PORT`); the host is the pod IP |
 | `transport.kvLoadFailurePolicy` | `fail` | `fail` or `recompute` when decode cannot load a transferred KV cache |
@@ -172,6 +178,10 @@ Use the in-cluster load replay and the scorer in [`../../_shared/`](../../_share
 | `proxy.replicas` | `1` | Proxy pods |
 | `service.type` / `.port` | `ClusterIP` / `8000` | Client-facing Service in front of the proxy |
 | `metrics.enabled` | `true` | Pod label and annotations for the `vllm` scrape job |
+| `kvCacheTier.mode` | `gpu-only` | `local` or `remote` stacks `LMCacheConnector` onto the mandatory `NixlConnector` via `MultiConnector`; see "KV cache tiers" below. Skeleton only, not built or measured on real hardware yet |
+| `kvCacheTier.lmcache.chunkSize`, `.hashAlgorithm` | `256`, `sha256` | Must be identical on every engine sharing a `remote` tier |
+| `kvCacheTier.lmcache.localBackend` | `cpu` | `cpu` or `disk`; required even with `mode=remote` |
+| `kvCacheTier.lmcache.remote.endpoint`, `.enableTls` | `""`, `true` | Required when `mode=remote`; fails to render otherwise |
 
 ## Known issues
 
@@ -180,6 +190,8 @@ Use the in-cluster load replay and the scorer in [`../../_shared/`](../../_share
 - With the default `emptyDir` cache, every engine pod downloads the weights at start. Point `engine.cacheVolume` at a persistent volume to avoid that.
 - The engine containers run as the vLLM image's non-root user (UID 2000, GID 0) with all Linux capabilities dropped and privilege escalation disabled. EFA memory registration then relies on the node's locked-memory limit rather than a capability; if your nodes need `IPC_LOCK` for it, add the capability through `engine.containerSecurityContext`.
 - One proxy pod is a single point of failure for the endpoint. Raise `proxy.replicas` for anything beyond measurement.
+- `transport.forceEfaSameNode` does not show a shm-vs-forced-EFA contrast under `placement.sameNodeMeasurement=true`: both values produce identical EFA traffic once each role has its own physical EFA interface, which is the only way two separate Pods can be co-located at all (confirmed on real hardware, see "Check which path the KV cache took" above). It still correctly forces `FI_EFA_ENABLE_SHM_TRANSFER=0` when set, which is as far as this chart's own contract on the value goes.
+- `placement.sameNodeMeasurement=true` sets the roles' `strategy.type` to `Recreate` (brief downtime on every `helm upgrade` in that mode) instead of the default rolling update, because the shared pool has no spare GPU/EFA capacity for a surge pod to land on while the old one is still running. This only applies in `sameNodeMeasurement` mode; the default (two separate pools) keeps `RollingUpdate`.
 
 ## Clean up
 

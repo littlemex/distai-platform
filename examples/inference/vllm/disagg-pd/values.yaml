@@ -62,7 +62,17 @@ transport:
   # set. libfabric's EFA provider still moves a same-host transfer over its
   # shared-memory path by default. true sets FI_EFA_ENABLE_SHM_TRANSFER=0 on
   # prefill and decode, which forces even a same-host transfer onto the EFA
-  # device. false leaves the variable unset (the library default).
+  # device. false sets it to 1 explicitly, matching the library default
+  # (stated rather than left unset).
+  #
+  # Confirmed on real hardware (g7.48xlarge, 2026-11-20): this value has no
+  # observable effect when placement.sameNodeMeasurement puts both roles on
+  # one node, because Kubernetes' EFA device plugin gives each role's Pod
+  # its own, different physical EFA interface (it never lets two Pods share
+  # one) - libfabric's shm bypass is keyed to both endpoints resolving to
+  # the SAME device, which never happens here, so both values move
+  # identical EFA traffic. See the disagg-pd chart's own README, "Known
+  # issues", before relying on this value for a shm-vs-EFA comparison.
   forceEfaSameNode: false
   # Extended resource the EFA device plugin advertises.
   efaResourceName: vpc.amazonaws.com/efa
@@ -164,3 +174,78 @@ metrics:
   # that the "vllm" scrape job in examples/inference/_shared/dashboards/
   # scrape-configs.yaml selects on. vLLM serves /metrics on the engine port.
   enabled: true
+
+# Skeleton only (values and rendering, not built or measured on real
+# hardware in this chart yet): where the KV cache lives, as three tiers that
+# stack, not three exclusive choices. Chosen per the LMCache/vLLM MultiConnector
+# shape confirmed from vLLM's own docs (docs.vllm.ai, "disaggregated prefilling",
+# fetched 2026-11-21): a disagg-pd release always needs NixlConnector for the
+# mandatory prefill-to-decode handshake (Decision 6), so a tier beyond
+# "gpu-only" here means stacking LMCacheConnector onto that same
+# MultiConnector list, never replacing NixlConnector.
+#   gpu-only (default): no change from today - NixlConnector only, no
+#     cache tiering, vLLM's own GPU-resident KV cache only.
+#   local: adds LMCacheConnector with a node-local backend (CPU RAM or
+#     local NVMe); still not shared across nodes or across aggregated
+#     replicas, the same as SGLang HiCache's own L1+L2 (confirmed,
+#     docs.sglang.io/advanced_features/hicache_design.html, fetched
+#     2026-11-21: "L2 is node-local and instance-exclusive; no instance
+#     reads another instance's L2").
+#   remote: local, plus an off-node backend every prefill/decode pod (or
+#     every aggregated replica) can read, the only tier that lets a prefix
+#     computed on one node be reused on another. Confirmed shape for vLLM
+#     via LMCache's own current docs (docs.lmcache.ai/mp/l2_storage/resp.html,
+#     fetched 2026-11-21): LMCache's "mp" server process holds the RESP
+#     (Redis/Valkey-protocol) adapter config and credentials
+#     (LMCACHE_RESP_HOST/PORT/USERNAME/PASSWORD env vars on that server,
+#     not on the vLLM container); the vLLM-side LMCacheConnector only needs
+#     that server's own host/port (kv_connector_extra_config's
+#     "lmcache.mp.host"/"lmcache.mp.port"). This chart does not yet render
+#     that separate "mp" server process - remote.endpoint below is carried
+#     through to the LMCacheConnector config as a placeholder for it, named
+#     here rather than silently assumed; follow-up issue B's own real-
+#     machine run settles whether the "mp" server needs its own
+#     Deployment/sidecar in this chart or can run outside it.
+#
+# NOT built here, stated rather than silently assumed: (1) which exact
+# LMCache config shape the pinned image's own LMCache version actually
+# speaks - two different shapes are documented across sources checked
+# 2026-11-21 (an older in-process LMCacheConnector config with
+# remote_url/remote_serde/save_unfull_chunk fields, versus the current
+# docs.lmcache.ai "mp server" + --l2-adapter shape above); which one the
+# vllm/vllm-openai:v0.34.0-efa image's own bundled LMCache speaks is
+# unconfirmed and is follow-up issue B's own first check, before trusting
+# any value below. (2) whether Amazon ElastiCache's new distributed KV
+# caching feature's own TLS requirement (rediss://) is compatible with the
+# RESP adapter config above - LMCache's own RESP page does not document TLS
+# at all (checked 2026-11-21); a prior, unrelated integration (ElastiCache
+# Serverless, a different product mode, confirmed EFA-incapable by a public
+# source predating this feature) needed `rediss://` and had certificate
+# verification disabled automatically - whether any of that transfers to
+# this feature's own dedicated cache.i8ge.48xlarge nodes is not confirmed
+# here. (3) SGLang has no confirmed Redis/ElastiCache L3 backend as of this
+# writing (docs.sglang.io/advanced_features/hicache_design.html lists
+# Mooncake, DeepSeek 3FS, NIXL, AIBrix KVCache, file/fast_file - no RESP/
+# Redis entry) - the "remote" tier is vLLM-only until that changes or is
+# otherwise confirmed.
+kvCacheTier:
+  mode: gpu-only
+  lmcache:
+    # Must be identical on every engine that shares a remote tier - a real
+    # LMCache compatibility requirement (confirmed independently by two
+    # separate real-world integration write-ups, both 2026-11-20/21).
+    chunkSize: 256
+    hashAlgorithm: sha256
+    # local: cpu or disk. Required even when mode=remote (the remote tier
+    # adds to, not replaces, a local buffer - confirmed by the same two
+    # write-ups above).
+    localBackend: cpu
+    remote:
+      # host:port of LMCache's own "mp" server (or, if follow-up issue B's
+      # own check finds the pinned image speaks the older in-process shape
+      # instead, a redis://|rediss:// URL there instead - this chart does
+      # not pre-judge which). Empty: mode=remote fails to render rather
+      # than silently running with no remote tier at all.
+      endpoint: ""
+      enableTls: true
+    extraConfig: {}

@@ -701,15 +701,17 @@ NONCE="$(date +%s%N)"
 # placement.sameNodeMeasurement=true and placement.enforceAntiAffinity=false (so the anti-affinity is gone and the two
 # roles *can* share a node); the role Deployments' nodeSelector is then
 # replaced by a hostname pin, the one thing a values file cannot express
-# without knowing the chart's own value names. Recreate, so the old pods
-# release their GPUs before the new ones need them on the same node.
+# without knowing the chart's own value names. The chart itself renders
+# strategy.type=Recreate whenever placement.sameNodeMeasurement=true (see
+# templates/engines.yaml), so the old pods already release their GPUs
+# before the new ones need them on the same node; this patch only pins the
+# hostname, it no longer needs to also set strategy.
 same_node_cell() {
   local force="$1" d patch pod node env_val
   disagg_install --set placement.sameNodeMeasurement=true --set placement.enforceAntiAffinity=false --set "transport.forceEfaSameNode=${force}" \
     || fail "criterion 3: helm upgrade with placement.sameNodeMeasurement=true, placement.enforceAntiAffinity=false, transport.forceEfaSameNode=${force}"
   patch="$(py 'import json, sys; print(json.dumps([
-    {"op": "replace", "path": "/spec/template/spec/nodeSelector", "value": {"kubernetes.io/hostname": sys.argv[1]}},
-    {"op": "replace", "path": "/spec/strategy", "value": {"type": "Recreate"}}]))' "${SAME_NODE}")"
+    {"op": "replace", "path": "/spec/template/spec/nodeSelector", "value": {"kubernetes.io/hostname": sys.argv[1]}}]))' "${SAME_NODE}")"
   for d in $(role_deployments prefill) $(role_deployments decode); do
     kn patch deployment "${d}" --type=json -p "${patch}" >/dev/null || fail "criterion 3: pinning ${d} to ${SAME_NODE}"
   done
