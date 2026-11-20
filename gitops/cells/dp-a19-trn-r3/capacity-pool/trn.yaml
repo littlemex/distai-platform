@@ -4,10 +4,13 @@
 # #28 section D verifies the device-plugin method on (a Layer 1 pod
 # requesting aws.amazon.com/neuron: 1, then neuron-ls).
 #
-# pool.labels opts this pool's nodes into accel-neuron-device-plugin and
-# nothing else (#19 Decision 2). The pool stays dynamically provisioned and
-# device-plugin method: #19 E4c showed a dynamic DRA pool never initializes
-# a Neuron node.
+# accelerator.methodLabel opts this pool's nodes into
+# accel-neuron-device-plugin and nothing else (#19 Decision 2; the chart's
+# own values.yaml renders it as a label on the NodePool's node template,
+# capacity-pool/templates/nodepool.yaml). accelerator.resourceName is
+# provenance only (the chart's own README): no template branches on it.
+# The pool stays dynamically provisioned and device-plugin method: #19 E4c
+# showed a dynamic DRA pool never initializes a Neuron node.
 #
 # pool.requirements replaces the chart default as a whole (Helm replaces
 # lists): the chart's instance-category/instance-generation terms describe
@@ -38,8 +41,6 @@ namespace: kube-system
 values:
   pool:
     name: trn
-    labels:
-      distai.dev/neuron-method: device-plugin
     requirements:
       - key: karpenter.sh/capacity-type
         operator: In
@@ -53,6 +54,18 @@ values:
     disruption:
       consolidationPolicy: WhenEmptyOrUnderutilized
       consolidateAfter: 15m
+    # The confirmed fix (#28, see this chart's own README "Known limits"):
+    # a trn2.3xlarge node's default root volume ran out of space while
+    # pulling a 7.5 GiB verification image ("no space left on device"
+    # while extracting a layer), which kubelet's eviction then turned
+    # into a permanently failing pod. 100Gi leaves comfortable headroom
+    # for a real ML image plus the AMI/driver's own footprint.
+    rootVolumeSizeGi: "100Gi"
+  accelerator:
+    resourceName: aws.amazon.com/neuron
+    methodLabel:
+      key: distai.dev/neuron-method
+      value: device-plugin
 valuesFrom:
   # The Cluster generator's own "name" field: this cell's cluster_name.
   - helmKey: clusterName

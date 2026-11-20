@@ -151,8 +151,10 @@ Facts checked; no content digest is recorded for these yet):
 ## Accelerators
 
 A `NodePool` opts its nodes into exactly one advertiser per device class by
-setting a method label through `capacity-pool`'s `pool.labels`
-([#19](https://github.com/littlemex/distai-platform/issues/19) Decision 2):
+setting a method label through `capacity-pool`'s
+`accelerator.methodLabel.key`/`.value`
+([#19](https://github.com/littlemex/distai-platform/issues/19) Decision 2;
+the value's own shape is [#17](https://github.com/littlemex/distai-platform/issues/17)'s):
 
 | Label | Value | Advertiser selected |
 | --- | --- | --- |

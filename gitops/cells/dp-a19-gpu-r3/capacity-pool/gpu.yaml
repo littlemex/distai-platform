@@ -4,9 +4,13 @@
 # pool #28 section D verifies the device-plugin method on (a Layer 1 pod
 # requesting nvidia.com/gpu: 1, then nvidia-smi).
 #
-# pool.labels opts this pool's nodes into accel-nvidia-device-plugin and
-# nothing else (#19 Decision 2). The pool stays dynamically provisioned and
-# device-plugin method: #19 E2 showed a dynamic DRA pool never initializes.
+# accelerator.methodLabel opts this pool's nodes into
+# accel-nvidia-device-plugin and nothing else (#19 Decision 2; the chart's
+# own values.yaml renders it as a label on the NodePool's node template,
+# capacity-pool/templates/nodepool.yaml). accelerator.resourceName is
+# provenance only (the chart's own README): no template branches on it.
+# The pool stays dynamically provisioned and device-plugin method: #19 E2
+# showed a dynamic DRA pool never initializes.
 #
 # pool.requirements replaces the chart default as a whole (Helm replaces
 # lists): the chart's instance-category/instance-generation terms describe
@@ -28,8 +32,6 @@ namespace: kube-system
 values:
   pool:
     name: gpu
-    labels:
-      distai.dev/nvidia-gpu-method: device-plugin
     requirements:
       - key: karpenter.sh/capacity-type
         operator: In
@@ -43,6 +45,15 @@ values:
     disruption:
       consolidationPolicy: WhenEmptyOrUnderutilized
       consolidateAfter: 15m
+    # Same shape as cells/dp-a19-trn-r3's own pool (#28): this pool's own
+    # lean CUDA test image has not needed the room, but GPU and Neuron
+    # take the same shape here on purpose, not a per-vendor tuning.
+    rootVolumeSizeGi: "100Gi"
+  accelerator:
+    resourceName: nvidia.com/gpu
+    methodLabel:
+      key: distai.dev/nvidia-gpu-method
+      value: device-plugin
 valuesFrom:
   # The Cluster generator's own "name" field: this cell's cluster_name.
   - helmKey: clusterName
