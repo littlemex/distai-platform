@@ -818,6 +818,7 @@ assert_stays_not_synced_bg() {
 # the bootstrap that started this stage.
 assert_stays_not_synced_refreshing() {
   local app="$1" timeout="$2" interval="$3"
+  # shellcheck disable=SC2329 # invoked indirectly, by name, as wait_until's own predicate argument below
   refreshing_predicate() { hard_refresh_app "${app}"; app_synced "${app}"; }
   wait_until "${timeout}" "${interval}" "${app} reaches Synced (expected not to within this window)" refreshing_predicate \
     && return 1
