@@ -1,0 +1,14 @@
+# e2e fixture for run gitops-e2e-dp-a19-gpu-r3-20261120082633-15457 (issue #27); lives only on e2e/gitops-e2e-dp-a19-gpu-r3-20261120082633-15457/capacity-types.
+addon: smoke-cpu-od
+wave: capacity
+dir: gitops/charts/smoke
+namespace: distai-smoke-cpu-od
+values:
+  namespace: distai-smoke-cpu-od
+  clusterQueue:
+    name: smoke-cpu-od
+    resourceFlavor: cpu-od
+    cpuQuota: "4"
+    memQuota: "16Gi"
+  localQueue:
+    name: smoke

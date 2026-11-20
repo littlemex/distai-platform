@@ -1,0 +1,16 @@
+# e2e fixture for run gitops-e2e-dp-a19-gpu-r3-20261120082633-15457 (issue #27); lives only on e2e/gitops-e2e-dp-a19-gpu-r3-20261120082633-15457/capacity-types.
+addon: capacity-pool-cpu-flex
+wave: capacity
+dir: gitops/charts/capacity-pool
+namespace: kube-system
+values:
+  pool:
+    name: cpu-flex
+    capacityType: flex
+    limits:
+      cpu: "8"
+valuesFrom:
+  - helmKey: clusterName
+    param: name
+  - helmKey: nodeRole
+    annotationKey: distai.dev.annotations/karpenter-node-role
