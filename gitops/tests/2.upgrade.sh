@@ -559,7 +559,7 @@ one_nodepool_exists() {
   mapfile -t nodepools < <(k get nodepools -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep -v '^$')
   [[ "${#nodepools[@]}" -eq 1 ]]
 }
-# capacity-pool reaching Healthy+Synced above (line 554) does not, on its
+# capacity-pool reaching Healthy+Synced above does not, on its
 # own, guarantee the NodePool object it owns is already visible through
 # this same kubectl connection -- Argo CD's own health/sync status and a
 # subsequent `kubectl get` are two independent reads, so a direct,

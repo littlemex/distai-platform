@@ -1066,9 +1066,10 @@ pass "restored --revision to ${GITOPS_REVISION}"
 #
 # 7a. The Secret cross-check (decision 1's second condition: an existing
 # cell-registration Secret must match --tf-outputs' cluster_arn exactly).
-# This is a re-run, not a first bootstrap -- the Secret this run's own
-# step 1 already wrote is what the forged cluster_arn conflicts with; the
-# live kubeconfig still points at the real cluster, so bootstrap.sh's own
+# This is a re-run, not a first bootstrap -- the Secret the pristine
+# stage A/B/C sequence already wrote is what the forged cluster_arn
+# conflicts with; the live kubeconfig still points at the real cluster,
+# so bootstrap.sh's own
 # "kubeconfig server matches cluster_endpoint" check (condition 1, below)
 # cannot catch a cluster_arn-only mismatch -- it must be this cross-check
 # that does.

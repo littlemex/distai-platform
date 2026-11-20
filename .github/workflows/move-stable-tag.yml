@@ -47,6 +47,17 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # Re-running an OLD workflow run (GitHub Actions' own "Re-run
+          # jobs") re-executes with github.sha fixed to whatever commit
+          # triggered that run, not main's current tip -- moving stable
+          # backwards past a newer commit that has already merged and
+          # already moved it forward. Refuse to move the tag unless SHA
+          # is still main's current tip right now.
+          MAIN_SHA="$(gh api "repos/${REPO}/commits/main" --jq .sha)"
+          if [[ "${SHA}" != "${MAIN_SHA}" ]]; then
+            echo "main is now at ${MAIN_SHA}, not this run's own ${SHA} (a re-run of an old workflow run, or a race with a later push); refusing to move stable backwards"
+            exit 0
+          fi
           # "git/ref/..." (singular), never "git/refs/..." (plural): the
           # plural form is GitHub's legacy prefix-matching list endpoint,
           # so a tag such as "stable-backup" would also match it and read
