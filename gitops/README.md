@@ -22,14 +22,18 @@ gitops/
   appsets/
     platform.ApplicationSet.yaml # one Application per gitops/addons/*/addon.yaml
     cells.ApplicationSet.yaml    # one Application per gitops/cells/<cell>/{capacity-pool,smoke}/*.yaml
+    addons-optional.ApplicationSet.yaml # one Application per gitops/cells/<cell>/addons/*.yaml
   addons/
-    <name>/addon.yaml            # one platform-wide add-on: chart, version, wave, values
+    <name>/addon.yaml            # one platform-wide add-on: chart, version, wave, values (tier: core)
+  addon-catalog/
+    <name>/addon.yaml            # one reviewed platform-optional entry; never read by an ApplicationSet
   charts/
     <name>/                      # shared chart templates, parameterized per cell
   cells/
     <cluster-name>/
       capacity-pool/*.yaml        # one parameter file per NodePool
       smoke/*.yaml                 # the admin-owned smoke ClusterQueue/LocalQueue
+      addons/*.yaml                # one marker file per platform-optional component this cell opts into
 ```
 
 Directories are named by **ownership and kind**, not by sync order: a wave
@@ -41,6 +45,22 @@ entry (`* @littlemex`) -- which also covers every other path, including
 `cells/*/teams/*` once #22 ships, so nothing in `CODEOWNERS` yet
 distinguishes an admin path from a team one; a path-specific rule drawing
 that line is #22's own to add.
+
+## Tiers
+
+Every component is one of three tiers (RFC
+[#41](https://github.com/littlemex/distai-platform/issues/41)). **core**
+ships to every cell with no opt-out: an `addons/<name>/addon.yaml` with
+`tier: core`, delivered by `platform.ApplicationSet.yaml`.
+**platform-optional** is an admin-delivered capability a cell opts into:
+its reviewed definition is `addon-catalog/<name>/addon.yaml`, and a marker
+file `cells/<cluster-name>/addons/<name>.yaml` (naming it in `fromCatalog`)
+is the opt-in, delivered by `addons-optional.ApplicationSet.yaml`; its
+pods run on the core `optional-pool` `NodePool`, never the system node
+group (whether that pool exists is still an open choice, see
+`charts/optional-pool/README.md`). A wrapped upstream chart is pinned in
+the wrapper's own `Chart.yaml`, not in an `addon.yaml`. **workload** is scoped to one team and has no delivery path until
+[#22](https://github.com/littlemex/distai-platform/issues/22) ships.
 
 ## Bootstrapping a cell (once, after `terraform apply`)
 
@@ -64,9 +84,10 @@ a `cell-registration` `Secret` (labelled `argocd.argoproj.io/secret-type:
 cluster`, `server` set to the cluster's ARN - never an API server URL),
 the `platform` `AppProject`, and a root `Application` sourced at
 `gitops/appsets/`. Everything after that point is Git, not a script: the
-root `Application` delivers `platform.ApplicationSet.yaml` and
-`cells.ApplicationSet.yaml`, which deliver every add-on and every cell's
-own capacity.
+root `Application` delivers `platform.ApplicationSet.yaml`,
+`cells.ApplicationSet.yaml` and `addons-optional.ApplicationSet.yaml`,
+which deliver every add-on, every cell's own capacity and every
+platform-optional component a cell opts into.
 
 The script is idempotent: re-running it with the same inputs changes
 nothing. It aborts before writing anything if the live `kubectl` context's
@@ -93,11 +114,12 @@ separate `ApplicationSet` objects.
 | `ApplicationSet` | Step (`wave`) | Delivered in this PR |
 | --- | --- | --- |
 | `platform` | `crds` (`karpenter-crd`) | yes |
-| `platform` | `controllers` (`karpenter`, `kueue`) | yes |
+| `platform` | `controllers` (`karpenter`, `kueue`, `optional-pool`) | yes |
 | `platform` | `accelerators` | no - [#19](https://github.com/littlemex/distai-platform/issues/19) |
 | `platform` | `extras` | no - [#18](https://github.com/littlemex/distai-platform/issues/18)/[#23](https://github.com/littlemex/distai-platform/issues/23) |
 | `cells` | `capacity` (`capacity-pool/*`, `smoke/*`) | yes |
 | `cells` | `teams` | no - [#22](https://github.com/littlemex/distai-platform/issues/22) |
+| `addons-optional` | `optional-1`..`optional-4` (`cells/*/addons/*`) | yes ([#41](https://github.com/littlemex/distai-platform/issues/41)) |
 
 ## Versioning
 
