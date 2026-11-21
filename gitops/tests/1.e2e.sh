@@ -1101,12 +1101,25 @@ STAGE_B_READ_INTERVAL=15
 # for requested resource...", "...karpenter.k8s.aws/EC2NodeClass...") --
 # a version-anchored pattern silently failed to recognize that form,
 # risking exactly the stale-but-accepted read this whole loop exists to
-# refuse.
+# refuse. Requires a failure phrase ("could not find" or "failed to
+# discover") to appear SOMEWHERE in the same text, not merely the bare
+# group name on its own: Argo CD also writes the same group name into a
+# genuinely successful sync's own per-resource message (e.g.
+# "nodepool.karpenter.sh/default created"), which a bare-group-only
+# pattern would misread as still-undiscoverable. Review round 2 flagged
+# this before any run exercised it; stage B's own manifests never
+# succeed before this check runs (the kueue break still fails validation
+# for the whole Application), so this guard is defense in depth, not a
+# path this fix's real runs are known to have taken.
 stage_b_mentions_karpenter_crds() {
   case "$1" in
-    *"karpenter.k8s.aws"*|*"karpenter.sh"*) return 0 ;;
-    *) return 1 ;;
+    *"could not find"*|*"failed to discover"*)
+      case "$1" in
+        *"karpenter.k8s.aws"*|*"karpenter.sh"*) return 0 ;;
+      esac
+      ;;
   esac
+  return 1
 }
 stage_b_read_start="$(date +%s)"
 stage_b_phase="" stage_b_message="" stage_b_retry_count="" stage_b_has_sync_result="0" stage_b_resources_summary="" stage_b_conditions_summary="" stage_b_combined=""
@@ -1137,7 +1150,7 @@ while true; do
     # reason, rather than falling through to the generic kueue-mismatch
     # message below (which would describe the symptom, not the cause).
     if stage_b_mentions_karpenter_crds "${stage_b_combined}"; then
-      fail "${APP_CAPACITY_POOL}'s own operationState reached a terminal phase (${stage_b_phase}) still naming karpenter's own CRDs as undiscoverable (retryCount=${stage_b_retry_count}: ${stage_b_combined}) even though karpenter-crd was confirmed Established and Synced earlier in this stage -- Argo CD will not retry again, so this is this Application's final answer, not a stale read waiting to clear"
+      fail "${APP_CAPACITY_POOL}'s own operationState reached a terminal phase (${stage_b_phase}) still naming karpenter's own CRDs as undiscoverable (retryCount=${stage_b_retry_count}: ${stage_b_combined}) -- Argo CD will not retry again, so this is this Application's final answer, not a stale read waiting to clear; most likely karpenter-crd is not actually visible to this Application despite this stage's own earlier wait_until confirming it Established, but the retry limit could instead have been exhausted entirely during stage A (before karpenter-crd was ever fixed), in which case this terminal message is a stale answer that nothing will ever refresh -- either way this run cannot proceed"
     fi
     break
   fi
