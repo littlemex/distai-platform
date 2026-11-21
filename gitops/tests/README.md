@@ -27,6 +27,10 @@ platform-optional entry. Two static checks (`check_addon_tiers.py`,
 
 Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
 
+- Bash `>= 4` (`mapfile`/`readarray`, used throughout all three scripts).
+  macOS's own shipped `/bin/bash` is 3.2 and does not have it; run these on
+  Linux (this repository's own distai-platform-runner CI, Amazon Linux's
+  `bash` is `>= 5`, always satisfies this).
 - Helm `>= 3.8` (OCI charts), for `0.static.sh` only (`1.e2e.sh`/`2.upgrade.sh`
   never call `helm` themselves -- Argo CD installs every chart in-cluster).
 - `uv` (for `0.static.sh`'s pinned `yamllint`/`pyyaml`, and for `2.upgrade.sh`'s
