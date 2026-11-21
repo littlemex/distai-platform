@@ -1,0 +1,37 @@
+# Admin-owned, untainted, on-demand CPU NodePool for platform-optional
+# component pods (RFC #41 Decision 4 Finding 1, raised in a comment on
+# #41 from a real-cluster check: distributed-ai's own observability.tf
+# already establishes "the system node group is a sanctuary for
+# kube-system + Karpenter controller only" -- extending CriticalAddonsOnly
+# tolerations case by case, as the platform-optional catalog grows, would
+# break that sanctuary). tier: core (RFC #41 Decision 1): every cell gets
+# this NodePool/EC2NodeClass pair unconditionally, the same way
+# karpenter/kueue are core, so a platform-optional component's pod always
+# has somewhere untainted to land other than the system node group or a
+# team's own capacity pool.
+#
+# NOT YET A MAINTAINER DECISION: values.enabled below is the switch
+# between Decision 4 Finding 1's own option (b) (true, this file's
+# default -- a dedicated pool) and option (a) (false -- no dedicated pool;
+# extend CriticalAddonsOnly tolerations on the system node group instead,
+# case by case, as new platform-optional components are catalogued). See
+# this PR's own body for the maintainer confirmation this still needs.
+#
+# wave: controllers, alongside karpenter/kueue: the NodePool/EC2NodeClass
+# kinds come from karpenter-crd (the "crds" step), and Karpenter itself
+# must be running to act on them -- both satisfied by retry-based
+# convergence (RFC #25 Decision 4), the same as the "capacity" step.
+addon: optional-pool
+tier: core
+dir: gitops/charts/optional-pool
+wave: controllers
+namespace: kube-system
+values:
+  enabled: true
+  pool:
+    name: optional
+valuesFrom:
+  - helmKey: clusterName
+    param: name
+  - helmKey: nodeRole
+    annotationKey: distai.dev.annotations/karpenter-node-role

@@ -1,0 +1,27 @@
+{{- if .Values.enabled }}
+# Same shape as gitops/charts/capacity-pool/templates/nodepool.yaml, minus
+# two things on purpose: no taints (this pool is deliberately untainted --
+# any platform-optional pod without a toleration can land here, which is
+# the whole point, RFC #41 Decision 4 Finding 1), and no accelerator
+# metadata (CPU only). Not referenced by any Kueue ResourceFlavor either:
+# nothing here is team capacity Kueue should admit work onto.
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: {{ required "pool.name is required" .Values.pool.name | quote }}
+spec:
+  template:
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: {{ .Values.pool.name | quote }}
+      requirements:
+{{ toYaml .Values.requirements | indent 8 }}
+      terminationGracePeriod: 24h0m0s
+  limits:
+{{ toYaml .Values.pool.limits | indent 4 }}
+  disruption:
+    consolidationPolicy: {{ .Values.pool.disruption.consolidationPolicy }}
+    consolidateAfter: {{ .Values.pool.disruption.consolidateAfter | quote }}
+{{- end }}
