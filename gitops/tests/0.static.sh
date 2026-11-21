@@ -7,18 +7,30 @@
 #   2. shellcheck and `bash -n` on every *.sh under gitops/;
 #   3. yamllint on every literal (non-templated) tracked YAML file;
 #   4. the structural contract of every addon.yaml / cells parameter file,
-#      both ApplicationSets and the root Application, against decisions
-#      1, 2, 3, 4, 6 and 8 of the issue (check_gitops_contract.py);
+#      the three ApplicationSets and the root Application, against decisions
+#      1, 2, 3, 4, 6 and 8 of the issue (check_gitops_contract.py); every
+#      gitops/addons/ entry is tier core and every gitops/addon-catalog/
+#      entry platform-optional or workload, with the directory naming
+#      rules of issue #41 Decision 2 (check_addon_tiers.py); every
+#      cells/*/addons/*.yaml marker against its catalog entry, issue #41
+#      Decision 3's checks (0)-(4) (check_addon_catalog_sync.py; its
+#      overridableKeys sub-check runs `helm dependency build` on a
+#      temporary copy of each wrapper chart, so it needs network access to
+#      that chart's upstream repository);
 #   5. `helm lint` and `helm template` of charts/capacity-pool and
 #      charts/smoke, each against one real cells/*/{capacity-pool,smoke}/*.yaml
-#      parameter file's own `values:`;
-#   6. kubeconform of the rendered chart output, both ApplicationSets and
-#      the root Application, against pinned upstream + CRD-catalog schemas;
+#      parameter file's own `values:`; of charts/optional-pool against
+#      addons/optional-pool/addon.yaml's own `values:`; and of
+#      charts/dcgm-exporter (after `helm dependency build`) against the
+#      cells/*/addons/*.yaml marker that points at it;
+#   6. kubeconform of the rendered chart output, the three ApplicationSets
+#      and the root Application, against pinned upstream + CRD-catalog schemas;
 #   7. every pinned add-on's own exact chart version (never a generic,
 #      multi-version schema catalog) is `helm template`-d fresh and its
 #      real CustomResourceDefinitions extracted, to check that the
-#      rendered charts/{capacity-pool,smoke} output only uses an
-#      apiVersion that pinned chart version actually serves
+#      rendered charts/{capacity-pool,smoke,optional-pool,dcgm-exporter}
+#      output only uses an apiVersion that pinned chart version actually
+#      serves
 #      (check_pinned_crds.py; needs network access to each add-on's own
 #      OCI registry, the same one Argo CD itself pulls from).
 #
@@ -88,6 +100,11 @@ required_files=(
   "addons/kueue/addon.yaml"
   "charts/capacity-pool/Chart.yaml"
   "charts/smoke/Chart.yaml"
+  "appsets/addons-optional.ApplicationSet.yaml"
+  "addons/optional-pool/addon.yaml"
+  "charts/optional-pool/Chart.yaml"
+  "charts/dcgm-exporter/Chart.yaml"
+  "addon-catalog/dcgm-exporter/addon.yaml"
 )
 missing=()
 for f in "${required_files[@]}"; do
@@ -133,7 +150,8 @@ fi
 mapfile -t literal_yaml_files < <(
   {
     find "${GITOPS_ROOT}/addons" -name 'addon.yaml'
-    find "${GITOPS_ROOT}/cells" -path '*/capacity-pool/*.yaml' -o -path '*/smoke/*.yaml' -o -path '*/teams/*.yaml'
+    find "${GITOPS_ROOT}/addon-catalog" -mindepth 2 -maxdepth 2 -name 'addon.yaml'
+    find "${GITOPS_ROOT}/cells" -path '*/capacity-pool/*.yaml' -o -path '*/smoke/*.yaml' -o -path '*/teams/*.yaml' -o -path '*/addons/*.yaml'
     find "${GITOPS_ROOT}/appsets" -name '*.yaml'
     find "${GITOPS_ROOT}/bootstrap" -name '*.yaml'
     find "${GITOPS_ROOT}/charts" -maxdepth 2 -name 'Chart.yaml' -o -maxdepth 2 -name 'values.yaml'
@@ -159,6 +177,16 @@ fi
 run_check "gitops contract (check_gitops_contract.py)" \
   "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
   python3 "${SCRIPT_DIR}/check_gitops_contract.py" "${REPO_ROOT}"
+
+run_check "add-on tiers and naming (check_addon_tiers.py)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_addon_tiers.py" "${REPO_ROOT}"
+
+# HELM is passed explicitly: the overridableKeys sub-check calls helm
+# itself (on a temporary copy of each wrapper chart, never this checkout).
+run_check "add-on catalog vs. cell markers (check_addon_catalog_sync.py)" \
+  env HELM="${HELM}" "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_addon_catalog_sync.py" "${REPO_ROOT}"
 
 # ----------------------------------------------- 5. helm lint and template
 
@@ -219,6 +247,51 @@ if [[ "${#cell_smoke_files[@]}" -ge 1 ]]; then
     bash -c "'${HELM}' template smoke-e2e '${GITOPS_ROOT}/charts/smoke' -f '${SMOKE_VALUES}' > '${RENDERED_DIR}/smoke.yaml'"
 fi
 
+# charts/optional-pool is delivered by platform.ApplicationSet.yaml from
+# addons/optional-pool/addon.yaml (issue #41: a core add-on with a local
+# dir, not a registry chart), so that file's own values:/valuesFrom: are
+# its real, checked-in input -- the same extract_values() technique as the
+# cells parameter files above.
+OPTIONAL_POOL_ADDON="${GITOPS_ROOT}/addons/optional-pool/addon.yaml"
+if [[ -f "${OPTIONAL_POOL_ADDON}" ]]; then
+  run_check "helm lint charts/optional-pool" "${HELM}" lint "${GITOPS_ROOT}/charts/optional-pool"
+  OPTIONAL_POOL_VALUES="${WORK_DIR}/optional-pool-values.yaml"
+  extract_values "${OPTIONAL_POOL_ADDON}" "${OPTIONAL_POOL_VALUES}"
+  run_check "helm template charts/optional-pool (values from addons/optional-pool/addon.yaml)" \
+    bash -c "'${HELM}' template optional-pool-e2e '${GITOPS_ROOT}/charts/optional-pool' -f '${OPTIONAL_POOL_VALUES}' > '${RENDERED_DIR}/optional-pool.yaml'"
+fi
+
+# charts/dcgm-exporter wraps an upstream chart as a Helm dependency (issue
+# #41 Decision 3), so it cannot be linted or rendered until that
+# dependency is fetched. `helm dependency build` writes the fetched
+# tarball into gitops/charts/dcgm-exporter/charts/ of this checkout (that
+# directory is .gitignore'd, never committed): harmless on an ephemeral CI
+# runner, but on a developer checkout it leaves that tarball behind after
+# this script exits -- this step is not side-effect-free there.
+# check_addon_catalog_sync.py does its own dependency build on a temporary
+# copy instead, so it never depends on this one having run.
+# The values come from the cells/*/addons/*.yaml marker that points at
+# this chart, the same way capacity-pool/smoke above take theirs from a
+# real parameter file; with no such marker, the chart's defaults alone.
+DCGM_CHART="${GITOPS_ROOT}/charts/dcgm-exporter"
+if [[ -f "${DCGM_CHART}/Chart.yaml" ]]; then
+  mapfile -t dcgm_markers < <(grep -lE '^dir:[[:space:]]*"?gitops/charts/dcgm-exporter/?"?[[:space:]]*$' "${GITOPS_ROOT}"/cells/*/addons/*.yaml 2>/dev/null | sort)
+  DCGM_VALUES="${WORK_DIR}/dcgm-exporter-values.yaml"
+  DCGM_NAMESPACE="default"
+  if [[ "${#dcgm_markers[@]}" -ge 1 ]]; then
+    extract_values "${dcgm_markers[0]}" "${DCGM_VALUES}"
+    DCGM_NAMESPACE="$(sed -n 's/^namespace:[[:space:]]*//p' "${dcgm_markers[0]}" | tr -d '"' | head -n1)"
+    DCGM_VALUES_FROM="$(basename "${dcgm_markers[0]}")"
+  else
+    printf '{}\n' >"${DCGM_VALUES}"
+    DCGM_VALUES_FROM="chart defaults, no cells/*/addons/ marker points at it"
+  fi
+  run_check "helm dependency build charts/dcgm-exporter" "${HELM}" dependency build "${DCGM_CHART}"
+  run_check "helm lint charts/dcgm-exporter" "${HELM}" lint "${DCGM_CHART}"
+  run_check "helm template charts/dcgm-exporter (values from ${DCGM_VALUES_FROM})" \
+    bash -c "'${HELM}' template dcgm-exporter-e2e '${DCGM_CHART}' --namespace '${DCGM_NAMESPACE:-default}' -f '${DCGM_VALUES}' > '${RENDERED_DIR}/dcgm-exporter.yaml'"
+fi
+
 # ------------------------------------------------------- 6. kubeconform
 
 KUBECONFORM_BIN="${WORK_DIR}/kubeconform"
@@ -248,8 +321,11 @@ KUBECONFORM_ARGS=(
 )
 
 kubeconform_targets=("${GITOPS_ROOT}/appsets/platform.ApplicationSet.yaml" "${GITOPS_ROOT}/appsets/cells.ApplicationSet.yaml" "${GITOPS_ROOT}/bootstrap/root-application.yaml")
+[[ -f "${GITOPS_ROOT}/appsets/addons-optional.ApplicationSet.yaml" ]] && kubeconform_targets+=("${GITOPS_ROOT}/appsets/addons-optional.ApplicationSet.yaml")
 [[ -f "${RENDERED_DIR}/capacity-pool.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/capacity-pool.yaml")
 [[ -f "${RENDERED_DIR}/smoke.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/smoke.yaml")
+[[ -f "${RENDERED_DIR}/optional-pool.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/optional-pool.yaml")
+[[ -f "${RENDERED_DIR}/dcgm-exporter.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/dcgm-exporter.yaml")
 
 run_check "kubeconform (${#kubeconform_targets[@]} file(s), k8s 1.37.0 + pinned CRD schemas)" \
   "${KUBECONFORM_BIN}" "${KUBECONFORM_ARGS[@]}" "${kubeconform_targets[@]}"
@@ -265,6 +341,12 @@ run_check "kubeconform (${#kubeconform_targets[@]} file(s), k8s 1.37.0 + pinned 
 # CRDs that version ships -- the gap that let gitops/charts/{capacity-pool,
 # smoke}'s templates hardcode kueue.x-k8s.io/v1beta1 straight through this
 # script while Kueue 0.20.6 (the pinned version) serves only v1beta2.
+# It reads every file in RENDERED_DIR, so charts/optional-pool's NodePool/
+# EC2NodeClass are checked against karpenter-crd's pinned CRDs here too,
+# with no change to the script; charts/dcgm-exporter renders no kind any
+# pinned add-on's CRD covers. The wrapper chart's own dependency pin
+# (Chart.yaml dependencies[].version) is not a CRD question and is not
+# checked here.
 run_check "pinned-chart-version CRDs (check_pinned_crds.py)" \
   "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
   python3 "${SCRIPT_DIR}/check_pinned_crds.py" "${REPO_ROOT}" "${RENDERED_DIR}"
