@@ -5,6 +5,7 @@ Self-contained references for serving models on an EKS cluster. Each example is 
 | Engine | Example | Description |
 | --- | --- | --- |
 | [`vllm`](vllm/) | [`disagg-pd`](vllm/disagg-pd/) | Prefill/decode disaggregated serving with vLLM's NixlConnector over libfabric/EFA, a prefill-then-decode proxy, a free prefill:decode ratio, and prefill and decode kept on different nodes by default |
+| [`vllm`](vllm/) | [`disagg-pd-llmd`](vllm/disagg-pd-llmd/) | The same prefill and decode engines as `disagg-pd`, routed by the llm-d router instead of the proxy: a Gateway API `HTTPRoute` to an `InferencePool`, llm-d's Endpoint Picker choosing a prefill and a decode pod per request, and a routing sidecar in each decode pod. Not yet run on real hardware (see Status) |
 | [`vllm`](vllm/) | [`agg-baseline`](vllm/agg-baseline/) | Aggregated vLLM serving with vLLM's default scheduler, the baseline the disaggregated layout is compared against on the same hardware |
 
 Shared measurement tools used by every example:
@@ -19,7 +20,14 @@ How to measure with them is described in [`_shared/README.md`](_shared/README.md
 
 ## Status
 
-Only the vLLM examples above exist and have run on real hardware (see the RFC, [#37](https://github.com/littlemex/distai-platform/issues/37), follow-up issue B). SGLang's own disaggregated example (follow-up issue C) and llm-d's own router mode (follow-up issue A) are not built here and have not run on any hardware yet — time-boxed out of the first real-machine round, not found broken. Before either is measured on a Capacity Block window or any other paid hardware, run it first on a smaller, cheaper GPU instance to produce a real, if rough, timing, the same way the vLLM path's own dry run already did.
+| Example | Built | Run on real hardware |
+| --- | --- | --- |
+| `vllm/disagg-pd` (hand-written proxy) | Yes | Yes (the RFC, [#37](https://github.com/littlemex/distai-platform/issues/37), follow-up issue B) |
+| `vllm/agg-baseline` | Yes | Yes (follow-up issue B) |
+| `vllm/disagg-pd-llmd` (llm-d router: Gateway API, `InferencePool`, EPP) | Yes: chart, README and static checks | No. It also needs the Gateway API and Gateway API Inference Extension CRDs and an administrator-provided Gateway (follow-up issue A), which no run has installed yet |
+| SGLang disaggregated example (follow-up issue C) | No | No |
+
+The untested rows are time-boxed out of the first real-machine round, not found broken. Before either untested path is measured on a Capacity Block window or any other paid hardware, run it first on a smaller, cheaper GPU instance to produce a real, if rough, timing, the same way the vLLM path's own dry run already did.
 
 ## Conventions
 
