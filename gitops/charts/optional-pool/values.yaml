@@ -6,11 +6,13 @@ nodeRole: ""
 
 # RFC #41 Decision 4 Finding 1, option (b) (recommended there, NOT YET
 # a maintainer decision -- see gitops/addons/optional-pool/addon.yaml's
-# own header comment and this PR's own "things to decide" list). false
-# renders nothing: a cell with enabled: false has no dedicated pool at
-# all, the Finding's option (a) instead (extend CriticalAddonsOnly
-# tolerations on the system node group case by case as new
-# platform-optional components are catalogued -- not built by this PR).
+# own header comment and issue #41's own comments). false renders
+# nothing: a cell with enabled: false has no dedicated pool at all,
+# the Finding's option (a) instead (extend CriticalAddonsOnly tolerations
+# on the system node group case by case as new platform-optional
+# components are catalogued -- no chart exists for that option, since it
+# needs no chart of its own, only a toleration added to each future
+# component's own values).
 enabled: true
 
 pool:
