@@ -103,6 +103,17 @@ def main(root: str) -> int:
             tier == CORE_TIER,
             f"got tier={tier!r}",
         )
+        # A core addon.yaml is either a registry chart (chart/repoURL/
+        # version) or a local dir (optional-pool), never both at once --
+        # platform.ApplicationSet.yaml's own {{- if .dir }} branch picks
+        # one source shape or the other, so a file carrying both would
+        # render a chart source with a dangling, unused dir value, never
+        # the local chart it also names.
+        check(
+            f"{rel} has 'dir' or 'chart', never both",
+            ("dir" in doc) != ("chart" in doc),
+            f"dir={'dir' in doc} chart={'chart' in doc}",
+        )
         # 3. naming rule (i), core side.
         addon = doc.get("addon")
         check(
@@ -153,8 +164,101 @@ def main(root: str) -> int:
     return 0
 
 
+# ------------------------------------------------------------- selftest
+#
+# DA-24/DA-43/C-53: a check that has only ever been seen green is not
+# trusted to actually fail on the thing it claims to catch. Each case
+# below builds a minimal, otherwise-valid fixture, breaks exactly one
+# rule, and asserts that the resulting FAILURES mention that rule's own
+# label substring and nothing else that was not already expected to
+# differ (every case starts from a byte-identical baseline that itself
+# passes with zero failures, so this also proves the baseline is clean).
+
+
+def _write(root: str, rel: str, doc: dict) -> None:
+    path = os.path.join(root, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(doc, f)
+
+
+def _baseline(root: str) -> None:
+    _write(root, "gitops/addons/good/addon.yaml", {"addon": "good", "tier": "core", "chart": "x", "repoURL": "y", "version": "1", "wave": "controllers"})
+    _write(root, "gitops/addon-catalog/good2/addon.yaml", {"addon": "good2", "tier": "platform-optional", "dir": "gitops/charts/good2", "namespace": "ns", "overridableKeys": ["resources"]})
+
+
+def _run(root: str) -> tuple[int, list[str]]:
+    global FAILURES
+    FAILURES = []
+    import contextlib
+    import io
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = main(root)
+    return rc, list(FAILURES)
+
+
+def selftest() -> int:
+    import shutil
+    import tempfile
+
+    cases: list[tuple[str, callable, str]] = []
+
+    def case(name, mutate, expect_substr):
+        cases.append((name, mutate, expect_substr))
+
+    case(
+        "baseline passes with zero failures",
+        lambda root: None,
+        None,
+    )
+    case(
+        "wrong tier on a core add-on fails only the tier rule",
+        lambda root: _write(root, "gitops/addons/good/addon.yaml", {"addon": "good", "tier": "platform-optional", "chart": "x", "repoURL": "y", "version": "1", "wave": "controllers"}),
+        "declares tier: core",
+    )
+    case(
+        "directory name != addon field fails only naming rule (i)",
+        lambda root: _write(root, "gitops/addons/good/addon.yaml", {"addon": "not-good", "tier": "core", "chart": "x", "repoURL": "y", "version": "1", "wave": "controllers"}),
+        "directory name equals its own addon",
+    )
+    case(
+        "catalog entry with tier: core fails the catalog tier rule",
+        lambda root: _write(root, "gitops/addon-catalog/good2/addon.yaml", {"addon": "good2", "tier": "core", "dir": "gitops/charts/good2", "namespace": "ns", "overridableKeys": []}),
+        "declares tier: platform-optional or workload",
+    )
+    case(
+        "same directory name under both addons/ and addon-catalog/ fails naming rule (ii)",
+        lambda root: _write(root, "gitops/addon-catalog/good/addon.yaml", {"addon": "good", "tier": "platform-optional", "dir": "gitops/charts/good", "namespace": "ns", "overridableKeys": []}),
+        "no directory name exists under both",
+    )
+
+    failures = 0
+    for name, mutate, expect_substr in cases:
+        tmp = tempfile.mkdtemp(prefix="check-addon-tiers-selftest-")
+        try:
+            _baseline(tmp)
+            mutate(tmp)
+            rc, fails = _run(tmp)
+            if expect_substr is None:
+                ok = rc == 0 and not fails
+                detail = f"expected a clean pass, got rc={rc} failures={fails}"
+            else:
+                ok = rc != 0 and any(expect_substr in f for f in fails) and len(fails) <= 2
+                detail = f"expected exactly the {expect_substr!r} rule to fail (±1 unrelated), got {fails}"
+            check(f"selftest: {name}", ok, detail)
+            if not ok:
+                failures += 1
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    return 1 if failures else 0
+
+
 if __name__ == "__main__":
+    if len(sys.argv) == 2 and sys.argv[1] == "--selftest":
+        sys.exit(selftest())
     if len(sys.argv) != 2:
-        print("usage: check_addon_tiers.py <repo-root>", file=sys.stderr)
+        print("usage: check_addon_tiers.py <repo-root> | check_addon_tiers.py --selftest", file=sys.stderr)
         sys.exit(2)
     sys.exit(main(sys.argv[1]))
