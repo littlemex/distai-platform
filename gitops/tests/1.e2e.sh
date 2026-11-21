@@ -1928,7 +1928,7 @@ DCGM_NS="$(dcgm_marker_field namespace)"
 DCGM_WAVE="$(dcgm_marker_field wave)"
 [[ -n "${DCGM_NS}" && -n "${DCGM_WAVE}" ]] || fail "could not read namespace/wave from the dcgm-exporter marker (namespace=${DCGM_NS} wave=${DCGM_WAVE})"
 
-# C-70: `! app_exists` would read a transient kubectl/API error exactly
+# `! app_exists` would read a transient kubectl/API error exactly
 # the same as a confirmed absence (both are "the positive check failed"),
 # which is wrong here specifically because this predicate feeds
 # wait_until's "stop as soon as this returns true" loop -- a single
@@ -2174,7 +2174,7 @@ dcgm_node_type="$(k get node "${DCGM_NODE}" -o jsonpath='{.metadata.labels.node\
   || fail "dcgm-exporter pod is Ready on node ${DCGM_NODE}, a system managed node group node (eks.amazonaws.com/nodegroup=${dcgm_node_mng})"
 [[ "${dcgm_node_pool}" == "${GPU_FIXTURE_NAME}" ]] \
   || fail "dcgm-exporter pod is Ready on node ${DCGM_NODE} from NodePool [${dcgm_node_pool}], not the GPU test fixture ${GPU_FIXTURE_NAME} (optional-pool is ${OPTIONAL_NODEPOOL})"
-# C-70: a process-substitution `done < <(...)` never surfaces the piped
+# A process-substitution `done < <(...)` never surfaces the piped
 # command's own exit code -- a failed `kubectl get pods` here would feed
 # the loop zero lines, same as a query that genuinely found none, and the
 # loop would exit having checked nothing while the pass below still
@@ -2252,7 +2252,7 @@ k delete pod "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" --ignore-not-found --wait=true
   || fail "kubectl delete the step 15d metrics-scrape Pod"
 pass "GET http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics returned ${dcgm_series_count} DCGM_FI_DEV_* series from the real GPU on ${DCGM_NODE}"
 
-# S2/B2: confirm the wrapper's own stated defaults against the real
+# Confirm the wrapper's own stated defaults against the real
 # rendered objects on this cluster, not only against what the chart's
 # values.yaml says it will do -- NetworkPolicy present and of the shape
 # the README claims, no ServiceMonitor CRD instance, and no
@@ -2269,15 +2269,15 @@ fi
 rm -f "${dcgm_netpol_errfile}"
 [[ -n "$(tr -d '[:space:]' <<<"${dcgm_netpol_names}")" ]] \
   || fail "no NetworkPolicy exists in ${DCGM_NS}, but the chart's own networkPolicy.enabled is true"
-# C-70, found running this exact check (dp-opt-r3, dp-opt-r4): --ignore-not-found
+# --ignore-not-found
 # only suppresses "no object of this kind exists"; it does nothing for
 # "this kind does not exist on this cluster at all" (no Prometheus
 # Operator CRD here, the expected and normal case), which kubectl
 # reports as a hard, non-zero-exit error on stderr -- piped into
 # `grep -c .` with 2>&1, that one error line was counted as "1
 # ServiceMonitor object", the opposite of what it meant. A second,
-# independent bug the first fix (dp-opt-r3's run) introduced and did not
-# catch until dp-opt-r4's own run: `var=$(failing_cmd); rc=$?` still
+# independent bug an earlier version of this fix introduced and did not
+# catch until a later real-cluster run: `var=$(failing_cmd); rc=$?` still
 # aborts the whole script right at the assignment under `set -e`
 # (confirmed: `set -e; v=$(false); echo reached` never prints "reached"
 # -- a plain assignment statement's own exit status is checked same as
@@ -2354,7 +2354,7 @@ k delete nodepool "${GPU_FIXTURE_NAME}" --ignore-not-found --wait=true --timeout
   || fail "kubectl delete the step 15 NodePool ${GPU_FIXTURE_NAME}"
 k delete ec2nodeclass "${GPU_FIXTURE_NAME}" --ignore-not-found --wait=true --timeout=600s >/dev/null \
   || fail "kubectl delete the step 15 EC2NodeClass ${GPU_FIXTURE_NAME}"
-# C-70: capture kubectl's own exit code before treating an empty result
+# Capture kubectl's own exit code before treating an empty result
 # as "no nodes" -- `2>/dev/null` with command substitution makes an API
 # error and a genuinely empty list produce the identical empty string,
 # and this predicate feeds a wait_until that stops as soon as it is true.

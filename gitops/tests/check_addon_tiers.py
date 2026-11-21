@@ -166,7 +166,7 @@ def main(root: str) -> int:
 
 # ------------------------------------------------------------- selftest
 #
-# DA-24/DA-43/C-53: a check that has only ever been seen green is not
+# A check that has only ever been seen green is not
 # trusted to actually fail on the thing it claims to catch. Each case
 # below builds a minimal, otherwise-valid fixture, breaks exactly one
 # rule, and asserts that the resulting FAILURES mention that rule's own
