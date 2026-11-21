@@ -39,6 +39,8 @@
 # entire purpose, so a token with Contents: write on GITOPS_TEST_REPO_URL
 # is required here, not optional.
 set -euo pipefail
+# mapfile/readarray needs bash >=4 (gitops/tests/README.md's own
+# Prerequisites) -- never run this on macOS's shipped bash 3.2.
 
 : "${AWS_PROFILE:?export AWS_PROFILE}"
 : "${AWS_REGION:?export AWS_REGION}"
