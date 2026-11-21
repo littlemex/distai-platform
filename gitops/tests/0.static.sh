@@ -7,12 +7,23 @@
 #   2. shellcheck and `bash -n` on every *.sh under gitops/;
 #   3. yamllint on every literal (non-templated) tracked YAML file;
 #   4. the structural contract of every addon.yaml / cells parameter file,
-#      both ApplicationSets and the root Application, against decisions
-#      1, 2, 3, 4, 6 and 8 of the issue (check_gitops_contract.py);
+#      the three ApplicationSets and the root Application, against decisions
+#      1, 2, 3, 4, 6 and 8 of the issue (check_gitops_contract.py); every
+#      gitops/addons/ entry is tier core and every gitops/addon-catalog/
+#      entry platform-optional or workload, with the directory naming
+#      rules of issue #41 Decision 2 (check_addon_tiers.py); every
+#      cells/*/addons/*.yaml marker against its catalog entry, issue #41
+#      Decision 3's checks (0)-(4) (check_addon_catalog_sync.py; its
+#      overridableKeys sub-check runs `helm dependency build` on a
+#      temporary copy of each wrapper chart, so it needs network access to
+#      that chart's upstream repository);
 #   5. `helm lint` and `helm template` of charts/capacity-pool and
 #      charts/smoke, each against one real cells/*/{capacity-pool,smoke}/*.yaml
 #      parameter file's own `values:`; charts/accel-device-classes (#28)
 #      against its own chart defaults, since nothing in it varies per cell;
+#      of charts/optional-pool against addons/optional-pool/addon.yaml's own
+#      `values:`; and of charts/dcgm-exporter (after `helm dependency
+#      build`) against the cells/*/addons/*.yaml marker that points at it;
 #   5b. issue #27's values shapes, from tests/fixtures/<chart>/*.yaml:
 #      `helm lint` and `helm template` of each fixture; seven fixtures
 #      that must be refused (a reserved pool with no reservation tags, an
@@ -34,8 +45,9 @@
 #   7. every pinned add-on's own exact chart version (never a generic,
 #      multi-version schema catalog) is `helm template`-d fresh and its
 #      real CustomResourceDefinitions extracted, to check that the
-#      rendered charts/{capacity-pool,smoke} output only uses an
-#      apiVersion that pinned chart version actually serves
+#      rendered charts/{capacity-pool,smoke,optional-pool,dcgm-exporter}
+#      output only uses an apiVersion that pinned chart version actually
+#      serves
 #      (check_pinned_crds.py; needs network access to each add-on's own
 #      OCI registry, the same one Argo CD itself pulls from).
 #
@@ -47,6 +59,9 @@
 #   KUBECONFORM_VERSION (0.8.0), K8S_SCHEMA_COMMIT, CRD_CATALOG_COMMIT
 #   (both default to the commits pinned below; override only to re-pin).
 set -euo pipefail
+# mapfile/readarray needs bash >=4 (gitops/tests/README.md's own
+# Prerequisites) -- never run this on macOS's shipped bash 3.2.
+[[ "${BASH_VERSINFO[0]}" -ge 4 ]] || { echo "FAIL this script needs bash >= 4 (mapfile/readarray); got ${BASH_VERSION}" >&2; exit 1; }
 
 HELM="${HELM:-helm}"
 UV="${UV:-uv}"
@@ -111,6 +126,9 @@ required_files=(
   "charts/capacity-pool/Chart.yaml"
   "charts/accel-device-classes/Chart.yaml"
   "charts/smoke/Chart.yaml"
+  "appsets/addons-optional.ApplicationSet.yaml"
+  "addons/optional-pool/addon.yaml"
+  "charts/optional-pool/Chart.yaml"
 )
 missing=()
 for f in "${required_files[@]}"; do
@@ -120,6 +138,19 @@ if [[ "${#missing[@]}" -eq 0 ]]; then
   echo "PASS required files present"
 else
   echo "FAIL required files missing: ${missing[*]}"
+  failures=$((failures + 1))
+fi
+
+# At least one platform-optional catalog entry (issue #41 Decision 2(b))
+# must exist for this PR's own mechanism to have anything to check below
+# -- named nowhere here, so a future catalog entry for a non-NVIDIA
+# component (a Neuron metrics agent, for example) needs no copied block
+# (AGENTS.md section 0/5: no GPU-only assumption in a shared mechanism).
+mapfile -t catalog_entries < <(find "${GITOPS_ROOT}/addon-catalog" -mindepth 2 -maxdepth 2 -name 'addon.yaml' 2>/dev/null | sort)
+if [[ "${#catalog_entries[@]}" -ge 1 ]]; then
+  echo "PASS at least one gitops/addon-catalog/*/addon.yaml exists (${#catalog_entries[@]} found)"
+else
+  echo "FAIL no gitops/addon-catalog/*/addon.yaml found"
   failures=$((failures + 1))
 fi
 
@@ -156,7 +187,8 @@ fi
 mapfile -t literal_yaml_files < <(
   {
     find "${GITOPS_ROOT}/addons" -name 'addon.yaml'
-    find "${GITOPS_ROOT}/cells" -path '*/capacity-pool/*.yaml' -o -path '*/smoke/*.yaml' -o -path '*/teams/*.yaml'
+    find "${GITOPS_ROOT}/addon-catalog" -mindepth 2 -maxdepth 2 -name 'addon.yaml'
+    find "${GITOPS_ROOT}/cells" -path '*/capacity-pool/*.yaml' -o -path '*/smoke/*.yaml' -o -path '*/teams/*.yaml' -o -path '*/addons/*.yaml'
     find "${GITOPS_ROOT}/appsets" -name '*.yaml'
     find "${GITOPS_ROOT}/bootstrap" -name '*.yaml'
     find "${GITOPS_ROOT}/charts" -maxdepth 2 -name 'Chart.yaml' -o -maxdepth 2 -name 'values.yaml'
@@ -277,6 +309,29 @@ else
   echo "FAIL check_gitops_contract.py rejected the duplicate-addon cell, but not on the expected check: $(cat "${WORK_DIR}/contract-dup-addon.log")"
   failures=$((failures + 1))
 fi
+# A checker that has only ever been run against a
+# passing repository is not evidence it would fail on a broken one.
+# --selftest builds its own mutated, throwaway fixtures (never this
+# checkout) and asserts each mutation fails only the rule it broke, run
+# before the real check below so a broken checker fails loudly here
+# rather than silently passing everything downstream.
+run_check "add-on tiers and naming self-test (check_addon_tiers.py --selftest)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_addon_tiers.py" --selftest
+
+run_check "add-on tiers and naming (check_addon_tiers.py)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_addon_tiers.py" "${REPO_ROOT}"
+
+run_check "add-on catalog vs. cell markers self-test (check_addon_catalog_sync.py --selftest)" \
+  env HELM="${HELM}" "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_addon_catalog_sync.py" --selftest
+
+# HELM is passed explicitly: the overridableKeys sub-check calls helm
+# itself (on a temporary copy of each wrapper chart, never this checkout).
+run_check "add-on catalog vs. cell markers (check_addon_catalog_sync.py)" \
+  env HELM="${HELM}" "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_addon_catalog_sync.py" "${REPO_ROOT}"
 
 # ----------------------------------------------- 5. helm lint and template
 
@@ -421,6 +476,86 @@ run_check "chart render fields (check_chart_renders.py)" \
   "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
   python3 "${SCRIPT_DIR}/check_chart_renders.py" "${FIXTURES_DIR}" "${RENDERED_DIR}"
 
+# charts/optional-pool is delivered by platform.ApplicationSet.yaml from
+# addons/optional-pool/addon.yaml (issue #41: a core add-on with a local
+# dir, not a registry chart), so that file's own values:/valuesFrom: are
+# its real, checked-in input -- the same extract_values() technique as the
+# cells parameter files above.
+OPTIONAL_POOL_ADDON="${GITOPS_ROOT}/addons/optional-pool/addon.yaml"
+if [[ -f "${OPTIONAL_POOL_ADDON}" ]]; then
+  run_check "helm lint charts/optional-pool" "${HELM}" lint "${GITOPS_ROOT}/charts/optional-pool"
+  OPTIONAL_POOL_VALUES="${WORK_DIR}/optional-pool-values.yaml"
+  extract_values "${OPTIONAL_POOL_ADDON}" "${OPTIONAL_POOL_VALUES}"
+  run_check "helm template charts/optional-pool (values from addons/optional-pool/addon.yaml)" \
+    bash -c "'${HELM}' template optional-pool-e2e '${GITOPS_ROOT}/charts/optional-pool' -f '${OPTIONAL_POOL_VALUES}' > '${RENDERED_DIR}/optional-pool.yaml'"
+  # Issue #41 Decision 4 Finding 1's option (a) (values.enabled: false,
+  # the maintainer-undecided alternative to this chart's own default)
+  # renders nothing at all -- exercised here since e2e only ever runs
+  # with the default (true); a chart that silently rendered an object
+  # anyway when disabled would mean a cell cannot actually pick option
+  # (a), the exact switch this PR's own open question relies on.
+  DISABLED_VALUES="${WORK_DIR}/optional-pool-disabled-values.yaml"
+  cat "${OPTIONAL_POOL_VALUES}" | sed 's/^enabled: .*/enabled: false/' >"${DISABLED_VALUES}"
+  grep -q '^enabled: false$' "${DISABLED_VALUES}" || echo 'enabled: false' >>"${DISABLED_VALUES}"
+  DISABLED_RENDERED="${WORK_DIR}/optional-pool-disabled.yaml"
+  if ! "${HELM}" template optional-pool-disabled-e2e "${GITOPS_ROOT}/charts/optional-pool" -f "${DISABLED_VALUES}" >"${DISABLED_RENDERED}" 2>"${WORK_DIR}/optional-pool-disabled.err"; then
+    echo "FAIL helm template charts/optional-pool with enabled: false exited non-zero: $(cat "${WORK_DIR}/optional-pool-disabled.err")"
+    failures=$((failures + 1))
+  else
+    # -s tests size > 0, which a file holding only "helm template"'s own
+    # single trailing newline still satisfies (1 byte) -- not what
+    # "renders nothing" means here. Command substitution strips trailing
+    # newlines, so comparing that against an empty string is the actual
+    # "no content at all" check. Only reached when helm itself exited 0:
+    # an empty DISABLED_RENDERED from a helm error above must never read
+    # as "renders nothing" (the opposite of what happened).
+    if [[ -n "$(cat "${DISABLED_RENDERED}")" ]]; then
+      echo "FAIL charts/optional-pool with enabled: false renders a non-empty manifest (option (a) would not actually disable it)"
+      failures=$((failures + 1))
+    else
+      echo "PASS charts/optional-pool with enabled: false renders nothing"
+    fi
+  fi
+fi
+
+# Every gitops/addon-catalog/<name>/addon.yaml's own dir chart is linted
+# and rendered the same way, by name derived from the catalog entry
+# itself -- not a per-component copied block (AGENTS.md section 0/5). A
+# chart with a Helm `dependencies:` entry (issue #41 Decision 3's wrapper
+# shape) needs `helm dependency build` first; that writes the fetched
+# tarball into <chart>/charts/ of this checkout (.gitignore'd, never
+# committed): harmless on an ephemeral CI runner, but on a developer
+# checkout it leaves that tarball behind after this script exits.
+# check_addon_catalog_sync.py does its own dependency build on a temporary
+# copy instead, so it never depends on this one having run. Values come
+# from the first cells/*/addons/*.yaml marker whose own fromCatalog names
+# this entry, the same way capacity-pool/smoke above take theirs from a
+# real parameter file; with no such marker, the chart's defaults alone.
+for catalog_entry in "${catalog_entries[@]}"; do
+  entry_name="$(basename "$(dirname "${catalog_entry}")")"
+  entry_dir_rel="$(sed -n 's/^dir:[[:space:]]*"\{0,1\}\([^"[:space:]]*\)"\{0,1\}[[:space:]]*$/\1/p' "${catalog_entry}" | head -n1)"
+  [[ -n "${entry_dir_rel}" ]] || { echo "INFO ${entry_name}: no 'dir' in catalog entry (not platform-optional, or malformed -- check_addon_catalog_sync.py reports the latter), skipping render"; continue; }
+  ENTRY_CHART="${REPO_ROOT}/${entry_dir_rel}"
+  [[ -f "${ENTRY_CHART}/Chart.yaml" ]] || { echo "FAIL ${entry_name}: dir ${entry_dir_rel} has no Chart.yaml"; failures=$((failures + 1)); continue; }
+  if grep -q '^dependencies:' "${ENTRY_CHART}/Chart.yaml" 2>/dev/null; then
+    run_check "helm dependency build charts/${entry_name}" "${HELM}" dependency build "${ENTRY_CHART}"
+  fi
+  mapfile -t entry_markers < <(grep -lE "^fromCatalog:[[:space:]]*\"?${entry_name}\"?[[:space:]]*\$" "${GITOPS_ROOT}"/cells/*/addons/*.yaml 2>/dev/null | sort)
+  ENTRY_VALUES="${WORK_DIR}/${entry_name}-values.yaml"
+  ENTRY_NAMESPACE="default"
+  if [[ "${#entry_markers[@]}" -ge 1 ]]; then
+    extract_values "${entry_markers[0]}" "${ENTRY_VALUES}"
+    ENTRY_NAMESPACE="$(sed -n 's/^namespace:[[:space:]]*//p' "${entry_markers[0]}" | tr -d '"' | head -n1)"
+    ENTRY_VALUES_FROM="$(basename "${entry_markers[0]}")"
+  else
+    printf '{}\n' >"${ENTRY_VALUES}"
+    ENTRY_VALUES_FROM="chart defaults, no cells/*/addons/ marker points at it"
+  fi
+  run_check "helm lint charts/${entry_name}" "${HELM}" lint "${ENTRY_CHART}"
+  run_check "helm template charts/${entry_name} (values from ${ENTRY_VALUES_FROM})" \
+    bash -c "'${HELM}' template '${entry_name}-e2e' '${ENTRY_CHART}' --namespace '${ENTRY_NAMESPACE:-default}' -f '${ENTRY_VALUES}' > '${RENDERED_DIR}/${entry_name}.yaml'"
+done
+
 # ------------------------------------------------------- 6. kubeconform
 
 KUBECONFORM_BIN="${WORK_DIR}/kubeconform"
@@ -456,6 +591,14 @@ kubeconform_targets=("${GITOPS_ROOT}/appsets/platform.ApplicationSet.yaml" "${GI
 while IFS= read -r -d '' rendered_file; do
   kubeconform_targets+=("${rendered_file}")
 done < <(find "${RENDERED_DIR}" -maxdepth 1 -name '*.yaml' -print0 | sort -z)
+[[ -f "${GITOPS_ROOT}/appsets/addons-optional.ApplicationSet.yaml" ]] && kubeconform_targets+=("${GITOPS_ROOT}/appsets/addons-optional.ApplicationSet.yaml")
+[[ -f "${RENDERED_DIR}/capacity-pool.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/capacity-pool.yaml")
+[[ -f "${RENDERED_DIR}/smoke.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/smoke.yaml")
+[[ -f "${RENDERED_DIR}/optional-pool.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/optional-pool.yaml")
+for catalog_entry in "${catalog_entries[@]}"; do
+  entry_name="$(basename "$(dirname "${catalog_entry}")")"
+  [[ -f "${RENDERED_DIR}/${entry_name}.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/${entry_name}.yaml")
+done
 
 run_check "kubeconform (${#kubeconform_targets[@]} file(s), k8s 1.37.0 + pinned CRD schemas)" \
   "${KUBECONFORM_BIN}" "${KUBECONFORM_ARGS[@]}" "${kubeconform_targets[@]}"
@@ -471,6 +614,12 @@ run_check "kubeconform (${#kubeconform_targets[@]} file(s), k8s 1.37.0 + pinned 
 # CRDs that version ships -- the gap that let gitops/charts/{capacity-pool,
 # smoke}'s templates hardcode kueue.x-k8s.io/v1beta1 straight through this
 # script while Kueue 0.20.6 (the pinned version) serves only v1beta2.
+# It reads every file in RENDERED_DIR, so charts/optional-pool's NodePool/
+# EC2NodeClass are checked against karpenter-crd's pinned CRDs here too,
+# with no change to the script; charts/dcgm-exporter renders no kind any
+# pinned add-on's CRD covers. The wrapper chart's own dependency pin
+# (Chart.yaml dependencies[].version) is not a CRD question and is not
+# checked here.
 run_check "pinned-chart-version CRDs (check_pinned_crds.py)" \
   "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
   python3 "${SCRIPT_DIR}/check_pinned_crds.py" "${REPO_ROOT}" "${RENDERED_DIR}"

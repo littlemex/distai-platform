@@ -1,9 +1,10 @@
 # RFC #25 Decision 2/3/4. One Application per gitops/addons/<name>/addon.yaml,
 # per registered cluster (Matrix: Cluster generator x Git FILE generator).
-# Steps shipped: "crds" (karpenter-crd), "controllers" (karpenter, kueue)
-# and "accelerators" (the four accel-* advertisers and accel-device-classes,
-# #28); "extras" is a later PR's (#18, #23) and simply has no addon.yaml
-# yet, so it generates nothing today.
+# Steps shipped: "crds" (karpenter-crd), "controllers" (karpenter, kueue,
+# optional-pool, RFC #41 Decision 1/4) and "accelerators" (the four
+# accel-* advertisers and accel-device-classes, #28); "extras" is a later
+# PR's (#18, #23) and simply has no addon.yaml yet, so it generates
+# nothing today.
 #
 # goTemplate is on (a decision this PR makes, not spelled out by the RFC's
 # own prose, which quotes the legacy fasttemplate form for a single field):
@@ -111,16 +112,15 @@ spec:
   # (karpenter's settings.clusterName and so on) avoid being forced into
   # every other add-on's template.
   #
-  # The {{- if .dir }} branch below (#28: a local, platform-owned chart,
-  # accel-device-classes, never an upstream registry - same "dir" shape
-  # cells.ApplicationSet.yaml already uses for capacity-pool/smoke, #25
-  # Decision 2, applied here because this one addon.yaml has no
-  # chart/repoURL/version) fully replaces the base template's source,
-  # which otherwise renders repoURL/chart/targetRevision all empty for a
-  # dir-only addon.yaml - an invalid Application with no repoURL. Its own
-  # "chart: null" is explicit, not left to whatever the base template's
-  # own "{{ .chart }}" happens to render for a missing key: with
-  # goTemplateOptions missingkey=zero, a map value of static type
+  # The {{- if .dir }} branch below (#28's accel-device-classes and RFC
+  # #41's optional-pool are both a local, platform-owned chart, never an
+  # upstream registry - same "dir" shape cells.ApplicationSet.yaml already
+  # uses for capacity-pool/smoke, #25 Decision 2) fully replaces the base
+  # template's source, which otherwise renders repoURL/chart/targetRevision
+  # all empty for a dir-only addon.yaml - an invalid Application with no
+  # repoURL. Its own "chart: null" is explicit, not left to whatever the
+  # base template's own "{{ .chart }}" happens to render for a missing key:
+  # with goTemplateOptions missingkey=zero, a map value of static type
   # interface{} (what a parsed addon.yaml's own params decode to) still
   # prints the literal string "<no value>" for a missing key in the
   # text/template engine Argo CD uses, not the empty string "zero" might
@@ -128,9 +128,13 @@ spec:
   # "path:" would make Argo CD treat this as a Helm chart source instead
   # of a Git path source, and this Application would never sync. A JSON
   # Merge Patch null removes the key entirely, which is what a dir-only
-  # addon.yaml actually needs. Verify this on a real cluster before
-  # relying on it (same caveat as goTemplate itself, #25's own header
-  # comment on this file).
+  # addon.yaml actually needs. The dir branch also duplicates the chart
+  # branch's skipCrds/values/valuesFrom (unlike #28's own
+  # accel-device-classes, which needs none of them): optional-pool's
+  # clusterName/nodeRole are cell-specific valuesFrom entries, the same
+  # contract capacity-pool/smoke already use. Verify this on a real
+  # cluster before relying on it (same caveat as goTemplate itself, #25's
+  # own header comment on this file).
   templatePatch: |
     spec:
       {{- if .dir }}
@@ -139,6 +143,25 @@ spec:
         path: "{{ .dir }}"
         targetRevision: '{{ index $.metadata.annotations "distai.dev.annotations/revision" }}'
         chart: null
+        helm:
+          {{- if .skipCrds }}
+          skipCrds: true
+          {{- end }}
+          {{- if .values }}
+          valuesObject:
+            {{- toYaml .values | nindent 12 }}
+          {{- end }}
+          {{- if .valuesFrom }}
+          parameters:
+          {{- range .valuesFrom }}
+          - name: {{ .helmKey }}
+            {{- if .param }}
+            value: "{{ index $ .param }}"
+            {{- else }}
+            value: "{{ index $.metadata.annotations .annotationKey }}"
+            {{- end }}
+          {{- end }}
+          {{- end }}
       {{- else }}
       source:
         helm:
@@ -161,10 +184,28 @@ spec:
           {{- end }}
           {{- end }}
       {{- end }}
-      {{- if .syncOptions }}
+      {{- if or .syncOptions .allowEmpty }}
       syncPolicy:
+        {{- if .allowEmpty }}
+        # Per-addon opt-in only (RFC #41 Decision 4 Finding 1): Argo CD's
+        # own automated-sync-with-prune default (allowEmpty: false)
+        # refuses to sync an Application down to zero resources,
+        # treating that as a likely automation/human error. optional-pool's
+        # own values.enabled: false switch renders nothing on purpose, so
+        # it alone sets allowEmpty: true in its own addon.yaml -- this key
+        # must stay scoped to the one addon that actually needs it:
+        # karpenter-crd, karpenter and kueue never render empty, and
+        # giving every core addon this escape hatch would mean a future
+        # Helm/OCI-registry hiccup that happened to render one of them
+        # empty gets automatically pruned (CRDs, NodePools, EC2NodeClasses,
+        # NodeClaims and all) instead of the safety mechanism catching it.
+        automated:
+          allowEmpty: true
+        {{- end }}
+        {{- if .syncOptions }}
         syncOptions:
         {{- range .syncOptions }}
         - {{ . }}
+        {{- end }}
         {{- end }}
       {{- end }}

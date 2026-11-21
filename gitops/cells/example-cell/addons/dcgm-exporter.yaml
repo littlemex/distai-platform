@@ -1,0 +1,19 @@
+# RFC #41 Decision 3. Opts this cell into the dcgm-exporter catalog entry
+# (gitops/addon-catalog/dcgm-exporter/addon.yaml) -- dir/namespace/skipCrds
+# below are byte-identical to that entry's own (checked by
+# check_addon_catalog_sync.py); no values override needed for this
+# fixture.
+#
+# A deliberate choice, not an implied default for every cell: a
+# platform-optional component's whole point (Decision 1) is that a cell
+# works the same with or without it, so copying this file as part of
+# "copy gitops/cells/example-cell/" (gitops/README.md's own "Adding a
+# cell" procedure) is this worked example demonstrating the opt-in
+# mechanism end to end -- not a recommendation to keep every file example-cell
+# happens to carry. Delete this one file, and only this one, on a new
+# cell that has no NVIDIA GPU capacity to monitor.
+addon: dcgm-exporter
+fromCatalog: dcgm-exporter
+dir: gitops/charts/dcgm-exporter
+namespace: dcgm-exporter
+wave: optional-1

@@ -97,7 +97,11 @@ def main(root: str) -> int:
     )
 
     # First-PR scope (decision 9) plus issue #28's five accelerator-step
-    # add-ons: no teams/* yet, and no addon.yaml outside these eight.
+    # add-ons and issue #41's optional-pool (the untainted on-demand CPU
+    # NodePool every platform-optional component's pods land on, delivered
+    # unconditionally like the others, tier: core): no teams/* yet, and no
+    # addon.yaml outside these nine. Any further add-on still needs its
+    # own issue to extend this set.
     addon_dirs = sorted(
         d
         for d in os.listdir(os.path.join(gitops, "addons"))
@@ -107,6 +111,7 @@ def main(root: str) -> int:
         "karpenter-crd",
         "karpenter",
         "kueue",
+        "optional-pool",
         "accel-nvidia-device-plugin",
         "accel-nvidia-dra",
         "accel-neuron-device-plugin",
@@ -114,7 +119,7 @@ def main(root: str) -> int:
         "accel-device-classes",
     }
     check(
-        f"addons/ contains exactly {sorted(expected_addon_dirs)} (#25 decision 9, #28 Interface)",
+        f"addons/ contains exactly {sorted(expected_addon_dirs)} (#25 decision 9, #28 Interface, #41)",
         set(addon_dirs) == expected_addon_dirs,
         f"found: {addon_dirs}, expected exactly {sorted(expected_addon_dirs)}",
     )
@@ -349,6 +354,10 @@ def main(root: str) -> int:
 
     check_applicationset(os.path.join(gitops, "appsets/platform.ApplicationSet.yaml"), {"crds", "controllers", "accelerators"})
     check_applicationset(os.path.join(gitops, "appsets/cells.ApplicationSet.yaml"), {"capacity"})
+    check_applicationset(
+        os.path.join(gitops, "appsets/addons-optional.ApplicationSet.yaml"),
+        {"optional-1", "optional-2", "optional-3", "optional-4"},
+    )
 
     # #28 Interface: "rollingSync.steps gains one step matching
     # distai.dev/wave In [accelerators], after controllers". The set check

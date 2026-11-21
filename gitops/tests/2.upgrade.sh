@@ -39,6 +39,9 @@
 # entire purpose, so a token with Contents: write on GITOPS_TEST_REPO_URL
 # is required here, not optional.
 set -euo pipefail
+# mapfile/readarray needs bash >=4 (gitops/tests/README.md's own
+# Prerequisites) -- never run this on macOS's shipped bash 3.2.
+[[ "${BASH_VERSINFO[0]}" -ge 4 ]] || { echo "FAIL this script needs bash >= 4 (mapfile/readarray); got ${BASH_VERSION}" >&2; exit 1; }
 
 : "${AWS_PROFILE:?export AWS_PROFILE}"
 : "${AWS_REGION:?export AWS_REGION}"
@@ -557,9 +560,12 @@ wait_until 600 15 "capacity-pool Healthy+Synced" app_healthy_synced "${APP_CAPAC
 pass "cell bootstrapped at ${GITOPS_REVISION}: karpenter-crd, karpenter, kueue and capacity-pool all converged"
 
 nodepools=()
+# Issue #41's core optional-pool add-on owns a second NodePool on every
+# cell; only the one capacity-pool's own Application owns is this test's
+# NodePool, told apart by status.resources rather than a hardcoded name.
 one_nodepool_exists() {
-  mapfile -t nodepools < <(k get nodepools -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep -v '^$')
-  [[ "${#nodepools[@]}" -eq 1 ]]
+  mapfile -t nodepools < <(app_field "${APP_CAPACITY_POOL}" '{.status.resources[?(@.kind=="NodePool")].name}' | tr ' ' '\n' | grep -v '^$')
+  [[ "${#nodepools[@]}" -eq 1 ]] && k get nodepool "${nodepools[0]}" >/dev/null 2>&1
 }
 # capacity-pool reaching Healthy+Synced above does not, on its
 # own, guarantee the NodePool object it owns is already visible through
@@ -572,7 +578,7 @@ one_nodepool_exists() {
 # "expected exactly 1 LocalQueue, found 0" on a cell that has not finished
 # syncing yet.
 wait_until 120 10 "exactly one NodePool exists" one_nodepool_exists \
-  || fail "expected exactly 1 NodePool, found ${#nodepools[@]}"
+  || fail "expected ${APP_CAPACITY_POOL} to own exactly 1 existing NodePool, found ${#nodepools[@]}: ${nodepools[*]:-none}"
 NODEPOOL="${nodepools[0]}"
 
 localqueues=()
