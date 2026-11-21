@@ -69,18 +69,18 @@ One replica per node, so no `PodDisruptionBudget` applies; the upstream
   (`DCGM_FI_PROF_*`: SM occupancy, tensor/FP64 pipe utilization, NVLink
   throughput -- exactly the per-job GPU utilization signal this
   platform's own training/inference workloads need, not a feature this
-  component happens to also offer). Dropping `SYS_ADMIN` (and the
-  profiling metrics with it) was considered and rejected for that reason:
-  it would remove the capability's cost (a namespace-scoped privileged
-  label) without removing what the capability is for. Separately, and for
-  a different reason, the chart also mounts the kubelet pod-resources
-  socket by `hostPath` (reads GPU-to-pod assignment for per-pod metric
-  labels) -- also forbidden by Pod Security Admission's `baseline`.
-  Either alone would require `templates/namespace.yaml`'s
-  `pod-security.kubernetes.io/enforce: privileged` label, on the
-  `dcgm-exporter` namespace only (`warn`/`audit` stay at `baseline`,
-  matching the `distributed-ai` `image-builder.tf` precedent RFC #41's
-  own Facts table cites).
+  component happens to also offer). Dropping `SYS_ADMIN` was considered
+  and rejected for that reason: the real benefit would be a narrower
+  container capability set, not a lower Pod Security level -- the chart
+  also mounts the kubelet pod-resources socket by `hostPath` (reads
+  GPU-to-pod assignment for per-pod metric labels), a second,
+  independent reason this namespace needs `privileged` regardless of
+  `SYS_ADMIN`, so dropping the capability alone would not let this
+  namespace move off `privileged`. Either one alone already requires
+  `templates/namespace.yaml`'s `pod-security.kubernetes.io/enforce:
+  privileged` label, on the `dcgm-exporter` namespace only
+  (`warn`/`audit` stay at `baseline`, matching the `distributed-ai`
+  `image-builder.tf` precedent RFC #41's own Facts table cites).
 - `hostNetwork` and `hostPID` stay `false`.
 - No IAM role or Pod Identity association: the exporter makes no AWS API
   call. Least privilege here is zero AWS permissions, not a scoped-down
