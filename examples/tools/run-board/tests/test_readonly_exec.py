@@ -19,6 +19,7 @@ from lib.readonly_exec import DisallowedCommandError, run_readonly  # noqa: E402
         ["aws", "ec2", "terminate-instances", "--instance-ids", "i-1"],
         ["aws", "ec2", "run-instances"],
         ["aws", "s3", "cp", "a", "b"],
+        ["aws", "ec2", "describe-capacity-reservations"],  # not wired to anything in this PR; see readonly_exec.py
         ["aws"],
         ["rm", "-rf", "/"],
         ["sh", "-c", "kubectl get pods"],
@@ -37,8 +38,6 @@ def test_disallowed_commands_never_reach_subprocess(argv):
     [
         ["kubectl", "get", "job", "x", "-n", "ns", "-o", "json"],
         ["kubectl", "get", "workloads.kueue.x-k8s.io", "x", "-n", "ns", "-o", "json"],
-        ["aws", "ec2", "describe-capacity-reservations"],
-        ["aws", "ec2", "describe-instances", "--filters", "Name=x,Values=y"],
     ],
 )
 def test_allowed_commands_are_passed_through_as_argv(argv):

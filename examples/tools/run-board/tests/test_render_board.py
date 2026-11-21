@@ -40,16 +40,37 @@ def test_every_plan_item_name_appears():
 
 
 def test_done_item_gets_done_class_and_unknown_item_gets_unknown_class():
+    # Matching 'class="state-done' (the actual <g class="..."> opening tag) rather than
+    # the bare substring "state-done": the inline <style> block also contains that bare
+    # substring in its own CSS selectors, so a bare-substring check would still pass even
+    # if no item ever actually got that class on an element.
     out = _render_sample()
-    assert "state-done" in out
-    assert "state-unknown" in out
-    assert "state-running" in out
+    assert 'class="state-done' in out
+    assert 'class="state-unknown' in out
+    assert 'class="state-running' in out
 
 
 def test_late_item_gets_late_modifier():
     # tier0-baseline-node-b starts 20 minutes late against a 15-minute grace.
     out = _render_sample()
-    assert "mod-late" in out
+    assert 'class="state-done mod-late' in out
+    assert "[late]" in out  # the badge text itself, not just the CSS class
+
+
+def test_manual_badge_and_unknown_dependency_edge_are_rendered():
+    out = _render_sample()
+    assert "[manual" in out
+    # dra-mode-node-b is unknown (a collection error); any item depending on it must get
+    # a distinct 'unknown' edge, not the same 'unmet' edge as a dependency that is merely
+    # still running.
+    assert 'class="dep-unknown"' in out
+
+
+def test_stop_condition_is_shown_as_a_tooltip():
+    plan = load_plan(str(SAMPLE_DIR / "plan.yaml"))
+    out = _render_sample()
+    item_with_stop_condition = next(i for i in plan.items if i.stop_condition and i.stop_condition != "n/a")
+    assert f"<title>{item_with_stop_condition.stop_condition}</title>" in out
 
 
 def test_collection_error_is_shown_as_a_banner_not_hidden():

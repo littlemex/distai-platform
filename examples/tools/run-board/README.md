@@ -47,17 +47,17 @@ Three independent, separately-testable pieces:
      human-reported milestone). Looked up by `key` in a small
      hand-maintained `manual-status.json`.
 
-2. **`collect_status.py`** — the *only* script that touches a cluster or AWS,
-   and it is read-only by construction (see `lib/readonly_exec.py`): every
-   call is routed through one wrapper that allowlists `kubectl get` and
-   `aws ec2 describe-*`, built as an argv list (never a shell string), so
-   there is no command this tool can run that mutates anything. It reads only
-   a small, fixed set of fields out of each object (see `lib/k8s_mapping.py`)
-   — never the raw object — so account IDs, image URIs, node IPs, and
-   free-text condition messages never reach disk. Output: `status.json`
-   (`block_start`, `collected_at`, one raw lifecycle state per item —
-   `unknown`/`pending`/`running`/`done`/`failed` — plus timestamps, and a list
-   of any items that failed to collect).
+2. **`collect_status.py`** — the *only* script that touches a cluster, and it
+   is read-only by construction (see `lib/readonly_exec.py`): every call is
+   routed through one wrapper that allowlists `kubectl get` only, built as an
+   argv list (never a shell string), so there is no command this tool can run
+   that mutates anything. It reads only a small, fixed set of fields out of
+   each object (see `lib/k8s_mapping.py`) — never the raw object — so account
+   IDs, image URIs, node IPs, and free-text condition messages never reach
+   disk. Output: `status.json` (`block_start`, `collected_at`, one raw
+   lifecycle state per item — `unknown`/`pending`/`running`/`done`/`failed` —
+   plus timestamps, and a list of any items that failed to collect). This PR
+   does not collect anything from AWS directly; see "Not covered" below.
 
 3. **`render_board.py`** — a pure function, `(plan.yaml, status.json) ->
    board.html`. No network, no cluster access, no clock reads except one
@@ -67,8 +67,10 @@ Three independent, separately-testable pieces:
    "overrunning" are derived here (`lib/status_model.py`), not stored as a
    state, so there is exactly one place that decides what "on schedule" means.
    Output is one HTML file: inline CSS/SVG, a few lines of inline JS, no
-   external `<script>`/`<link>`, a `Content-Security-Policy: default-src
-   'none'` meta tag, and every free-text field HTML-escaped.
+   external `<script>`/`<link>`, a `Content-Security-Policy` meta tag that
+   allows nothing but this page's own inline style/script, and every
+   free-text field HTML-escaped. Hovering a bar shows its `stop_condition`,
+   if one is set.
 
 A collection error (a typo'd name, an expired credential, a deleted-by-TTL
 Job) renders as **`unknown`**, visually distinct from "not started" — never
@@ -85,64 +87,65 @@ account ID and timing replaced by a generic placeholder.
 
 ```bash
 cd examples/tools/run-board
-uv run -q --with PyYAML==6.0.2 python render_board.py \
-  sample/plan.yaml sample/status.sample.json -o /tmp/run-board-sample.html
-open /tmp/run-board-sample.html   # macOS; use xdg-open on Linux
+uv run -q --with PyYAML==6.0.2 python render_board.py sample/plan.yaml sample/status.sample.json -o /tmp/run-board-sample.html
+open /tmp/run-board-sample.html
 ```
+
+(`open` is macOS; use `xdg-open` on Linux.)
 
 ## Using it for real
 
+Collecting live status needs a `kubectl` context pointed at your cluster — a
+`get`/`list`-only `ClusterRole` is enough, see "Security" below. Re-run both
+commands whenever you want a fresh snapshot; neither watches anything
+continuously or refreshes itself.
+
 ```bash
 cd examples/tools/run-board
-
-# 1. Collect live status. Needs a kubectl context pointed at your cluster
-#    (get/list-only RBAC is enough — see "Security" below) and, for the AWS
-#    calls, read-only/describe-only credentials.
-uv run -q --with PyYAML==6.0.2 python collect_status.py \
-  my-plan.yaml --block-start 2026-11-20T11:00:00Z \
-  --manual-status my-manual-status.json -o out/status.json
-
-# 2. Render it.
-uv run -q --with PyYAML==6.0.2 python render_board.py \
-  my-plan.yaml out/status.json -o out/board.html
-
-# 3. Re-run step 1+2 whenever you want a fresh snapshot. This does not watch
-#    anything continuously and does not refresh itself.
+uv run -q --with PyYAML==6.0.2 python collect_status.py my-plan.yaml --block-start 2026-11-20T11:00:00Z --manual-status my-manual-status.json -o out/status.json
+uv run -q --with PyYAML==6.0.2 python render_board.py my-plan.yaml out/status.json -o out/board.html
 ```
 
-`out/` is gitignored by this directory — never commit a real `status.json` or
+Both scripts create `out/` themselves if it does not already exist. `out/` is
+also gitignored by this directory — never commit a real `status.json` or
 rendered board from a real cluster; only the sample fixtures under `sample/`
 are meant to be committed.
 
 ## Security
 
-- `collect_status.py` can only run `kubectl get ...` and
-  `aws ec2 describe-capacity-reservations` / `aws ec2 describe-instances`; any
-  other argv raises before a subprocess is ever started
-  (`tests/test_readonly_exec.py` proves this without needing a real cluster).
-  The real guarantee is still your credentials: give it a `kubectl` context
-  bound to a `get`/`list`-only `ClusterRole` and an IAM policy with only
-  `ec2:Describe*`, so that even a bug in this tool cannot mutate anything.
+- `collect_status.py` can only run `kubectl get ...`; any other argv raises
+  before a subprocess is ever started (`tests/test_readonly_exec.py` proves
+  this without needing a real cluster). The real guarantee is still your
+  credentials: give it a `kubectl` context bound to a `get`/`list`-only
+  `ClusterRole`, so that even a bug in this tool cannot mutate anything.
 - Names and namespaces from `plan.yaml` are validated as plain DNS-1123 labels
   before they are ever spliced into an argv list (`lib/plan.py`), closing the
   one place a plan file could otherwise smuggle a flag or metacharacter into
   a subprocess call.
-- `status.json` never carries raw `kubectl`/`aws` output, only the few
-  allowlisted fields in `lib/k8s_mapping.py` — so it is safe-ish to share for
-  debugging, but still treat it and any rendered `board.html` from a real
-  cluster as internal: write them to the gitignored `out/` directory, not into
-  this repo.
-- The rendered HTML has `Content-Security-Policy: default-src 'none'` and
-  references no external URL (`tests/test_render_board.py` checks both), so
-  it is safe to open the file directly with no network access.
+- `status.json` never carries raw `kubectl` output, only the few allowlisted
+  fields in `lib/k8s_mapping.py` — so it is safe-ish to share for debugging,
+  but still treat it and any rendered `board.html` from a real cluster as
+  internal: write them to the gitignored `out/` directory, not into this repo.
+- The rendered HTML's `Content-Security-Policy` meta tag allows nothing but
+  this page's own inline style and script, and the page references no
+  external URL (`tests/test_render_board.py` checks both), so it is safe to
+  open the file directly with no network access.
 
 ## Not covered (by design, for a toy)
 
 - No continuous refresh — it is a snapshot generator, run it again for a
   newer picture.
 - No alerting, no history, no multi-run comparison.
-- `stop_condition` is free text shown for context only; it is never evaluated,
-  and the board does not claim to know whether a stop condition was hit.
+- No AWS-side status source (for example a Capacity Reservation's own
+  `AvailableInstanceCount`): only `job`, `kueue_workload` and `manual` exist
+  today. A read-only `aws ec2 describe-capacity-reservations` collector is a
+  natural follow-up, left out of this PR to keep its scope small.
+- `stop_condition` is free text shown as a hover tooltip for context only; it
+  is never evaluated, and the board does not claim to know whether a stop
+  condition was hit.
 - Overlapping items in the same lane are drawn as separate rows, not packed
   into a single interval-scheduling layout — this is a simple per-item list
   grouped by lane, not a dense Gantt chart.
+- A manual entry's own `updated_at` is shown next to its `[manual]` badge, but
+  is not enforced as required and does not by itself make the board flag a
+  stale hand report as late.

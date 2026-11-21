@@ -59,9 +59,19 @@ def map_kueue_workload_status(workload: dict) -> dict:
     `lastTransitionTime` is the real "actual start" for queueing purposes —
     the thing a run-board cares about is when the work actually got a slot,
     not when it was merely submitted), "Finished" (True on either success or
-    failure; `status.conditionStatus` or a message prefix distinguishes them
-    in some Kueue versions, but this toy only asserts what's structurally
-    guaranteed: Finished=True plus no error marker is treated as done).
+    failure).
+
+    Finished=True does not by itself say which: this deliberately does NOT
+    fail open to "done" by treating anything without an obvious failure
+    keyword as success (an earlier version of this function did, and some
+    Kueue releases have used the same `reason` value for both outcomes in the
+    past, which would have rendered a failed Workload as "done"). Instead,
+    only `reason == "Succeeded"` is mapped to done and only
+    `reason == "Failed"` to failed; anything else — an unrecognized reason, a
+    different Kueue minor version's own wording, a missing reason — maps to
+    "unknown" rather than guessing. If this repo later pins a specific Kueue
+    version, this allowlist should be checked against that version's actual
+    `Reason` values and extended deliberately, not loosened by default.
     """
     status = workload.get("status", {})
     conditions = status.get("conditions", []) or []
@@ -71,13 +81,14 @@ def map_kueue_workload_status(workload: dict) -> dict:
     admitted = by_type.get("Admitted")
 
     if finished and finished.get("status") == "True":
-        reason = (finished.get("reason") or "").lower()
-        state = "failed" if "fail" in reason or "error" in reason else "done"
-        return {
-            "state": state,
-            "actual_start": admitted.get("lastTransitionTime") if admitted else None,
-            "actual_end": finished.get("lastTransitionTime"),
-        }
+        reason = finished.get("reason") or ""
+        actual_start = admitted.get("lastTransitionTime") if admitted else None
+        actual_end = finished.get("lastTransitionTime")
+        if reason == "Succeeded":
+            return {"state": "done", "actual_start": actual_start, "actual_end": actual_end}
+        if reason == "Failed":
+            return {"state": "failed", "actual_start": actual_start, "actual_end": actual_end}
+        return {"state": "unknown", "actual_start": actual_start, "actual_end": actual_end}
 
     if admitted and admitted.get("status") == "True":
         return {"state": "running", "actual_start": admitted.get("lastTransitionTime"), "actual_end": None}

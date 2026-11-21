@@ -5,7 +5,7 @@
 # lib.readonly_exec.run_readonly rather than ever calling a real kubectl/aws.
 #
 # Run via the distai-platform EC2 runner, never on a developer Mac:
-#   runner/run.sh --ref feat/run-board -- bash examples/tools/run-board/tests/run_tests.sh
+#   runner/run.sh --ref <branch or main> -- bash examples/tools/run-board/tests/run_tests.sh
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

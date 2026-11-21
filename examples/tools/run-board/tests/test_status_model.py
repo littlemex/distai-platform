@@ -153,6 +153,7 @@ def test_dependency_edge_states():
     assert dependency_edge_state(done_item, DisplayState("done", False, False)) == "done"
     assert dependency_edge_state(done_item, DisplayState("running", False, False)) == "unmet"
     assert dependency_edge_state(done_item, DisplayState("failed", False, False)) == "broken"
+    assert dependency_edge_state(done_item, DisplayState("unknown", False, False)) == "unknown"
 
 
 def test_collected_before_block_start_rejected():
