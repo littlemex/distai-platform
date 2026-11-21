@@ -109,6 +109,26 @@ def main(root: str) -> int:
         # one source shape or the other, so a file carrying both would
         # render a chart source with a dangling, unused dir value, never
         # the local chart it also names.
+        # allowEmpty (RFC #41 Decision 4 Finding 1) is an escape hatch
+        # from Argo CD's own safety mechanism against pruning an
+        # Application to zero resources by accident -- platform.
+        # ApplicationSet.yaml's own templatePatch renders it only when
+        # this key is present, never from its own shared base template
+        # (the regression this check exists to catch: that field going
+        # back into the shared template would quietly remove the safety
+        # net for every core addon, not just the one that asked for it).
+        # A quoted "true" string is also wrong here, not just absent: Go
+        # templates render `{{- if "true" }}` as truthy too (a non-empty
+        # string), so a YAML string would still enable the branch while
+        # looking like a careless copy-paste rather than a reviewed
+        # boolean.
+        if "allowEmpty" in doc:
+            check(
+                f"{rel}'s allowEmpty is the boolean true, not a string or false (issue #41 Decision 4 Finding 1 -- an intentional, reviewed escape hatch, not a stray value)",
+                doc.get("allowEmpty") is True,
+                f"got allowEmpty={doc.get('allowEmpty')!r} ({type(doc.get('allowEmpty')).__name__})",
+            )
+            print(f"INFO {rel} declares allowEmpty: true -- review why this one core addon may legitimately render empty")
         check(
             f"{rel} has 'dir' or 'chart', never both",
             ("dir" in doc) != ("chart" in doc),
