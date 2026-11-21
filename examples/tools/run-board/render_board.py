@@ -38,10 +38,25 @@ from lib.status_model import (
 LABEL_COL_W = 300
 ROW_H = 34
 ROW_GAP = 6
+LANE_HEADER_H = 22  # its own strip, so a lane label never overlaps the first item's text
 CHART_LEFT = LABEL_COL_W + 20
 CHART_RIGHT_MARGIN = 40
 PX_PER_MINUTE = 2.2  # clamped below for very long or very short plans
 TOP_AXIS_H = 50
+
+# Flat, explicit per-state colors for the legend swatches. The chart itself gets its
+# color from CSS classes (lib above), but the legend draws tiny standalone boxes that
+# are not inside a `.state-X` ancestor, so relying on the same descendant-combinator
+# CSS rules there would silently render them blank — these are spelled out once, here,
+# so the legend can never again go blank for that reason.
+LEGEND_STATE_COLORS = {
+    "not-started": ("#ffffff", "#c6c6cd"),
+    "overdue-not-started": ("#fffbf0", "#8d6605"),
+    "running": ("#f0fbff", "#006ce0"),
+    "done": ("#effff1", "#00802f"),
+    "failed": ("#fff5f5", "#db0000"),
+    "unknown": ("#fffbf0", "#8d6605"),
+}
 
 # State -> (fill css class). "late"/"overrunning" add a modifier class on top.
 BASE_STATE_LABEL = {
@@ -178,7 +193,7 @@ def render(plan: Plan, status: StatusDoc) -> str:
             lanes.append(item.lane)
     ordered = sorted(plan.items, key=lambda it: (lanes.index(it.lane), _minutes(it.planned_start)))
 
-    total_h = TOP_AXIS_H + len(ordered) * (ROW_H + ROW_GAP) + 30
+    total_h = TOP_AXIS_H + len(lanes) * LANE_HEADER_H + len(ordered) * (ROW_H + ROW_GAP) + 30
 
     svg_parts: list[str] = []
     svg_parts.append(
@@ -205,8 +220,9 @@ def render(plan: Plan, status: StatusDoc) -> str:
     y = TOP_AXIS_H
     for item in ordered:
         if item.lane != current_lane:
-            svg_parts.append(f'<text class="lane-label" x="8" y="{y + 14:.0f}">{html.escape(item.lane)}</text>')
+            svg_parts.append(f'<text class="lane-label" x="8" y="{y + 15:.0f}">{html.escape(item.lane)}</text>')
             current_lane = item.lane
+            y += LANE_HEADER_H
         row_y[item.id] = y
         y += ROW_H + ROW_GAP
 
@@ -273,8 +289,9 @@ def render(plan: Plan, status: StatusDoc) -> str:
         ("unknown", "Unknown / collection error"),
     ]
     legend_html = "".join(
-        f'<div class="legend-item"><span class="legend-swatch state-{s} bar-actual" '
-        f'style="display:inline-block"></span>{html.escape(label)}</div>'
+        f'<div class="legend-item"><span class="legend-swatch" '
+        f'style="background:{LEGEND_STATE_COLORS[s][0]};border-color:{LEGEND_STATE_COLORS[s][1]}">'
+        f'</span>{html.escape(label)}</div>'
         for s, label in legend_items
     )
 
