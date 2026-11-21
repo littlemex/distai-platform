@@ -103,3 +103,28 @@ items:
     assert doc["items"]["a"]["state"] == "done"
     assert doc["items"]["b"]["state"] == "unknown"
     assert doc["collection_errors"], "the missing manual entry for b must be reported"
+
+
+def test_main_rejects_a_malformed_block_start_with_a_labelled_error_not_a_traceback(tmp_path):
+    plan_path = tmp_path / "plan.yaml"
+    plan_path.write_text(
+        """
+items:
+  - id: a
+    name: A
+    lane: l
+    planned_start: "T+00:00"
+    planned_duration: "PT1H"
+    status_source: {kind: manual, key: a}
+"""
+    )
+    out_path = tmp_path / "status.json"
+    argv = [
+        "collect_status.py", str(plan_path),
+        "--block-start", "not-a-real-timestamp",
+        "-o", str(out_path),
+    ]
+    with mock.patch.object(sys, "argv", argv):
+        rc = collect_status.main()
+    assert rc == 2
+    assert not out_path.exists(), "a rejected run must not write a half-formed status.json"

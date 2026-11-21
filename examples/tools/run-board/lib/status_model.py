@@ -26,10 +26,20 @@ class StatusError(ValueError):
 
 
 def parse_utc(text: str) -> datetime:
-    """Parse an ISO-8601 UTC timestamp like '2026-11-20T11:00:00Z'."""
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    dt = datetime.fromisoformat(text)
+    """Parse an ISO-8601 UTC timestamp like '2026-11-20T11:00:00Z'.
+
+    Every malformed-input path raises StatusError, not a bare ValueError/TypeError —
+    callers (render_board.py's and collect_status.py's own `except StatusError` blocks)
+    rely on that to turn a hand-edited typo into a labelled error instead of an
+    unlabelled traceback.
+    """
+    if not isinstance(text, str):
+        raise StatusError(f"timestamp must be a string, got {text!r}")
+    candidate = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        dt = datetime.fromisoformat(candidate)
+    except ValueError as e:
+        raise StatusError(f"timestamp {text!r} is not a valid ISO-8601 timestamp: {e}") from e
     if dt.tzinfo is None:
         raise StatusError(f"timestamp {text!r} has no timezone; all timestamps must be UTC")
     return dt.astimezone(timezone.utc)
@@ -150,10 +160,7 @@ def derive_display_state(
     raise StatusError(f"unhandled raw state {raw.state!r}")
 
 
-def dependency_edge_state(
-    dep_item,  # the dependency's PlanItem
-    dep_display: DisplayState,
-) -> str:
+def dependency_edge_state(dep_display: DisplayState) -> str:
     """How to draw the arrow from a dependency to a dependent: 'done' | 'unmet' | 'broken' | 'unknown'.
 
     'broken' means the dependency itself failed — an arrow drawn as if the

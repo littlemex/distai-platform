@@ -118,10 +118,12 @@ are meant to be committed.
   this without needing a real cluster). The real guarantee is still your
   credentials: give it a `kubectl` context bound to a `get`/`list`-only
   `ClusterRole`, so that even a bug in this tool cannot mutate anything.
-- Names and namespaces from `plan.yaml` are validated as plain DNS-1123 labels
-  before they are ever spliced into an argv list (`lib/plan.py`), closing the
-  one place a plan file could otherwise smuggle a flag or metacharacter into
-  a subprocess call.
+- Names and namespaces from `plan.yaml` are validated as a plain lowercase
+  alphanumeric-and-hyphen token (no dots — stricter than a full DNS-1123
+  subdomain, which does allow them; this project's own Job and Workload
+  names never need one) before they are ever spliced into an argv list
+  (`lib/plan.py`), closing the one place a plan file could otherwise
+  smuggle a flag or metacharacter into a subprocess call.
 - `status.json` never carries raw `kubectl` output, only the few allowlisted
   fields in `lib/k8s_mapping.py` — so it is safe-ish to share for debugging,
   but still treat it and any rendered `board.html` from a real cluster as
@@ -149,3 +151,6 @@ are meant to be committed.
 - A manual entry's own `updated_at` is shown next to its `[manual]` badge, but
   is not enforced as required and does not by itself make the board flag a
   stale hand report as late.
+- An item `name` is not clipped or wrapped. The label column is sized for
+  names around the length of the longest one in the sample data (about 50
+  characters); a much longer name can run into the chart area.

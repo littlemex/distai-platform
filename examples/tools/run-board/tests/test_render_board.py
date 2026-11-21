@@ -1,24 +1,21 @@
-import html.parser
 import re
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from datetime import timedelta  # noqa: E402
 
+import json
+from unittest import mock
+
 from lib.plan import Plan, PlanItem, StatusSource, load_plan  # noqa: E402
 from lib.status_model import RawStatus, StatusDoc, load_status, parse_utc  # noqa: E402
+import render_board  # noqa: E402
 from render_board import render  # noqa: E402
 
 SAMPLE_DIR = Path(__file__).resolve().parents[1] / "sample"
-
-
-class _StrictParser(html.parser.HTMLParser):
-    """Just needs to not blow up — a cheap proxy for "this is well-formed enough"."""
-
-    def error(self, message):  # pragma: no cover - HTMLParser in py3 doesn't call this
-        raise AssertionError(message)
 
 
 def _render_sample() -> str:
@@ -27,11 +24,14 @@ def _render_sample() -> str:
     return render(plan, status)
 
 
-def test_renders_without_raising_and_parses():
+def test_svg_body_is_well_formed_xml():
+    # html.parser.HTMLParser is deliberately lenient and does not raise on malformed
+    # markup, so it cannot actually catch a broken tag — this parses the inner <svg>...
+    # </svg> block (which the page's own CSS/JS never touch) as strict XML instead,
+    # which DOES fail on an unescaped '&', a mismatched tag, or any other real break.
     out = _render_sample()
-    parser = _StrictParser()
-    parser.feed(out)  # raises on malformed markup via .error() above only for py2-style parsers;
-    # the real check is just that .feed() completes without a Python exception.
+    svg_text = out[out.index("<svg "):out.index("</svg>") + len("</svg>")]
+    ET.fromstring(svg_text)  # raises ET.ParseError on malformed XML
 
 
 def test_every_plan_item_name_appears():
@@ -79,6 +79,22 @@ def test_overdue_not_started_item_gets_its_own_class_distinct_from_unknown():
     from render_board import LEGEND_STATE_COLORS
 
     assert LEGEND_STATE_COLORS["overdue-not-started"] != LEGEND_STATE_COLORS["unknown"]
+    # Same check against the actual chart CSS, not just the legend's own color table:
+    # the two states must use two different CSS custom properties, with two different
+    # literal values, not the same --unknown-text token reused for both.
+    assert "--overdue-text:#b8550a" in out
+    assert "--unknown-text:#8d6605" in out
+    assert "stroke: var(--overdue-text)" in out
+
+
+def test_overdue_not_started_item_does_not_get_a_redundant_late_badge():
+    # Its own state text already says "Not started (overdue)" — a second [late] badge,
+    # in a different color token than the row's own orange, would be redundant and a
+    # color mismatch, not new information.
+    out = _render_sample()
+    overdue_row = re.search(r'<text class="note"[^>]*>Not started \(overdue\)(.*?)</text>', out)
+    assert overdue_row is not None
+    assert "[late]" not in overdue_row.group(1)
 
 
 def test_overrunning_item_gets_overrun_badge_and_pattern():
@@ -160,7 +176,7 @@ def test_dependency_edges_rendered_for_every_depends_on():
     assert actual_edges == expected_edges
 
 
-def _one_item_plan_and_status(state: str, collected_hours_after_planned_end: float):
+def _one_item_plan_and_status(state: str, collected_hours_after_planned_end: float, actual_start_hours_after_planned_start=None):
     block_start = parse_utc("2026-01-01T00:00:00Z")
     item = PlanItem(
         id="x", name="X", lane="l",
@@ -168,10 +184,19 @@ def _one_item_plan_and_status(state: str, collected_hours_after_planned_end: flo
         depends_on=(), stop_condition="", status_source=StatusSource(kind="manual", key="x"),
     )
     plan = Plan(grace_minutes=15, items=(item,))
-    raw = RawStatus(state=state, actual_start=None, actual_end=None, updated_at=None, note="")
+    actual_start = None
+    if actual_start_hours_after_planned_start is not None:
+        actual_start = block_start + item.planned_start + timedelta(hours=actual_start_hours_after_planned_start)
+    raw = RawStatus(state=state, actual_start=actual_start, actual_end=None, updated_at=None, note="")
     collected_at = block_start + item.planned_start + item.planned_duration + timedelta(hours=collected_hours_after_planned_end)
     status = StatusDoc(block_start=block_start, collected_at=collected_at, items={"x": raw}, collection_errors=())
     return plan, status
+
+
+def _bar_widths(out: str) -> tuple[float, float]:
+    planned_width = float(re.search(r'<rect class="bar-planned"[^>]*width="([\d.]+)"', out).group(1))
+    actual_width = float(re.search(r'<rect class="bar-actual"[^>]*width="([\d.]+)"', out).group(1))
+    return planned_width, actual_width
 
 
 def test_finished_item_with_no_actual_end_spans_the_planned_window_not_the_snapshot():
@@ -179,23 +204,41 @@ def test_finished_item_with_no_actual_end_spans_the_planned_window_not_the_snaps
     unknown' — not 'still running'. Its bar must be the same width as its own planned
     bar. Rendering with the snapshot many hours after the planned end makes the bug this
     guards against (stretching the bar out to the snapshot line) obviously different in
-    width from the fix, rather than coincidentally close."""
+    width from the fix, rather than coincidentally close. Covers both the no-actual_start
+    case (start defaults to the planned start) and the actual_start-present case."""
     for state in ("done", "failed"):
-        plan, status = _one_item_plan_and_status(state, collected_hours_after_planned_end=10)
-        out = render(plan, status)
-        planned_width = float(re.search(r'<rect class="bar-planned"[^>]*width="([\d.]+)"', out).group(1))
-        actual_width = float(re.search(r'<rect class="bar-actual"[^>]*width="([\d.]+)"', out).group(1))
-        assert abs(planned_width - actual_width) < 0.5, f"state={state}: planned={planned_width} actual={actual_width}"
+        for actual_start_offset in (None, 0, 5):
+            plan, status = _one_item_plan_and_status(
+                state, collected_hours_after_planned_end=10, actual_start_hours_after_planned_start=actual_start_offset
+            )
+            out = render(plan, status)
+            planned_width, actual_width = _bar_widths(out)
+            assert abs(planned_width - actual_width) < 0.5, (
+                f"state={state} actual_start_offset={actual_start_offset}: "
+                f"planned={planned_width} actual={actual_width}"
+            )
+
+
+def test_finished_item_started_after_its_own_planned_end_does_not_become_a_zero_width_sliver():
+    """A done/failed item whose actual_start is already past its own planned end (it
+    started very late) must still draw a real bar — start_dt + planned_duration — not
+    snap its end back to the planned end (which would be before start_dt, collapsing to
+    the 2px-minimum sliver this guards against)."""
+    plan, status = _one_item_plan_and_status(
+        "done", collected_hours_after_planned_end=10, actual_start_hours_after_planned_start=3,
+    )
+    out = render(plan, status)
+    planned_width, actual_width = _bar_widths(out)
+    assert abs(planned_width - actual_width) < 0.5
 
 
 def test_running_item_with_no_actual_end_does_still_extend_to_the_snapshot():
-    """The contrast case for the test above: a genuinely still-running item legitimately
+    """The contrast case for the tests above: a genuinely still-running item legitimately
     has no actual_end, and its bar must extend all the way to the snapshot line (it really
     is still going) rather than being clipped to the planned window like a finished item."""
     plan, status = _one_item_plan_and_status("running", collected_hours_after_planned_end=10)
     out = render(plan, status)
-    planned_width = float(re.search(r'<rect class="bar-planned"[^>]*width="([\d.]+)"', out).group(1))
-    actual_width = float(re.search(r'<rect class="bar-actual"[^>]*width="([\d.]+)"', out).group(1))
+    planned_width, actual_width = _bar_widths(out)
     assert actual_width > planned_width * 2
 
 
@@ -204,3 +247,21 @@ def test_bar_planned_is_pointer_events_enabled_so_its_tooltip_is_reachable():
     # overdue/not-started item's <title> tooltip would only trigger on its thin outline.
     out = _render_sample()
     assert "pointer-events: all;" in out
+
+
+def test_main_rejects_a_malformed_status_timestamp_with_a_labelled_error_not_a_traceback(tmp_path):
+    status_path = tmp_path / "status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "block_start": "2026-11-20T11:00:00Z",
+                "collected_at": "2026-11-20T12:00:00Z",
+                "items": {"phase-a-bare-ec2-experiment": {"state": "done", "actual_start": "17:05Z"}},
+            }
+        )
+    )
+    argv = ["render_board.py", str(SAMPLE_DIR / "plan.yaml"), str(status_path), "-o", str(tmp_path / "out.html")]
+    with mock.patch.object(sys, "argv", argv):
+        rc = render_board.main()
+    assert rc == 2
+    assert not (tmp_path / "out.html").exists()

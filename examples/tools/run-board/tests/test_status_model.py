@@ -1,5 +1,5 @@
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -147,13 +147,12 @@ def test_failed_is_failed_regardless_of_timing():
 
 
 def test_dependency_edge_states():
-    done_item = _item(item_id="dep")
     from lib.status_model import DisplayState
 
-    assert dependency_edge_state(done_item, DisplayState("done", False, False)) == "done"
-    assert dependency_edge_state(done_item, DisplayState("running", False, False)) == "unmet"
-    assert dependency_edge_state(done_item, DisplayState("failed", False, False)) == "broken"
-    assert dependency_edge_state(done_item, DisplayState("unknown", False, False)) == "unknown"
+    assert dependency_edge_state(DisplayState("done", False, False)) == "done"
+    assert dependency_edge_state(DisplayState("running", False, False)) == "unmet"
+    assert dependency_edge_state(DisplayState("failed", False, False)) == "broken"
+    assert dependency_edge_state(DisplayState("unknown", False, False)) == "unknown"
 
 
 def test_collected_before_block_start_rejected():
@@ -170,6 +169,20 @@ def test_collected_before_block_start_rejected():
 def test_naive_timestamp_rejected():
     with pytest.raises(StatusError):
         parse_utc("2026-11-20T11:00:00")  # no 'Z' or offset
+
+
+def test_malformed_timestamp_is_a_status_error_not_a_bare_value_error():
+    # datetime.fromisoformat's own ValueError must be wrapped, not left to escape as an
+    # unlabelled exception that the callers' "except StatusError" blocks would miss.
+    with pytest.raises(StatusError):
+        parse_utc("17:05Z")
+    with pytest.raises(StatusError):
+        parse_utc("not-a-timestamp-at-all")
+
+
+def test_non_string_timestamp_is_a_status_error():
+    with pytest.raises(StatusError):
+        parse_utc(12345)
 
 
 def test_unknown_raw_state_rejected():

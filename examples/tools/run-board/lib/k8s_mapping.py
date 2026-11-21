@@ -20,8 +20,10 @@ def map_job_status(job: dict) -> dict:
       is set only on success, matching the Job API's own contract).
     - failed: a condition of type "Failed" with status "True" — its own
       timestamp is used (not completionTime, which is not set on failure).
-    - unknown: no status block at all (should not normally happen for a real
-      Job, but a just-created one briefly has an empty status).
+    - unknown: the document has no `status` key at all (a `kubectl get` result that
+      was somehow stripped of it — this should not normally happen for a real Job).
+    - pending: a `status` key is present (even an empty `{}`, which a just-created
+      Job briefly has) but with no startTime and no terminal condition yet.
     """
     status = job.get("status", {})
     conditions = status.get("conditions", []) or []
