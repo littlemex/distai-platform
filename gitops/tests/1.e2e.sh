@@ -234,11 +234,31 @@ app_healthy_synced() { [[ "$(app_health "$1")" == "Healthy" && "$(app_sync "$1")
 # signal, since which error classes it covers for a GVK-discovery
 # failure specifically is not confirmed against a real cluster).
 app_operation_state() {
+  # Field separator is ASCII Unit Separator (0x1F / \x1F), never a tab: bash
+  # (and POSIX shells generally) treat space/tab/newline in IFS as "IFS
+  # whitespace" and collapse RUNS of them into one delimiter regardless of
+  # what else is in IFS -- confirmed directly:
+  #   printf 'a\tb\t\tc\n' | { IFS=$'\t' read -r x y z; ... }  # z is "c", not ""
+  # A tab-separated row with an empty retryCount field (Argo CD's own
+  # omitempty on retryCount: 0, or this script's own "" default) would
+  # silently lose that field and shift every later one left by one column
+  # -- Issue #45's review caught this before it ever shipped. \x1F is not
+  # "IFS whitespace", so IFS=$'\x1F' read below preserves empty fields
+  # exactly as written, the same way a comma or pipe separator would.
   k get application "$1" -n "${ARGOCD_NS}" -o json 2>/dev/null | python3 -c '
 import json, sys
 
-def flatten(sep, items, fmt):
-    return sep.join(fmt(i) for i in items)
+FS = "\x1f"
+
+def clean(s):
+    # Strips the field separator and the inner "|" item separator out of
+    # free-form text too, not just newlines/tabs: a value containing
+    # either would otherwise silently re-introduce the exact column-shift
+    # or item-merge bugs this encoding exists to avoid.
+    return (s or "").replace(FS, " ").replace("|", "/").replace("\t", " ").replace("\n", " ")
+
+def flatten(items, fmt):
+    return "|".join(fmt(i) for i in items)
 
 try:
     doc = json.load(sys.stdin)
@@ -246,8 +266,8 @@ except ValueError:
     doc = {}
 status = doc.get("status") or {}
 op = status.get("operationState") or {}
-phase = op.get("phase") or ""
-message = (op.get("message") or "").replace("\t", " ").replace("\n", " ")
+phase = clean(op.get("phase"))
+message = clean(op.get("message"))
 retry_count = op.get("retryCount")
 retry_count = "" if retry_count is None else str(retry_count)
 sync_result = op.get("syncResult")
@@ -257,14 +277,14 @@ if sync_result is None:
 else:
     has_sync_result = "1"
     resources_summary = flatten(
-        "|", sync_result.get("resources") or [],
-        lambda r: "{}/{}: {}".format(r.get("kind", ""), r.get("name", ""), (r.get("message") or "").replace("\t", " ").replace("\n", " ")),
+        sync_result.get("resources") or [],
+        lambda r: "{}/{}: {}".format(clean(r.get("kind")), clean(r.get("name")), clean(r.get("message"))),
     )
 conditions_summary = flatten(
-    "|", status.get("conditions") or [],
-    lambda c: "{}: {}".format(c.get("type", ""), (c.get("message") or "").replace("\t", " ").replace("\n", " ")),
+    status.get("conditions") or [],
+    lambda c: "{}: {}".format(clean(c.get("type")), clean(c.get("message"))),
 )
-print("\t".join([phase, message, retry_count, has_sync_result, resources_summary, conditions_summary]))
+print(FS.join([phase, message, retry_count, has_sync_result, resources_summary, conditions_summary]))
 '
 }
 
@@ -1010,18 +1030,20 @@ k get crd nodepools.karpenter.sh -o jsonpath='{.status.conditions[?(@.type=="Est
 # capacity-pool already tried and failed to sync once, while
 # karpenter-crd's own CRDs did not exist yet (stage A); that failure's
 # own operationState.message is a cached result Argo CD's own retry
-# backoff can leave untouched for minutes. Reading it without forcing a
-# fresh attempt first risks asserting a stale message that still blames
-# karpenter's own CRDs too, confirmed on a real run: the message read
-# immediately after karpenter-crd became Established still named
-# karpenter.k8s.aws/v1 and karpenter.sh/v1 as undiscoverable alongside
-# kueue.x-k8s.io, left over from before this stage's own bootstrap.
-# assert_stays_not_synced_refreshing forces a fresh sync attempt on
-# every single poll (not merely once), so "never reaches Synced" is
-# evidenced against this cell's continuously re-evaluated current state;
-# one more explicit refresh plus a short settle wait right before the
-# final read below gives Argo CD time to act on it and gets a message
-# tied to an attempt made after karpenter-crd was already fixed.
+# backoff can leave untouched for minutes -- confirmed on a real run:
+# the message read shortly after karpenter-crd became Established still
+# named karpenter.k8s.aws/v1 and karpenter.sh/v1 as undiscoverable
+# alongside kueue.x-k8s.io, left over from before this stage's own
+# bootstrap. assert_stays_not_synced_refreshing's hard_refresh_app on
+# every poll forces a fresh *comparison* (desired vs. live manifests) on
+# every single poll, so "never reaches Synced" is evidenced against this
+# cell's continuously re-evaluated current comparison state -- it does
+# NOT, on its own, force a new *sync attempt* against the fixed CRDs
+# (operation retries run on their own RetryCount/backoff clock,
+# independent of how often the comparison is refreshed; see the comment
+# on STAGE_B_READ_TIMEOUT just below for why, and how the read loop
+# there actually waits this staleness out rather than assuming one
+# refresh is enough).
 STAGE_B_TIMEOUT=180
 STAGE_B_WORK="${WORK_DIR}/stage-b"
 mkdir -p "${STAGE_B_WORK}"
@@ -1072,20 +1094,35 @@ hard_refresh_app "${APP_CAPACITY_POOL}"
 # hanging indefinitely.
 STAGE_B_READ_TIMEOUT=600
 STAGE_B_READ_INTERVAL=15
+# Matches the bare API group (karpenter.k8s.aws, karpenter.sh), never
+# requiring a trailing "/v1": confirmed on a real run that
+# syncResult.resources[]'s own per-resource message names the group and
+# Kind with no version at all ("...could not find karpenter.sh/NodePool
+# for requested resource...", "...karpenter.k8s.aws/EC2NodeClass...") --
+# a version-anchored pattern silently failed to recognize that form,
+# risking exactly the stale-but-accepted read this whole loop exists to
+# refuse.
 stage_b_mentions_karpenter_crds() {
   case "$1" in
-    *"karpenter.k8s.aws/v1"*|*"karpenter.sh/v1"*) return 0 ;;
+    *"karpenter.k8s.aws"*|*"karpenter.sh"*) return 0 ;;
     *) return 1 ;;
   esac
 }
 stage_b_read_start="$(date +%s)"
 stage_b_phase="" stage_b_message="" stage_b_retry_count="" stage_b_has_sync_result="0" stage_b_resources_summary="" stage_b_conditions_summary="" stage_b_combined=""
 while true; do
-  IFS=$'\t' read -r stage_b_phase stage_b_message stage_b_retry_count stage_b_has_sync_result stage_b_resources_summary stage_b_conditions_summary \
+  # IFS=$'\x1f' (ASCII Unit Separator), not $'\t': see the comment on
+  # app_operation_state() above for why a tab delimiter would silently
+  # swallow an empty field (e.g. retryCount omitted at 0) and shift every
+  # column after it.
+  IFS=$'\x1f' read -r stage_b_phase stage_b_message stage_b_retry_count stage_b_has_sync_result stage_b_resources_summary stage_b_conditions_summary \
     < <(app_operation_state "${APP_CAPACITY_POOL}")
   # Concatenated once per read, not chosen between: see the "Search the
   # top-level message..." note below for why neither field alone is
-  # matched on in isolation.
+  # matched on in isolation. status.conditions[] is deliberately left out
+  # of this combined text -- it is logged for diagnosis only (its
+  # coverage of this failure class is unconfirmed, see the README) and
+  # must never silently feed either match below.
   stage_b_combined="${stage_b_message}"
   [[ -n "${stage_b_resources_summary}" ]] && stage_b_combined+=" | resources: ${stage_b_resources_summary}"
   # Logged on every single poll, pass or fail (requirement: the values a
@@ -1093,6 +1130,15 @@ while true; do
   # not only once a verdict is reached.
   info "${APP_CAPACITY_POOL} operationState read: phase=[${stage_b_phase}] retryCount=[${stage_b_retry_count}] syncResult=[$([[ "${stage_b_has_sync_result}" == "1" ]] && echo present || echo nil)] message=[${stage_b_message}] resources=[${stage_b_resources_summary}] conditions=[${stage_b_conditions_summary}]"
   if [[ "${stage_b_phase}" == "Error" || "${stage_b_phase}" == "Failed" ]]; then
+    # Terminal: Argo CD itself has stopped retrying, so no amount of
+    # further polling changes this Application's own answer. A terminal
+    # read that still names karpenter's groups is therefore wrong now,
+    # not merely "not yet settled" -- fail immediately with the specific
+    # reason, rather than falling through to the generic kueue-mismatch
+    # message below (which would describe the symptom, not the cause).
+    if stage_b_mentions_karpenter_crds "${stage_b_combined}"; then
+      fail "${APP_CAPACITY_POOL}'s own operationState reached a terminal phase (${stage_b_phase}) still naming karpenter's own CRDs as undiscoverable (retryCount=${stage_b_retry_count}: ${stage_b_combined}) even though karpenter-crd was confirmed Established and Synced earlier in this stage -- Argo CD will not retry again, so this is this Application's final answer, not a stale read waiting to clear"
+    fi
     break
   fi
   if [[ "${stage_b_phase}" == "Running" && "${stage_b_has_sync_result}" == "1" ]] && ! stage_b_mentions_karpenter_crds "${stage_b_combined}"; then
@@ -1102,7 +1148,7 @@ while true; do
     if stage_b_mentions_karpenter_crds "${stage_b_combined}"; then
       fail "${APP_CAPACITY_POOL}'s own operationState still names karpenter's own CRDs as undiscoverable after ${STAGE_B_READ_TIMEOUT}s of polling since karpenter-crd was confirmed Established and Synced (last read: phase=${stage_b_phase}, retryCount=${stage_b_retry_count}: ${stage_b_combined}) -- either karpenter-crd is not actually Established on this cluster, or no sync attempt made since it was fixed has run in this window"
     else
-      fail "${APP_CAPACITY_POOL}'s operationState never settled into a readable state (phase Error/Failed, or Running with a non-nil syncResult) within ${STAGE_B_READ_TIMEOUT}s of polling after the final refresh -- every read landed in Argo CD's own between-attempts window (last read: phase=${stage_b_phase}, retryCount=${stage_b_retry_count}, message=${stage_b_message})"
+      fail "${APP_CAPACITY_POOL}'s operationState never reached an acceptable read (a terminal phase, or Running with a non-nil syncResult that does not name karpenter's own groups) within ${STAGE_B_READ_TIMEOUT}s of polling after the final refresh (last read: phase=${stage_b_phase}, retryCount=${stage_b_retry_count}, syncResult=$([[ "${stage_b_has_sync_result}" == "1" ]] && echo present || echo nil), message=${stage_b_message}) -- most likely every read landed in Argo CD's own between-attempts window, but an unexpected phase such as Succeeded this early in the cell's first-ever bootstrap would also land here, and is not itself proof of that specific cause"
     fi
   fi
   hard_refresh_app "${APP_CAPACITY_POOL}"
