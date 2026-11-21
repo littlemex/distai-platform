@@ -2222,9 +2222,9 @@ dcgm_scrape_phase="$(k get pod "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" -o jsonpath=
 dcgm_scrape_output="$(k logs "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" 2>&1)"
 [[ "${dcgm_scrape_phase}" == "Succeeded" ]] \
   || fail "curl http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics (-sf) exited non-zero (Pod phase ${dcgm_scrape_phase}): ${dcgm_scrape_output}"
-echo "${dcgm_scrape_output}" | grep -qE '^DCGM_FI_DEV_[A-Z_]+ ' \
+echo "${dcgm_scrape_output}" | grep -qE '^DCGM_FI_DEV_[A-Z_]+(\{[^}]*\})? [0-9.eE+-]+$' \
   || fail "curl http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics succeeded but no DCGM_FI_DEV_* series appeared; first 10 lines: $(echo "${dcgm_scrape_output}" | head -10 | tr '\n' ' ')"
-dcgm_series_count="$(echo "${dcgm_scrape_output}" | grep -cE '^DCGM_FI_DEV_[A-Z_]+ ')"
+dcgm_series_count="$(echo "${dcgm_scrape_output}" | grep -cE '^DCGM_FI_DEV_[A-Z_]+(\{[^}]*\})? [0-9.eE+-]+$')"
 k delete pod "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" --ignore-not-found --wait=true --timeout=60s >/dev/null \
   || fail "kubectl delete the step 15d metrics-scrape Pod"
 pass "GET http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics returned ${dcgm_series_count} DCGM_FI_DEV_* series from the real GPU on ${DCGM_NODE}"
