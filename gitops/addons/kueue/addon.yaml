@@ -31,6 +31,8 @@
 # (see karpenter-crd/addon.yaml for why this is a comment, not an enforced
 # pin: Argo CD's Application CRD has no OCI-digest field for Helm sources.)
 addon: kueue
+# RFC #41 Decision 1: delivered unconditionally to every cell, no opt-out.
+tier: core
 chart: kueue
 repoURL: registry.k8s.io/kueue/charts
 version: "0.20.6"
