@@ -1,19 +1,19 @@
 # RFC #41 Decision 2(b)/3/5 row 2. Catalog entry for dcgm-exporter
 # (closes part of #33 -- the exporter itself; #33's own PrometheusRule/
-# alerting acceptance criterion waits on a `prometheus` catalog entry, not
-# shipped on this PR).
+# alerting acceptance criterion waits on a `prometheus` catalog entry,
+# which does not exist yet).
 addon: dcgm-exporter
 tier: platform-optional
 dir: gitops/charts/dcgm-exporter
 namespace: dcgm-exporter
 # dependsOn deliberately omitted: RFC #41 Decision 5 row 2 names
-# `prometheus` as a dependency, but this PR does not ship a `prometheus`
-# catalog entry (ServiceMonitor is off -- see the chart's own values.yaml)
-# -- listing an unresolvable name here would fail
-# check_addon_catalog_sync.py's own dependency check by design (Decision
-# 3: "a dependsOn entry naming neither [tier: core nor a real
-# gitops/addon-catalog/ entry] is rejected... unresolvable"). Add
-# `dependsOn: [prometheus]` once that catalog entry exists.
+# `prometheus` as a dependency, but no `prometheus` catalog entry exists
+# yet (ServiceMonitor is off -- see the chart's own values.yaml) --
+# listing an unresolvable name here would fail check_addon_catalog_sync.py's
+# own dependency check by design (Decision 3: "a dependsOn entry naming
+# neither [tier: core nor a real gitops/addon-catalog/ entry] is
+# rejected... unresolvable"). Add `dependsOn: [prometheus]` once that
+# catalog entry exists.
 #
 # overridableKeys (RFC #41 Decision 3, mandatory): the only value paths a
 # cell's marker may set. Both carry the subchart's own "dcgm-exporter."

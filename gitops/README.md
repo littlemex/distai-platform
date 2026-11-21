@@ -55,11 +55,15 @@ ships to every cell with no opt-out: an `addons/<name>/addon.yaml` with
 **platform-optional** is an admin-delivered capability a cell opts into:
 its reviewed definition is `addon-catalog/<name>/addon.yaml`, and a marker
 file `cells/<cluster-name>/addons/<name>.yaml` (naming it in `fromCatalog`)
-is the opt-in, delivered by `addons-optional.ApplicationSet.yaml`; its
-pods run on the core `optional-pool` `NodePool`, never the system node
-group (whether that pool exists is still an open choice, see
-`charts/optional-pool/README.md`). A wrapped upstream chart is pinned in
-the wrapper's own `Chart.yaml`, not in an `addon.yaml`. **workload** is scoped to one team and has no delivery path until
+is the opt-in, delivered by `addons-optional.ApplicationSet.yaml`. A
+component with no node-placement need of its own lands on the core
+`optional-pool` `NodePool`, never the system node group (whether that
+pool exists is still an open choice, see
+`charts/optional-pool/README.md`); `dcgm-exporter`, the first shipped
+entry, is the opposite case -- its own `nodeSelector` targets GPU nodes
+specifically, so it never schedules onto `optional-pool` at all. A
+wrapped upstream chart is pinned in the wrapper's own `Chart.yaml`, not
+in an `addon.yaml`. **workload** is scoped to one team and has no delivery path until
 [#22](https://github.com/littlemex/distai-platform/issues/22) ships.
 
 ## Bootstrapping a cell (once, after `terraform apply`)
@@ -172,7 +176,13 @@ semver):
    own annotations - never set them by hand in this file.
 4. In `smoke/queue.yaml`, set `values.clusterQueue.resourceFlavor` to the
    same `pool.name` chosen in step 3.
-5. Open a PR. Once merged and `stable` moves, `cells.ApplicationSet.yaml`
+5. Decide whether to keep `addons/dcgm-exporter.yaml` (opts this cell into
+   the `dcgm-exporter` platform-optional component, RFC
+   [#41](https://github.com/littlemex/distai-platform/issues/41)) --
+   delete the file if this cell has no NVIDIA GPU capacity to monitor; a
+   platform-optional component's own definition is that the cell works
+   the same either way.
+6. Open a PR. Once merged and `stable` moves, `cells.ApplicationSet.yaml`
    picks the new cell's files up on its own - no second `bootstrap.sh` run
    is needed for an ordinary cell addition (only a new chart registry, or
    a `--revision` change ahead of a merge, needs one).
