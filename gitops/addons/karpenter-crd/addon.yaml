@@ -17,6 +17,8 @@
 # reviewer can tell a republished 1.15.2 tag apart from the one this PR
 # reviewed, not because anything in this file enforces it.
 addon: karpenter-crd
+# RFC #41 Decision 1: delivered unconditionally to every cell, no opt-out.
+tier: core
 chart: karpenter-crd
 repoURL: public.ecr.aws/karpenter
 version: "1.15.2"
