@@ -1472,6 +1472,17 @@ crds_owned_by_karpenter="$(app_field "${APP_KARPENTER}" '{.status.resources[?(@.
   || fail "${APP_KARPENTER} (skipCrds) still owns CRD(s) in its own resource list: ${crds_owned_by_karpenter}"
 pass "${APP_KARPENTER_CRD} owns the CRDs (${crds_owned_by_karpenter_crd}); ${APP_KARPENTER} owns none -- no shared-resource conflict"
 
+# Regression guard for RFC #41 Decision 4 Finding 1's own allowEmpty
+# scoping: templatePatch's {{- if .allowEmpty }} branch must never fire
+# for a core addon that does not set it, which would mean the key went
+# back into platform.ApplicationSet.yaml's own SHARED base template --
+# silently removing Argo CD's own safety net (refuse to prune to zero
+# resources) for karpenter-crd too, not only for optional-pool.
+karpenter_crd_automated="$(app_field "${APP_KARPENTER_CRD}" '{.spec.syncPolicy.automated}')"
+[[ "${karpenter_crd_automated}" != *"allowEmpty"* ]] \
+  || fail "${APP_KARPENTER_CRD}'s spec.syncPolicy.automated is [${karpenter_crd_automated}] -- allowEmpty must never appear here; it is optional-pool's own addon.yaml-scoped opt-in, not the shared base template's"
+pass "${APP_KARPENTER_CRD}'s spec.syncPolicy.automated carries no allowEmpty -- the per-addon opt-in stayed scoped to optional-pool, not the shared base template"
+
 # -------------------------------------------------------------- 10. capacity
 
 wait_until 900 15 "capacity-pool Application Healthy and Synced" app_healthy_synced "${APP_CAPACITY_POOL}" \
