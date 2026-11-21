@@ -27,6 +27,10 @@ tier: core
 dir: gitops/charts/optional-pool
 wave: controllers
 namespace: kube-system
+# Scoped to this one addon.yaml only: see platform.ApplicationSet.yaml's
+# own templatePatch comment for why this must never become the default
+# for every core addon.
+allowEmpty: true
 values:
   enabled: true
   pool:
