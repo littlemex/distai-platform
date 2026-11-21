@@ -1,0 +1,52 @@
+# clusterName/nodeRole: same contract as gitops/charts/capacity-pool
+# (RFC #25 Decision 2) -- no default is safe, both are cell-specific and
+# come from gitops/addons/optional-pool/addon.yaml's own valuesFrom.
+clusterName: ""
+nodeRole: ""
+
+# RFC #41 Decision 4 Finding 1, option (b) (recommended there, NOT YET
+# a maintainer decision -- see gitops/addons/optional-pool/addon.yaml's
+# own header comment and this PR's own "things to decide" list). false
+# renders nothing: a cell with enabled: false has no dedicated pool at
+# all, the Finding's option (a) instead (extend CriticalAddonsOnly
+# tolerations on the system node group case by case as new
+# platform-optional components are catalogued -- not built by this PR).
+enabled: true
+
+pool:
+  # Shared by the NodePool and its EC2NodeClass. Must not collide with any
+  # capacity-pool pool.name in the same cell (both charts create
+  # cluster-scoped NodePool/EC2NodeClass objects by this name).
+  name: optional
+  # Deliberately small and fixed: this pool exists for admin-delivered
+  # platform-optional component pods only (Decision 1's own definition),
+  # never team/workload capacity (gitops/charts/capacity-pool's own job).
+  limits:
+    cpu: "8"
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 60s
+
+# Same on-demand, amd64, c/m/r, generation > 5 shape as
+# gitops/charts/capacity-pool's own default requirements: on-demand
+# because an admin component should not be evicted by a Spot interruption.
+requirements:
+  - key: karpenter.sh/capacity-type
+    operator: In
+    values: ["on-demand"]
+  - key: kubernetes.io/arch
+    operator: In
+    values: ["amd64"]
+  - key: karpenter.k8s.aws/instance-category
+    operator: In
+    values: ["c", "m", "r"]
+  - key: karpenter.k8s.aws/instance-generation
+    operator: Gt
+    values: ["5"]
+
+# Pinned, not "latest", and identical to gitops/charts/capacity-pool's own
+# pin (see that chart's values.yaml for where al2023@v20261112 was
+# confirmed) -- a reviewed diff bumps both together.
+amiFamily: AL2023
+amiSelectorTerms:
+  - alias: al2023@v20261112
