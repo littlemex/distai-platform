@@ -42,6 +42,40 @@ pool:
     consolidationPolicy: WhenEmptyOrUnderutilized
     consolidateAfter: 60s
 
+  # EC2NodeClass.spec.blockDeviceMappings' root volume size, as a plain
+  # Kubernetes quantity string (e.g. "100Gi" or "150Gi"). Empty by
+  # default: the EC2NodeClass renders no blockDeviceMappings at all, so a
+  # node's root volume stays whatever the AMI's own default is -- no
+  # behavior change for an existing pool that does not set this. Set it
+  # when a pool's own workloads need more room than that default leaves
+  # free for container images. Confirmed necessary on real hardware: a
+  # trn2.3xlarge node's default root volume ran out of space mid-pull of
+  # a 7.5 GiB verification image ("no space left on device" while
+  # extracting a layer); kubelet's own disk-pressure eviction then turned
+  # that into a pod that was genuinely Scheduled and bound, evicted, and
+  # whose now-pod-less node Karpenter reclaimed as idle shortly after --
+  # a failure that reads, from Karpenter's own side alone, as an
+  # unrelated empty-node consolidation.
+  rootVolumeSizeGi: ""
+
+  # Empty (default): no extra ENI is requested, matching every existing
+  # pool exactly (no behavior change for a pool that does not set this). A
+  # pool targeting an EFA-capable instance type (for example the
+  # single-network-card g7/g7e sizes, which carry exactly one EFA
+  # interface) sets this to request it; otherwise the instance boots
+  # without an EFA device even though the type supports one (see
+  # ec2nodeclass.yaml's own comment). Example for one EFA device on
+  # network card 0, the only shape a single-network-card instance type
+  # supports:
+  #   networkInterfaces:
+  #     - networkCardIndex: 0
+  #       deviceIndex: 0
+  #       interfaceType: interface
+  #     - networkCardIndex: 0
+  #       deviceIndex: 1
+  #       interfaceType: efa-only
+  networkInterfaces: []
+
 # Used only when pool.capacityType is "reserved": renders
 # EC2NodeClass.spec.capacityReservationSelectorTerms as one term
 # [{tags, instanceMatchCriteria}]. Reservations are selected by tag, not by
