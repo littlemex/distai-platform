@@ -1,0 +1,11 @@
+Endpoint (cluster-internal): http://{{ include "agg.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+
+GPUs this release requests (the --gpu-count for score.py):
+  {{ mul (int .Values.engine.replicas) (int .Values.engine.gpusPerEngine) }} = {{ .Values.engine.replicas }} engines x {{ .Values.engine.gpusPerEngine }}
+
+Scheduler: --chunked-prefill-size {{ .Values.engine.scheduler.chunkedPrefillSize }}{{ if .Values.engine.scheduler.enableMixedChunk }} --enable-mixed-chunk{{ end }}
+KV cache tier: {{ .Values.kvCacheTier.mode }}{{ if eq .Values.kvCacheTier.mode "local" }} (--enable-hierarchical-cache --hicache-size {{ .Values.kvCacheTier.hicache.sizeGb }}){{ end }}
+{{- if not .Values.model.name }}
+
+WARNING: model.name is empty; the engine exits until it is set.
+{{- end }}
