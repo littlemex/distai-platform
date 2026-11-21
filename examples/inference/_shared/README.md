@@ -1,12 +1,12 @@
 # Shared measurement tools
 
-The tools here measure any OpenAI-compatible vLLM endpoint the same way, so that a disaggregated run and its aggregated baseline are scored by identical rules. They wrap vLLM's own benchmark client rather than replacing it, and add only what no existing tool computes: a per-request longest inter-token gap, a joint SLO over planned requests, and goodput per GPU including drain.
+The tools here measure any OpenAI-compatible endpoint the same way, a vLLM or an SGLang one, so that a disaggregated run and its aggregated baseline, and one engine and the other, are scored by identical rules. They wrap vLLM's own benchmark client rather than replacing it, and add only what no existing tool computes: a per-request longest inter-token gap, a joint SLO over planned requests, and goodput per GPU including drain.
 
 | Directory | What it is |
 | --- | --- |
 | [`load-replay/`](load-replay/) | `run-load.sh` and the `load-job.yaml` Job that runs it in the cluster: open-loop Poisson load with `vllm bench serve`, send-lag rejection and pod snapshots |
 | [`scorer/`](scorer/) | `score.py`, which scores saved per-request results against an SLO, and `to_prom.py`, which turns a score into Prometheus metrics |
-| [`dashboards/`](dashboards/) | `vllm-pd.json` (Grafana 11) and `scrape-configs.yaml`, the scrape jobs it reads |
+| [`dashboards/`](dashboards/) | `vllm-pd.json` and `sglang-pd.json` (Grafana 11), and `scrape-configs.yaml`, the scrape jobs they read |
 
 ## Load replay
 
@@ -53,6 +53,10 @@ cat "results-$RUN_ID/exit-code"
 ```
 
 Delete the Job with `kubectl delete job load-replay -n "$NAMESPACE"` before the next run.
+
+### SGLang targets use the same client
+
+The SGLang examples in [`../sglang/`](../sglang/) are measured with this same `run-load.sh`, `vllm bench serve` and `score.py`, unchanged: SGLang serves the same OpenAI-compatible `/v1/completions` streaming endpoint, so only `TARGET_URL` changes (for example `http://pd-sglang-disagg-pd:8000`). SGLang's own benchmark client, `python3 -m sglang.benchmark.serving --output-details` (formerly `sglang.bench_serving`), is not used, because its saved per-request detail cannot pass the checks above: at the pinned SGLang release it writes `ttfts`, `itls`, `errors`, `input_lens`, `output_lens` and `generated_texts` per request (`python/sglang/benchmark/serving.py` at tag `v0.5.23`), but no send time, latency or client-side queue time, so neither the send-lag check nor the drain-inclusive interval of `score.py` can be computed from it. Using one client for both engines also removes the confound of a different client per engine; what stays engine-specific is only the server. The per-chunk gap `vllm bench serve` records for SGLang is the raw time between two streamed chunks, the same primitive it records for vLLM (the RFC, [#37](https://github.com/littlemex/distai-platform/issues/37), Decision 7, asks for exactly that raw gap). This has not yet been run against a real SGLang engine; the SGLang verification round confirms that the requests `vllm bench serve` sends are accepted and the records are complete.
 
 `queue_times` is the time vLLM's client recorded between a request's dispatch from its arrival schedule and the moment it was sent. It catches a client that is too busy to start requests on time; it does not include a delay in waking up for a scheduled arrival, which vLLM does not record. Keep the request rate well within what one client process sustains, and treat the bound as a necessary check, not a proof that every arrival was on time.
 
@@ -101,7 +105,7 @@ It reads the one JSON object `vllm bench serve --save-detailed` writes, with per
 
 The summary has exactly these fields: `planned_requests`, `successful_requests`, `failed_requests`, `no_tokens_generated`, `joint_attainment_share`, `goodput_per_gpu`, `ttft_ms` and `longest_gap_ms`. Because it is computed from saved records, the same run can be re-scored against another SLO without re-running the load.
 
-## Dashboard and the goodput panel
+## Dashboards and the goodput panel
 
 [`dashboards/vllm-pd.json`](dashboards/vllm-pd.json) shows engine latency histograms, queue depth, KV cache use, engine count and placement per role, NIXL KV transfer time and volume, EFA TX/RX and RDMA write bytes per node, GPU utilization and memory per node, and the joint-SLO goodput and attainment of scored runs. It reads four scrape jobs:
 
@@ -112,7 +116,9 @@ The summary has exactly these fields: `planned_requests`, `successful_requests`,
 | `dcgm-gpu` | [`dashboards/scrape-configs.yaml`](dashboards/scrape-configs.yaml); selects NVIDIA's own [`dcgm-exporter`](https://nvidia.github.io/dcgm-exporter/helm-charts) DaemonSet |
 | `distai-pd-score` | [`dashboards/scrape-configs.yaml`](dashboards/scrape-configs.yaml); a Prometheus Pushgateway holding the pushed scores |
 
-Append the three jobs from `scrape-configs.yaml` to the collector's `scrape_configs` of that observability stack (it sends to Amazon Managed Service for Prometheus, per the RFC's own Decision 7, [#37](https://github.com/littlemex/distai-platform/issues/37)), and import `vllm-pd.json` in Grafana with that Prometheus data source.
+[`dashboards/sglang-pd.json`](dashboards/sglang-pd.json) is the SGLang counterpart. It extends the `sglang-pd.json` of the same awsome-distributed-ai observability stack (at commit [`25d5723`](https://github.com/awslabs/awsome-distributed-ai/blob/25d5723cb62ab1f83b0f4307c28c8f3496bfaa53/observability/prometheus-grafana/eks-managed-observability/dashboards/sglang-pd.json)) with a Helm release filter, the aggregated baseline next to decode in the latency panels, all six of SGLang's per-role disaggregation queues (prefill: `num_prefill_bootstrap_queue_reqs`, `num_prefill_inflight_queue_reqs`; decode: `num_decode_prealloc_queue_reqs`, `num_decode_transfer_queue_reqs`, `num_decode_host_receive_queue_reqs`, `num_decode_deferred_kv_release_reqs`), failed KV transfers and bootstraps, and the same joint-SLO goodput and GPU panels as `vllm-pd.json`. The upstream panel that plotted replicas wanted by a KEDA queue trigger is dropped, since these examples run at a fixed ratio with no autoscaler. `sglang:kv_transfer_latency_ms` has fixed buckets ending at 5000 ms, so its quantiles saturate there; the panel says so. It reads the `sglang` job in [`dashboards/scrape-configs.yaml`](dashboards/scrape-configs.yaml), which has the same name and keep rules as the upstream `sglang` job plus a `release` label; append it instead of the upstream job, not next to it, since Prometheus rejects two jobs with the same name. Both SGLang charts also set the plain `component` pod label the upstream job reads, so the upstream dashboard keeps working against them.
+
+Append the jobs from `scrape-configs.yaml` to the collector's `scrape_configs` of that observability stack (it sends to Amazon Managed Service for Prometheus, per the RFC's own Decision 7, [#37](https://github.com/littlemex/distai-platform/issues/37)), and import `vllm-pd.json` and `sglang-pd.json` in Grafana with that Prometheus data source.
 
 Install `dcgm-exporter` itself with its own `serviceMonitor.enabled` turned off, since this pipeline has no Prometheus Operator CRDs for that chart's own default `ServiceMonitor` to attach to (this pipeline's own collector discovers targets through `scrape-configs.yaml`'s `kubernetes_sd_configs` above instead):
 

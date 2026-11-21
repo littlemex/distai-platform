@@ -1,5 +1,5 @@
-# Prometheus scrape jobs that feed vllm-pd.json. They follow the shape of the
-# sglang job in awslabs/awsome-distributed-ai
+# Prometheus scrape jobs that feed vllm-pd.json and sglang-pd.json. They
+# follow the shape of the sglang job in awslabs/awsome-distributed-ai
 # observability/prometheus-grafana/eks-managed-observability/scrape-configs/,
 # so they can be appended to the same collector's scrape_configs list. Keep
 # $$1/$$2 as written: that collector unescapes $$ to $. For a plain
@@ -18,6 +18,54 @@
   - role: pod
   relabel_configs:
   - source_labels: [__meta_kubernetes_pod_label_vllm_metrics]
+    action: keep
+    regex: "true"
+  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+    action: keep
+    regex: "true"
+  - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+    action: replace
+    regex: ([^:]+)(?::\d+)?;(\d+)
+    replacement: $$1:$$2
+    target_label: __address__
+  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+    action: replace
+    regex: (.+)
+    target_label: __metrics_path__
+  - source_labels: [__meta_kubernetes_pod_node_name]
+    action: replace
+    target_label: kubernetes_node
+  - source_labels: [__meta_kubernetes_pod_name]
+    action: replace
+    target_label: pod
+  - source_labels: [__meta_kubernetes_namespace]
+    action: replace
+    target_label: namespace
+  - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+    action: replace
+    target_label: component
+  - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+    action: replace
+    target_label: release
+
+# SGLang engine metrics (--enable-metrics). Takes the place of the upstream
+# awsome-distributed-ai "sglang" job (scrape-configs/sglang.yaml at
+# 25d5723cb62ab1f83b0f4307c28c8f3496bfaa53): the same job name and the same
+# keep rules (pods labeled sglang-metrics=true and annotated
+# prometheus.io/scrape=true), so the upstream sglang-pd.json keeps working,
+# plus the release label sglang-pd.json filters on. Append this job instead
+# of the upstream one, not next to it: Prometheus rejects two jobs with one
+# name. Both charts in examples/inference/sglang/ set these labels; the
+# role comes from app.kubernetes.io/component (prefill, decode or
+# aggregated), which the charts also copy into the plain "component" label
+# the upstream job reads.
+- job_name: 'sglang'
+  scrape_interval: 10s
+  metrics_path: /metrics
+  kubernetes_sd_configs:
+  - role: pod
+  relabel_configs:
+  - source_labels: [__meta_kubernetes_pod_label_sglang_metrics]
     action: keep
     regex: "true"
   - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]

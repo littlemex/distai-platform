@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Open-loop load against an OpenAI-compatible vLLM endpoint, kept honest.
+# Open-loop load against an OpenAI-compatible endpoint (vLLM or SGLang), kept honest.
 #
 # 1. Snapshots the pods of the namespace (OUTPUT without .json, plus
 #    .pods-before.json).
