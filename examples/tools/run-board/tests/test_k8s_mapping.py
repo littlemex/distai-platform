@@ -62,12 +62,41 @@ def test_kueue_workload_finished_failure_reason_is_failed():
         "status": {
             "conditions": [
                 {"type": "Admitted", "status": "True", "lastTransitionTime": "t1"},
-                {"type": "Finished", "status": "True", "lastTransitionTime": "t2", "reason": "PodsFailed"},
+                {"type": "Finished", "status": "True", "lastTransitionTime": "t2", "reason": "Failed"},
             ]
         }
     }
     mapped = map_kueue_workload_status(doc)
     assert mapped["state"] == "failed"
+
+
+def test_kueue_workload_finished_with_unrecognized_reason_is_unknown_not_done():
+    # This is the fail-open bug this mapping must not have: any reason other than the
+    # two the allowlist explicitly recognizes must render as "unknown", never silently
+    # as "done".
+    doc = {
+        "status": {
+            "conditions": [
+                {"type": "Admitted", "status": "True", "lastTransitionTime": "t1"},
+                {"type": "Finished", "status": "True", "lastTransitionTime": "t2", "reason": "SomeFutureReasonValue"},
+            ]
+        }
+    }
+    mapped = map_kueue_workload_status(doc)
+    assert mapped["state"] == "unknown"
+
+
+def test_kueue_workload_finished_with_no_reason_is_unknown_not_done():
+    doc = {
+        "status": {
+            "conditions": [
+                {"type": "Admitted", "status": "True", "lastTransitionTime": "t1"},
+                {"type": "Finished", "status": "True", "lastTransitionTime": "t2"},
+            ]
+        }
+    }
+    mapped = map_kueue_workload_status(doc)
+    assert mapped["state"] == "unknown"
 
 
 def test_kueue_workload_no_status_is_unknown():

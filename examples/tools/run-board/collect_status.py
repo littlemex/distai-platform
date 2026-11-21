@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""collect_status.py — the only script in run-board that touches a cluster or AWS.
+"""collect_status.py — the only script in run-board that touches a cluster.
 
 Read-only, by construction (see lib/readonly_exec.py's allowlist): `kubectl get`
-and `aws ec2 describe-*` only. Never writes to the cluster or to AWS. Builds
-status.json from a small, explicit allowlist of fields (see lib/k8s_mapping.py)
-— never the full kubectl/aws JSON, so account IDs, image URIs, node IPs and
-free-text condition messages never end up on disk or in the rendered HTML.
+only. Never writes to the cluster. Builds status.json from a small, explicit
+allowlist of fields (see lib/k8s_mapping.py) — never the full kubectl JSON, so
+account IDs, image URIs, node IPs and free-text condition messages never end
+up on disk or in the rendered HTML.
+
+This PR does not collect anything from AWS directly (e.g. a Capacity
+Reservation's own `AvailableInstanceCount`) — only `job` / `kueue_workload` /
+`manual` status sources exist today. A `capacity_reservation` status source
+backed by a read-only `aws ec2 describe-capacity-reservations` call is a
+natural follow-up, deliberately left out of this PR to keep its scope small.
 
 Usage:
     python3 collect_status.py plan.yaml --block-start 2026-11-20T11:00:00Z \
@@ -30,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.k8s_mapping import map_job_status, map_kueue_workload_status
 from lib.plan import load_plan, PlanError
 from lib.readonly_exec import run_readonly, DisallowedCommandError
+from lib.status_model import StatusError, parse_utc
 
 
 def _now_utc_iso() -> str:
@@ -87,6 +94,12 @@ def main() -> int:
         print(f"[collect_status] invalid plan: {e}", file=sys.stderr)
         return 2
 
+    try:
+        parse_utc(args.block_start)
+    except StatusError as e:
+        print(f"[collect_status] invalid --block-start: {e}", file=sys.stderr)
+        return 2
+
     manual_status = {}
     if args.manual_status:
         with open(args.manual_status, "r", encoding="utf-8") as f:
@@ -108,6 +121,7 @@ def main() -> int:
         "items": items,
         "collection_errors": errors,
     }
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(doc, f, indent=2, sort_keys=True)
         f.write("\n")

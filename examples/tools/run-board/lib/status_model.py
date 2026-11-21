@@ -40,7 +40,7 @@ class RawStatus:
     state: str  # one of RAW_STATES
     actual_start: datetime | None
     actual_end: datetime | None
-    updated_at: datetime | None  # required for kind=manual entries; informational otherwise
+    updated_at: datetime | None  # expected for kind=manual entries (shown next to the badge), not enforced
     note: str  # allowlisted, human-written short text only — never raw k8s/AWS output
 
 
@@ -154,11 +154,17 @@ def dependency_edge_state(
     dep_item,  # the dependency's PlanItem
     dep_display: DisplayState,
 ) -> str:
-    """How to draw the arrow from a dependency to a dependent: 'done' | 'unmet' | 'broken'.
+    """How to draw the arrow from a dependency to a dependent: 'done' | 'unmet' | 'broken' | 'unknown'.
 
     'broken' means the dependency itself failed — an arrow drawn as if the
     order were merely "not yet satisfied" would understate the problem.
+    'unknown' means the dependency's own state could not be collected at all —
+    drawing it the same as 'unmet' (a dependency we positively know is not
+    done yet) would claim more certainty than this tool actually has: an
+    "unmet" dependency might in fact already be done, just not observed.
     """
+    if dep_display.base == "unknown":
+        return "unknown"
     if dep_display.base == "failed":
         return "broken"
     if dep_display.base == "done":

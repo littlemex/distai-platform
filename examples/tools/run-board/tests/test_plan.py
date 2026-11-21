@@ -144,6 +144,63 @@ def test_status_source_rejects_unsafe_namespace(tmp_path, bad_namespace):
         load_plan(path)
 
 
+@pytest.mark.parametrize(
+    "bad_name",
+    ["Has-Capital", "-leading-dash", "trailing-dash-", "has a space", "../etc/passwd", "name;rm -rf /"],
+)
+def test_status_source_rejects_unsafe_name(tmp_path, bad_name):
+    """Same guard as the namespace test above, for the 'name' field — both are spliced
+    into the same argv list, so both must be validated, not just the first one checked."""
+    path = _write_plan(
+        tmp_path,
+        f"""
+        items:
+          - id: a
+            name: A
+            lane: l
+            planned_start: "T+00:00"
+            planned_duration: "PT1H"
+            status_source: {{kind: job, namespace: ok-ns, name: "{bad_name}"}}
+        """,
+    )
+    with pytest.raises(PlanError):
+        load_plan(path)
+
+
+def test_non_string_planned_duration_is_a_plan_error_not_an_attribute_error(tmp_path):
+    path = _write_plan(
+        tmp_path,
+        """
+        items:
+          - id: a
+            name: A
+            lane: l
+            planned_start: "T+00:00"
+            planned_duration: 2
+            status_source: {kind: manual, key: a}
+        """,
+    )
+    with pytest.raises(PlanError):
+        load_plan(path)
+
+
+def test_non_string_planned_start_is_a_plan_error_not_an_attribute_error(tmp_path):
+    path = _write_plan(
+        tmp_path,
+        """
+        items:
+          - id: a
+            name: A
+            lane: l
+            planned_start: 0
+            planned_duration: "PT1H"
+            status_source: {kind: manual, key: a}
+        """,
+    )
+    with pytest.raises(PlanError):
+        load_plan(path)
+
+
 def test_empty_items_rejected(tmp_path):
     path = _write_plan(tmp_path, "items: []\n")
     with pytest.raises(PlanError, match="non-empty"):

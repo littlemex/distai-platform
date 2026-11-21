@@ -6,11 +6,12 @@ output file. Deterministic: the same two inputs always produce byte-identical
 output (it never reads the wall clock — `collected_at` from status.json is the
 only notion of "now" used to decide what is late or overdue).
 
-Visual language follows this repo's own AWS-Cloudscape token snapshot
-(see ../../../.claude/rules/aws-design-kit-for-ui.md): link blue #006ce0, pill
-buttons, success/info/error tokens. The "unknown" amber and the hatch/pattern
-fills for delayed/failed/unknown are this tool's own addition (Cloudscape has
-no tiling-pattern convention) so that state is never color-only.
+Visual language follows a snapshot of the AWS Cloudscape design tokens used
+elsewhere in this project: link blue #006ce0, pill-shaped buttons, and
+success/info/error color tokens. The "unknown" amber and the hatch/pattern
+fills for failed/unknown/late/overrunning are this tool's own addition
+(Cloudscape has no tiling-pattern convention) so that state is never
+color-only.
 
 Usage:
     python3 render_board.py plan.yaml status.json -o board.html
@@ -115,17 +116,21 @@ h1 { font-size: 20px; margin: 0 0 4px; }
 .state-done .bar-actual { fill: var(--success-bg); stroke: var(--success-text); stroke-width: 1.5; }
 .state-failed .bar-actual { fill: url(#hatch-failed); stroke: var(--error-text); stroke-width: 1.5; }
 .state-unknown .bar-actual { fill: url(#hatch-unknown); stroke: var(--unknown-text); stroke-width: 1.5; stroke-dasharray: 2 2; }
-.mod-late .bar-actual { fill: url(#hatch-late); }
-.mod-overrunning .bar-actual { fill: url(#hatch-overrun); }
-.badge {
-  font-size: 10px; padding: 1px 7px; border-radius: var(--r-button);
-  margin-left: 6px; font-weight: 600;
-}
-.badge-manual { background: var(--line2); color: var(--ink2); }
-.badge-late { background: var(--unknown-bg); color: var(--unknown-text); }
+/* "late"/"overrunning" only ever modify running/done — never failed/unknown, whose own
+   pattern already says the thing that matters most. These are deliberately compound
+   (state AND modifier on the same element) rather than two separate same-specificity
+   rules, so which one "wins" does not depend on source order. */
+.state-running.mod-late .bar-actual, .state-done.mod-late .bar-actual { fill: url(#hatch-late); }
+.state-running.mod-overrunning .bar-actual { fill: url(#hatch-overrun); }
+/* SVG <tspan> has no box model (no padding/background/border-radius), so these
+   badges are color + weight only, not little pill chips. */
+.badge { font-size: 10px; font-weight: 700; }
+.badge-manual { fill: var(--ink2); }
+.badge-late { fill: var(--unknown-text); }
 .dep-done { stroke: var(--success-text); stroke-width: 1.2; }
 .dep-unmet { stroke: var(--ink2); stroke-width: 1; stroke-dasharray: 2 2; }
 .dep-broken { stroke: var(--error-text); stroke-width: 1.5; }
+.dep-unknown { stroke: var(--unknown-text); stroke-width: 1; stroke-dasharray: 1 3; }
 .footnote { color: var(--ink2); font-size: 11px; margin-top: 10px; }
 .note { font-size: 11px; fill: var(--ink2); }
 """
@@ -256,12 +261,18 @@ def render(plan: Plan, status: StatusDoc) -> str:
         px = CHART_LEFT + _minutes(item.planned_start) * px_per_minute
         pw = max(2.0, _minutes(item.planned_duration) * px_per_minute)
         svg_parts.append(f'<g class="{state_classes}">')
+        if item.stop_condition:
+            svg_parts.append(f"<title>{html.escape(item.stop_condition)}</title>")
         svg_parts.append(f'<rect class="bar-planned" x="{px:.1f}" y="{y + 3:.1f}" width="{pw:.1f}" height="{ROW_H - 6}" rx="6" />')
 
-        if raw and raw.actual_start and disp.base in ("running", "done", "failed"):
-            ax = CHART_LEFT + _minutes(raw.actual_start - status.block_start) * px_per_minute
-            end_dt = raw.actual_end if raw.actual_end else status.collected_at
-            aw = max(2.0, _minutes(end_dt - raw.actual_start) * px_per_minute)
+        if disp.base in ("running", "done", "failed"):
+            # Prefer the real actual_start/actual_end; a manual entry that only ever says
+            # {"state": "failed"} with no timestamps still gets a filled bar (spanning the
+            # planned window) rather than silently drawing nothing at all.
+            start_dt = raw.actual_start if (raw and raw.actual_start) else (status.block_start + item.planned_start)
+            end_dt = (raw.actual_end if (raw and raw.actual_end) else None) or status.collected_at
+            ax = CHART_LEFT + _minutes(start_dt - status.block_start) * px_per_minute
+            aw = max(2.0, _minutes(end_dt - start_dt) * px_per_minute)
             svg_parts.append(f'<rect class="bar-actual" x="{ax:.1f}" y="{y + 7:.1f}" width="{aw:.1f}" height="{ROW_H - 14}" rx="4" />')
         elif disp.base == "unknown":
             svg_parts.append(f'<rect class="bar-actual" x="{px:.1f}" y="{y + 7:.1f}" width="{pw:.1f}" height="{ROW_H - 14}" rx="4" />')
@@ -270,10 +281,13 @@ def render(plan: Plan, status: StatusDoc) -> str:
         label = html.escape(item.name)
         badges = ""
         if item.status_source.kind == "manual":
-            badges += '<tspan class="badge badge-manual"> manual</tspan>'
+            updated = f" {html.escape(raw.updated_at.strftime('%H:%MZ'))}" if raw and raw.updated_at else ""
+            badges += f'<tspan class="badge badge-manual"> [manual{updated}]</tspan>'
         if disp.late or disp.base == "overdue-not-started":
-            badges += '<tspan class="badge badge-late"> late</tspan>'
-        svg_parts.append(f'<text class="item-label" x="12" y="{y + ROW_H / 2 + 4:.0f}">{label}</text>')
+            badges += '<tspan class="badge badge-late"> [late]</tspan>'
+        if disp.overrunning:
+            badges += '<tspan class="badge badge-late"> [overrunning]</tspan>'
+        svg_parts.append(f'<text class="item-label" x="12" y="{y + ROW_H / 2 + 4:.0f}">{label}{badges}</text>')
         state_text = html.escape(BASE_STATE_LABEL[disp.base])
         svg_parts.append(f'<text class="note" x="12" y="{y + ROW_H / 2 + 16:.0f}">{state_text}</text>')
 
@@ -294,6 +308,11 @@ def render(plan: Plan, status: StatusDoc) -> str:
         f'</span>{html.escape(label)}</div>'
         for s, label in legend_items
     )
+    legend_html += (
+        '<div class="legend-item">[late] / [overrunning] badge — started or is running later than planned</div>'
+        '<div class="legend-item">[manual HH:MMZ] badge — hand-reported, not observed as a Kubernetes object; '
+        "the time shown is when that hand report was last updated, which can be older than this snapshot</div>"
+    )
 
     errors_html = ""
     if status.collection_errors:
@@ -312,7 +331,7 @@ def render(plan: Plan, status: StatusDoc) -> str:
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
 <title>run-board (toy) — plan vs actual</title>
 <style>{CSS}</style>
 </head>
@@ -330,10 +349,11 @@ def render(plan: Plan, status: StatusDoc) -> str:
 </div>
 <div class="legend">{legend_html}</div>
 <p class="footnote">
-  Dependency arrows: solid green = dependency done, dashed grey = dependency not yet done,
-  red = dependency failed. Stop conditions (free text in plan.yaml) are informational only —
-  this tool never evaluates them, so their absence from this page is not a signal that they
-  were not hit.
+  Dependency arrows: solid green = dependency done, dashed grey = dependency not yet done
+  (known, just not finished), dotted amber = dependency's own state could not be collected
+  (unknown — this is not the same claim as "not yet done"), red = dependency failed. Hover a
+  bar to see its stop condition, if one is set in plan.yaml — shown for context only, never
+  evaluated by this tool, so its absence from this page is not a signal that it was not hit.
 </p>
 <script>{JS}</script>
 </body>
@@ -377,6 +397,7 @@ def main() -> int:
     plan = load_plan(args.plan)
     status = load_status(args.status)
     html_out = render(plan, status)
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(html_out)
     print(f"[render_board] wrote {args.out}")

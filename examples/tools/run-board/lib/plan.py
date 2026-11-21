@@ -38,7 +38,11 @@ class PlanError(ValueError):
 
 def parse_offset(text: str) -> timedelta:
     """Parse a 'T+HH:MM' offset-from-block-start into a timedelta."""
-    m = _OFFSET_RE.match(text.strip())
+    if not isinstance(text, str):
+        # A plan author writing `planned_start: 6` (no quotes) gets a clear PlanError
+        # here instead of an AttributeError from calling .strip() on an int.
+        raise PlanError(f"planned_start must be a string like 'T+HH:MM', got {text!r}")
+    m = _OFFSET_RE.fullmatch(text.strip())
     if not m:
         raise PlanError(f"planned_start must look like 'T+HH:MM', got {text!r}")
     hours, minutes = int(m.group(1)), int(m.group(2))
@@ -47,7 +51,9 @@ def parse_offset(text: str) -> timedelta:
 
 def parse_duration(text: str) -> timedelta:
     """Parse a small ISO-8601 duration subset: PT<h>H<m>M / PT<h>H / PT<m>M."""
-    m = _DURATION_RE.match(text.strip())
+    if not isinstance(text, str):
+        raise PlanError(f"planned_duration must be a string like 'PT2H', got {text!r}")
+    m = _DURATION_RE.fullmatch(text.strip())
     if not m or (m.group(1) is None and m.group(2) is None):
         raise PlanError(
             f"planned_duration must look like 'PT2H', 'PT30M' or 'PT1H30M', got {text!r}"
@@ -67,7 +73,7 @@ def validate_name_component(value: str, field_name: str) -> str:
     compromised plan.yaml) could otherwise smuggle a flag or a shell metacharacter
     into a subprocess argv.
     """
-    if not isinstance(value, str) or not _DNS1123_RE.match(value) or len(value) > 253:
+    if not isinstance(value, str) or not _DNS1123_RE.fullmatch(value) or len(value) > 253:
         raise PlanError(
             f"{field_name}={value!r} must be a plain DNS-1123 label "
             "(lowercase alnum and '-', not starting/ending with '-')"
@@ -121,7 +127,7 @@ def _parse_status_source(raw: dict, item_id: str) -> StatusSource:
     # kind == "manual": the key just has to be a safe identifier too, since it is
     # used as a lookup key and echoed back into the rendered HTML.
     key = raw.get("key")
-    if not isinstance(key, str) or not _ID_RE.match(key):
+    if not isinstance(key, str) or not _ID_RE.fullmatch(key):
         raise PlanError(f"item {item_id!r}: status_source.key must be a plain id, got {key!r}")
     return StatusSource(kind=kind, key=key)
 
@@ -146,7 +152,7 @@ def load_plan(path: str) -> Plan:
         if not isinstance(raw_item, dict):
             raise PlanError(f"each item must be a mapping, got {raw_item!r}")
         item_id = raw_item.get("id")
-        if not isinstance(item_id, str) or not _ID_RE.match(item_id):
+        if not isinstance(item_id, str) or not _ID_RE.fullmatch(item_id):
             raise PlanError(f"item id must be a plain id (lowercase, '-'), got {item_id!r}")
         if item_id in seen_ids:
             raise PlanError(f"duplicate item id {item_id!r}")
