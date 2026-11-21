@@ -2238,26 +2238,47 @@ dcgm_netpol_names="$(k get networkpolicy -n "${DCGM_NS}" -o jsonpath='{.items[*]
   || fail "kubectl get networkpolicy -n ${DCGM_NS} failed: ${dcgm_netpol_names}"
 [[ -n "$(tr -d '[:space:]' <<<"${dcgm_netpol_names}")" ]] \
   || fail "no NetworkPolicy exists in ${DCGM_NS}, but the chart's own networkPolicy.enabled is true"
-# C-70, found running this exact check (dp-opt-r3): --ignore-not-found
+# C-70, found running this exact check (dp-opt-r3, dp-opt-r4): --ignore-not-found
 # only suppresses "no object of this kind exists"; it does nothing for
 # "this kind does not exist on this cluster at all" (no Prometheus
 # Operator CRD here, the expected and normal case), which kubectl
 # reports as a hard, non-zero-exit error on stderr -- piped into
 # `grep -c .` with 2>&1, that one error line was counted as "1
-# ServiceMonitor object", the opposite of what it meant.
-dcgm_sm_output="$(k get servicemonitors.monitoring.coreos.com -n "${DCGM_NS}" --ignore-not-found -o name 2>&1)"
-dcgm_sm_rc=$?
-if [[ "${dcgm_sm_rc}" -ne 0 ]]; then
+# ServiceMonitor object", the opposite of what it meant. A second,
+# independent bug the first fix (dp-opt-r3's run) introduced and did not
+# catch until dp-opt-r4's own run: `var=$(failing_cmd); rc=$?` still
+# aborts the whole script right at the assignment under `set -e`
+# (confirmed: `set -e; v=$(false); echo reached` never prints "reached"
+# -- a plain assignment statement's own exit status is checked same as
+# any other simple command, so the following `rc=$?` line is never
+# reached). The existing aws_text() helper already has the fix for this
+# exact shape: put the assignment inside an `if` condition, where set -e
+# does not apply to the first branch of an AND-OR or compound test.
+if dcgm_sm_output="$(k get servicemonitors.monitoring.coreos.com -n "${DCGM_NS}" --ignore-not-found -o name 2>&1)"; then
+  dcgm_servicemonitor_count="$(echo "${dcgm_sm_output}" | grep -c . || true)"
+else
   [[ "${dcgm_sm_output}" == *"doesn't have a resource type"* || "${dcgm_sm_output}" == *"the server could not find the requested resource"* ]] \
     || fail "kubectl get servicemonitors.monitoring.coreos.com -n ${DCGM_NS} failed, not with 'no such resource type': ${dcgm_sm_output}"
   dcgm_servicemonitor_count=0
-else
-  dcgm_servicemonitor_count="$(echo "${dcgm_sm_output}" | grep -c . || true)"
 fi
 [[ "${dcgm_servicemonitor_count}" -eq 0 ]] \
   || fail "found ${dcgm_servicemonitor_count} ServiceMonitor object(s) in ${DCGM_NS}, but serviceMonitor.enabled is false"
-dcgm_pod_name="$(k get pods -n "${DCGM_NS}" -l "app.kubernetes.io/name=dcgm-exporter" -o jsonpath='{.items[0].metadata.name}')"
-dcgm_pod_priority_class="$(k get pod "${dcgm_pod_name}" -n "${DCGM_NS}" -o jsonpath='{.spec.priorityClassName}')"
+# A bare `x=$(cmd)` with no `||` still trips set -e on cmd's own exit
+# code (this is not a readability choice -- bash's errexit does check a
+# command substitution's exit status in a plain assignment), and
+# `-o jsonpath='{.items[0]...}'` against zero matching pods is exactly
+# that: kubectl's own jsonpath engine errors on an out-of-range index
+# rather than printing nothing, which would otherwise abort this script
+# with no FAIL message naming why. Listing names first makes "is there
+# exactly one" an explicit, loud check instead of an implicit one.
+dcgm_pod_names_raw="$(k get pods -n "${DCGM_NS}" -l "app.kubernetes.io/name=dcgm-exporter" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>&1)" \
+  || fail "kubectl get pods -n ${DCGM_NS} -l app.kubernetes.io/name=dcgm-exporter failed: ${dcgm_pod_names_raw}"
+mapfile -t dcgm_pod_names <<<"${dcgm_pod_names_raw}"
+[[ "${#dcgm_pod_names[@]}" -eq 1 && -n "${dcgm_pod_names[0]}" ]] \
+  || fail "expected exactly one dcgm-exporter pod in ${DCGM_NS}, found: ${dcgm_pod_names[*]:-none}"
+dcgm_pod_name="${dcgm_pod_names[0]}"
+dcgm_pod_priority_class="$(k get pod "${dcgm_pod_name}" -n "${DCGM_NS}" -o jsonpath='{.spec.priorityClassName}' 2>&1)" \
+  || fail "kubectl get pod ${dcgm_pod_name} -n ${DCGM_NS} failed: ${dcgm_pod_priority_class}"
 [[ -z "${dcgm_pod_priority_class}" ]] \
   || fail "pod ${dcgm_pod_name} has priorityClassName=${dcgm_pod_priority_class}, expected none (the wrapper sets priorityClassName: \"\")"
 pass "NetworkPolicy exists in ${DCGM_NS}, no ServiceMonitor object, pod ${dcgm_pod_name} has no priorityClassName"
