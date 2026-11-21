@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: aws-efa-k8s-device-plugin
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: aws-efa-k8s-device-plugin
+  template:
+    metadata:
+      labels:
+        name: aws-efa-k8s-device-plugin
+    spec:
+      nodeSelector:
+        distai.dev/nvidia-gpu-method: device-plugin
+      tolerations:
+        - operator: Exists
+      hostNetwork: true
+      containers:
+        - image: 602401143452.dkr.ecr.__REGION__.amazonaws.com/eks/aws-efa-k8s-device-plugin:v0.5.3
+          name: aws-efa-k8s-device-plugin
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins

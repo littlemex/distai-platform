@@ -1,0 +1,12 @@
+serviceAccount:
+  name: karpenter
+controller:
+  env:
+    - name: AWS_REGION
+      value: "__REGION__"
+tolerations:
+  - key: CriticalAddonsOnly
+    operator: Exists
+settings:
+  clusterName: "__CLUSTER_NAME__"
+  interruptionQueue: "__INTERRUPTION_QUEUE__"

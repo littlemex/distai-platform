@@ -1,0 +1,39 @@
+clusterName: "__CLUSTER_NAME__"
+nodeRole: "__NODE_ROLE__"
+pool:
+  name: p4d-efa
+  capacityType: flex
+  requirements:
+    - key: kubernetes.io/arch
+      operator: In
+      values: ["amd64"]
+    - key: node.kubernetes.io/instance-type
+      operator: In
+      values: ["p4d.24xlarge"]
+  limits:
+    cpu: "250"
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 15m
+  rootVolumeSizeGi: "300Gi"
+  networkInterfaces:
+    - networkCardIndex: 0
+      deviceIndex: 0
+      interfaceType: interface
+    - networkCardIndex: 0
+      deviceIndex: 1
+      interfaceType: efa-only
+    - networkCardIndex: 1
+      deviceIndex: 1
+      interfaceType: efa-only
+    - networkCardIndex: 2
+      deviceIndex: 1
+      interfaceType: efa-only
+    - networkCardIndex: 3
+      deviceIndex: 1
+      interfaceType: efa-only
+accelerator:
+  resourceName: nvidia.com/gpu
+  methodLabel:
+    key: distai.dev/nvidia-gpu-method
+    value: device-plugin

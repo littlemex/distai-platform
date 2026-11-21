@@ -1,0 +1,10 @@
+nodeSelector:
+  distai.dev/nvidia-gpu-method: device-plugin
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: distai.dev/nvidia-gpu-method
+              operator: In
+              values: ["device-plugin"]
