@@ -21,15 +21,14 @@ spec:
         - image: 602401143452.dkr.ecr.__REGION__.amazonaws.com/eks/aws-efa-k8s-device-plugin:v0.5.3
           name: aws-efa-k8s-device-plugin
           securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
+            privileged: true
           volumeMounts:
             - name: device-plugin
               mountPath: /var/lib/kubelet/device-plugins
             - name: sys
               mountPath: /sys
-              readOnly: true
+            - name: dev
+              mountPath: /dev
       volumes:
         - name: device-plugin
           hostPath:
@@ -37,3 +36,6 @@ spec:
         - name: sys
           hostPath:
             path: /sys
+        - name: dev
+          hostPath:
+            path: /dev
