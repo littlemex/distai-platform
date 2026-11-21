@@ -239,33 +239,66 @@ silently:
   finished sync attempt's backoff has elapsed and the next retry is
   about to start -- a plain message-only read landing in that window
   sees neither the real cause nor any per-resource detail, by Argo CD's
-  own design, not staleness or a bug on either side. `app_operation_state()`
-  reads `phase`, `message`, `retryCount`, whether `syncResult` is present,
-  `syncResult.resources[]`'s own per-resource messages, and
-  `status.conditions[]`, all from one `kubectl get -o json` call (so
-  none of them can be read from two different instants); the final check
-  polls it, with no further `hard_refresh_app` call of its own, until a
-  read lands with `phase` terminal (`Error`/`Failed`) or with `phase`
-  `Running` and `syncResult` non-nil, bounded by `STAGE_B_READ_TIMEOUT`
-  (90s), and prefers `syncResult.resources[]`'s per-resource messages
-  over the top-level `message` when both are present. Every read, not
-  only the one finally asserted on, is logged (`phase`, `message`,
-  `retryCount`, whether `syncResult` was present, the resources and
-  conditions summaries), so a future flake in this same check leaves
-  evidence of all of them, not only the one field the pre-#45 version
-  captured. `status.conditions[]` is logged for diagnosis only, not
-  matched on: whether Argo CD's `ComparisonError`/`SyncError` conditions
-  (`controller/state.go`'s `CompareAppState`) cover this specific
-  GVK-discovery failure class was not confirmed against a real cluster
-  (issue #45's own root-cause writeup says so explicitly) at the time of
-  this fix. This is a stronger form of decision 4's own claim than "only
-  the dependent resource fails to create," and the earlier design of
-  this test (expecting `NodePool`/`EC2NodeClass` to converge in stage B
-  while only `ResourceFlavor` stayed blocked, then later reading a stale
-  message with no fresh attempt forced, then later still reading a
-  real-but-uninformative "Retrying operation" message with no settle-past-
-  the-nil-window logic) was wrong for the same underlying reason three
-  times, each caught only by running it against a real cluster.
+  own design, not staleness or a bug on either side. A second, distinct
+  finding came only from running the first version of this fix on a real
+  cluster twice: a read that already satisfies "outside the nil window"
+  (`phase` `Running`, `syncResult` non-nil) can still be stale in a
+  different way, naming `karpenter.k8s.aws/v1`/`karpenter.sh/v1` as
+  undiscoverable alongside `kueue.x-k8s.io` well after this same check's
+  own earlier `wait_until` already confirmed `karpenter-crd` `Synced` and
+  its CRD `Established`, and after a full `STAGE_B_TIMEOUT` (180s) of
+  continuous `hard_refresh_app` calls. `hard_refresh_app` forces a fresh
+  *comparison* (desired manifests vs. live state); it does not force a
+  new *sync attempt* -- the operation's own retry runs on a schedule
+  driven solely by `retryCount` and the backoff
+  (`gitops/appsets/cells.ApplicationSet.yaml`'s `retry.backoff`: 10s,
+  doubling, capped at 300s), independent of how often anything refreshes
+  the comparison. A sync attempt that ran before `karpenter-crd`'s CRDs
+  existed keeps being the most recent one Argo CD reports until the next
+  attempt's own backoff interval elapses, which real runs put at several
+  minutes, not the single post-refresh sleep the pre-#45 version assumed.
+  `app_operation_state()` reads `phase`, `message`, `retryCount`, whether
+  `syncResult` is present, `syncResult.resources[]`'s own per-resource
+  messages, and `status.conditions[]`, all from one `kubectl get -o json`
+  call (so none of them can be read from two different instants); the
+  final check polls it -- hard-refreshing again before each retry, which
+  cannot speed up the next sync attempt specifically but keeps this
+  stage's "force a fresh look every poll" intent for the comparison side
+  -- until a read is *both* outside the nil window (terminal phase, or
+  `Running` with a non-nil `syncResult`) *and* does not name karpenter's
+  own groups, bounded by `STAGE_B_READ_TIMEOUT` (600s, long enough to
+  span several retry cycles even at the capped 300s interval). The
+  top-level `message` and `syncResult.resources[]`'s own summary are
+  always searched together, never one in place of the other: a real run
+  showed the same underlying cause worded differently in each ("...the
+  server could not find the requested resource" vs. "...could not find
+  kueue.x-k8s.io/ResourceFlavor for requested resource...", with the
+  phrase order reversed between them), so an earlier version of this fix
+  that preferred `resources[]` whenever present failed this exact check
+  on that real run even though its own nil-window handling had already
+  worked correctly. Every read, not only the one finally asserted on, is
+  logged (`phase`, `message`, `retryCount`, whether `syncResult` was
+  present, the resources and conditions summaries), so a future flake in
+  this same check leaves evidence of all of them, not only the one field
+  the pre-#45 version captured. `status.conditions[]` is logged for
+  diagnosis only, not matched on: whether Argo CD's
+  `ComparisonError`/`SyncError` conditions (`controller/state.go`'s
+  `CompareAppState`) cover this specific GVK-discovery failure class was
+  not confirmed against a real cluster (issue #45's own root-cause
+  writeup says so explicitly) at the time of this fix. This is a
+  stronger form of decision 4's own claim than "only the dependent
+  resource fails to create," and the earlier design of this test
+  (expecting `NodePool`/`EC2NodeClass` to converge in stage B while only
+  `ResourceFlavor` stayed blocked; then reading a stale message with no
+  fresh attempt forced; then reading a real-but-uninformative "Retrying
+  operation" message with no settle-past-the-nil-window logic; then, on
+  this fix's own first real run, failing a correct nil-window read
+  because it preferred a differently-worded field; then, on this fix's
+  second real run, failing a correct and correctly-worded read because
+  it was still a stale pre-CRD-fix attempt) was wrong for the same
+  underlying reason five times across two PRs, each caught only by
+  running it against a real cluster -- never by reasoning about Argo CD's
+  behavior from documentation alone.
   Separately, step 12's break/restore experiments run against this same
   cell once already converged, and evidence the narrower, already-
   converged-cell claim that stage A/B/C above cannot re-observe once

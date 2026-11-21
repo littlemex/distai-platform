@@ -1033,30 +1033,61 @@ wait
 [[ "$(cat "${STAGE_B_WORK}/kueue")" == PASS ]] \
   || fail "${APP_KUEUE} reached Synced despite still being broken"
 hard_refresh_app "${APP_CAPACITY_POOL}"
-# Issue #45: a single jsonpath read of only status.operationState.message,
-# even right after a fresh refresh, can land while Argo CD's own
-# controller is between a finished sync attempt and the next scheduled
-# retry -- in that exact window (see app_operation_state() above) the
-# controller overwrites this field with a generic "Retrying operation.
-# Attempt #N" string and sets syncResult to nil in the same write, so the
-# earlier version of this check could fail on a real, current read that
-# simply told it nothing, not a stale or wrong one. Poll
-# app_operation_state (no further hard_refresh_app here -- the one call
-# above is this stage's one deliberate fresh attempt; refreshing again on
-# every poll would only restart the same race against the same backoff)
-# until the read lands outside that window: either a terminal phase
-# (Error/Failed -- Argo CD itself gave up retrying, so whatever it
-# reports is final) or phase Running with a non-nil syncResult (a read
-# tied to a real, in-progress or just-completed attempt). Bounded by
-# STAGE_B_READ_TIMEOUT so a cell that is, for some other reason, stuck in
-# the nil window permanently still fails instead of hanging.
-STAGE_B_READ_TIMEOUT=90
-STAGE_B_READ_INTERVAL=5
+# Issue #45 (first fix): a single jsonpath read of only
+# status.operationState.message, even right after a fresh refresh, can
+# land while Argo CD's own controller is between a finished sync attempt
+# and the next scheduled retry -- in that exact window (see
+# app_operation_state() above) the controller overwrites this field with
+# a generic "Retrying operation. Attempt #N" string and sets syncResult
+# to nil in the same write.
+# Issue #45 (second, real-run-only finding): even a read that lands
+# outside that window can still be *stale* in a different way. A real
+# run of the first fix (cell dp-dlv-i45b) showed capacity-pool's
+# operationState, read at retryCount 5 with syncResult non-nil (a
+# perfectly valid, non-placeholder read by the first fix's own
+# criterion), still naming karpenter.k8s.aws/v1 and karpenter.sh/v1 as
+# undiscoverable together with kueue.x-k8s.io -- well after this
+# function's own earlier wait_until confirmed karpenter-crd Synced and
+# its CRD Established, and after the whole STAGE_B_TIMEOUT (180s) window
+# of continuous hard-refreshing above. hard_refresh_app only forces a
+# fresh *comparison* (desired vs. live manifests); it does not force a
+# new *sync attempt* -- the operation's own retry is scheduled solely by
+# RetryCount and the backoff (10s, doubling, capped at 300s per
+# gitops/appsets/cells.ApplicationSet.yaml's retry.backoff), independent
+# of how often this script refreshes. So a sync attempt that happened to
+# run before karpenter-crd's CRDs were Established keeps being the most
+# recent one -- and therefore the one operationState reports -- until
+# the next attempt's own backoff interval elapses, which observed real
+# backoff math puts at up to several minutes, not the few seconds a
+# single post-refresh sleep assumed. Both findings get the same
+# treatment: poll app_operation_state (hard-refreshing again before each
+# retry below -- harmless, and keeps this stage's existing "force a
+# fresh look every poll" intent even though it cannot speed up the next
+# sync attempt specifically) until a read is both outside the nil window
+# (terminal phase, or Running with a non-nil syncResult) AND does not
+# still name karpenter's own groups as undiscoverable -- or
+# STAGE_B_READ_TIMEOUT elapses, long enough to span several of this
+# Application's own retry backoff cycles even at the capped 300s
+# interval, so a cell stuck for some other reason still fails instead of
+# hanging indefinitely.
+STAGE_B_READ_TIMEOUT=600
+STAGE_B_READ_INTERVAL=15
+stage_b_mentions_karpenter_crds() {
+  case "$1" in
+    *"karpenter.k8s.aws/v1"*|*"karpenter.sh/v1"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 stage_b_read_start="$(date +%s)"
-stage_b_phase="" stage_b_message="" stage_b_retry_count="" stage_b_has_sync_result="0" stage_b_resources_summary="" stage_b_conditions_summary=""
+stage_b_phase="" stage_b_message="" stage_b_retry_count="" stage_b_has_sync_result="0" stage_b_resources_summary="" stage_b_conditions_summary="" stage_b_combined=""
 while true; do
   IFS=$'\t' read -r stage_b_phase stage_b_message stage_b_retry_count stage_b_has_sync_result stage_b_resources_summary stage_b_conditions_summary \
     < <(app_operation_state "${APP_CAPACITY_POOL}")
+  # Concatenated once per read, not chosen between: see the "Search the
+  # top-level message..." note below for why neither field alone is
+  # matched on in isolation.
+  stage_b_combined="${stage_b_message}"
+  [[ -n "${stage_b_resources_summary}" ]] && stage_b_combined+=" | resources: ${stage_b_resources_summary}"
   # Logged on every single poll, pass or fail (requirement: the values a
   # judgement is based on must be visible without re-running anything) --
   # not only once a verdict is reached.
@@ -1064,12 +1095,17 @@ while true; do
   if [[ "${stage_b_phase}" == "Error" || "${stage_b_phase}" == "Failed" ]]; then
     break
   fi
-  if [[ "${stage_b_phase}" == "Running" && "${stage_b_has_sync_result}" == "1" ]]; then
+  if [[ "${stage_b_phase}" == "Running" && "${stage_b_has_sync_result}" == "1" ]] && ! stage_b_mentions_karpenter_crds "${stage_b_combined}"; then
     break
   fi
   if (( $(date +%s) - stage_b_read_start >= STAGE_B_READ_TIMEOUT )); then
-    fail "${APP_CAPACITY_POOL}'s operationState never settled into a readable state (phase Error/Failed, or Running with a non-nil syncResult) within ${STAGE_B_READ_TIMEOUT}s of polling after the final refresh -- every read landed in Argo CD's own between-attempts window (last read: phase=${stage_b_phase}, retryCount=${stage_b_retry_count}, message=${stage_b_message})"
+    if stage_b_mentions_karpenter_crds "${stage_b_combined}"; then
+      fail "${APP_CAPACITY_POOL}'s own operationState still names karpenter's own CRDs as undiscoverable after ${STAGE_B_READ_TIMEOUT}s of polling since karpenter-crd was confirmed Established and Synced (last read: phase=${stage_b_phase}, retryCount=${stage_b_retry_count}: ${stage_b_combined}) -- either karpenter-crd is not actually Established on this cluster, or no sync attempt made since it was fixed has run in this window"
+    else
+      fail "${APP_CAPACITY_POOL}'s operationState never settled into a readable state (phase Error/Failed, or Running with a non-nil syncResult) within ${STAGE_B_READ_TIMEOUT}s of polling after the final refresh -- every read landed in Argo CD's own between-attempts window (last read: phase=${stage_b_phase}, retryCount=${stage_b_retry_count}, message=${stage_b_message})"
+    fi
   fi
+  hard_refresh_app "${APP_CAPACITY_POOL}"
   sleep "${STAGE_B_READ_INTERVAL}"
 done
 # Search the top-level message and syncResult.resources[]'s own summary
@@ -1088,13 +1124,11 @@ done
 # already correctly waited out five "Retrying operation" reads first.
 # Concatenating both (rather than choosing one) means whichever field
 # happens to carry the matched phrase's exact order does not depend on
-# which one this fix's author guessed would be more specific.
-capacity_pool_operation_message="${stage_b_message}"
-[[ -n "${stage_b_resources_summary}" ]] && capacity_pool_operation_message+=" | resources: ${stage_b_resources_summary}"
-case "${capacity_pool_operation_message}" in
-  *"karpenter.k8s.aws/v1"*|*"karpenter.sh/v1"*)
-    fail "${APP_CAPACITY_POOL}'s own operationState still names karpenter's own CRDs as undiscoverable (got: ${capacity_pool_operation_message}; phase=${stage_b_phase}, retryCount=${stage_b_retry_count}) even after this read settled outside Argo CD's retry-preparation window -- either karpenter-crd is not actually Established, or this message is stale and does not reflect a sync attempt made since it was fixed" ;;
-esac
+# which one this fix's author guessed would be more specific. The loop
+# above already guarantees capacity_pool_operation_message does not name
+# karpenter's own groups (its own accept condition), so only the kueue
+# assertion remains here.
+capacity_pool_operation_message="${stage_b_combined}"
 case "${capacity_pool_operation_message}" in
   *"kueue.x-k8s.io"*"could not find the requested resource"*|*"could not find"*"kueue.x-k8s.io"*) ;;
   *) fail "${APP_CAPACITY_POOL}'s own operationState does not mention kueue.x-k8s.io's own resources being undiscoverable (got: ${capacity_pool_operation_message}; phase=${stage_b_phase}, retryCount=${stage_b_retry_count}, conditions=${stage_b_conditions_summary}) -- the claimed cause is not what this run's own Application actually reports" ;;
