@@ -50,7 +50,8 @@ final_teardown() {
   done
   kubectl delete clusterpolicy --all --ignore-not-found >/dev/null 2>&1
   kubectl delete constrainttemplate --all --ignore-not-found >/dev/null 2>&1
-  kubectl delete tenant --all --ignore-not-found >/dev/null 2>&1
+  timeout 30 kubectl delete tenant --all --ignore-not-found >/dev/null 2>&1 || \
+    kubectl patch tenant cap-team --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
   kubectl delete clusterqueue --all --ignore-not-found >/dev/null 2>&1
   kubectl delete resourceflavor --all --ignore-not-found >/dev/null 2>&1
   # drain the Karpenter-launched node(s) before terraform destroy tears down
@@ -477,7 +478,13 @@ capture "05-capsule-defaults-on-create.txt" bash -c 'kubectl get ns t-cap -o jso
 capture "05-capsule-quota-denied.txt" kubectl create ns t-cap-2 --as=system:serviceaccount:kube-system:cap-team-bot --as-group=projectcapsule.dev
 
 helm uninstall capsule -n capsule-system --wait >/dev/null 2>&1
-kubectl delete tenant cap-team --ignore-not-found >/dev/null 2>&1
+# A Tenant carries its own finalizer (controller.projectcapsule.dev/finalize);
+# a plain `kubectl delete` blocks forever if the controller never clears it
+# (attempts 3 and 4, dp-ten-x3/dp-ten-x4, both hung here for over an hour
+# until the hung kubectl process was killed by hand) -- bound it, and fall
+# back to stripping the finalizer directly so teardown is never stuck on it.
+timeout 30 kubectl delete tenant cap-team --ignore-not-found >/dev/null 2>&1 || \
+  kubectl patch tenant cap-team --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
 kubectl delete ns capsule-system --ignore-not-found --wait=true --timeout=120s >/dev/null 2>&1
 
 #############################################
