@@ -8,7 +8,7 @@ This is checked by `tests/test_readonly_exec.py` with `subprocess.run` mocked
 out — no real cluster access is needed to test it.
 
 Only `kubectl get` is allowlisted today, because that is the only thing this
-PR's two call sites (`collect_status.py`'s `job` and `kueue_workload` status
+tool's two call sites (`collect_status.py`'s `job` and `kueue_workload` status
 sources) ever actually call. An `aws ec2 describe-*` branch is a natural
 extension for a future `capacity_reservation` status source, but is not added
 here speculatively — an allowlist entry for a call nothing makes is a

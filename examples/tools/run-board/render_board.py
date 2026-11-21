@@ -46,7 +46,7 @@ PX_PER_MINUTE = 2.2  # clamped below for very long or very short plans
 TOP_AXIS_H = 50
 
 # Flat, explicit per-state colors for the legend swatches. The chart itself gets its
-# color from CSS classes (lib above), but the legend draws tiny standalone boxes that
+# color from the CSS block below, but the legend draws tiny standalone boxes that
 # are not inside a `.state-X` ancestor, so relying on the same descendant-combinator
 # CSS rules there would silently render them blank — these are spelled out once, here.
 # "overdue-not-started" and "unknown" are deliberately two different hues (not both the
@@ -62,7 +62,7 @@ LEGEND_STATE_COLORS = {
     "unknown": ("#fffbf0", "#8d6605"),
 }
 
-# State -> (fill css class). "late"/"overrunning" add a modifier class on top.
+# State -> the short label text shown under an item's name (not a CSS class).
 BASE_STATE_LABEL = {
     "unknown": "Unknown (collection incomplete)",
     "not-started": "Not started (on schedule)",
@@ -124,7 +124,9 @@ h1 { font-size: 20px; margin: 0 0 4px; }
   pointer-events: all;
 }
 .bar-actual { stroke-width: 0; }
-.state-not-started .bar-actual, .state-overdue-not-started .bar-actual { fill: none; }
+/* not-started/overdue-not-started never emit a .bar-actual element at all (see render()
+   below), so there is intentionally no `.state-not-started .bar-actual`-style rule here:
+   a rule that can never match is a worse trap to leave behind than simply not writing it. */
 .state-not-started .bar-planned { stroke-dasharray: 3 3; }
 .state-overdue-not-started .bar-planned { stroke: var(--overdue-text); stroke-dasharray: 3 3; }
 .state-running .bar-actual { fill: var(--info-bg); stroke: var(--info-text); stroke-width: 1.5; }
@@ -256,7 +258,7 @@ def render(plan: Plan, status: StatusDoc) -> str:
         for dep_id in item.depends_on:
             dep_item = items_by_id[dep_id]
             dep_disp = derive_display_state(dep_item, status.items.get(dep_id), status.block_start, status.collected_at, plan.grace_minutes)
-            edge = dependency_edge_state(dep_item, dep_disp)
+            edge = dependency_edge_state(dep_disp)
             dep_end_x = CHART_LEFT + _minutes(dep_item.planned_start + dep_item.planned_duration) * px_per_minute
             dep_y = row_y[dep_id] + ROW_H / 2
             this_start_x = CHART_LEFT + _minutes(item.planned_start) * px_per_minute
@@ -287,19 +289,21 @@ def render(plan: Plan, status: StatusDoc) -> str:
         if disp.base in ("running", "done", "failed"):
             # Prefer the real actual_start/actual_end. A manual entry that only ever says
             # {"state": "failed"} (or "done") with no timestamps at all still gets a filled
-            # bar rather than silently drawing nothing — but it is drawn as spanning exactly
-            # the *planned* window, not stretched out to "now": a finished item with no real
-            # end time is not the same claim as "still going", and must not be drawn that way.
-            # Only a genuinely still-running item (no actual_end because it hasn't ended)
-            # legitimately extends its bar up to the snapshot time.
+            # bar rather than silently drawing nothing. A finished item (done/failed) with
+            # no actual_end on record always gets a bar exactly as wide as its own planned
+            # bar — start_dt + planned_duration, never "now" — regardless of whether
+            # actual_start itself is present or defaulted to the planned start: a finished
+            # item with no real end time on record is not the same claim as "still going",
+            # and must not be drawn that way, and must not shrink to a misleading sliver if
+            # it started later than its own planned end. Only a genuinely still-running item
+            # (no actual_end because it legitimately hasn't ended) extends to the snapshot.
             start_dt = raw.actual_start if (raw and raw.actual_start) else (status.block_start + item.planned_start)
-            planned_end_dt = status.block_start + item.planned_start + item.planned_duration
             if raw and raw.actual_end:
                 end_dt = raw.actual_end
             elif disp.base == "running":
                 end_dt = status.collected_at
             else:  # done or failed with no actual_end on record
-                end_dt = max(planned_end_dt, start_dt)
+                end_dt = start_dt + item.planned_duration
             ax = CHART_LEFT + _minutes(start_dt - status.block_start) * px_per_minute
             aw = max(2.0, _minutes(end_dt - start_dt) * px_per_minute)
             svg_parts.append(f'<rect class="bar-actual" x="{ax:.1f}" y="{y + 7:.1f}" width="{aw:.1f}" height="{ROW_H - 14}" rx="4" />')
@@ -317,7 +321,11 @@ def render(plan: Plan, status: StatusDoc) -> str:
         if item.status_source.kind == "manual":
             updated = f" {html.escape(raw.updated_at.strftime('%H:%MZ'))}" if raw and raw.updated_at else ""
             badges += f'<tspan class="badge badge-manual"> [manual{updated}]</tspan>'
-        if disp.late or disp.base == "overdue-not-started":
+        # overdue-not-started already says "overdue" in its own state text (and already
+        # has its own distinct orange, not the amber below) — a second [late] badge on
+        # top would be redundant, and in the amber meant for a different state, so it is
+        # only added for running/done/failed items where "late" is not otherwise obvious.
+        if disp.late and disp.base != "overdue-not-started":
             badges += '<tspan class="badge badge-late"> [late]</tspan>'
         if disp.overrunning:
             badges += '<tspan class="badge badge-late"> [overrunning]</tspan>'
