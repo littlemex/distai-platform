@@ -77,8 +77,14 @@ spec:
           volumeMounts:
             - name: ssh-key
               mountPath: /etc/ssh-key
+            - name: dshm
+              mountPath: /dev/shm
       volumes:
         - name: ssh-key
           secret:
             secretName: ssh-key
             defaultMode: 0600
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
