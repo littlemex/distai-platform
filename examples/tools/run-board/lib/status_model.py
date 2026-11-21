@@ -64,7 +64,13 @@ class StatusDoc:
 
 def load_status(path: str) -> StatusDoc:
     with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
+        try:
+            raw = json.load(f)
+        except json.JSONDecodeError as e:
+            # Same reasoning as load_plan()'s YAMLError guard: a syntax-level error (a
+            # trailing comma, a missing quote, ...) must reach the same labelled
+            # "except StatusError" path as every other status.json problem.
+            raise StatusError(f"status.json is not valid JSON: {e}") from e
     return parse_status_doc(raw)
 
 

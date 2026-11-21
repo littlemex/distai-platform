@@ -7,8 +7,9 @@ output (it never reads the wall clock — `collected_at` from status.json is the
 only notion of "now" used to decide what is late or overdue).
 
 Visual language follows a snapshot of the AWS Cloudscape design tokens used
-elsewhere in this project: link blue #006ce0, pill-shaped buttons, and
-success/info/error color tokens. The "unknown" amber and the hatch/pattern
+elsewhere in this project: link blue #006ce0, and success/info/error color
+tokens (this page has no buttons, so Cloudscape's pill-shaped-button radius
+token is not used here). The "unknown" amber and the hatch/pattern
 fills for failed/unknown/late/overrunning are this tool's own addition
 (Cloudscape has no tiling-pattern convention) so that state is never
 color-only.
@@ -78,14 +79,14 @@ CSS = """
   --line:#c6c6cd; --line2:#ebebf0; --link:#006ce0;
   --info-bg:#f0fbff; --info-text:#006ce0;
   --success-bg:#effff1; --success-text:#00802f;
-  --error-bg:#fff5f5; --error-text:#db0000;
+  --error-text:#db0000;
   /* amber "unknown" and orange "overdue" tokens: not in the Cloudscape snapshot
      this repo vendors. Two different hues on purpose — "unknown" (a fact we do
      not have) and "overdue, not started" (a fact we do have: it is late) are
      easy to conflate if they share a color, so they don't. */
   --unknown-bg:#fffbf0; --unknown-text:#8d6605;
-  --overdue-bg:#fff2e8; --overdue-text:#b8550a;
-  --r-button:20px; --r-input:8px; --r-container:16px;
+  --overdue-text:#b8550a;
+  --r-input:8px; --r-container:16px;
   --font-base:'Open Sans','Helvetica Neue',Roboto,Arial,sans-serif;
 }
 * { box-sizing: border-box; }
@@ -200,6 +201,13 @@ def render(plan: Plan, status: StatusDoc) -> str:
         raw = status.items.get(item.id)
         if raw and raw.actual_end:
             latest_minutes = max(latest_minutes, _minutes(raw.actual_end - status.block_start))
+        elif raw and raw.actual_start and raw.state in ("done", "failed"):
+            # Mirrors the fallback-bar-end rule below (start_dt + planned_duration) for a
+            # finished item with no actual_end on record — without this, a late-started
+            # item like that can draw its bar past this chart's own right edge and get
+            # silently clipped there instead of being accounted for in the chart's width.
+            fallback_end = raw.actual_start + item.planned_duration
+            latest_minutes = max(latest_minutes, _minutes(fallback_end - status.block_start))
     latest_minutes = max(latest_minutes, _minutes(status.collected_at - status.block_start))
     latest_minutes += 30  # margin so the last bar/now-line isn't flush against the edge
 

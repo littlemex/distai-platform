@@ -34,9 +34,18 @@ def test_job_failed_uses_condition_timestamp_not_completion_time():
     assert mapped["actual_end"] == "2026-11-20T18:05:00Z"
 
 
-def test_job_with_empty_status_is_unknown_not_pending():
-    mapped = map_job_status(_load("job_pending_empty_status.json"))
+def test_job_with_no_status_key_at_all_is_unknown():
+    # Not the same thing as an empty status dict (see the test right below this one) —
+    # this is a document with no "status" key whatsoever.
+    mapped = map_job_status(_load("job_no_status_key.json"))
     assert mapped["state"] == "unknown"
+
+
+def test_job_with_an_empty_status_dict_is_pending_not_unknown():
+    # A just-created Job briefly has a present but empty `status: {}` — the literal case
+    # the mapper's own docstring describes as pending, distinct from the no-key case above.
+    mapped = map_job_status(_load("job_empty_status_dict.json"))
+    assert mapped["state"] == "pending"
 
 
 def test_job_never_started_but_has_status_block_is_pending():

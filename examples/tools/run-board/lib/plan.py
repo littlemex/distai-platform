@@ -142,7 +142,13 @@ def _parse_status_source(raw: dict, item_id: str) -> StatusSource:
 
 def load_plan(path: str) -> Plan:
     with open(path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f)  # safe_load: a plan.yaml is data, never executable.
+        try:
+            raw = yaml.safe_load(f)  # safe_load: a plan.yaml is data, never executable.
+        except yaml.YAMLError as e:
+            # A syntax-level error (bad indentation, a stray tab, ...) must reach the
+            # same labelled "except PlanError" path as every other plan problem, not
+            # escape as an unlabelled yaml.YAMLError.
+            raise PlanError(f"plan.yaml is not valid YAML: {e}") from e
     if not isinstance(raw, dict):
         raise PlanError("plan.yaml must be a mapping at the top level")
 
