@@ -192,7 +192,7 @@ run_check "gitops contract (check_gitops_contract.py)" \
   "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
   python3 "${SCRIPT_DIR}/check_gitops_contract.py" "${REPO_ROOT}"
 
-# DA-24/DA-43/C-53: a checker that has only ever been run against a
+# A checker that has only ever been run against a
 # passing repository is not evidence it would fail on a broken one.
 # --selftest builds its own mutated, throwaway fixtures (never this
 # checkout) and asserts each mutation fails only the rule it broke, run

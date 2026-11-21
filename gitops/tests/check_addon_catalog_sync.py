@@ -581,7 +581,7 @@ def main(root: str) -> int:
 
 # ------------------------------------------------------------- selftest
 #
-# DA-24/DA-43/C-53: build one mutated copy per rule, confirm it fails
+# Build one mutated copy per rule, confirm it fails
 # only that rule against an otherwise-passing baseline. The chart each
 # catalog entry's `dir` points at is local-only (no Chart.yaml
 # `dependencies`), so every case below runs offline -- `check_dependency_pin`
@@ -792,7 +792,7 @@ def selftest() -> int:
                 # A case name claiming "only check (N)" is not proven by
                 # "check (N) is somewhere in the failures" alone -- that
                 # also holds if checks (M != N) failed too, which an
-                # earlier version of one case here did (DA-24/C-53: a
+                # earlier version of one case here did (a
                 # selftest that does not actually prove what its own name
                 # claims). Re-derive which check numbers this case's own
                 # name claims are the ONLY ones to fail, and reject any
