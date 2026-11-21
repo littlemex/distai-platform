@@ -228,7 +228,7 @@ silently:
   stage's own bootstrap -- stage B's `hard_refresh_app` calls (both
   `assert_stays_not_synced_refreshing`'s and the read loop's own) force a
   fresh *comparison* on every poll, which is necessary for "never reaches
-  Synced" to mean anything current, but (see the second caveat) does not
+  Synced" to mean anything current, but (see the third caveat) does not
   by itself make a stale operation message current. Second (issue #45,
   found running a PR stacked on this one): Argo CD's own controller
   (`controller/appcontroller.go`'s
@@ -264,7 +264,7 @@ silently:
   classified as "IFS whitespace" by POSIX shells and collapses runs of
   the delimiter, which would silently drop an empty field (`retryCount`
   omitted at 0 by Argo CD's own `omitempty`) and shift every later column
-  left by one -- caught in review, before it ever ran, by testing
+  left by one -- caught in review, before this fix ever shipped, by testing
   `IFS=$'\t' read` against a row with an empty field. The final check
   polls it -- hard-refreshing again before each retry, which cannot
   speed up the next sync attempt specifically but keeps this stage's
