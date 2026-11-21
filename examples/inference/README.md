@@ -5,6 +5,7 @@ Self-contained references for serving models on an EKS cluster. Each example is 
 | Engine | Example | Description |
 | --- | --- | --- |
 | [`vllm`](vllm/) | [`disagg-pd`](vllm/disagg-pd/) | Prefill/decode disaggregated serving with vLLM's NixlConnector over libfabric/EFA, a prefill-then-decode proxy, a free prefill:decode ratio, and prefill and decode kept on different nodes by default |
+| [`vllm`](vllm/) | [`disagg-pd-llmd`](vllm/disagg-pd-llmd/) | The same prefill and decode engines as `disagg-pd`, routed by the llm-d router instead of the proxy: a Gateway API `HTTPRoute` to an `InferencePool`, llm-d's Endpoint Picker choosing a prefill and a decode pod per request, and a routing sidecar in each decode pod. Not yet run on real hardware (see Status) |
 | [`vllm`](vllm/) | [`agg-baseline`](vllm/agg-baseline/) | Aggregated vLLM serving with vLLM's default scheduler, the baseline the disaggregated layout is compared against on the same hardware |
 | [`sglang`](sglang/) | [`disagg-pd`](sglang/disagg-pd/) | Prefill/decode disaggregated serving with SGLang's own transfer backends (NIXL over libfabric/EFA by default, or Mooncake), SGLang's own router finding both roles through the Kubernetes API, and the same placement values as the vLLM chart |
 | [`sglang`](sglang/) | [`agg-baseline`](sglang/agg-baseline/) | Aggregated SGLang serving with mixed chunked prefill and an explicit chunk size, the tuned baseline for the SGLang disaggregated layout |
@@ -21,14 +22,16 @@ How to measure with them is described in [`_shared/README.md`](_shared/README.md
 
 ## Status
 
-| Example | Status |
-| --- | --- |
-| [`vllm/disagg-pd`](vllm/disagg-pd/), [`vllm/agg-baseline`](vllm/agg-baseline/) | Run on real hardware (see the RFC, [#37](https://github.com/littlemex/distai-platform/issues/37), follow-up issue B, and each chart's README for what was observed) |
-| [`sglang/disagg-pd`](sglang/disagg-pd/), [`sglang/agg-baseline`](sglang/agg-baseline/) | Chart built, not yet verified on real hardware (follow-up issue C). They render and pass `helm lint`, but `tests/0.static.sh` does not cover them yet, and no engine from them has served a request on a GPU node |
-| [`_shared/dashboards/sglang-pd.json`](_shared/dashboards/sglang-pd.json) | Built, not yet fed by a real SGLang run |
-| llm-d's own router mode (follow-up issue A) | Not built here and not run on any hardware yet |
+| Example | Built | Run on real hardware |
+| --- | --- | --- |
+| [`vllm/disagg-pd`](vllm/disagg-pd/) (hand-written proxy) | Yes | Yes (the RFC, [#37](https://github.com/littlemex/distai-platform/issues/37), follow-up issue B) |
+| [`vllm/agg-baseline`](vllm/agg-baseline/) | Yes | Yes (follow-up issue B) |
+| [`vllm/disagg-pd-llmd`](vllm/disagg-pd-llmd/) (llm-d router: Gateway API, `InferencePool`, EPP) | Yes: chart, README and static checks | Not yet. It also needs the Gateway API and Gateway API Inference Extension CRDs and an administrator-provided Gateway (follow-up issue A), which no run has installed yet |
+| [`sglang/disagg-pd`](sglang/disagg-pd/) | Yes: chart, README and static checks (render-time only; `tests/0.static.sh` does not cover it yet) | Not yet (follow-up issue C) |
+| [`sglang/agg-baseline`](sglang/agg-baseline/) | Yes: chart, README and static checks (render-time only; `tests/0.static.sh` does not cover it yet) | Not yet (follow-up issue C) |
+| [`_shared/dashboards/sglang-pd.json`](_shared/dashboards/sglang-pd.json) | Yes | Not yet fed by a real SGLang run |
 
-The SGLang charts and llm-d's router mode were time-boxed out of the first real-machine round, not found broken. Before either is measured on a Capacity Block window or any other paid hardware, run it first on a smaller, cheaper GPU instance to produce a real, if rough, timing, the same way the vLLM path's own dry run already did.
+The untested rows above were time-boxed out of the first real-machine round, not found broken. Before any of them is measured on a Capacity Block window or any other paid hardware, run it first on a smaller, cheaper GPU instance to produce a real, if rough, timing, the same way the `vllm/disagg-pd` / `vllm/agg-baseline` dry run already did.
 
 ## Conventions
 

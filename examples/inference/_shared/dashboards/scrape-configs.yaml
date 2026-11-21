@@ -96,6 +96,41 @@
     action: replace
     target_label: release
 
+# llm-d Endpoint Picker (EPP) metrics, for examples/inference/vllm/
+# disagg-pd-llmd: llm_d_epp_* counters, including
+# llm_d_epp_disagg_decision_total{decision_type="prefill-decode"|"decode-only"},
+# one increment per routed request. Keeps pods carrying the label llm-d's
+# router chart (llm-d-router-gateway v1.0.0) puts on every EPP pod, with the
+# prometheus.io/* annotations that chart's values set. The EPP serves
+# /metrics without a token there (monitoring.prometheus.auth.enabled=false).
+- job_name: 'llm-d-epp'
+  scrape_interval: 10s
+  metrics_path: /metrics
+  kubernetes_sd_configs:
+  - role: pod
+  relabel_configs:
+  - source_labels: [__meta_kubernetes_pod_labelpresent_llm_d_router_gateway]
+    action: keep
+    regex: "true"
+  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+    action: keep
+    regex: "true"
+  - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+    action: replace
+    regex: ([^:]+)(?::\d+)?;(\d+)
+    replacement: $$1:$$2
+    target_label: __address__
+  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+    action: replace
+    regex: (.+)
+    target_label: __metrics_path__
+  - source_labels: [__meta_kubernetes_pod_name]
+    action: replace
+    target_label: pod
+  - source_labels: [__meta_kubernetes_namespace]
+    action: replace
+    target_label: namespace
+
 # Scores pushed by examples/inference/_shared/scorer/to_prom.py. The
 # Pushgateway keeps the last push of each run, so the joint-SLO goodput panel
 # shows one step per scored run. honor_labels keeps the run's own labels.
