@@ -1,6 +1,6 @@
 apiVersion: v2
 name: dcgm-exporter
-description: Wrapper around NVIDIA's own dcgm-exporter chart, baking in this platform's required defaults (RFC #41 Decision 3/5 row 2).
+description: "Wrapper around NVIDIA's own dcgm-exporter chart, baking in this platform's required defaults (RFC #41 Decision 3/5 row 2)."
 version: 0.1.0
 dependencies:
   - name: dcgm-exporter
