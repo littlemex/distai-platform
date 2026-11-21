@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # Static checks for examples/inference/ (vLLM prefill/decode disaggregation
-# reference, its aggregated baseline, and the shared scorer, load driver
-# and dashboard): no AWS credentials needed, no cluster needed.
+# reference with its proxy and with the llm-d router, its aggregated
+# baseline, and the shared scorer, load driver and dashboard): no AWS
+# credentials needed, no cluster needed. Needs network access to fetch the
+# pinned llm-d router chart dependency and the pinned upstream schemas.
 #
 #   1. every file the interface contract names exists at its exact path,
 #      with a README per component;
 #   2. bash -n and shellcheck on every *.sh under examples/inference/;
 #   3. score.py and its tests: py_compile, ruff, then the stdlib unittest
 #      suite (_shared/scorer/test_score.py) against score.py;
-#   4. helm lint and helm template of both charts with default values
-#      (acceptance criterion 1);
+#   4. helm dependency build (charts with a Chart.lock), then helm lint and
+#      helm template of every chart with default values (acceptance
+#      criterion 1);
 #   5. kubeconform of the rendered charts and of load-job.yaml against
-#      pinned upstream schemas;
+#      pinned upstream schemas, including the Gateway API and Gateway API
+#      Inference Extension CRD schemas for vllm/disagg-pd-llmd;
 #   6. the placement/transport values contract (test_placement_transport.sh);
 #   7. the Grafana dashboard (check_dashboard.py);
 #   8. the load driver's own documented guarantees that are visible
@@ -24,7 +28,8 @@
 # Optional environment:
 #   HELM (helm), UV (uv), PYTHON (python3), SHELLCHECK (shellcheck),
 #   PYTHON_YAML_VERSION (6.0.2), RUFF_VERSION (0.12.0),
-#   KUBECONFORM_VERSION (0.8.0), K8S_SCHEMA_COMMIT (pinned below).
+#   KUBECONFORM_VERSION (0.8.0), K8S_SCHEMA_COMMIT (pinned below),
+#   GATEWAY_API_VERSION (v1.6.2), GAIE_VERSION (v1.6.2).
 set -euo pipefail
 
 HELM="${HELM:-helm}"
@@ -37,10 +42,18 @@ KUBECONFORM_VERSION="${KUBECONFORM_VERSION:-0.8.0}"
 # The same yannh/kubernetes-json-schema commit gitops/tests/0.static.sh
 # pins (Kubernetes 1.37.0 standalone schemas).
 K8S_SCHEMA_COMMIT="${K8S_SCHEMA_COMMIT:-11639286f15b208b6c7f1f93bc2c1a70f42cfbcb}"
+# The CRD releases vllm/disagg-pd-llmd's README tells the administrator to
+# install (the versions llm-d v1.0.0's guides/env.sh pins), with the
+# sha256 of each release manifest as downloaded on 2026-11-22.
+GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.6.2}"
+GATEWAY_API_SHA256="${GATEWAY_API_SHA256:-faede450fa178126aba41337737b97d351ebe87d93c910237ce1e072d1ca40d9}"
+GAIE_VERSION="${GAIE_VERSION:-v1.6.2}"
+GAIE_SHA256="${GAIE_SHA256:-f410dfca474608c02903087b47f1ac081706dfb6dfe7f83d00a7cc7e00c4ad0d}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INFERENCE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DISAGG="${INFERENCE_ROOT}/vllm/disagg-pd"
+LLMD="${INFERENCE_ROOT}/vllm/disagg-pd-llmd"
 AGG="${INFERENCE_ROOT}/vllm/agg-baseline"
 SCORER="${INFERENCE_ROOT}/_shared/scorer"
 LOAD="${INFERENCE_ROOT}/_shared/load-replay"
@@ -91,6 +104,10 @@ required_files=(
   "vllm/disagg-pd/Chart.yaml"
   "vllm/disagg-pd/values.yaml"
   "vllm/disagg-pd/README.md"
+  "vllm/disagg-pd-llmd/Chart.yaml"
+  "vllm/disagg-pd-llmd/Chart.lock"
+  "vllm/disagg-pd-llmd/values.yaml"
+  "vllm/disagg-pd-llmd/README.md"
   "vllm/agg-baseline/Chart.yaml"
   "vllm/agg-baseline/values.yaml"
   "vllm/agg-baseline/README.md"
@@ -180,9 +197,15 @@ run_check "score.py unit tests (unittest, stdlib only)" \
 
 # ------------------------------------------- 4. helm lint, helm template
 
-for chart in "${DISAGG}" "${AGG}"; do
+for chart in "${DISAGG}" "${AGG}" "${LLMD}"; do
   rel="${chart#"${INFERENCE_ROOT}"/}"
   [[ -f "${chart}/Chart.yaml" ]] || continue
+  # A chart with a Chart.lock depends on another chart (disagg-pd-llmd on
+  # llm-d's router chart): fetch exactly the locked version first.
+  if [[ -f "${chart}/Chart.lock" ]]; then
+    run_check "helm dependency build ${rel} (the versions in Chart.lock)" \
+      "${HELM}" dependency build "${chart}"
+  fi
   run_check "helm lint ${rel}" "${HELM}" lint "${chart}"
   run_check "helm template ${rel} (default values)" \
     bash -c "'${HELM}' template contract-test '${chart}' --namespace contract-test > '${RENDERED_DIR}/$(basename "${chart}").yaml'"
@@ -209,6 +232,33 @@ else
   chmod 0755 "${KUBECONFORM_BIN}"
 fi
 
+# Schemas for the custom resources disagg-pd-llmd renders (HTTPRoute,
+# InferencePool), from the same pinned CRD release manifests its README
+# installs, so a misspelled or misplaced field fails here as it would at
+# apply time. kubeconform tries the built-in schema location first and this
+# one for kinds that location does not have.
+CRD_SCHEMA_DIR="${WORK_DIR}/crd-schemas"
+fetch_pinned() {
+  local url="$1" want="$2" out="$3" got
+  curl -fsSL -o "${out}" "${url}" || return 1
+  got="$(sha256sum "${out}" | awk '{print $1}')"
+  [[ "${got}" == "${want}" ]] || { echo "checksum mismatch for ${url}: got ${got}, want ${want}"; return 1; }
+}
+if [[ -f "${LLMD}/Chart.yaml" ]]; then
+  require_bin curl CURL
+  require_bin sha256sum SHA256SUM
+  run_check "Gateway API ${GATEWAY_API_VERSION} standard CRDs (pinned sha256)" fetch_pinned \
+    "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml" \
+    "${GATEWAY_API_SHA256}" "${WORK_DIR}/gateway-api-crds.yaml"
+  run_check "Gateway API Inference Extension ${GAIE_VERSION} CRDs (pinned sha256)" fetch_pinned \
+    "https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${GAIE_VERSION}/v1-manifests.yaml" \
+    "${GAIE_SHA256}" "${WORK_DIR}/gaie-crds.yaml"
+  run_check "CRD manifests -> kubeconform JSON schemas" \
+    "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+    python3 "${SCRIPT_DIR}/crd_to_jsonschema.py" --out "${CRD_SCHEMA_DIR}" \
+    "${WORK_DIR}/gateway-api-crds.yaml" "${WORK_DIR}/gaie-crds.yaml"
+fi
+
 kubeconform_targets=()
 for r in "${RENDERED_DIR}"/*.yaml; do [[ -s "${r}" ]] && kubeconform_targets+=("${r}"); done
 [[ -f "${LOAD}/load-job.yaml" ]] && kubeconform_targets+=("${LOAD}/load-job.yaml")
@@ -216,6 +266,7 @@ if [[ "${#kubeconform_targets[@]}" -gt 0 ]]; then
   run_check "kubeconform (${#kubeconform_targets[@]} file(s), k8s 1.37.0, strict)" \
     "${KUBECONFORM_BIN}" -strict -summary -kubernetes-version 1.37.0 \
     -schema-location "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/${K8S_SCHEMA_COMMIT}/{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json" \
+    -schema-location "${CRD_SCHEMA_DIR}/{{ .Group }}/{{ .ResourceKind }}_{{ .ResourceAPIVersion }}.json" \
     "${kubeconform_targets[@]}"
 else
   fail "nothing to run kubeconform on (no chart rendered, no load-job.yaml)"
@@ -236,7 +287,7 @@ fi
 
 # ------------------------------------- 6. placement/transport contract
 
-if [[ -f "${DISAGG}/Chart.yaml" && -f "${AGG}/Chart.yaml" ]]; then
+if [[ -f "${DISAGG}/Chart.yaml" && -f "${AGG}/Chart.yaml" && -f "${LLMD}/Chart.yaml" ]]; then
   run_check "placement/transport values contract" \
     env HELM="${HELM}" UV="${UV}" PYTHON_YAML_VERSION="${PYTHON_YAML_VERSION}" \
     bash "${SCRIPT_DIR}/test_placement_transport.sh"
