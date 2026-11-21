@@ -1,8 +1,9 @@
 # RFC #25 Decision 2/3/4. One Application per gitops/addons/<name>/addon.yaml,
 # per registered cluster (Matrix: Cluster generator x Git FILE generator).
-# This PR ships only the "crds" and "controllers" steps (karpenter-crd,
-# karpenter, kueue); "accelerators" and "extras" are later PRs' (#19, #18,
-# #23) and simply have no addon.yaml yet, so they generate nothing today.
+# This PR ships the "crds" and "controllers" steps (karpenter-crd,
+# karpenter, kueue, optional-pool, RFC #41 Decision 1/4); "accelerators"
+# and "extras" are later PRs' (#19, #18, #23) and simply have no
+# addon.yaml yet, so they generate nothing today.
 #
 # goTemplate is on (a decision this PR makes, not spelled out by the RFC's
 # own prose, which quotes the legacy fasttemplate form for a single field):
@@ -105,8 +106,59 @@ spec:
   # spec.goTemplate above - the only way Decision 2's per-add-on values
   # (karpenter's settings.clusterName and so on) avoid being forced into
   # every other add-on's template.
+  #
+  # The {{- if .dir }} branch below (RFC #41: optional-pool, a local,
+  # platform-owned chart delivering the admin CPU NodePool, never an
+  # upstream registry - the same "dir" shape cells.ApplicationSet.yaml
+  # already uses for capacity-pool/smoke, RFC #25 Decision 2, applied
+  # here because this one addon.yaml has no chart/repoURL/version)
+  # fully replaces the base template's source, which otherwise renders
+  # repoURL/chart/targetRevision all empty for a dir-only addon.yaml - an
+  # invalid Application with no repoURL. Its own "chart: null" is
+  # explicit, not left to whatever the base template's own "{{ .chart }}"
+  # happens to render for a missing key: with goTemplateOptions
+  # missingkey=zero, a map value of static type interface{} (what a
+  # parsed addon.yaml's own params decode to) still prints the literal
+  # string "<no value>" for a missing key in the text/template engine
+  # Argo CD uses, not the empty string "zero" might suggest - left unset,
+  # a non-empty "chart: <no value>" alongside "path:" would make Argo CD
+  # treat this as a Helm chart source instead of a Git path source, and
+  # this Application would never sync. A JSON Merge Patch null removes
+  # the key entirely, which is what a dir-only addon.yaml actually needs.
+  #
+  # Unlike #28's own accel-device-classes (dir-based, but no per-cell
+  # values at all), optional-pool's dir branch below still needs its own
+  # nested source.helm block: clusterName/nodeRole are cell-specific
+  # valuesFrom entries (same contract cells.ApplicationSet.yaml's own
+  # capacity-pool/smoke use), so the .dir branch duplicates the same
+  # skipCrds/values/valuesFrom rendering the chart branch below it uses -
+  # a dir-only addon.yaml is not exempt from needing per-cell values, it
+  # is only exempt from needing chart/repoURL/version.
   templatePatch: |
     spec:
+      {{- if .dir }}
+      source:
+        repoURL: https://github.com/littlemex/distai-platform.git
+        path: "{{ .dir }}"
+        targetRevision: '{{ index $.metadata.annotations "distai.dev.annotations/revision" }}'
+        chart: null
+        helm:
+          {{- if .values }}
+          valuesObject:
+            {{- toYaml .values | nindent 12 }}
+          {{- end }}
+          {{- if .valuesFrom }}
+          parameters:
+          {{- range .valuesFrom }}
+          - name: {{ .helmKey }}
+            {{- if .param }}
+            value: "{{ index $ .param }}"
+            {{- else }}
+            value: "{{ index $.metadata.annotations .annotationKey }}"
+            {{- end }}
+          {{- end }}
+          {{- end }}
+      {{- else }}
       source:
         helm:
           {{- if .skipCrds }}
@@ -127,6 +179,7 @@ spec:
             {{- end }}
           {{- end }}
           {{- end }}
+      {{- end }}
       {{- if .syncOptions }}
       syncPolicy:
         syncOptions:
