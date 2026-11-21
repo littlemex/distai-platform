@@ -1,13 +1,24 @@
 # RFC #41 Decision 4 (Pod Security level stated, never implicit). The
-# upstream DaemonSet runs as root with the SYS_ADMIN capability and a
-# hostPath mount of the kubelet pod-resources socket, which Pod Security
-# Admission's baseline level forbids -- so this namespace is labelled
-# enforce=privileged on itself only. Rendered by the chart, rather than
-# left to the bare namespace CreateNamespace=true makes, so the label is
-# there from the first sync instead of added by hand afterwards.
+# upstream DaemonSet runs as root with the SYS_ADMIN capability (both
+# forbidden by baseline) and a hostPath mount of the kubelet
+# pod-resources socket (also forbidden by baseline -- a second,
+# independent reason this namespace needs privileged, not only the
+# capability) -- so this namespace is labelled enforce=privileged on
+# itself only. Rendered by the chart, rather than left to the bare
+# namespace CreateNamespace=true makes, so the label is there from the
+# first sync instead of added by hand afterwards.
+#
+# warn/audit stay at baseline (the Facts-checked precedent: distributed-ai's
+# own image-builder.tf keeps them there for its own enforce=privileged
+# namespace too) -- enforce is what actually admits or rejects a pod;
+# warn/audit only annotate a request or a log line, and lowering them to
+# privileged as well would silence that signal for anything else ever
+# created in this namespace, with nothing in this chart that needs it.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ .Release.Namespace }}
   labels:
     pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: baseline
+    pod-security.kubernetes.io/audit: baseline

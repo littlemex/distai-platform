@@ -15,7 +15,8 @@
 # default -- a dedicated pool) and option (a) (false -- no dedicated pool;
 # extend CriticalAddonsOnly tolerations on the system node group instead,
 # case by case, as new platform-optional components are catalogued). See
-# this PR's own body for the maintainer confirmation this still needs.
+# issue #41's own comments for the two options; flip this value once a
+# maintainer confirms which one this platform keeps.
 #
 # wave: controllers, alongside karpenter/kueue: the NodePool/EC2NodeClass
 # kinds come from karpenter-crd (the "crds" step), and Karpenter itself
