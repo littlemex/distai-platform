@@ -297,7 +297,12 @@ if [[ -f "${OPTIONAL_POOL_ADDON}" ]]; then
   grep -q '^enabled: false$' "${DISABLED_VALUES}" || echo 'enabled: false' >>"${DISABLED_VALUES}"
   DISABLED_RENDERED="${WORK_DIR}/optional-pool-disabled.yaml"
   "${HELM}" template optional-pool-disabled-e2e "${GITOPS_ROOT}/charts/optional-pool" -f "${DISABLED_VALUES}" >"${DISABLED_RENDERED}" 2>"${WORK_DIR}/optional-pool-disabled.err"
-  if [[ -s "${DISABLED_RENDERED}" ]]; then
+  # -s tests size > 0, which a file holding only "helm template"'s own
+  # single trailing newline still satisfies (1 byte) -- not what "renders
+  # nothing" means here. Command substitution strips trailing newlines,
+  # so comparing that against an empty string is the actual "no content
+  # at all" check.
+  if [[ -n "$(cat "${DISABLED_RENDERED}")" ]]; then
     echo "FAIL charts/optional-pool with enabled: false renders a non-empty manifest (option (a) would not actually disable it)"
     failures=$((failures + 1))
   else

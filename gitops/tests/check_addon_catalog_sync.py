@@ -621,6 +621,13 @@ spec:
 """
 
 
+def _write(root: str, rel: str, doc: dict) -> None:
+    path = os.path.join(root, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(doc, f)
+
+
 def _write_text(root: str, rel: str, text: str) -> None:
     path = os.path.join(root, rel)
     os.makedirs(os.path.dirname(path), exist_ok=True)
