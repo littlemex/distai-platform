@@ -35,10 +35,18 @@ def test_parse_offset_and_duration():
     assert parse_duration("PT6H").total_seconds() == 6 * 3600
 
 
-@pytest.mark.parametrize("bad", ["06:30", "T06:30", "T+6:30", ""])
+@pytest.mark.parametrize("bad", ["06:30", "T06:30", "T+6:3", "T+:30", ""])
 def test_parse_offset_rejects_garbage(bad):
     with pytest.raises(PlanError):
         parse_offset(bad)
+
+
+def test_parse_offset_accepts_single_digit_hour():
+    # The hour component is \d+, not \d{2}: "T+6:30" is a legitimate short form
+    # of "T+06:30", not garbage — kept as its own explicit, documented case so
+    # a future tightening of the regex doesn't silently break single-digit
+    # hour offsets without a test noticing.
+    assert parse_offset("T+6:30").total_seconds() == 6 * 3600 + 30 * 60
 
 
 @pytest.mark.parametrize("bad", ["2H", "PT", "PTxH", ""])
