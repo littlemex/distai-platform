@@ -94,6 +94,17 @@ spec:
         automated:
           selfHeal: true
           prune: true
+          # Argo CD's own automated-sync-with-prune default (allowEmpty:
+          # false) refuses to sync an Application down to zero resources,
+          # treating that as a likely automation/human error -- a real
+          # problem for optional-pool (RFC #41 Decision 4 Finding 1),
+          # whose own values.enabled: false switch renders nothing on
+          # purpose. Without this, flipping that switch on a cell that
+          # already has the pool would leave the Application stuck
+          # OutOfSync rather than actually clearing the NodePool/
+          # EC2NodeClass. karpenter/karpenter-crd/kueue never render
+          # empty, so this does not relax anything for them.
+          allowEmpty: true
         retry:
           limit: 20
           backoff:

@@ -41,6 +41,7 @@
 set -euo pipefail
 # mapfile/readarray needs bash >=4 (gitops/tests/README.md's own
 # Prerequisites) -- never run this on macOS's shipped bash 3.2.
+[[ "${BASH_VERSINFO[0]}" -ge 4 ]] || { echo "FAIL this script needs bash >= 4 (mapfile/readarray); got ${BASH_VERSION}" >&2; exit 1; }
 
 : "${AWS_PROFILE:?export AWS_PROFILE}"
 : "${AWS_REGION:?export AWS_REGION}"

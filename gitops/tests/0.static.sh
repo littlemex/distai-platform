@@ -44,6 +44,7 @@
 set -euo pipefail
 # mapfile/readarray needs bash >=4 (gitops/tests/README.md's own
 # Prerequisites) -- never run this on macOS's shipped bash 3.2.
+[[ "${BASH_VERSINFO[0]}" -ge 4 ]] || { echo "FAIL this script needs bash >= 4 (mapfile/readarray); got ${BASH_VERSION}" >&2; exit 1; }
 
 HELM="${HELM:-helm}"
 UV="${UV:-uv}"
@@ -302,17 +303,23 @@ if [[ -f "${OPTIONAL_POOL_ADDON}" ]]; then
   cat "${OPTIONAL_POOL_VALUES}" | sed 's/^enabled: .*/enabled: false/' >"${DISABLED_VALUES}"
   grep -q '^enabled: false$' "${DISABLED_VALUES}" || echo 'enabled: false' >>"${DISABLED_VALUES}"
   DISABLED_RENDERED="${WORK_DIR}/optional-pool-disabled.yaml"
-  "${HELM}" template optional-pool-disabled-e2e "${GITOPS_ROOT}/charts/optional-pool" -f "${DISABLED_VALUES}" >"${DISABLED_RENDERED}" 2>"${WORK_DIR}/optional-pool-disabled.err"
-  # -s tests size > 0, which a file holding only "helm template"'s own
-  # single trailing newline still satisfies (1 byte) -- not what "renders
-  # nothing" means here. Command substitution strips trailing newlines,
-  # so comparing that against an empty string is the actual "no content
-  # at all" check.
-  if [[ -n "$(cat "${DISABLED_RENDERED}")" ]]; then
-    echo "FAIL charts/optional-pool with enabled: false renders a non-empty manifest (option (a) would not actually disable it)"
+  if ! "${HELM}" template optional-pool-disabled-e2e "${GITOPS_ROOT}/charts/optional-pool" -f "${DISABLED_VALUES}" >"${DISABLED_RENDERED}" 2>"${WORK_DIR}/optional-pool-disabled.err"; then
+    echo "FAIL helm template charts/optional-pool with enabled: false exited non-zero: $(cat "${WORK_DIR}/optional-pool-disabled.err")"
     failures=$((failures + 1))
   else
-    echo "PASS charts/optional-pool with enabled: false renders nothing"
+    # -s tests size > 0, which a file holding only "helm template"'s own
+    # single trailing newline still satisfies (1 byte) -- not what
+    # "renders nothing" means here. Command substitution strips trailing
+    # newlines, so comparing that against an empty string is the actual
+    # "no content at all" check. Only reached when helm itself exited 0:
+    # an empty DISABLED_RENDERED from a helm error above must never read
+    # as "renders nothing" (the opposite of what happened).
+    if [[ -n "$(cat "${DISABLED_RENDERED}")" ]]; then
+      echo "FAIL charts/optional-pool with enabled: false renders a non-empty manifest (option (a) would not actually disable it)"
+      failures=$((failures + 1))
+    else
+      echo "PASS charts/optional-pool with enabled: false renders nothing"
+    fi
   fi
 fi
 
