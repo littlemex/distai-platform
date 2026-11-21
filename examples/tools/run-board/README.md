@@ -56,7 +56,7 @@ Three independent, separately-testable pieces:
    IDs, image URIs, node IPs, and free-text condition messages never reach
    disk. Output: `status.json` (`block_start`, `collected_at`, one raw
    lifecycle state per item — `unknown`/`pending`/`running`/`done`/`failed` —
-   plus timestamps, and a list of any items that failed to collect). This PR
+   plus timestamps, and a list of any items that failed to collect). This tool
    does not collect anything from AWS directly; see "Not covered" below.
 
 3. **`render_board.py`** — a pure function, `(plan.yaml, status.json) ->
@@ -139,7 +139,7 @@ are meant to be committed.
 - No AWS-side status source (for example a Capacity Reservation's own
   `AvailableInstanceCount`): only `job`, `kueue_workload` and `manual` exist
   today. A read-only `aws ec2 describe-capacity-reservations` collector is a
-  natural follow-up, left out of this PR to keep its scope small.
+  natural follow-up, left out for now, to keep this tool small.
 - `stop_condition` is free text shown as a hover tooltip for context only; it
   is never evaluated, and the board does not claim to know whether a stop
   condition was hit.

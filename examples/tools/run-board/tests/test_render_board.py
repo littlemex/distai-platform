@@ -51,15 +51,47 @@ def test_done_item_gets_done_class_and_unknown_item_gets_unknown_class():
 
 
 def test_late_item_gets_late_modifier():
-    # tier0-baseline-node-b starts 20 minutes late against a 15-minute grace.
+    # tier0-baseline-node-b finishes 25 minutes past its planned end (grace is 15
+    # minutes) — "late" for a done item is about the finish time, not the start time.
     out = _render_sample()
     assert 'class="state-done mod-late' in out
-    assert "[late]" in out  # the badge text itself, not just the CSS class
+    # The badge text as an actual rendered element, not just present somewhere on the
+    # page — the legend text alone also contains the bare substring "[late]", so a
+    # bare "in out" check here would pass even if no item ever got the badge.
+    assert '<tspan class="badge badge-late"> [late]</tspan>' in out
+
+
+def test_failed_item_gets_failed_class():
+    # node-health-suite-check is the sample's one failed item (on time, no [late] badge).
+    out = _render_sample()
+    assert 'class="state-failed' in out
+
+
+def test_overdue_not_started_item_gets_its_own_class_distinct_from_unknown():
+    # efa-loopback-check is pending with a planned_start well before the snapshot.
+    out = _render_sample()
+    assert 'class="state-overdue-not-started' in out
+    # The legend swatch colors for "overdue-not-started" and "unknown" must differ —
+    # both being the same amber would make them indistinguishable at a glance, even
+    # though they mean different things (a known fact vs. a missing one).
+    from render_board import LEGEND_STATE_COLORS
+
+    assert LEGEND_STATE_COLORS["overdue-not-started"] != LEGEND_STATE_COLORS["unknown"]
+
+
+def test_overrunning_item_gets_overrun_badge_and_pattern():
+    # node-replacement-drill has been running for 55 minutes against a 20-minute plan
+    # (grace 15 minutes) — overrunning, but not late (it started on time).
+    out = _render_sample()
+    assert 'class="state-running mod-overrunning' in out
+    assert '<tspan class="badge badge-late"> [overrunning]</tspan>' in out
 
 
 def test_manual_badge_and_unknown_dependency_edge_are_rendered():
     out = _render_sample()
-    assert "[manual" in out
+    # Same reasoning as the late-badge test above: the legend also contains the bare
+    # substring "[manual", so this checks the actual rendered tspan, not just the page.
+    assert '<tspan class="badge badge-manual"> [manual 16:55Z]</tspan>' in out
     # dra-mode-node-b is unknown (a collection error); any item depending on it must get
     # a distinct 'unknown' edge, not the same 'unmet' edge as a dependency that is merely
     # still running.
@@ -92,9 +124,11 @@ def test_content_security_policy_present():
 
 
 def test_free_text_fields_are_escaped():
-    """Plan/status free text (name, note, stop_condition-derived labels) must never be
-    interpretable as HTML — otherwise a plan.yaml or status.json authored by someone
-    else (or a buggy collector) could inject script into the rendered board."""
+    """Plan/status free text that reaches the page (name, lane, stop_condition) must
+    never be interpretable as HTML — otherwise a plan.yaml or status.json authored by
+    someone else (or a buggy collector) could inject script into the rendered board.
+    (status.json's own `note` field is collected but never rendered anywhere on the
+    page today — nothing to escape there yet.)"""
     plan = load_plan(str(SAMPLE_DIR / "plan.yaml"))
     status = load_status(str(SAMPLE_DIR / "status.sample.json"))
 

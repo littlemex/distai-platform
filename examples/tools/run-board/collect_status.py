@@ -7,11 +7,11 @@ allowlist of fields (see lib/k8s_mapping.py) — never the full kubectl JSON, so
 account IDs, image URIs, node IPs and free-text condition messages never end
 up on disk or in the rendered HTML.
 
-This PR does not collect anything from AWS directly (e.g. a Capacity
+This tool does not collect anything from AWS directly (e.g. a Capacity
 Reservation's own `AvailableInstanceCount`) — only `job` / `kueue_workload` /
 `manual` status sources exist today. A `capacity_reservation` status source
 backed by a read-only `aws ec2 describe-capacity-reservations` call is a
-natural follow-up, deliberately left out of this PR to keep its scope small.
+natural follow-up, deliberately left out of this tool for now, to keep it small.
 
 Usage:
     python3 collect_status.py plan.yaml --block-start 2026-11-20T11:00:00Z \

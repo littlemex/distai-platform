@@ -25,10 +25,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from lib.plan import Plan, load_plan
+from lib.plan import Plan, PlanError, load_plan
 from lib.status_model import (
-    RawStatus,
     StatusDoc,
+    StatusError,
     derive_display_state,
     dependency_edge_state,
     load_status,
@@ -36,7 +36,7 @@ from lib.status_model import (
 
 # --- layout constants --------------------------------------------------------
 
-LABEL_COL_W = 300
+LABEL_COL_W = 340
 ROW_H = 34
 ROW_GAP = 6
 LANE_HEADER_H = 22  # its own strip, so a lane label never overlaps the first item's text
@@ -48,11 +48,14 @@ TOP_AXIS_H = 50
 # Flat, explicit per-state colors for the legend swatches. The chart itself gets its
 # color from CSS classes (lib above), but the legend draws tiny standalone boxes that
 # are not inside a `.state-X` ancestor, so relying on the same descendant-combinator
-# CSS rules there would silently render them blank — these are spelled out once, here,
-# so the legend can never again go blank for that reason.
+# CSS rules there would silently render them blank — these are spelled out once, here.
+# "overdue-not-started" and "unknown" are deliberately two different hues (not both the
+# generic amber token) — they are easy to conflate otherwise, since both are "something
+# is wrong" states, but they mean different things (one is a known fact, the other is a
+# missing one).
 LEGEND_STATE_COLORS = {
     "not-started": ("#ffffff", "#c6c6cd"),
-    "overdue-not-started": ("#fffbf0", "#8d6605"),
+    "overdue-not-started": ("#fff2e8", "#b8550a"),
     "running": ("#f0fbff", "#006ce0"),
     "done": ("#effff1", "#00802f"),
     "failed": ("#fff5f5", "#db0000"),
@@ -76,9 +79,12 @@ CSS = """
   --info-bg:#f0fbff; --info-text:#006ce0;
   --success-bg:#effff1; --success-text:#00802f;
   --error-bg:#fff5f5; --error-text:#db0000;
-  /* amber "unknown" token: not in the Cloudscape snapshot this repo vendors,
-     added here only because a distinct 5th state needs a distinct hue. */
+  /* amber "unknown" and orange "overdue" tokens: not in the Cloudscape snapshot
+     this repo vendors. Two different hues on purpose — "unknown" (a fact we do
+     not have) and "overdue, not started" (a fact we do have: it is late) are
+     easy to conflate if they share a color, so they don't. */
   --unknown-bg:#fffbf0; --unknown-text:#8d6605;
+  --overdue-bg:#fff2e8; --overdue-text:#b8550a;
   --r-button:20px; --r-input:8px; --r-container:16px;
   --font-base:'Open Sans','Helvetica Neue',Roboto,Arial,sans-serif;
 }
@@ -107,19 +113,33 @@ h1 { font-size: 20px; margin: 0 0 4px; }
 .axis-text { font-size: 11px; fill: var(--ink2); }
 .axis-line { stroke: var(--line2); stroke-width: 1; }
 .now-line { stroke: var(--link); stroke-width: 1.5; stroke-dasharray: 4 3; }
-.bar-planned { fill: none; stroke: var(--line); stroke-width: 1.5; }
+.bar-planned {
+  fill: none; stroke: var(--line); stroke-width: 1.5;
+  /* An unfilled shape is not hit-tested by default (SVG's default
+     pointer-events: visiblePainted only hit-tests the painted parts — fill
+     and stroke — so a `fill: none` bar only responds on its 1.5px outline).
+     Items in the not-started/overdue states draw only this rect, with no
+     bar-actual on top, so without this override their <title> tooltip would
+     be effectively unreachable except by hovering a thin line. */
+  pointer-events: all;
+}
 .bar-actual { stroke-width: 0; }
 .state-not-started .bar-actual, .state-overdue-not-started .bar-actual { fill: none; }
 .state-not-started .bar-planned { stroke-dasharray: 3 3; }
-.state-overdue-not-started .bar-planned { stroke: var(--unknown-text); stroke-dasharray: 3 3; }
+.state-overdue-not-started .bar-planned { stroke: var(--overdue-text); stroke-dasharray: 3 3; }
 .state-running .bar-actual { fill: var(--info-bg); stroke: var(--info-text); stroke-width: 1.5; }
 .state-done .bar-actual { fill: var(--success-bg); stroke: var(--success-text); stroke-width: 1.5; }
 .state-failed .bar-actual { fill: url(#hatch-failed); stroke: var(--error-text); stroke-width: 1.5; }
 .state-unknown .bar-actual { fill: url(#hatch-unknown); stroke: var(--unknown-text); stroke-width: 1.5; stroke-dasharray: 2 2; }
 /* "late"/"overrunning" only ever modify running/done — never failed/unknown, whose own
-   pattern already says the thing that matters most. These are deliberately compound
-   (state AND modifier on the same element) rather than two separate same-specificity
-   rules, so which one "wins" does not depend on source order. */
+   pattern already says the thing that matters most, because these are compound
+   selectors (state AND modifier on the same element) rather than two separate
+   same-specificity rules targeting the same element from unrelated classes. That
+   guarantee is specifically about failed/unknown never being overridden by either
+   modifier; it does NOT mean source order never matters at all — a running item
+   that is both late and overrunning matches both of the two rules below, and
+   between those two, the later one in this file (overrunning) wins, deliberately,
+   since "exceeded its planned duration" is the more actionable fact of the two. */
 .state-running.mod-late .bar-actual, .state-done.mod-late .bar-actual { fill: url(#hatch-late); }
 .state-running.mod-overrunning .bar-actual { fill: url(#hatch-overrun); }
 /* SVG <tspan> has no box model (no padding/background/border-radius), so these
@@ -233,7 +253,6 @@ def render(plan: Plan, status: StatusDoc) -> str:
 
     # Dependency arrows first, so bars draw on top of them.
     for item in ordered:
-        disp = derive_display_state(item, status.items.get(item.id), status.block_start, status.collected_at, plan.grace_minutes)
         for dep_id in item.depends_on:
             dep_item = items_by_id[dep_id]
             dep_disp = derive_display_state(dep_item, status.items.get(dep_id), status.block_start, status.collected_at, plan.grace_minutes)
@@ -266,11 +285,21 @@ def render(plan: Plan, status: StatusDoc) -> str:
         svg_parts.append(f'<rect class="bar-planned" x="{px:.1f}" y="{y + 3:.1f}" width="{pw:.1f}" height="{ROW_H - 6}" rx="6" />')
 
         if disp.base in ("running", "done", "failed"):
-            # Prefer the real actual_start/actual_end; a manual entry that only ever says
-            # {"state": "failed"} with no timestamps still gets a filled bar (spanning the
-            # planned window) rather than silently drawing nothing at all.
+            # Prefer the real actual_start/actual_end. A manual entry that only ever says
+            # {"state": "failed"} (or "done") with no timestamps at all still gets a filled
+            # bar rather than silently drawing nothing — but it is drawn as spanning exactly
+            # the *planned* window, not stretched out to "now": a finished item with no real
+            # end time is not the same claim as "still going", and must not be drawn that way.
+            # Only a genuinely still-running item (no actual_end because it hasn't ended)
+            # legitimately extends its bar up to the snapshot time.
             start_dt = raw.actual_start if (raw and raw.actual_start) else (status.block_start + item.planned_start)
-            end_dt = (raw.actual_end if (raw and raw.actual_end) else None) or status.collected_at
+            planned_end_dt = status.block_start + item.planned_start + item.planned_duration
+            if raw and raw.actual_end:
+                end_dt = raw.actual_end
+            elif disp.base == "running":
+                end_dt = status.collected_at
+            else:  # done or failed with no actual_end on record
+                end_dt = max(planned_end_dt, start_dt)
             ax = CHART_LEFT + _minutes(start_dt - status.block_start) * px_per_minute
             aw = max(2.0, _minutes(end_dt - start_dt) * px_per_minute)
             svg_parts.append(f'<rect class="bar-actual" x="{ax:.1f}" y="{y + 7:.1f}" width="{aw:.1f}" height="{ROW_H - 14}" rx="4" />')
@@ -279,6 +308,11 @@ def render(plan: Plan, status: StatusDoc) -> str:
         svg_parts.append("</g>")
 
         label = html.escape(item.name)
+        svg_parts.append(f'<text class="item-label" x="12" y="{y + ROW_H / 2 + 4:.0f}">{label}</text>')
+
+        # Badges live on the second line, next to the state text, not appended to the name:
+        # item names can already be long, and this is where the overlap-with-the-chart risk
+        # concentrates. The state line is always short ("Done", "Running", ...), leaving room.
         badges = ""
         if item.status_source.kind == "manual":
             updated = f" {html.escape(raw.updated_at.strftime('%H:%MZ'))}" if raw and raw.updated_at else ""
@@ -287,9 +321,8 @@ def render(plan: Plan, status: StatusDoc) -> str:
             badges += '<tspan class="badge badge-late"> [late]</tspan>'
         if disp.overrunning:
             badges += '<tspan class="badge badge-late"> [overrunning]</tspan>'
-        svg_parts.append(f'<text class="item-label" x="12" y="{y + ROW_H / 2 + 4:.0f}">{label}{badges}</text>')
         state_text = html.escape(BASE_STATE_LABEL[disp.base])
-        svg_parts.append(f'<text class="note" x="12" y="{y + ROW_H / 2 + 16:.0f}">{state_text}</text>')
+        svg_parts.append(f'<text class="note" x="12" y="{y + ROW_H / 2 + 16:.0f}">{state_text}{badges}</text>')
 
     svg_parts.append("</svg>")
     svg = "\n".join(svg_parts)
@@ -309,7 +342,8 @@ def render(plan: Plan, status: StatusDoc) -> str:
         for s, label in legend_items
     )
     legend_html += (
-        '<div class="legend-item">[late] / [overrunning] badge — started or is running later than planned</div>'
+        '<div class="legend-item">[late] badge — started later than planned (running/failed), or finished '
+        'later than planned (done); [overrunning] badge — still running past its planned duration</div>'
         '<div class="legend-item">[manual HH:MMZ] badge — hand-reported, not observed as a Kubernetes object; '
         "the time shown is when that hand report was last updated, which can be older than this snapshot</div>"
     )
@@ -394,8 +428,16 @@ def main() -> int:
     ap.add_argument("-o", "--out", required=True, help="path to write board.html")
     args = ap.parse_args()
 
-    plan = load_plan(args.plan)
-    status = load_status(args.status)
+    try:
+        plan = load_plan(args.plan)
+        status = load_status(args.status)
+    except (PlanError, StatusError) as e:
+        # Most often a hand-edited plan.yaml or a hand-edited manual-status.json entry
+        # (collect_status.py's own "job"/"kueue_workload" output is always well-formed) —
+        # a clear, labelled error here is more useful than the same exception reaching
+        # the user as an unlabelled traceback.
+        print(f"[render_board] invalid input: {e}", file=sys.stderr)
+        return 2
     html_out = render(plan, status)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:

@@ -63,10 +63,10 @@ def map_kueue_workload_status(workload: dict) -> dict:
 
     Finished=True does not by itself say which: this deliberately does NOT
     fail open to "done" by treating anything without an obvious failure
-    keyword as success (an earlier version of this function did, and some
-    Kueue releases have used the same `reason` value for both outcomes in the
-    past, which would have rendered a failed Workload as "done"). Instead,
-    only `reason == "Succeeded"` is mapped to done and only
+    keyword as success. Some Kueue releases have used the same `reason`
+    value for both outcomes, which a keyword-guess mapping would render as
+    "done" for a Workload that actually failed. Instead, only
+    `reason == "Succeeded"` is mapped to done and only
     `reason == "Failed"` to failed; anything else — an unrecognized reason, a
     different Kueue minor version's own wording, a missing reason — maps to
     "unknown" rather than guessing. If this repo later pins a specific Kueue

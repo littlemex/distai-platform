@@ -19,7 +19,7 @@ from lib.readonly_exec import DisallowedCommandError, run_readonly  # noqa: E402
         ["aws", "ec2", "terminate-instances", "--instance-ids", "i-1"],
         ["aws", "ec2", "run-instances"],
         ["aws", "s3", "cp", "a", "b"],
-        ["aws", "ec2", "describe-capacity-reservations"],  # not wired to anything in this PR; see readonly_exec.py
+        ["aws", "ec2", "describe-capacity-reservations"],  # not wired to anything in this tool; see readonly_exec.py
         ["aws"],
         ["rm", "-rf", "/"],
         ["sh", "-c", "kubectl get pods"],

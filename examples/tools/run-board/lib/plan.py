@@ -20,7 +20,7 @@ import yaml
 
 _ID_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 # DNS-1123-ish: this is also the regex used to validate any name/namespace that
-# `collect_status.py` will later splice into an argv list passed to kubectl/aws.
+# `collect_status.py` will later splice into a kubectl argv list.
 _DNS1123_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
 _OFFSET_RE = re.compile(r"^T\+(\d+):(\d{2})$")
@@ -64,19 +64,27 @@ def parse_duration(text: str) -> timedelta:
 
 
 def validate_name_component(value: str, field_name: str) -> str:
-    """Validate a value that will be used as a Kubernetes name or namespace.
+    """Validate a value that will be used as a Kubernetes resource name or namespace.
 
     This is the one guard that matters for injection safety: `collect_status.py`
     builds argv lists like ["kubectl", "get", "job", name, "-n", namespace, ...],
     and `name`/`namespace` come straight from this file. Rejecting anything that
-    is not a plain DNS-1123 label closes the one place a plan author (or a
-    compromised plan.yaml) could otherwise smuggle a flag or a shell metacharacter
-    into a subprocess argv.
+    is not a plain lowercase-alnum-and-hyphen token closes the one place a plan
+    author (or a compromised plan.yaml) could otherwise smuggle a flag or a shell
+    metacharacter into a subprocess argv.
+
+    The 253-character ceiling matches a Kubernetes object `name` (a DNS-1123
+    subdomain). A real namespace is actually capped at 63 (a DNS-1123 *label*,
+    the stricter of the two) — this function does not distinguish the two
+    fields and uses the more permissive limit for both, so an over-long
+    namespace value is still rejected by `kubectl` itself at call time, just
+    not by this check. That is a usability gap, not a safety one: neither
+    field can contain a flag or metacharacter regardless of length.
     """
     if not isinstance(value, str) or not _DNS1123_RE.fullmatch(value) or len(value) > 253:
         raise PlanError(
-            f"{field_name}={value!r} must be a plain DNS-1123 label "
-            "(lowercase alnum and '-', not starting/ending with '-')"
+            f"{field_name}={value!r} must be a plain lowercase-alnum-and-hyphen token, "
+            "up to 253 characters, not starting/ending with '-'"
         )
     return value
 
