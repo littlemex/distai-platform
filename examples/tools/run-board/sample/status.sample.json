@@ -57,6 +57,22 @@
       "state": "pending",
       "updated_at": "2026-11-20T21:00:00Z",
       "note": "manual"
+    },
+    "node-health-suite-check": {
+      "state": "failed",
+      "actual_start": "2026-11-20T17:32:00Z",
+      "actual_end": "2026-11-20T17:40:00Z",
+      "note": "job/node-health-suite-check"
+    },
+    "efa-loopback-check": {
+      "state": "pending",
+      "note": "manual"
+    },
+    "node-replacement-drill": {
+      "state": "running",
+      "actual_start": "2026-11-20T20:05:00Z",
+      "actual_end": null,
+      "note": "workload/node-replacement-drill"
     }
   },
   "collection_errors": [

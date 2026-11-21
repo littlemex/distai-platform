@@ -98,3 +98,34 @@ items:
     depends_on: [serving-benchmark]
     stop_condition: "never compressed, never delayed"
     status_source: {kind: manual, key: closing-tail}
+
+  # The three items below are not part of the real schedule's main critical path
+  # above; they exist only so the sample data exercises every state this tool can
+  # draw (failed, overdue-not-started, overrunning), which the main schedule above
+  # does not happen to produce on its own.
+  - id: node-health-suite-check
+    name: "Node health suite (independent check)"
+    lane: node-a
+    planned_start: "T+06:30"
+    planned_duration: "PT0H10M"
+    depends_on: []
+    stop_condition: "n/a"
+    status_source: {kind: job, namespace: run-board-sample, name: node-health-suite-check}
+
+  - id: efa-loopback-check
+    name: "EFA loopback check (independent check)"
+    lane: node-b
+    planned_start: "T+07:00"
+    planned_duration: "PT0H15M"
+    depends_on: []
+    stop_condition: "n/a"
+    status_source: {kind: manual, key: efa-loopback}
+
+  - id: node-replacement-drill
+    name: "Node replacement drill (independent check)"
+    lane: shared-reservation
+    planned_start: "T+09:00"
+    planned_duration: "PT0H20M"
+    depends_on: []
+    stop_condition: "n/a"
+    status_source: {kind: kueue_workload, namespace: run-board-sample, name: node-replacement-drill}
