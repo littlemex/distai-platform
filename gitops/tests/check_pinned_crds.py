@@ -33,6 +33,7 @@ Usage: check_pinned_crds.py <repo_root> <rendered_dir>
 """
 import glob
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -73,10 +74,35 @@ def helm_template_chart(addon_doc, workdir):
     chart = addon_doc["chart"]
     version = str(addon_doc["version"])
     skip_crds = bool(addon_doc.get("skipCrds"))
-    ref = f"oci://{addon_doc['repoURL']}/{chart}"
-    cmd = ["helm", "template", f"{chart}-pinned-crd-check", ref, "--version", version]
+    repo_url = addon_doc["repoURL"]
+    # #28: not every registry chart is OCI. accel-nvidia-device-plugin's
+    # repoURL is a classic Helm chart repo (index.yaml at
+    # https://nvidia.github.io/k8s-device-plugin), which `helm template`
+    # reaches with `--repo <url> <chart-name>`, never an `oci://` ref --
+    # prefixing "oci://" onto an already-"https://" URL produced an
+    # unparseable "oci://https://..." reference (found while extending
+    # this script for #28). Every other pinned addon.yaml in this repo so
+    # far (karpenter*, kueue, the other three accel-* add-ons) uses an OCI
+    # registry host with no scheme of its own, so this branch leaves their
+    # behavior unchanged.
+    if repo_url.startswith("http://") or repo_url.startswith("https://"):
+        ref = f"{repo_url}#{chart}"  # descriptive only, for the FAIL message below; not a real helm ref
+        cmd = ["helm", "template", f"{chart}-pinned-crd-check", chart, "--repo", repo_url, "--version", version]
+    else:
+        ref = f"oci://{repo_url}/{chart}"
+        cmd = ["helm", "template", f"{chart}-pinned-crd-check", ref, "--version", version]
     if skip_crds:
         cmd.append("--skip-crds")
+    # Both NVIDIA charts (accel-nvidia-device-plugin, accel-nvidia-dra)
+    # template a validation guard refusing the implicit "default"
+    # namespace ("Running in the 'default' namespace is not recommended"),
+    # found running this script for #28. Every addon.yaml already names
+    # its own real namespace (the Application's own destination); passing
+    # it here avoids relying on --set allowDefaultNamespace=true, a flag
+    # Argo CD's own generated Application never sets either.
+    namespace = addon_doc.get("namespace")
+    if namespace:
+        cmd += ["--namespace", namespace]
     values = placeholder_values(addon_doc)
     values_path = None
     if values:
@@ -106,6 +132,69 @@ def extract_served_versions(rendered_text):
     return out
 
 
+METHOD_LABEL_RE = re.compile(r"^distai\.dev/[\w-]+-method$")
+
+
+def find_method_label(values):
+    """#28: search an addon.yaml's own `values` block (recursively; a method
+    label lives at a different nesting depth per chart -- top-level
+    nodeSelector for both NVIDIA charts, devicePlugin.nodeSelector /
+    draDriver.nodeSelector for Neuron) for the one key matching
+    distai.dev/<vendor>-method. Returns (key, value) or None."""
+    if isinstance(values, dict):
+        for k, v in values.items():
+            if isinstance(k, str) and METHOD_LABEL_RE.match(k) and isinstance(v, str):
+                return (k, v)
+            found = find_method_label(v)
+            if found:
+                return found
+    elif isinstance(values, list):
+        for item in values:
+            found = find_method_label(item)
+            if found:
+                return found
+    return None
+
+
+def daemonset_carries_label(ds_spec, key, value):
+    """True if this DaemonSet's pod template selects nodes by key=value,
+    either through a plain nodeSelector or a required nodeAffinity
+    matchExpressions term (both chart families in this PR use one or the
+    other, confirmed against the pinned chart versions' own values.yaml)."""
+    pod_spec = ((ds_spec.get("template") or {}).get("spec") or {})
+    if (pod_spec.get("nodeSelector") or {}).get(key) == value:
+        return True
+    terms = (
+        ((pod_spec.get("affinity") or {}).get("nodeAffinity") or {})
+        .get("requiredDuringSchedulingIgnoredDuringExecution", {})
+        .get("nodeSelectorTerms", [])
+    )
+    for term in terms:
+        for expr in term.get("matchExpressions", []):
+            if expr.get("key") == key and value in (expr.get("values") or []):
+                return True
+    return False
+
+
+def check_method_label_rendered(label, rendered_text, key, value):
+    """#28, Blocking finding from the Fable 5.2 review of this PR: a
+    values key that is not a real field in the pinned chart is silently
+    ignored by Helm, not an error -- confirmed by the review, and the
+    reason this script (which already has the exact pinned chart's own
+    real rendered output) checks the label actually reached a DaemonSet's
+    pod template, rather than trusting that setting it in addon.yaml's
+    values was enough. Returns True/False/None (None: no DaemonSet in
+    this chart's output at all, which is itself worth flagging)."""
+    found_any_daemonset = False
+    for doc in yaml.safe_load_all(rendered_text):
+        if not doc or doc.get("kind") != "DaemonSet":
+            continue
+        found_any_daemonset = True
+        if daemonset_carries_label(doc.get("spec") or {}, key, value):
+            return True
+    return None if not found_any_daemonset else False
+
+
 def main(repo_root, rendered_dir):
     failures = 0
     served = {}
@@ -132,6 +221,34 @@ def main(repo_root, rendered_dir):
             skip_crds = bool(doc.get("skipCrds"))
             suffix = " (skipCrds: its own crds/-folder CRDs are not applied)" if skip_crds else ""
             print(f"INFO {label} ({chart}:{doc['version']}) ships {len(crds)} CustomResourceDefinition kind(s){suffix}")
+
+            # #28: every accel-* advertiser (never accel-device-classes,
+            # which is a dir-only addon with no chart and no method label
+            # of its own) must have its declared method label actually
+            # reach a DaemonSet in the rendered output of the exact
+            # pinned chart version -- not merely present in addon.yaml's
+            # own values block, which Helm would silently accept and
+            # ignore if the key were wrong (the review finding this
+            # closes).
+            if label.startswith("accel-"):
+                method = find_method_label(doc.get("values") or {})
+                if not method:
+                    print(f"FAIL {label}: no distai.dev/*-method key found anywhere in its values block")
+                    failures += 1
+                else:
+                    mkey, mvalue = method
+                    result = check_method_label_rendered(label, rendered, mkey, mvalue)
+                    if result is True:
+                        print(f"PASS {label}: a DaemonSet in the rendered chart selects nodes by {mkey}={mvalue}")
+                    elif result is False:
+                        print(
+                            f"FAIL {label}: no DaemonSet in the rendered chart selects nodes by {mkey}={mvalue} "
+                            f"(the values key holding it may not be a real field of {chart}:{doc['version']})"
+                        )
+                        failures += 1
+                    else:
+                        print(f"FAIL {label}: the rendered chart has no DaemonSet at all to carry {mkey}={mvalue}")
+                        failures += 1
 
     if failures:
         return 1

@@ -1,0 +1,91 @@
+# Parameter file for cells.ApplicationSet.yaml's Git file generator
+# (RFC #25 Decision 2/3), same shape as
+# cells/example-cell/capacity-pool/cpu.yaml. The Trainium light-tier pool
+# #28 section D verifies the device-plugin method on (a Layer 1 pod
+# requesting aws.amazon.com/neuron: 1, then neuron-ls).
+#
+# accelerator.methodLabel opts this pool's nodes into
+# accel-neuron-device-plugin and nothing else (#19 Decision 2; the chart's
+# own values.yaml renders it as a label on the NodePool's node template,
+# capacity-pool/templates/nodepool.yaml). accelerator.resourceName is
+# provenance only (the chart's own README): no template branches on it.
+# The pool stays dynamically provisioned and device-plugin method: #19 E4c
+# showed a dynamic DRA pool never initializes a Neuron node.
+#
+# pool.capacityType: flex, reverted back from on-demand (#28 section H).
+# A first real run found flex sticking to spot for 30 minutes on this
+# single-instance-type NodePool (CloudTrail: 9 CreateFleet calls, all
+# spot, all UnfulfillableCapacity, while a dry-run on-demand CreateFleet
+# for the same instance type confirmed it would have succeeded) -- see
+# the chart's own README "Known limits" and #28 section H for that
+# finding, with evidence. Switching to pool.capacityType: on-demand to
+# work around it was tried next and itself failed on a real run, a
+# different and still-unexplained way: Karpenter's own provisioner logged
+# "nodepool requirements filtered out all instance types" continuously
+# for the full 30-minute wait, with EC2NodeClass "trn" showing zero
+# errors of its own the entire time (so not an EC2NodeClass-readiness
+# problem) -- not root caused with the same confidence as the flex
+# finding, so reverted rather than shipped as a fix. `flex` is restored
+# here as the known, already-documented behavior (sometimes sticks to
+# spot, but has launched a real node successfully before) rather than an
+# unexplained on-demand failure mode with zero launch attempts at all.
+#
+# pool.requirements replaces the chart default as a whole (Helm replaces
+# lists): the chart's instance-category/instance-generation terms describe
+# CPU families and are dropped; instance-family names trn2 directly.
+#
+# pool.disruption.consolidateAfter: 15m, not the chart default 60s. Root
+# caused on a real run (#28): CloudTrail showed Karpenter itself (user
+# agent karpenter.sh-1.15.2) calling TerminateInstances on the node six
+# minutes after it launched, while the Layer 1 probe pod -- using a 7.5
+# GiB image at the time -- was still Pending; Kubernetes' own node
+# lifecycle controller then force-deleted the pod bound to that now-gone
+# Node ("pods accel-layer1 not found" at the next check, zero NodeClaims
+# left). The pool's nodes, device plugin and extended-resource allocation
+# were never the problem (the same mechanism had already launched a real
+# node and shown allocatable aws.amazon.com/neuron=1 in an earlier run of
+# this same fixture, with a lighter image) -- WhenEmptyOrUnderutilized
+# consolidation simply does not know a Pending, still-image-pulling pod
+# is spoken for, and 60s is shorter than a multi-gigabyte image can pull
+# on a freshly launched node. 15m is this fixture's own value (verifying
+# real hardware, not a cost-tuned production default); capacity-pool's
+# own chart default is unchanged for every other consumer.
+addon: capacity-pool-trn
+wave: capacity
+dir: gitops/charts/capacity-pool
+namespace: kube-system
+values:
+  pool:
+    name: trn
+    capacityType: flex
+    requirements:
+      - key: kubernetes.io/arch
+        operator: In
+        values: ["amd64"]
+      - key: karpenter.k8s.aws/instance-family
+        operator: In
+        values: ["trn2"]
+    disruption:
+      consolidationPolicy: WhenEmptyOrUnderutilized
+      consolidateAfter: 15m
+    # The confirmed fix (#28, see this chart's own README "Known limits"):
+    # a trn2.3xlarge node's default root volume ran out of space while
+    # pulling a 7.5 GiB verification image ("no space left on device"
+    # while extracting a layer), which kubelet's eviction then turned
+    # into a permanently failing pod. 100Gi leaves comfortable headroom
+    # for a real ML image plus the AMI/driver's own footprint.
+    rootVolumeSizeGi: "100Gi"
+  accelerator:
+    resourceName: aws.amazon.com/neuron
+    methodLabel:
+      key: distai.dev/neuron-method
+      value: device-plugin
+valuesFrom:
+  # The Cluster generator's own "name" field: this cell's cluster_name.
+  - helmKey: clusterName
+    param: name
+  # infra/foundation output karpenter_node_role_name, carried by the
+  # registration Secret (RFC #25 Decision 1/2) - the one annotation no
+  # platform add-on reads.
+  - helmKey: nodeRole
+    annotationKey: distai.dev.annotations/karpenter-node-role

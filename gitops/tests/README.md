@@ -137,7 +137,22 @@ every other disposable branch here), and bootstraps from that branch
 instead of the literal `GITOPS_REVISION` for the rest of the run. `NAME`
 and `example-cell` collide with nothing: a run with `NAME=example-cell`
 finds the checked-in directory already there and creates no branch at
-all.
+all. Two more cell directories ship as of #28, `dp-a19-gpu-r3` and
+`dp-a19-trn-r3` (one NVIDIA GPU pool and one Trainium pool, issue #28's
+own light-tier accelerator fixtures, each carrying a method label
+`ensure_cell_fixture()`'s own plain copy of `example-cell` would not).
+With `GITOPS_RUN_ACCEL_E2E=1` (below), **`NAME` must be `dp-a19-gpu-r3`**:
+that extension builds only one cell directly (the plain `1.e2e.sh` flow
+already above), and treats it as the GPU accelerator cell;
+`dp-a19-trn-r3` is never a valid value for `NAME` itself, only for
+`ACCEL_TRN_CELL_NAME` -- the Trainium cell is a second, separate
+foundation cell the extension builds and destroys on its own, in
+`ACCEL_TRN_REGION`. (Both fixture names carry an `-r3` suffix: an
+unrelated agent working on a different issue independently created a
+cell also named `dp-a19-gpu` in another Region, and since IAM role names
+are account-global, its own teardown deleted and recreated roles this
+PR's own verification cluster was using mid-run -- renamed once to a
+name nobody else has used, never reused again.):
 
 ```bash
 export AWS_PROFILE="${AWS_PROFILE:-default}"
@@ -158,6 +173,42 @@ cd gitops/tests
 ```
 
 For `2.upgrade.sh` instead, additionally export `UPGRADE_TO_KARPENTER_VERSION` (a real, published Karpenter version different from `addons/karpenter/addon.yaml`'s pinned one) and run `./2.upgrade.sh` in place of `./1.e2e.sh` above.
+
+(swap the trailing command and add `--env UPGRADE_TO_KARPENTER_VERSION=<x>`
+for `2.upgrade.sh`). As with `infra/foundation/tests/1.e2e.sh`,
+`AWS_PROFILE=default` on the runner (it authenticates via its IAM role
+through IMDS) and `MY_CIDR` is the runner's own public IP, not the Mac's.
+
+### Accelerator extension (issue #28, opt-in: `GITOPS_RUN_ACCEL_E2E=1`)
+
+Adds the `accelerators` step's own real-hardware check, light tier (#16):
+a Layer 1 pod on the existing cell's NVIDIA GPU pool, and a second
+foundation cell built in a Trainium-capable Region for a Layer 1 pod on a
+Neuron pool. Off by default, so an ordinary `1.e2e.sh` run (any `NAME`) is
+unaffected.
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `GITOPS_RUN_ACCEL_E2E` | no (default `0`) | Set to `1` to run this extension |
+| `NAME` | yes, when set to `1` | Must equal `ACCEL_GPU_CELL_NAME` (default `dp-a19-gpu-r3`) -- the GPU accelerator check reuses this script's own existing cell, it does not build a third one |
+| `ACCEL_GPU_CELL_NAME` | no (default `dp-a19-gpu-r3`) | Must match `NAME` and the `gitops/cells/<name>/` fixture this cell's pool comes from |
+| `ACCEL_TRN_CELL_NAME` | no (default `dp-a19-trn-r3`) | Name of the second, Trainium-only foundation cell this extension builds and destroys itself |
+| `ACCEL_TRN_REGION` | no (default `ap-southeast-4`) | Region offering `trn2.3xlarge` spot capacity; the Identity Center instance stays wherever `ARGOCD_IDC_REGION` already points (#28 section E) |
+| `ACCEL_GPU_TEST_IMAGE` | yes, when set to `1` | Container image with `nvidia-smi` on `PATH` (for example a CUDA base image), no default pinned in this repository |
+| `ACCEL_TRN_TEST_IMAGE` | yes, when set to `1` | Container image with `neuron-ls` on `PATH` (a Neuron SDK image), no default pinned in this repository |
+| `ACCEL_POD_TIMEOUT_SECONDS` | no (default `1800`) | How long to wait for each accelerator pod's node to launch |
+
+```bash
+runner/run.sh --ref "${GITOPS_REVISION}" \
+  --env NAME=dp-a19-gpu-r3 \
+  --env AWS_REGION=<Region offering g7/g6e/g5 spot capacity> \
+  ... (every variable the plain 1.e2e.sh invocation above already needs) \
+  --env GITOPS_RUN_ACCEL_E2E=1 \
+  --env ACCEL_GPU_TEST_IMAGE=<a CUDA image reference> \
+  --env ACCEL_TRN_TEST_IMAGE=<a Neuron SDK image reference> \
+  --detach \
+  -- bash gitops/tests/1.e2e.sh
+```
 
 ## Acceptance criteria -> checks
 
@@ -180,6 +231,16 @@ For `2.upgrade.sh` instead, additionally export `UPGRADE_TO_KARPENTER_VERSION` (
 | Upgrade e2e's version-pair check catches a mismatch; a matched bump passes no-replacement and canary-stays-Running | `2.upgrade.sh` experiments A and B |
 | CRD-schema-diff check not claimed met | `2.upgrade.sh`'s final `INFO` line states this explicitly; no assertion claims it |
 | Every claim about upstream versions/capability behavior backed by a primary source or an "unconfirmed" marker | Enforced by this README and the scripts' own comments pointing at the issue's facts comment, not re-derived here |
+
+| Acceptance criterion (issue #28) | Checked by |
+| --- | --- |
+| Every `addon.yaml`/chart file in the Interface table exists and matches the stated shape | `0.static.sh` (`check_gitops_contract.py`, helm lint/template, kubeconform, `check_pinned_crds.py`) |
+| A real `g7`/`g6e`/`g5` node, `pool.capacityType: flex` (spot or on-demand, device-plugin method) runs a Layer 1 `nvidia.com/gpu` pod; `nvidia-smi` reports one GPU | `1.e2e.sh` `check_accel_layer1` on the GPU cell (`GITOPS_RUN_ACCEL_E2E=1`) |
+| A real `trn2.3xlarge` node in `ap-southeast-4`, `pool.capacityType: flex` (spot or on-demand, device-plugin method) runs a Layer 1 `aws.amazon.com/neuron` pod; `neuron-ls` reports one device | `1.e2e.sh` `check_accel_layer1` on the Trainium cell |
+| Each method-labeled `NodePool` carries only the one advertiser its label selects | `1.e2e.sh` `check_accel_layer1`'s own node-level DaemonSet/namespace check |
+| The `accelerators` step reaches Healthy+Synced for the device-plugin releases before anything is asserted about them | `1.e2e.sh` `check_accel_layer1`'s own `app_healthy_synced` wait |
+| Both light-tier cells torn down with no leftover instance/ENI/launch template/volume | `1.e2e.sh` steps 15 and 19 (`report_leftovers`, parameterized per cell) |
+| DRA `addon.yaml` files pass static checks; not required to launch a real DRA node | `0.static.sh`; `1.e2e.sh` only asserts the DRA Application exists in a distinct namespace from its device-plugin sibling, never schedules a pod onto it |
 
 ## Assumptions behind these checks (flagged for the implementer and reviewer to reconcile)
 

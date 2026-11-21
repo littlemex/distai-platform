@@ -11,7 +11,8 @@
 #      1, 2, 3, 4, 6 and 8 of the issue (check_gitops_contract.py);
 #   5. `helm lint` and `helm template` of charts/capacity-pool and
 #      charts/smoke, each against one real cells/*/{capacity-pool,smoke}/*.yaml
-#      parameter file's own `values:`;
+#      parameter file's own `values:`; charts/accel-device-classes (#28)
+#      against its own chart defaults, since nothing in it varies per cell;
 #   5b. issue #27's values shapes, from tests/fixtures/<chart>/*.yaml:
 #      `helm lint` and `helm template` of each fixture; seven fixtures
 #      that must be refused (a reserved pool with no reservation tags, an
@@ -102,7 +103,13 @@ required_files=(
   "addons/karpenter-crd/addon.yaml"
   "addons/karpenter/addon.yaml"
   "addons/kueue/addon.yaml"
+  "addons/accel-nvidia-device-plugin/addon.yaml"
+  "addons/accel-nvidia-dra/addon.yaml"
+  "addons/accel-neuron-device-plugin/addon.yaml"
+  "addons/accel-neuron-dra/addon.yaml"
+  "addons/accel-device-classes/addon.yaml"
   "charts/capacity-pool/Chart.yaml"
+  "charts/accel-device-classes/Chart.yaml"
   "charts/smoke/Chart.yaml"
 )
 missing=()
@@ -315,19 +322,42 @@ with open(out, "w", encoding="utf-8") as f:
 PY
 }
 
+# #28: loop over every cells/*/capacity-pool/*.yaml and cells/*/smoke/*.yaml
+# parameter file, not only the first in sorted order -- issue #28 added a
+# second and third pair (dp-a19-gpu-r3, dp-a19-trn-r3) whose own values
+# (accelerator.methodLabel, a widened pool.requirements) are exactly the
+# content a single-file check would never render or kubeconform. Each file's own
+# cell/pool name keeps its rendered output from colliding with another's
+# in RENDERED_DIR.
 if [[ "${#cell_capacity_pool_files[@]}" -ge 1 ]]; then
   run_check "helm lint charts/capacity-pool" "${HELM}" lint "${GITOPS_ROOT}/charts/capacity-pool"
-  CP_VALUES="${WORK_DIR}/capacity-pool-values.yaml"
-  extract_values "${cell_capacity_pool_files[0]}" "${CP_VALUES}"
-  run_check "helm template charts/capacity-pool (values from $(basename "${cell_capacity_pool_files[0]}"))" \
-    bash -c "'${HELM}' template capacity-pool-e2e '${GITOPS_ROOT}/charts/capacity-pool' -f '${CP_VALUES}' > '${RENDERED_DIR}/capacity-pool.yaml'"
+  for cp_file in "${cell_capacity_pool_files[@]}"; do
+    cp_label="$(basename "$(dirname "$(dirname "${cp_file}")")")-$(basename "${cp_file}" .yaml)"
+    CP_VALUES="${WORK_DIR}/capacity-pool-values-${cp_label}.yaml"
+    extract_values "${cp_file}" "${CP_VALUES}"
+    run_check "helm template charts/capacity-pool (values from ${cp_label}/$(basename "${cp_file}"))" \
+      bash -c "'${HELM}' template capacity-pool-e2e '${GITOPS_ROOT}/charts/capacity-pool' -f '${CP_VALUES}' > '${RENDERED_DIR}/capacity-pool-${cp_label}.yaml'"
+  done
 fi
 if [[ "${#cell_smoke_files[@]}" -ge 1 ]]; then
   run_check "helm lint charts/smoke" "${HELM}" lint "${GITOPS_ROOT}/charts/smoke"
-  SMOKE_VALUES="${WORK_DIR}/smoke-values.yaml"
-  extract_values "${cell_smoke_files[0]}" "${SMOKE_VALUES}"
-  run_check "helm template charts/smoke (values from $(basename "${cell_smoke_files[0]}"))" \
-    bash -c "'${HELM}' template smoke-e2e '${GITOPS_ROOT}/charts/smoke' -f '${SMOKE_VALUES}' > '${RENDERED_DIR}/smoke.yaml'"
+  for smoke_file in "${cell_smoke_files[@]}"; do
+    smoke_label="$(basename "$(dirname "$(dirname "${smoke_file}")")")-$(basename "${smoke_file}" .yaml)"
+    SMOKE_VALUES="${WORK_DIR}/smoke-values-${smoke_label}.yaml"
+    extract_values "${smoke_file}" "${SMOKE_VALUES}"
+    run_check "helm template charts/smoke (values from ${smoke_label}/$(basename "${smoke_file}"))" \
+      bash -c "'${HELM}' template smoke-e2e '${GITOPS_ROOT}/charts/smoke' -f '${SMOKE_VALUES}' > '${RENDERED_DIR}/smoke-${smoke_label}.yaml'"
+  done
+fi
+
+# charts/accel-device-classes (#28) has no cell-specific values (one
+# cluster-scoped DeviceClass, nothing varies per cell) and no
+# cells/*/*.yaml parameter file to extract values from -- helm lint/
+# template run against the chart's own defaults only.
+if [[ -f "${GITOPS_ROOT}/charts/accel-device-classes/Chart.yaml" ]]; then
+  run_check "helm lint charts/accel-device-classes" "${HELM}" lint "${GITOPS_ROOT}/charts/accel-device-classes"
+  run_check "helm template charts/accel-device-classes" \
+    bash -c "'${HELM}' template accel-device-classes-e2e '${GITOPS_ROOT}/charts/accel-device-classes' > '${RENDERED_DIR}/accel-device-classes.yaml'"
 fi
 
 # --------------------------------- 5b. issue #27 values shapes (fixtures)
@@ -420,10 +450,12 @@ KUBECONFORM_ARGS=(
 )
 
 kubeconform_targets=("${GITOPS_ROOT}/appsets/platform.ApplicationSet.yaml" "${GITOPS_ROOT}/appsets/cells.ApplicationSet.yaml" "${GITOPS_ROOT}/bootstrap/root-application.yaml")
-[[ -f "${RENDERED_DIR}/capacity-pool.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/capacity-pool.yaml")
-[[ -f "${RENDERED_DIR}/smoke.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/smoke.yaml")
-mapfile -t rendered_fixtures < <(find "${RENDERED_DIR}" -name 'fixture-*.yaml' | sort)
-kubeconform_targets+=("${rendered_fixtures[@]}")
+# #28: every rendered output under RENDERED_DIR, not a fixed list of
+# names -- the capacity-pool/smoke loop above now writes one file per
+# cell, and #27's own fixture loop writes one file per fixture.
+while IFS= read -r -d '' rendered_file; do
+  kubeconform_targets+=("${rendered_file}")
+done < <(find "${RENDERED_DIR}" -maxdepth 1 -name '*.yaml' -print0 | sort -z)
 
 run_check "kubeconform (${#kubeconform_targets[@]} file(s), k8s 1.37.0 + pinned CRD schemas)" \
   "${KUBECONFORM_BIN}" "${KUBECONFORM_ARGS[@]}" "${kubeconform_targets[@]}"
