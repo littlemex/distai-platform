@@ -82,15 +82,20 @@ def main(root: str) -> int:
     )
 
     # First-PR scope (decision 9): no accelerators/ or teams/* yet, and no
-    # addon.yaml outside the three add-ons this PR delivers.
+    # addon.yaml outside the three add-ons this PR delivers. Issue #41
+    # (https://github.com/littlemex/distai-platform/issues/41) adds a
+    # fourth core add-on, optional-pool: the untainted on-demand CPU
+    # NodePool every platform-optional component's pods land on, delivered
+    # unconditionally like the other three (tier: core). Any further
+    # add-on still needs its own issue to extend this set.
     addon_dirs = sorted(
         d
         for d in os.listdir(os.path.join(gitops, "addons"))
         if os.path.isdir(os.path.join(gitops, "addons", d))
     ) if os.path.isdir(os.path.join(gitops, "addons")) else []
-    expected_addon_dirs = {"karpenter-crd", "karpenter", "kueue"}
+    expected_addon_dirs = {"karpenter-crd", "karpenter", "kueue", "optional-pool"}
     check(
-        "addons/ contains only karpenter-crd, karpenter, kueue in this PR (decision 9)",
+        "addons/ contains only karpenter-crd, karpenter, kueue (decision 9) and optional-pool (issue #41)",
         set(addon_dirs) == expected_addon_dirs,
         f"found: {addon_dirs}, expected exactly {sorted(expected_addon_dirs)}",
     )
@@ -277,6 +282,10 @@ def main(root: str) -> int:
 
     check_applicationset(os.path.join(gitops, "appsets/platform.ApplicationSet.yaml"), {"crds", "controllers"})
     check_applicationset(os.path.join(gitops, "appsets/cells.ApplicationSet.yaml"), {"capacity"})
+    check_applicationset(
+        os.path.join(gitops, "appsets/addons-optional.ApplicationSet.yaml"),
+        {"optional-1", "optional-2", "optional-3", "optional-4"},
+    )
 
     # ----------------------------------------------------- root Application
     root_app_path = os.path.join(gitops, "bootstrap/root-application.yaml")
