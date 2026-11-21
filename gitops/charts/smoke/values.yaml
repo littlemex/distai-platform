@@ -1,0 +1,13 @@
+namespace: distai-smoke
+
+clusterQueue:
+  name: smoke
+  # Must name a ResourceFlavor this cell's own capacity-pool release
+  # creates (gitops/charts/capacity-pool); set per cell in
+  # cells/<cluster-name>/smoke/*.yaml, never defaulted here, since the pool
+  # name is cell-specific.
+  resourceFlavor: ""
+  cpuQuota: "32"
+
+localQueue:
+  name: smoke

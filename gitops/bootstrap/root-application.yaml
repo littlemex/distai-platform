@@ -1,0 +1,31 @@
+# Applied by bootstrap.sh (RFC #25 Decision 1), never by an ApplicationSet -
+# this is the one Application this repository hand-writes, so it carries
+# its own cascade finalizer explicitly (Decision 8): deleting it cascades
+# to platform.ApplicationSet.yaml and cells.ApplicationSet.yaml, and
+# preserveResourcesOnDeletion on each of those (set in both manifests)
+# keeps that cascade from reaching the resources they themselves manage.
+#
+# Placeholders __REVISION__, __CLUSTER_NAME__ and __ARGOCD_NAMESPACE__ are
+# substituted by bootstrap.sh from --tf-outputs and --revision; this file
+# is never applied as-is.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/littlemex/distai-platform.git
+    targetRevision: __REVISION__
+    path: gitops/appsets
+  destination:
+    name: __CLUSTER_NAME__
+    namespace: __ARGOCD_NAMESPACE__
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - CreateNamespace=true

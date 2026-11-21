@@ -1,0 +1,92 @@
+# RFC #25 Decision 2/3/4. One Application per cell-specific parameter file
+# under gitops/cells/<cluster-name>/{capacity-pool,smoke}/*.yaml, pointing
+# at the shared chart templates in gitops/charts/ (capacity-pool, smoke) via
+# a local "dir", never an upstream "chart" - these are admin-authored,
+# per-cell values, not a registry add-on (Decision 2). Explicit globs, not
+# one all-matching cells/{{.name}}/**/*.yaml, so a stray file under a cell's
+# own directory never becomes an Application with no wave to sync in.
+#
+# This PR ships only the "capacity" step (capacity-pool + smoke); #22's
+# "teams" step and its own cells/<cluster-name>/teams/*.yaml glob are not
+# added here - adding the glob with no matching step would leave a team's
+# own Application generated but never synced.
+#
+# See platform.ApplicationSet.yaml for why goTemplate is on and why
+# templatePatch is a Go template either way.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: cells
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=zero"]
+  generators:
+    - matrix:
+        generators:
+          - clusters:
+              selector:
+                matchLabels:
+                  argocd.argoproj.io/secret-type: cluster
+          - git:
+              repoURL: https://github.com/littlemex/distai-platform.git
+              revision: '{{ index .metadata.annotations "distai.dev.annotations/revision" }}'
+              files:
+                - path: "gitops/cells/{{ .name }}/capacity-pool/*.yaml"
+                - path: "gitops/cells/{{ .name }}/smoke/*.yaml"
+  # RFC #25 Decision 8: see platform.ApplicationSet.yaml.
+  syncPolicy:
+    preserveResourcesOnDeletion: true
+  strategy:
+    type: RollingSync
+    rollingSync:
+      steps:
+        - matchExpressions:
+            - key: distai.dev/wave
+              operator: In
+              values: ["capacity"]
+  template:
+    metadata:
+      name: "{{ .name }}-{{ .addon }}"
+      labels:
+        distai.dev/wave: "{{ .wave }}"
+        distai.dev/cell: "{{ .name }}"
+    spec:
+      project: platform
+      source:
+        repoURL: https://github.com/littlemex/distai-platform.git
+        targetRevision: '{{ index .metadata.annotations "distai.dev.annotations/revision" }}'
+        path: "{{ .dir }}"
+      destination:
+        name: "{{ .name }}"
+        namespace: "{{ .namespace }}"
+      syncPolicy:
+        automated:
+          selfHeal: true
+          prune: true
+        retry:
+          limit: 20
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 5m
+        syncOptions:
+          - CreateNamespace=true
+  templatePatch: |
+    spec:
+      source:
+        helm:
+          {{- if .values }}
+          valuesObject:
+            {{- toYaml .values | nindent 12 }}
+          {{- end }}
+          {{- if .valuesFrom }}
+          parameters:
+          {{- range .valuesFrom }}
+          - name: {{ .helmKey }}
+            {{- if .param }}
+            value: "{{ index $ .param }}"
+            {{- else }}
+            value: "{{ index $.metadata.annotations .annotationKey }}"
+            {{- end }}
+          {{- end }}
+          {{- end }}

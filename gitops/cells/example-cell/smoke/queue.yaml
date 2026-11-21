@@ -1,0 +1,13 @@
+# Parameter file for cells.ApplicationSet.yaml's Git file generator
+# (RFC #25 Decision 2/3/9). Requests the "cpu" ResourceFlavor this cell's
+# own capacity-pool/cpu.yaml creates; the two files are not otherwise
+# linked by anything Argo CD enforces - keep the flavor name in step by
+# hand, the same content dependency Decision 4 leaves to review rather
+# than ordering.
+addon: smoke
+wave: capacity
+dir: gitops/charts/smoke
+namespace: distai-smoke
+values:
+  clusterQueue:
+    resourceFlavor: cpu

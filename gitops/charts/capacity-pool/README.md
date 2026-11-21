@@ -1,0 +1,37 @@
+# capacity-pool
+
+One Karpenter `NodePool`, its `EC2NodeClass` and the matching Kueue
+`ResourceFlavor`, as a single release. This is the minimal CPU-only skeleton
+RFC #25's first PR ships (one capacity type, no reserved/on-demand/flex
+ordering across several `NodePool`s of the same pool). [#17](https://github.com/littlemex/distai-platform/issues/17)
+extends this chart with that logic on top; this chart's name, values shape
+and the three kinds it renders do not change under that extension.
+
+## Values
+
+| Key | Required | Description |
+| --- | --- | --- |
+| `clusterName` | yes | Matches the `karpenter.sh/discovery` tag the foundation layer puts on the cell's subnets and security group |
+| `nodeRole` | yes | IAM role name for nodes launched by Karpenter (`infra/foundation` output `karpenter_node_role_name`) |
+| `pool.name` | yes | Name shared by the `NodePool`, its `EC2NodeClass` and the `ResourceFlavor` |
+| `pool.requirements` | no | Karpenter `NodePool` scheduling requirements; defaults to on-demand, amd64, `c`/`m`/`r` instance categories |
+| `pool.limits` | no | Karpenter `NodePool` resource limits; defaults to `cpu: "32"` |
+| `pool.disruption` | no | Karpenter `NodePool` disruption settings |
+| `amiFamily`, `amiSelectorTerms` | no | `EC2NodeClass` AMI selection; defaults to a pinned AL2023 alias (`al2023@v20261112`), bumped only by a reviewed diff, never `latest` |
+
+This chart is never installed from an upstream chart registry: a cell's own
+`gitops/cells/<cluster-name>/capacity-pool/*.yaml` parameter file points
+`cells.ApplicationSet.yaml`'s Git file generator at this chart's own `dir`
+(RFC #25 Decision 2/3), sets `clusterName`/`nodeRole` through `valuesFrom`
+(cell-specific, never a static value in that file - `clusterName` from the
+Cluster generator's own `name` param, `nodeRole` from the registration
+Secret's annotation), and sets `pool.name` as a static value under its own
+`values:` block instead (not cell-specific - the same pool name, `cpu`, is
+reused across every cell by this PR's own fixture).
+
+## Known limits
+
+- One `NodePool` per release, one capacity type (on-demand) - this PR's own
+  minimal skeleton, extended by #17.
+- `EC2NodeClass.spec.role` and the subnet/security-group discovery tags
+  assume the foundation layer (`infra/foundation`) created this cell.
