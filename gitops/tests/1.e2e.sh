@@ -87,6 +87,8 @@
 #   2.upgrade.sh's own disposable branches have no bypass either, since
 #   their own acceptance criteria need exactly this write).
 set -euo pipefail
+# mapfile/readarray needs bash >=4 (gitops/tests/README.md's own
+# Prerequisites) -- never run this on macOS's shipped bash 3.2.
 
 : "${AWS_PROFILE:?export AWS_PROFILE}"
 : "${AWS_REGION:?export AWS_REGION}"
@@ -155,6 +157,9 @@ chmod 700 "${SECRET_TMP_DIR}"
 STATE_KEY="distai-platform/${AWS_REGION}/${NAME}/foundation"
 RUN_ID="gitops-e2e-${NAME}-$(date -u +%Y%m%d%H%M%S)-${RANDOM}"
 TEST_TAG_KEY="distai-platform-e2e"
+# Same image+digest infra/foundation/tests/1.e2e.sh's own IMDS check
+# already pins (DA-10): a scrape pod for step 15d's metrics check below.
+DCGM_SCRAPE_CURL_IMAGE="docker.io/curlimages/curl@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
 
 APPLY_ATTEMPTED=0
 DESTROYED=0
@@ -1922,7 +1927,22 @@ DCGM_NS="$(dcgm_marker_field namespace)"
 DCGM_WAVE="$(dcgm_marker_field wave)"
 [[ -n "${DCGM_NS}" && -n "${DCGM_WAVE}" ]] || fail "could not read namespace/wave from the dcgm-exporter marker (namespace=${DCGM_NS} wave=${DCGM_WAVE})"
 
-dcgm_app_gone() { ! app_exists "${APP_DCGM}"; }
+# C-70: `! app_exists` would read a transient kubectl/API error exactly
+# the same as a confirmed absence (both are "the positive check failed"),
+# which is wrong here specifically because this predicate feeds
+# wait_until's "stop as soon as this returns true" loop -- a single
+# transient error on any poll would end the wait immediately and report
+# "gone" while the Application might still exist. This checks the
+# server's own response text for "NotFound" instead of only the exit
+# code: exists -> false (not gone); confirmed NotFound -> true (gone);
+# any other error (timeout, connection refused, ...) -> false, so
+# wait_until retries rather than concluding anything from a reply the
+# cluster never actually gave.
+dcgm_app_gone() {
+  local err
+  err="$(k get application "${APP_DCGM}" -n "${ARGOCD_NS}" 2>&1 >/dev/null)" && return 1
+  [[ "${err}" == *"NotFound"* ]]
+}
 dcgm_daemonsets() { k get daemonsets -n "${DCGM_NS}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | { grep -v '^$' || true; }; }
 
 # ---- 15a. no marker file, no Application
@@ -2138,12 +2158,92 @@ dcgm_node_type="$(k get node "${DCGM_NODE}" -o jsonpath='{.metadata.labels.node\
   || fail "dcgm-exporter pod is Ready on node ${DCGM_NODE}, a system managed node group node (eks.amazonaws.com/nodegroup=${dcgm_node_mng})"
 [[ "${dcgm_node_pool}" == "${GPU_FIXTURE_NAME}" ]] \
   || fail "dcgm-exporter pod is Ready on node ${DCGM_NODE} from NodePool [${dcgm_node_pool}], not the GPU test fixture ${GPU_FIXTURE_NAME} (optional-pool is ${OPTIONAL_NODEPOOL})"
+# C-70: a process-substitution `done < <(...)` never surfaces the piped
+# command's own exit code -- a failed `kubectl get pods` here would feed
+# the loop zero lines, same as a query that genuinely found none, and the
+# loop would exit having checked nothing while the pass below still
+# claims "every dcgm-exporter pod is on an NVIDIA node". Capturing the
+# output and its exit code first makes that failure loud instead.
+dcgm_pod_nodes="$(k get pods -n "${DCGM_NS}" -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' 2>&1)" \
+  || fail "kubectl get pods -n ${DCGM_NS} failed while checking every dcgm-exporter pod's node: ${dcgm_pod_nodes}"
+dcgm_pod_node_count=0
 while IFS= read -r pod_node; do
   [[ -n "${pod_node}" ]] || continue
+  dcgm_pod_node_count=$((dcgm_pod_node_count + 1))
   [[ "$(k get node "${pod_node}" -o jsonpath='{.metadata.labels.karpenter\.k8s\.aws/instance-gpu-manufacturer}')" == "nvidia" ]] \
     || fail "a dcgm-exporter pod is scheduled on non-NVIDIA node ${pod_node}"
-done < <(k get pods -n "${DCGM_NS}" -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}')
+done <<<"${dcgm_pod_nodes}"
+[[ "${dcgm_pod_node_count}" -ge 1 ]] || fail "no dcgm-exporter pod had a .spec.nodeName to check, even though one was just found Ready on ${DCGM_NODE}"
 pass "a dcgm-exporter pod is Ready on ${DCGM_NODE} (${dcgm_node_type}, nvidia, NodePool ${GPU_FIXTURE_NAME}) -- not on the system node group or optional-pool's ${OPTIONAL_NODEPOOL}; every dcgm-exporter pod is on an NVIDIA node"
+
+# DA-20/DA-31/B2: "Ready" proves the container's liveness/readiness probes
+# pass, not that DCGM itself produced a real metric from the GPU on this
+# node -- the three-stage check (Ready, resource registered, computed
+# value) DA-31 names, applied here to the metrics endpoint rather than a
+# device-plugin resource. This scrapes the chart's own Service (never
+# the Pod IP directly, so it also proves the Service/port the catalog
+# entry's README states is reachable, not only the container port) from
+# a throwaway Pod using this suite's own pinned curl image, and greps for
+# a real DCGM_FI_DEV_* series -- the actual series name, not merely a
+# 200 response (an exporter that serves an empty or malformed page on
+# :9400/metrics would otherwise look identical to a working one here).
+mapfile -t dcgm_services < <(k get svc -n "${DCGM_NS}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>&1)
+[[ "${#dcgm_services[@]}" -eq 1 && -n "${dcgm_services[0]}" ]] \
+  || fail "expected exactly one Service in ${DCGM_NS} to scrape, found: ${dcgm_services[*]:-none}"
+DCGM_SVC="${dcgm_services[0]}"
+DCGM_SCRAPE_POD="dcgm-scrape-${RUN_ID##*-}"
+cat >"${WORK_DIR}/dcgm-scrape-pod.yaml" <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${DCGM_SCRAPE_POD}
+  namespace: ${DCGM_NS}
+  labels:
+    ${TEST_TAG_KEY}: ${RUN_ID}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: ${DCGM_SCRAPE_CURL_IMAGE}
+      command: ["curl", "-sf", "-m", "10", "http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics"]
+      resources:
+        requests: {cpu: 10m, memory: 16Mi}
+        limits: {cpu: 100m, memory: 32Mi}
+YAML
+k apply -f "${WORK_DIR}/dcgm-scrape-pod.yaml" >/dev/null || fail "apply the step 15d metrics-scrape Pod"
+dcgm_scrape_done() {
+  local phase
+  phase="$(k get pod "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" -o jsonpath='{.status.phase}' 2>/dev/null)"
+  [[ "${phase}" == "Succeeded" || "${phase}" == "Failed" ]]
+}
+wait_until 120 5 "the metrics-scrape Pod finished" dcgm_scrape_done \
+  || fail "the step 15d metrics-scrape Pod ${DCGM_SCRAPE_POD} never reached Succeeded/Failed"
+dcgm_scrape_phase="$(k get pod "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" -o jsonpath='{.status.phase}')"
+dcgm_scrape_output="$(k logs "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" 2>&1)"
+[[ "${dcgm_scrape_phase}" == "Succeeded" ]] \
+  || fail "curl http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics (-sf) exited non-zero (Pod phase ${dcgm_scrape_phase}): ${dcgm_scrape_output}"
+echo "${dcgm_scrape_output}" | grep -qE '^DCGM_FI_DEV_[A-Z_]+ ' \
+  || fail "curl http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics succeeded but no DCGM_FI_DEV_* series appeared; first 10 lines: $(echo "${dcgm_scrape_output}" | head -10 | tr '\n' ' ')"
+dcgm_series_count="$(echo "${dcgm_scrape_output}" | grep -cE '^DCGM_FI_DEV_[A-Z_]+ ')"
+k delete pod "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" --ignore-not-found --wait=true --timeout=60s >/dev/null \
+  || fail "kubectl delete the step 15d metrics-scrape Pod"
+pass "GET http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics returned ${dcgm_series_count} DCGM_FI_DEV_* series from the real GPU on ${DCGM_NODE}"
+
+# S2/B2: confirm the wrapper's own stated defaults against the real
+# rendered objects on this cluster, not only against what the chart's
+# values.yaml says it will do -- NetworkPolicy present and of the shape
+# the README claims, no ServiceMonitor CRD instance, and no
+# priorityClassName set on the running pod.
+[[ "$(k get networkpolicy -n "${DCGM_NS}" -o jsonpath='{.items[*].metadata.name}' 2>&1 | tr -d '[:space:]')" != "" ]] \
+  || fail "no NetworkPolicy exists in ${DCGM_NS}, but the chart's own networkPolicy.enabled is true"
+dcgm_servicemonitor_count="$(k get servicemonitors.monitoring.coreos.com -n "${DCGM_NS}" --ignore-not-found -o name 2>&1 | grep -c . || true)"
+[[ "${dcgm_servicemonitor_count}" -eq 0 ]] \
+  || fail "found ${dcgm_servicemonitor_count} ServiceMonitor object(s) in ${DCGM_NS}, but serviceMonitor.enabled is false"
+dcgm_pod_name="$(k get pods -n "${DCGM_NS}" -l "app.kubernetes.io/name=dcgm-exporter" -o jsonpath='{.items[0].metadata.name}')"
+dcgm_pod_priority_class="$(k get pod "${dcgm_pod_name}" -n "${DCGM_NS}" -o jsonpath='{.spec.priorityClassName}')"
+[[ -z "${dcgm_pod_priority_class}" ]] \
+  || fail "pod ${dcgm_pod_name} has priorityClassName=${dcgm_pod_priority_class}, expected none (the wrapper sets priorityClassName: \"\")"
+pass "NetworkPolicy exists in ${DCGM_NS}, no ServiceMonitor object, pod ${dcgm_pod_name} has no priorityClassName"
 
 # ---- 15e. marker file removed: Application gone, resources orphaned
 #
@@ -2175,7 +2275,15 @@ k delete nodepool "${GPU_FIXTURE_NAME}" --ignore-not-found --wait=true --timeout
   || fail "kubectl delete the step 15 NodePool ${GPU_FIXTURE_NAME}"
 k delete ec2nodeclass "${GPU_FIXTURE_NAME}" --ignore-not-found --wait=true --timeout=600s >/dev/null \
   || fail "kubectl delete the step 15 EC2NodeClass ${GPU_FIXTURE_NAME}"
-gpu_fixture_nodes_gone() { [[ -z "$(k get nodes -l "karpenter.sh/nodepool=${GPU_FIXTURE_NAME}" -o name 2>/dev/null)" ]]; }
+# C-70: capture kubectl's own exit code before treating an empty result
+# as "no nodes" -- `2>/dev/null` with command substitution makes an API
+# error and a genuinely empty list produce the identical empty string,
+# and this predicate feeds a wait_until that stops as soon as it is true.
+gpu_fixture_nodes_gone() {
+  local out
+  out="$(k get nodes -l "karpenter.sh/nodepool=${GPU_FIXTURE_NAME}" -o name 2>&1)" || return 1
+  [[ -z "${out}" ]]
+}
 wait_until 900 20 "the GPU test fixture's node is gone" gpu_fixture_nodes_gone \
   || fail "node(s) from NodePool ${GPU_FIXTURE_NAME} remain after deleting it: $(k get nodes -l "karpenter.sh/nodepool=${GPU_FIXTURE_NAME}" -o name 2>&1 | tr '\n' ' ')"
 pass "deleted the GPU test fixture ${GPU_FIXTURE_NAME} and its node"
