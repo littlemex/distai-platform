@@ -83,15 +83,15 @@ def main(root: str) -> int:
 
     # Every directory under addons/ has exactly one addon.yaml, and that
     # file is independently structurally valid (checked below via
-    # check_addon_yaml). This PR shipped a hand-typed, exact-equality set
-    # here instead (decision 9's first-PR scope: karpenter-crd, karpenter,
-    # kueue); #28/#40/#41 each then extended their own copy of that literal
-    # for their own addons, so the merged tree's real addon count matched
-    # neither copy and the check failed on merge regardless of which PR
-    # landed second (#63, filed as #55). This directory-shape check is
-    # derived from the filesystem, like sourceRepos already is in
+    # check_addon_yaml). An earlier version of this check asserted an
+    # exact, hand-typed set of directory names instead; this PR (#41,
+    # adding optional-pool) and #28/#40's chain each extended their own
+    # copy of that literal for their own addons, so the merged tree's real
+    # addon count matched neither copy and the check failed regardless of
+    # which PR landed second (#63, filed as #55). This directory-shape
+    # check is derived from the filesystem, like sourceRepos already is in
     # bootstrap.sh, and needs no further edit as addons/ grows; the three
-    # addon.yaml files this PR's own Decisions discuss by name are still
+    # addon.yaml files RFC #25's own Decisions discuss by name are still
     # checked explicitly below, independent of this generic shape check.
     addon_dirs = sorted(
         d
@@ -301,6 +301,10 @@ def main(root: str) -> int:
 
     check_applicationset(os.path.join(gitops, "appsets/platform.ApplicationSet.yaml"), {"crds", "controllers"})
     check_applicationset(os.path.join(gitops, "appsets/cells.ApplicationSet.yaml"), {"capacity"})
+    check_applicationset(
+        os.path.join(gitops, "appsets/addons-optional.ApplicationSet.yaml"),
+        {"optional-1", "optional-2", "optional-3", "optional-4"},
+    )
 
     # ----------------------------------------------------- root Application
     root_app_path = os.path.join(gitops, "bootstrap/root-application.yaml")
