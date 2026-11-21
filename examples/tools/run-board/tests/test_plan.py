@@ -205,3 +205,12 @@ def test_empty_items_rejected(tmp_path):
     path = _write_plan(tmp_path, "items: []\n")
     with pytest.raises(PlanError, match="non-empty"):
         load_plan(path)
+
+
+def test_syntactically_invalid_yaml_is_a_plan_error_not_a_yaml_error(tmp_path):
+    # A real yaml.YAMLError (not this module's own PlanError) must not escape load_plan
+    # — every caller's "except PlanError" guard needs this to be the one error type.
+    path = tmp_path / "plan.yaml"
+    path.write_text("items:\n  - id: a\n\tname: bad tab indent\n")
+    with pytest.raises(PlanError):
+        load_plan(str(path))

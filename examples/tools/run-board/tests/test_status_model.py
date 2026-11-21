@@ -194,3 +194,12 @@ def test_unknown_raw_state_rejected():
                 "items": {"x": {"state": "totally-made-up"}},
             }
         )
+
+
+def test_syntactically_invalid_json_is_a_status_error_not_a_json_decode_error(tmp_path):
+    # A real json.JSONDecodeError must not escape load_status — every caller's
+    # "except StatusError" guard needs this to be the one error type.
+    path = tmp_path / "status.json"
+    path.write_text('{"block_start": "2026-11-20T11:00:00Z", "collected_at": "2026-11-20T11:05:00Z",}')
+    with pytest.raises(StatusError):
+        load_status(str(path))

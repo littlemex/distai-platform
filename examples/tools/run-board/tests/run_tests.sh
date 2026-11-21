@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Unit tests for the run-board example tool. No AWS credentials, no cluster access,
 # no network access beyond resolving the two pinned Python packages below — every
-# test uses fixture JSON/YAML under tests/ and tests/fixtures/, and patches either
+# test uses fixture JSON/YAML under tests/fixtures/ and sample/, and patches either
 # collect_status.run_readonly or subprocess.run directly, rather than ever calling
 # a real kubectl.
 #
