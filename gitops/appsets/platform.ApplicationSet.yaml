@@ -94,17 +94,6 @@ spec:
         automated:
           selfHeal: true
           prune: true
-          # Argo CD's own automated-sync-with-prune default (allowEmpty:
-          # false) refuses to sync an Application down to zero resources,
-          # treating that as a likely automation/human error -- a real
-          # problem for optional-pool (RFC #41 Decision 4 Finding 1),
-          # whose own values.enabled: false switch renders nothing on
-          # purpose. Without this, flipping that switch on a cell that
-          # already has the pool would leave the Application stuck
-          # OutOfSync rather than actually clearing the NodePool/
-          # EC2NodeClass. karpenter/karpenter-crd/kueue never render
-          # empty, so this does not relax anything for them.
-          allowEmpty: true
         retry:
           limit: 20
           backoff:
@@ -180,7 +169,6 @@ spec:
           {{- end }}
           {{- end }}
       {{- end }}
-      {{- if .syncOptions }}
       # templatePatch is applied as a JSON merge patch over the rendered
       # base template above (goTemplate's own semantics): a present key
       # replaces the base's list wholesale, it does not append to it. An
@@ -189,7 +177,25 @@ spec:
       # CreateNamespace=true is always rendered first here, and an
       # addon.yaml that also lists it explicitly (as gitops/addons/kueue's
       # used to, before this fix) is de-duplicated rather than repeated.
+      {{- if or .syncOptions .allowEmpty }}
       syncPolicy:
+        {{- if .allowEmpty }}
+        # Per-addon opt-in only (RFC #41 Decision 4 Finding 1): Argo CD's
+        # own automated-sync-with-prune default (allowEmpty: false)
+        # refuses to sync an Application down to zero resources,
+        # treating that as a likely automation/human error. optional-pool's
+        # own values.enabled: false switch renders nothing on purpose, so
+        # it alone sets allowEmpty: true in its own addon.yaml -- this key
+        # must stay scoped to the one addon that actually needs it:
+        # karpenter-crd, karpenter and kueue never render empty, and
+        # giving every core addon this escape hatch would mean a future
+        # Helm/OCI-registry hiccup that happened to render one of them
+        # empty gets automatically pruned (CRDs, NodePools, EC2NodeClasses,
+        # NodeClaims and all) instead of the safety mechanism catching it.
+        automated:
+          allowEmpty: true
+        {{- end }}
+        {{- if .syncOptions }}
         syncOptions:
         - CreateNamespace=true
         {{- range .syncOptions }}

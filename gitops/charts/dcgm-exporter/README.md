@@ -67,9 +67,13 @@ One replica per node, so no `PodDisruptionBudget` applies; the upstream
   change, runs as root (`runAsUser: 0`, `runAsNonRoot: false`) and adds
   the `SYS_ADMIN` capability, needed for GPU profiling metrics
   (`DCGM_FI_PROF_*`: SM occupancy, tensor/FP64 pipe utilization, NVLink
-  throughput -- exactly the per-job GPU utilization signal this
-  platform's own training/inference workloads need, not a feature this
-  component happens to also offer). Dropping `SYS_ADMIN` was considered
+  throughput -- the per-job GPU utilization signal this platform's own
+  training/inference workloads need, not a feature this component
+  happens to also offer, though the real-cluster run below only
+  confirms the broader `DCGM_FI_DEV_*` series, not a `DCGM_FI_PROF_*`
+  one specifically -- whether this GPU generation's driver actually
+  exposes profiling counters is a separate question from whether the
+  capability is granted). Dropping `SYS_ADMIN` was considered
   and rejected for that reason: the real benefit would be a narrower
   container capability set, not a lower Pod Security level -- the chart
   also mounts the kubelet pod-resources socket by `hostPath` (reads

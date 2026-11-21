@@ -159,7 +159,7 @@ STATE_KEY="distai-platform/${AWS_REGION}/${NAME}/foundation"
 RUN_ID="gitops-e2e-${NAME}-$(date -u +%Y%m%d%H%M%S)-${RANDOM}"
 TEST_TAG_KEY="distai-platform-e2e"
 # Same image+digest infra/foundation/tests/1.e2e.sh's own IMDS check
-# already pins (DA-10): a scrape pod for step 15d's metrics check below.
+# already pins: a scrape pod for step 15d's metrics check below.
 DCGM_SCRAPE_CURL_IMAGE="docker.io/curlimages/curl@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
 
 APPLY_ATTEMPTED=0
@@ -1505,7 +1505,16 @@ optional_taints="$(k get nodepool "${OPTIONAL_NODEPOOL}" -o jsonpath='{.spec.tem
 optional_capacity_types="$(k get nodepool "${OPTIONAL_NODEPOOL}" -o jsonpath='{.spec.template.spec.requirements[?(@.key=="karpenter.sh/capacity-type")].values[*]}')"
 [[ "${optional_capacity_types}" == "on-demand" ]] \
   || fail "optional-pool NodePool ${OPTIONAL_NODEPOOL}'s karpenter.sh/capacity-type values are [${optional_capacity_types}], expected exactly [on-demand]"
-pass "${APP_OPTIONAL_POOL} reached Healthy+Synced and owns one untainted, on-demand NodePool (${OPTIONAL_NODEPOOL}) and its EC2NodeClass (${OPTIONAL_NODECLASS})"
+# templatePatch's own {{- if .allowEmpty }} branch (platform.ApplicationSet.yaml)
+# must MERGE allowEmpty into spec.syncPolicy.automated alongside the base
+# template's own selfHeal/prune, not replace that block -- checked
+# directly on the generated Application rather than only assumed from
+# how the same templatePatch mechanism already merges source.helm
+# alongside source.repoURL/chart/targetRevision elsewhere.
+optional_automated="$(app_field "${APP_OPTIONAL_POOL}" '{.spec.syncPolicy.automated}')"
+[[ "${optional_automated}" == *'"selfHeal":true'* && "${optional_automated}" == *'"prune":true'* && "${optional_automated}" == *'"allowEmpty":true'* ]] \
+  || fail "${APP_OPTIONAL_POOL}'s spec.syncPolicy.automated is [${optional_automated}], expected selfHeal/prune (from the base template) and allowEmpty (from templatePatch) all merged together, not one replacing the other"
+pass "${APP_OPTIONAL_POOL} reached Healthy+Synced and owns one untainted, on-demand NodePool (${OPTIONAL_NODEPOOL}) and its EC2NodeClass (${OPTIONAL_NODECLASS}), with selfHeal/prune/allowEmpty all merged into spec.syncPolicy.automated"
 
 mapfile -t nodepools < <(k get nodepools -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$' | grep -vxF "${OPTIONAL_NODEPOOL}")
 mapfile -t ec2nodeclasses < <(k get ec2nodeclasses -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$' | grep -vxF "${OPTIONAL_NODECLASS}")
@@ -1944,6 +1953,18 @@ dcgm_app_gone() {
   err="$(k get application "${APP_DCGM}" -n "${ARGOCD_NS}" 2>&1 >/dev/null)" && return 1
   [[ "${err}" == *"NotFound"* ]]
 }
+# Note: a failed `k get daemonsets` here would read as "no DaemonSets
+# exist" (the same risk class other checks in this step now guard
+# against), which would skip the dcgm-exporter namespace reset below and
+# let 15b pass its "re-adoption" assertion for the wrong reason. Left as
+# is rather than guarded with fail(): this function is invoked through
+# `< <(dcgm_daemonsets)` process substitution, where `fail`'s own `exit`
+# would only terminate that subshell, not this script -- the same
+# subtlety the other guarded checks in this step avoid by never calling
+# fail() from inside a process-substituted function. A real fix needs a
+# different mechanism (a side-channel exit-code file, or restructuring
+# the two call sites to not use process substitution), not attempted
+# here.
 dcgm_daemonsets() { k get daemonsets -n "${DCGM_NS}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | { grep -v '^$' || true; }; }
 
 # ---- 15a. no marker file, no Application
@@ -2192,7 +2213,7 @@ done <<<"${dcgm_pod_nodes}"
 [[ "${dcgm_pod_node_count}" -ge 1 ]] || fail "no dcgm-exporter pod had a .spec.nodeName to check, even though one was just found Ready on ${DCGM_NODE}"
 pass "a dcgm-exporter pod is Ready on ${DCGM_NODE} (${dcgm_node_type}, nvidia, NodePool ${GPU_FIXTURE_NAME}) -- not on the system node group or optional-pool's ${OPTIONAL_NODEPOOL}; every dcgm-exporter pod is on an NVIDIA node"
 
-# DA-20/DA-31/B2: "Ready" proves the container's liveness/readiness probes
+# "Ready" proves the container's liveness/readiness probes
 # pass, not that DCGM itself produced a real metric from the GPU on this
 # node -- the three-stage check (Ready, resource registered, computed
 # value) DA-31 names, applied here to the metrics endpoint rather than a
