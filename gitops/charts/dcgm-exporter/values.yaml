@@ -1,0 +1,58 @@
+dcgm-exporter:
+  # Embedded DCGM (the upstream chart's own default: config.sources.dcgm.hostengine
+  # left unset) plus hostNetwork: false / a ClusterIP Service on port 9400
+  # (also the upstream chart's own default) together avoid the EKS Node
+  # Monitoring Agent's dcgm-server hostPort 5555 conflict distributed-ai's
+  # observability.tf documents for the GPU Operator's bundled, host-network
+  # DCGM DaemonSet (RFC #41 Facts checked). Nothing to override here --
+  # recorded so a future values change does not reintroduce
+  # hostNetwork/hostPort by accident.
+
+  # RFC #41's own monitoring-components comment: this cell has no
+  # Prometheus Operator CRDs yet (no `prometheus` catalog entry on this
+  # PR), so a ServiceMonitor object here would dangle with no controller
+  # to read it. Metrics are exposed on the plain ClusterIP Service (port
+  # 9400) only; wire scraping up once the `prometheus` catalog entry
+  # ships.
+  serviceMonitor:
+    enabled: false
+
+  # GPU nodes only, including a tainted one (#33's own acceptance
+  # criterion: "a wildcard toleration so it lands on every GPU node
+  # including tainted ones"). karpenter.k8s.aws/instance-gpu-manufacturer
+  # is a Karpenter-for-AWS well-known label, populated automatically from
+  # each EC2 instance type's own spec -- no device-plugin/DRA advertiser
+  # (RFC #19, not shipped on this PR's base) or GPU Operator/NFD label
+  # needed. This is also why dcgm-exporter needs no capacity-pool of its
+  # own in this PR: it schedules onto whatever GPU NodePool a cell
+  # already has, team-owned or admin-owned -- never onto this PR's own
+  # optional-pool (CPU-only, RFC #41 Decision 4 Finding 1).
+  nodeSelector:
+    karpenter.k8s.aws/instance-gpu-manufacturer: nvidia
+  tolerations:
+    - operator: Exists
+
+  # The chart's own default is system-node-critical; overridden to an
+  # empty string (the upstream DaemonSet template then renders no
+  # priorityClassName at all) deliberately: that class lets the kubelet
+  # evict other pods on the node to admit this one, a priority reserved
+  # for what the node cannot run without. dcgm-exporter is not on the
+  # critical boot path the way karpenter/kueue are (RFC #41 Decision 1's
+  # own core/platform-optional split), so it must never displace a
+  # team's training pod on a GPU node.
+  priorityClassName: ""
+
+  networkPolicy:
+    enabled: true
+    # No monitoring namespace exists yet to scope this to (the
+    # `prometheus` catalog entry is a later PR) -- open to every
+    # in-cluster pod on the metrics TCP port only, still narrower than no
+    # NetworkPolicy at all. `namespaceSelector: {}` (every pod in every
+    # namespace), not a bare `{}` peer: the API server rejects a peer with
+    # no podSelector/namespaceSelector/ipBlock ("must specify a peer"),
+    # and an in-cluster-only peer is what this comment intends anyway.
+    # Narrow this to a specific namespaceSelector once `prometheus`
+    # ships; overridableKeys (gitops/addon-catalog/dcgm-exporter/addon.yaml)
+    # lets a cell do this itself in the meantime.
+    allowedPeers:
+      - namespaceSelector: {}
