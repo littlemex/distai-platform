@@ -89,6 +89,7 @@
 set -euo pipefail
 # mapfile/readarray needs bash >=4 (gitops/tests/README.md's own
 # Prerequisites) -- never run this on macOS's shipped bash 3.2.
+[[ "${BASH_VERSINFO[0]}" -ge 4 ]] || { echo "FAIL this script needs bash >= 4 (mapfile/readarray); got ${BASH_VERSION}" >&2; exit 1; }
 
 : "${AWS_PROFILE:?export AWS_PROFILE}"
 : "${AWS_REGION:?export AWS_REGION}"
@@ -1979,7 +1980,15 @@ pass "no Application ${APP_DCGM} exists at ${NO_DCGM_REVISION} (no ${DCGM_MARKER
 # so Healthy+Synced, not merely Synced, is what this step expects. A
 # capability whose health check differs fails here with both statuses
 # printed, rather than being assumed either way.
-nvidia_nodes="$(k get nodes -l karpenter.k8s.aws/instance-gpu-manufacturer=nvidia --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+# Under pipefail, a failed `k get nodes` here (API hiccup, not "zero
+# nodes") would make the whole pipeline's exit code non-zero even though
+# wc -l/tr both exit 0 on their own, which a bare assignment with no
+# guard would let abort the script with no message. Capturing kubectl
+# alone first, guarded, keeps that failure distinguishable from a
+# genuine zero-node answer.
+nvidia_node_names="$(k get nodes -l karpenter.k8s.aws/instance-gpu-manufacturer=nvidia -o name 2>&1)" \
+  || fail "kubectl get nodes -l karpenter.k8s.aws/instance-gpu-manufacturer=nvidia failed: ${nvidia_node_names}"
+nvidia_nodes="$(echo "${nvidia_node_names}" | grep -c . || true)"
 [[ "${nvidia_nodes}" -eq 0 ]] \
   || fail "${nvidia_nodes} NVIDIA node(s) already exist before step 15c launches one; 15b's zero-matched-node expectation would not hold"
 run_bootstrap --revision "${ADD_DCGM_REVISION}" || fail "bootstrap.sh --revision ${ADD_DCGM_REVISION}"
@@ -2147,7 +2156,14 @@ dcgm_ready_node() {
 dcgm_pod_ready() { [[ -n "$(dcgm_ready_node)" ]]; }
 wait_until 1500 20 "a dcgm-exporter pod is Ready on a node" dcgm_pod_ready \
   || fail "no dcgm-exporter pod became Ready: pods=[$(k get pods -n "${DCGM_NS}" -o wide 2>&1 | tr '\n' ' ')] nodeclaims=[$(k get nodeclaims -o wide 2>&1 | tr '\n' ' ')]"
-DCGM_NODE="$(dcgm_ready_node)"
+# dcgm_ready_node's own awk exits 1 (via END{exit !found}) when no
+# matching pod is found; a bare assignment with no guard would let that
+# abort the script silently under set -e if the pod stopped being Ready
+# in the instant between wait_until's last successful poll and this
+# direct re-invocation (unlikely, but the same shape this step's own
+# other fixes are closing elsewhere).
+DCGM_NODE="$(dcgm_ready_node)" \
+  || fail "dcgm_ready_node found no Ready dcgm-exporter pod on this direct re-check, immediately after wait_until confirmed one"
 dcgm_node_gpu="$(k get node "${DCGM_NODE}" -o jsonpath='{.metadata.labels.karpenter\.k8s\.aws/instance-gpu-manufacturer}')"
 dcgm_node_pool="$(k get node "${DCGM_NODE}" -o jsonpath='{.metadata.labels.karpenter\.sh/nodepool}')"
 dcgm_node_mng="$(k get node "${DCGM_NODE}" -o jsonpath='{.metadata.labels.eks\.amazonaws\.com/nodegroup}')"
@@ -2187,7 +2203,12 @@ pass "a dcgm-exporter pod is Ready on ${DCGM_NODE} (${dcgm_node_type}, nvidia, N
 # a real DCGM_FI_DEV_* series -- the actual series name, not merely a
 # 200 response (an exporter that serves an empty or malformed page on
 # :9400/metrics would otherwise look identical to a working one here).
-mapfile -t dcgm_services < <(k get svc -n "${DCGM_NS}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>&1)
+# A failed `k get svc` here would otherwise read as "one Service named
+# <the error text>" -- mapfile/< <() never surfaces the piped command's
+# own exit code, same shape as the step 15d node-loop fix above.
+dcgm_svc_output="$(k get svc -n "${DCGM_NS}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>&1)" \
+  || fail "kubectl get svc -n ${DCGM_NS} failed: ${dcgm_svc_output}"
+mapfile -t dcgm_services <<<"${dcgm_svc_output}"
 [[ "${#dcgm_services[@]}" -eq 1 && -n "${dcgm_services[0]}" ]] \
   || fail "expected exactly one Service in ${DCGM_NS} to scrape, found: ${dcgm_services[*]:-none}"
 DCGM_SVC="${dcgm_services[0]}"
@@ -2218,8 +2239,10 @@ dcgm_scrape_done() {
 }
 wait_until 120 5 "the metrics-scrape Pod finished" dcgm_scrape_done \
   || fail "the step 15d metrics-scrape Pod ${DCGM_SCRAPE_POD} never reached Succeeded/Failed"
-dcgm_scrape_phase="$(k get pod "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" -o jsonpath='{.status.phase}')"
-dcgm_scrape_output="$(k logs "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" 2>&1)"
+dcgm_scrape_phase="$(k get pod "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" -o jsonpath='{.status.phase}')" \
+  || fail "kubectl get pod ${DCGM_SCRAPE_POD} -n ${DCGM_NS} failed: ${dcgm_scrape_phase}"
+dcgm_scrape_output="$(k logs "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" 2>&1)" \
+  || fail "kubectl logs ${DCGM_SCRAPE_POD} -n ${DCGM_NS} failed: ${dcgm_scrape_output}"
 [[ "${dcgm_scrape_phase}" == "Succeeded" ]] \
   || fail "curl http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics (-sf) exited non-zero (Pod phase ${dcgm_scrape_phase}): ${dcgm_scrape_output}"
 echo "${dcgm_scrape_output}" | grep -qE '^DCGM_FI_DEV_[A-Z_]+(\{[^}]*\})? [0-9.eE+-]+$' \
@@ -2234,8 +2257,16 @@ pass "GET http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics returned ${dcgm_series_
 # values.yaml says it will do -- NetworkPolicy present and of the shape
 # the README claims, no ServiceMonitor CRD instance, and no
 # priorityClassName set on the running pod.
-dcgm_netpol_names="$(k get networkpolicy -n "${DCGM_NS}" -o jsonpath='{.items[*].metadata.name}' 2>&1)" \
-  || fail "kubectl get networkpolicy -n ${DCGM_NS} failed: ${dcgm_netpol_names}"
+# 2>&1 would merge in any benign stderr warning kubectl happens to print
+# on a SUCCESSFUL call too (a deprecation notice, for example), and that
+# noise alone would satisfy "non-empty" even if the real jsonpath result
+# was genuinely empty (no NetworkPolicy) -- not only a failure-path risk,
+# so stdout and stderr are kept apart here rather than merged.
+dcgm_netpol_errfile="$(mktemp)"
+if ! dcgm_netpol_names="$(k get networkpolicy -n "${DCGM_NS}" -o jsonpath='{.items[*].metadata.name}' 2>"${dcgm_netpol_errfile}")"; then
+  fail "kubectl get networkpolicy -n ${DCGM_NS} failed: $(cat "${dcgm_netpol_errfile}")"
+fi
+rm -f "${dcgm_netpol_errfile}"
 [[ -n "$(tr -d '[:space:]' <<<"${dcgm_netpol_names}")" ]] \
   || fail "no NetworkPolicy exists in ${DCGM_NS}, but the chart's own networkPolicy.enabled is true"
 # C-70, found running this exact check (dp-opt-r3, dp-opt-r4): --ignore-not-found
@@ -2254,13 +2285,20 @@ dcgm_netpol_names="$(k get networkpolicy -n "${DCGM_NS}" -o jsonpath='{.items[*]
 # reached). The existing aws_text() helper already has the fix for this
 # exact shape: put the assignment inside an `if` condition, where set -e
 # does not apply to the first branch of an AND-OR or compound test.
-if dcgm_sm_output="$(k get servicemonitors.monitoring.coreos.com -n "${DCGM_NS}" --ignore-not-found -o name 2>&1)"; then
+# Stdout and stderr are kept apart here too (see the NetworkPolicy check
+# just above): a benign stderr line on a SUCCESSFUL call must never add
+# to the ServiceMonitor count, only a real stderr line on the FAILURE
+# branch is ever inspected for the CRD-absent message.
+dcgm_sm_errfile="$(mktemp)"
+if dcgm_sm_output="$(k get servicemonitors.monitoring.coreos.com -n "${DCGM_NS}" --ignore-not-found -o name 2>"${dcgm_sm_errfile}")"; then
   dcgm_servicemonitor_count="$(echo "${dcgm_sm_output}" | grep -c . || true)"
 else
-  [[ "${dcgm_sm_output}" == *"doesn't have a resource type"* || "${dcgm_sm_output}" == *"the server could not find the requested resource"* ]] \
-    || fail "kubectl get servicemonitors.monitoring.coreos.com -n ${DCGM_NS} failed, not with 'no such resource type': ${dcgm_sm_output}"
+  dcgm_sm_err="$(cat "${dcgm_sm_errfile}")"
+  [[ "${dcgm_sm_err}" == *"doesn't have a resource type"* || "${dcgm_sm_err}" == *"the server could not find the requested resource"* ]] \
+    || fail "kubectl get servicemonitors.monitoring.coreos.com -n ${DCGM_NS} failed, not with 'no such resource type': ${dcgm_sm_err}"
   dcgm_servicemonitor_count=0
 fi
+rm -f "${dcgm_sm_errfile}"
 [[ "${dcgm_servicemonitor_count}" -eq 0 ]] \
   || fail "found ${dcgm_servicemonitor_count} ServiceMonitor object(s) in ${DCGM_NS}, but serviceMonitor.enabled is false"
 # A bare `x=$(cmd)` with no `||` still trips set -e on cmd's own exit
@@ -2277,8 +2315,11 @@ mapfile -t dcgm_pod_names <<<"${dcgm_pod_names_raw}"
 [[ "${#dcgm_pod_names[@]}" -eq 1 && -n "${dcgm_pod_names[0]}" ]] \
   || fail "expected exactly one dcgm-exporter pod in ${DCGM_NS}, found: ${dcgm_pod_names[*]:-none}"
 dcgm_pod_name="${dcgm_pod_names[0]}"
-dcgm_pod_priority_class="$(k get pod "${dcgm_pod_name}" -n "${DCGM_NS}" -o jsonpath='{.spec.priorityClassName}' 2>&1)" \
-  || fail "kubectl get pod ${dcgm_pod_name} -n ${DCGM_NS} failed: ${dcgm_pod_priority_class}"
+dcgm_prio_errfile="$(mktemp)"
+if ! dcgm_pod_priority_class="$(k get pod "${dcgm_pod_name}" -n "${DCGM_NS}" -o jsonpath='{.spec.priorityClassName}' 2>"${dcgm_prio_errfile}")"; then
+  fail "kubectl get pod ${dcgm_pod_name} -n ${DCGM_NS} failed: $(cat "${dcgm_prio_errfile}")"
+fi
+rm -f "${dcgm_prio_errfile}"
 [[ -z "${dcgm_pod_priority_class}" ]] \
   || fail "pod ${dcgm_pod_name} has priorityClassName=${dcgm_pod_priority_class}, expected none (the wrapper sets priorityClassName: \"\")"
 pass "NetworkPolicy exists in ${DCGM_NS}, no ServiceMonitor object, pod ${dcgm_pod_name} has no priorityClassName"

@@ -176,10 +176,10 @@ semver):
    own annotations - never set them by hand in this file.
 4. In `smoke/queue.yaml`, set `values.clusterQueue.resourceFlavor` to the
    same `pool.name` chosen in step 3.
-5. Decide whether to keep `addons/dcgm-exporter.yaml` (opts this cell into
-   the `dcgm-exporter` platform-optional component, RFC
-   [#41](https://github.com/littlemex/distai-platform/issues/41)) --
-   delete the file if this cell has no NVIDIA GPU capacity to monitor; a
+5. For every file under `addons/` (today, just `dcgm-exporter.yaml`; a
+   future catalog entry adds its own), decide whether to keep it -- each
+   one opts this cell into one `platform-optional` component (RFC
+   [#41](https://github.com/littlemex/distai-platform/issues/41)); a
    platform-optional component's own definition is that the cell works
    the same either way.
 6. Open a PR. Once merged and `stable` moves, `cells.ApplicationSet.yaml`

@@ -665,14 +665,22 @@ def selftest() -> int:
         cases.append((name, mutate, expect_substr))
 
     case("baseline passes with zero failures", lambda root: None, None)
-    case(
-        "marker stem != addon/fromCatalog fails only check (0)",
-        lambda root: _write(root, "gitops/cells/testcell/addons/widget.yaml", {
-            "addon": "widget-renamed", "fromCatalog": "widget-renamed", "dir": "gitops/charts/widget",
+    def _stem_mismatch(root):
+        # addon/fromCatalog both stay "widget" (a real, resolvable catalog
+        # entry) -- only the FILENAME changes, so this isolates check (0)'s
+        # own stem==addon==fromCatalog rule from check (1)'s fromCatalog
+        # resolution, which an earlier version of this case did not (it
+        # changed addon/fromCatalog together, which also broke check (1)
+        # and never actually proved "fails only check (0)").
+        import os as _os
+
+        _os.remove(_os.path.join(root, "gitops/cells/testcell/addons/widget.yaml"))
+        _write(root, "gitops/cells/testcell/addons/widget-wrong-stem.yaml", {
+            "addon": "widget", "fromCatalog": "widget", "dir": "gitops/charts/widget",
             "namespace": "ns", "wave": "optional-1",
-        }),
-        "check (0)",
-    )
+        })
+
+    case("marker filename stem != addon/fromCatalog (both still valid) fails only check (0)", _stem_mismatch, "check (0)")
     case(
         "catalog entry is tier: workload referenced by a marker fails check (1)",
         lambda root: _write(root, "gitops/addon-catalog/widget/addon.yaml", {
@@ -781,6 +789,22 @@ def selftest() -> int:
             else:
                 ok = rc != 0 and any(expect_substr in f for f in fails)
                 detail = f"expected the {expect_substr!r} rule among the failures, got {fails}"
+                # A case name claiming "only check (N)" is not proven by
+                # "check (N) is somewhere in the failures" alone -- that
+                # also holds if checks (M != N) failed too, which an
+                # earlier version of one case here did (DA-24/C-53: a
+                # selftest that does not actually prove what its own name
+                # claims). Re-derive which check numbers this case's own
+                # name claims are the ONLY ones to fail, and reject any
+                # other check number appearing in the real failures.
+                if "only check (" in name:
+                    claimed = {s.split(")")[0] for s in name.split("only check (")[1:]}
+                    other_checks = {
+                        n for f in fails for n in re.findall(r"check \((\d)\)", f)
+                    } - claimed
+                    if other_checks:
+                        ok = False
+                        detail = f"claimed only check({sorted(claimed)}) fails, but check(s) {sorted(other_checks)} also failed: {fails}"
             check(f"selftest: {name}", ok, detail)
             if not ok:
                 failures += 1
