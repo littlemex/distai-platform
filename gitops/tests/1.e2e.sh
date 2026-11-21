@@ -32,6 +32,25 @@
 #      re-adopts them without duplicating; destroy still removes every
 #      instance directly.
 #
+# Step 11b also covers issue #27 (the capacity-pool chart's -rsv/-od/-flex
+# pools) on the same cell:
+#   a. a -rsv, a -od and a -flex release each create one NodePool/
+#      EC2NodeClass/ResourceFlavor joined by karpenter.sh/nodepool, with
+#      the capacity-type requirement of its pool and, for -rsv only,
+#      capacityReservationSelectorTerms from reservation.tags (targeted);
+#   b. a real, targeted, one-instance, two-hour On-Demand Capacity
+#      Reservation backs the -rsv pool: a canary admitted through its
+#      LocalQueue launches exactly one node labelled
+#      karpenter.sh/capacity-type=reserved and
+#      karpenter.k8s.aws/capacity-reservation-id=<that reservation>; a
+#      second canary on the same queue is not admitted, by the
+#      ClusterQueue's own quota (Kueue's Workload condition), while the
+#      first holds the node;
+#   c. the -od and -flex pools each admit a canary and launch a node with
+#      the capacity type of the pool;
+#   d. the reservation is cancelled at the end, on success and on failure
+#      alike, confirmed by DescribeCapacityReservations showing cancelled.
+#
 # The upgrade-mode e2e (decision 6/9) is a separate script, 2.upgrade.sh.
 #
 # Required environment (export before running):
@@ -75,9 +94,13 @@
 #   this token cannot write to GITOPS_TEST_REPO_URL; criterion 4 itself
 #   is still exercised by the pristine stage A/B/C sequence in section 3c
 #   below, this cell's own first-ever bootstrap, which pushes
-#   unconditionally; the step 13 generator-entry-loss experiment and
-#   2.upgrade.sh's own disposable branches have no bypass either, since
-#   their own acceptance criteria need exactly this write).
+#   unconditionally; the step 11b capacity-type pools, the step 13
+#   generator-entry-loss experiment and 2.upgrade.sh's own disposable
+#   branches have no bypass either, since their own acceptance criteria
+#   need exactly this write),
+#   E2E_RSV_INSTANCE_TYPE (m7i.large -- the instance type of step 11b's
+#   one-instance Capacity Reservation; must satisfy the capacity-pool
+#   chart's default requirements: amd64, category c/m/r, generation > 5).
 set -euo pipefail
 
 : "${AWS_PROFILE:?export AWS_PROFILE}"
@@ -113,6 +136,7 @@ GITOPS_SKIP_ORDERING_EXPERIMENT="${GITOPS_SKIP_ORDERING_EXPERIMENT:-0}"
 GITOPS_TEST_REPO_URL="${GITOPS_TEST_REPO_URL:-https://github.com/littlemex/distai-platform.git}"
 GITOPS_TEST_TOKEN_SSM_PARAM="${GITOPS_TEST_TOKEN_SSM_PARAM:-/relay/github/distai-platform}"
 GITOPS_TEST_TOKEN_SSM_REGION="${GITOPS_TEST_TOKEN_SSM_REGION:-us-east-1}"
+E2E_RSV_INSTANCE_TYPE="${E2E_RSV_INSTANCE_TYPE:-m7i.large}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GITOPS_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -157,6 +181,8 @@ BOOTSTRAP_RAN=0
 BROKEN_BRANCHES=()
 CLEANUP_FAILED=0
 CELL_FIXTURE_BRANCH=""
+RSV_ID=""
+RSV_CANCELLED=0
 
 # ---------------------------------------------------------------- helpers
 
@@ -286,6 +312,84 @@ conditions_summary = flatten(
 )
 print(FS.join([phase, message, retry_count, has_sync_result, resources_summary, conditions_summary]))
 '
+}
+
+# job_node NS JOB: prints the node name the Job's pod is bound to, or
+# fails if none is bound yet. "|", never " ", between nodeName and phase:
+# awk's default whitespace-splitting strips a line's leading blank before
+# splitting into fields, so an empty nodeName ("" followed by a space, then
+# "Pending") silently shifted the *phase* into $1 -- `$1!=""` was true the
+# instant the pod existed, long before any node was ever assigned, and the
+# bogus "Pending" was then used as a literal node name (`kubectl get node
+# Pending` -> NotFound, uncaught under set -e, confirmed on a real
+# cluster). A non-whitespace delimiter with -F keeps an empty first field
+# empty.
+job_node() {
+  k get pods -n "$1" -l "job-name=$2" \
+    -o jsonpath='{range .items[*]}{.spec.nodeName}{"|"}{.status.phase}{"\n"}{end}' \
+    | awk -F'|' '$1!="" {print $1; found=1} END{exit !found}'
+}
+
+# workload_of_job NS JOB: prints the name of the one Kueue Workload owned
+# by the Job (Kueue chooses the name; it is never assumed), or nothing.
+workload_of_job() {
+  k get workloads -n "$1" -o json 2>/dev/null | python3 -c '
+import json, sys
+job = sys.argv[1]
+items = json.load(sys.stdin).get("items", [])
+names = [
+    w["metadata"]["name"]
+    for w in items
+    if any(o.get("kind") == "Job" and o.get("name") == job for o in w["metadata"].get("ownerReferences", []))
+]
+print(names[0] if len(names) == 1 else "")
+' "$2"
+}
+
+# list_names KIND: one name per line, for cluster-scoped kinds.
+list_names() { k get "$1" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep -v '^$' | sort; }
+
+# ------------------------------------------- run-owned Capacity Reservations
+#
+# Step 11b creates one On-Demand Capacity Reservation, tagged
+# ${TEST_TAG_KEY}=${RUN_ID} like every other AWS resource this run owns.
+# cancel_run_capacity_reservations finds every pending/active reservation
+# carrying this run's own tag (plus RSV_ID, in case tagging itself failed),
+# cancels each, and waits for DescribeCapacityReservations to report
+# "cancelled" for every one of them. Called from step 11b's own teardown
+# and again from cleanup() if that teardown was never reached, so the
+# reservation is cancelled on success and on failure alike.
+capacity_reservation_state() {
+  aws ec2 describe-capacity-reservations --capacity-reservation-ids "$1" \
+    --query 'CapacityReservations[0].State' --output text 2>/dev/null
+}
+capacity_reservation_cancelled() { [[ "$(capacity_reservation_state "$1")" == "cancelled" ]]; }
+cancel_run_capacity_reservations() {
+  local ids id state bad=0
+  ids="$(aws ec2 describe-capacity-reservations \
+    --filters "Name=tag:${TEST_TAG_KEY},Values=${RUN_ID}" "Name=state,Values=pending,active" \
+    --query 'CapacityReservations[].CapacityReservationId' --output text 2>/dev/null | tr '\t' '\n' | grep -v '^None$' | grep -v '^$' || true)"
+  if [[ -n "${RSV_ID}" ]] && ! grep -qx "${RSV_ID}" <<<"${ids}"; then
+    ids="$(printf '%s\n%s' "${ids}" "${RSV_ID}" | grep -v '^$')"
+  fi
+  [[ -n "${ids}" ]] || return 0
+  local -a id_list
+  mapfile -t id_list <<<"${ids}"
+  for id in "${id_list[@]}"; do
+    [[ -n "${id}" ]] || continue
+    state="$(capacity_reservation_state "${id}")"
+    if [[ "${state}" != "cancelled" ]]; then
+      aws ec2 cancel-capacity-reservation --capacity-reservation-id "${id}" >/dev/null \
+        || log "cancel-capacity-reservation ${id} failed (state was ${state})"
+    fi
+    if wait_until 300 10 "Capacity Reservation ${id} cancelled" capacity_reservation_cancelled "${id}"; then
+      log "PASS Capacity Reservation ${id}: DescribeCapacityReservations reports $(capacity_reservation_state "${id}")"
+    else
+      log "FAIL Capacity Reservation ${id} is not cancelled (state: $(capacity_reservation_state "${id}")); cancel it by hand"
+      bad=1
+    fi
+  done
+  return "${bad}"
 }
 
 # ------------------------------------- authenticated disposable branches
@@ -555,6 +659,14 @@ cleanup() {
   if [[ "${E2E_KEEP_ON_FAILURE}" != "1" ]]; then
     delete_broken_branches
     verify_no_leftover_branches
+  fi
+  # Step 11b's Capacity Reservation is cancelled on success and on
+  # failure alike, never gated on E2E_KEEP_ON_FAILURE: an On-Demand
+  # Capacity Reservation keeps billing whether or not the cell itself is
+  # kept for debugging.
+  if [[ "${RSV_CANCELLED}" -ne 1 ]]; then
+    cancel_run_capacity_reservations \
+      || info "cleanup: a Capacity Reservation tagged ${TEST_TAG_KEY}=${RUN_ID} is not cancelled (cancel it by hand)"
   fi
   if [[ -n "${IDC_GROUP_ID}" ]]; then
     if aws identitystore delete-group --identity-store-id "${ARGOCD_IDC_IDENTITY_STORE_ID}" \
@@ -1538,20 +1650,8 @@ admission_events="$(k get events -n "${SMOKE_NS}" --field-selector involvedObjec
   || fail "no Kueue admission event (Admitted/QuotaReserved) recorded for Workload ${CANARY_WORKLOAD}: events=[${admission_events}]"
 pass "Kueue admitted the canary Job via Workload ${CANARY_WORKLOAD} (events: ${admission_events})"
 
-canary_node() {
-  # "|", never " ", between nodeName and phase: awk's default
-  # whitespace-splitting strips a line's leading blank before splitting
-  # into fields, so an empty nodeName ("" followed by a space, then
-  # "Pending") silently shifted the *phase* into $1 -- `$1!=""` was true
-  # the instant the pod existed, long before any node was ever assigned,
-  # and the bogus "Pending" was then used as a literal node name
-  # (`kubectl get node Pending` -> NotFound, uncaught under set -e,
-  # confirmed on a real cluster). A non-whitespace delimiter with -F
-  # keeps an empty first field empty.
-  k get pods -n "${SMOKE_NS}" -l job-name=canary \
-    -o jsonpath='{range .items[*]}{.spec.nodeName}{"|"}{.status.phase}{"\n"}{end}' \
-    | awk -F'|' '$1!="" {print $1; found=1} END{exit !found}'
-}
+# job_node()'s own comment explains the "|" delimiter.
+canary_node() { job_node "${SMOKE_NS}" canary; }
 canary_running_on_node() { [[ -n "$(canary_node)" ]]; }
 wait_until 900 15 "a node launches for the canary Job" canary_running_on_node \
   || fail "canary Job's pod never got a node: $(k get nodeclaims -o wide 2>&1)"
@@ -1560,6 +1660,451 @@ canary_nodepool_label="$(k get node "${CANARY_NODE}" -o jsonpath='{.metadata.lab
 [[ "${canary_nodepool_label}" == "${NODEPOOL}" ]] \
   || fail "canary Job's node ${CANARY_NODE} is not from NodePool ${NODEPOOL} (label: ${canary_nodepool_label})"
 pass "a Karpenter node (${CANARY_NODE}) launched from NodePool ${NODEPOOL} for the canary Job"
+
+# ------------------------- 11b. three capacity types (issue #27): -rsv/-od/-flex
+#
+# Issue #27's acceptance criteria, on the same cell, while every
+# Application above is still known-healthy and before step 12 breaks
+# anything on purpose. The three pools and their smoke queues need
+# parameter files under gitops/cells/${CLUSTER}/ (cells.ApplicationSet's
+# Git file generator reads exactly that path, gitops/README.md), and the
+# -rsv file must select this run's own reservation by its own tag. Neither
+# belongs in the tracked tree: they name one run's reservation tag. So
+# they are committed only to one disposable branch, e2e/${RUN_ID}/
+# capacity-types, cut from GITOPS_REVISION (the same mechanism step 12
+# uses), and the cell is re-pointed at it with a --revision-only
+# bootstrap.sh re-run (step 6 proved that re-run safe). The sub-step's own
+# teardown (11b-6) points the cell back at GITOPS_REVISION and removes
+# every object the three pools created, so steps 12-15 see the cell
+# exactly as step 11 left it (one NodePool, one LocalQueue). The branch
+# itself is deleted by cleanup(), like every other disposable branch.
+#
+# Names below are this fixture's own choice (decision 9 names none), so
+# they are set here once and every assertion reads the live objects back
+# by these names rather than assuming what the chart calls anything else.
+
+POOL_RSV="cpu-rsv"
+POOL_OD="cpu-od"
+POOL_FLEX="cpu-flex"
+POOLS_27=("${POOL_RSV}" "${POOL_OD}" "${POOL_FLEX}")
+for p in "${POOLS_27[@]}"; do
+  [[ "${p}" != "${NODEPOOL}" ]] || fail "step 11b pool name ${p} collides with the cell's own NodePool ${NODEPOOL}"
+done
+smoke_ns_of() { printf 'distai-smoke-%s' "$1"; }
+smoke_cq_of() { printf 'smoke-%s' "$1"; }
+SMOKE_LQ_27="smoke"
+
+# ---- 11b-1. the reservation (AWS side) ---------------------------------
+#
+# One instance of E2E_RSV_INSTANCE_TYPE, targeted (never open: an open
+# reservation would also absorb any unrelated same-type launch in the
+# account), ending within two hours of creation, tagged like every other
+# resource of this run. Its AZ must be one of the cell's own private
+# subnets (the EC2NodeClass selects only those); each such AZ offering
+# the type is tried in turn, since a single AZ can be out of capacity.
+
+read -r RSV_VCPUS RSV_MEM_MIB < <(aws ec2 describe-instance-types --instance-types "${E2E_RSV_INSTANCE_TYPE}" \
+  --query 'InstanceTypes[0].[VCpuInfo.DefaultVCpus,MemoryInfo.SizeInMiB]' --output text) \
+  || fail "aws ec2 describe-instance-types ${E2E_RSV_INSTANCE_TYPE}"
+[[ "${RSV_VCPUS}" =~ ^[0-9]+$ && "${RSV_MEM_MIB}" =~ ^[0-9]+$ ]] \
+  || fail "could not read vCPU/memory of ${E2E_RSV_INSTANCE_TYPE} (got '${RSV_VCPUS}' '${RSV_MEM_MIB}')"
+
+mapfile -t private_subnets < <(python3 -c '
+import json, sys
+print("\n".join(json.load(open(sys.argv[1]))["private_subnet_ids"]["value"]))' "${TF_OUTPUTS_JSON}")
+[[ "${#private_subnets[@]}" -ge 1 ]] || fail "terraform output private_subnet_ids is empty"
+mapfile -t subnet_azs < <(aws ec2 describe-subnets --subnet-ids "${private_subnets[@]}" \
+  --query 'Subnets[].AvailabilityZone' --output text | tr '\t' '\n' | grep -v '^$' | sort -u)
+mapfile -t offering_azs < <(aws ec2 describe-instance-type-offerings --location-type availability-zone \
+  --filters "Name=instance-type,Values=${E2E_RSV_INSTANCE_TYPE}" \
+  --query 'InstanceTypeOfferings[].Location' --output text | tr '\t' '\n' | grep -v '^$' | sort -u)
+mapfile -t rsv_candidate_azs < <(comm -12 <(printf '%s\n' "${subnet_azs[@]}") <(printf '%s\n' "${offering_azs[@]}"))
+[[ "${#rsv_candidate_azs[@]}" -ge 1 ]] \
+  || fail "no AZ of the cell's private subnets (${subnet_azs[*]}) offers ${E2E_RSV_INSTANCE_TYPE}"
+
+# Strictly inside the two-hour bound the issue sets, and well past
+# EC2's own one-hour minimum for a limited end date.
+RSV_END_DATE="$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=110)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
+RSV_AZ=""
+for az in "${rsv_candidate_azs[@]}"; do
+  if RSV_ID="$(aws ec2 create-capacity-reservation --instance-type "${E2E_RSV_INSTANCE_TYPE}" \
+    --instance-platform Linux/UNIX --availability-zone "${az}" --instance-count 1 \
+    --instance-match-criteria targeted --end-date-type limited --end-date "${RSV_END_DATE}" \
+    --tag-specifications "ResourceType=capacity-reservation,Tags=[{Key=${TEST_TAG_KEY},Value=${RUN_ID}}]" \
+    --query 'CapacityReservation.CapacityReservationId' --output text 2>"${WORK_DIR}/create-cr-${az}.err")" \
+    && [[ "${RSV_ID}" == cr-* ]]; then
+    RSV_AZ="${az}"
+    break
+  fi
+  RSV_ID=""
+  info "could not create a Capacity Reservation in ${az}: $(tr '\n' ' ' <"${WORK_DIR}/create-cr-${az}.err")"
+done
+[[ -n "${RSV_ID}" ]] || fail "could not create a ${E2E_RSV_INSTANCE_TYPE} Capacity Reservation in any of: ${rsv_candidate_azs[*]}"
+pass "created targeted Capacity Reservation ${RSV_ID} (1x ${E2E_RSV_INSTANCE_TYPE}, ${RSV_AZ}, ends ${RSV_END_DATE}, tag ${TEST_TAG_KEY}=${RUN_ID})"
+
+capacity_reservation_active() { [[ "$(capacity_reservation_state "${RSV_ID}")" == "active" ]]; }
+wait_until 600 10 "Capacity Reservation ${RSV_ID} active" capacity_reservation_active \
+  || fail "Capacity Reservation ${RSV_ID} did not become active (state: $(capacity_reservation_state "${RSV_ID}"))"
+rsv_facts="$(aws ec2 describe-capacity-reservations --capacity-reservation-ids "${RSV_ID}" \
+  --query 'CapacityReservations[0].[InstanceMatchCriteria,TotalInstanceCount,AvailableInstanceCount]' --output text)"
+[[ "${rsv_facts}" == $'targeted\t1\t1' ]] \
+  || fail "Capacity Reservation ${RSV_ID} is not targeted/1 total/1 available: ${rsv_facts}"
+pass "Capacity Reservation ${RSV_ID} is active, targeted, 1 instance, 1 available"
+
+# ---- 11b-2. the cell's parameter files, on a disposable branch ---------
+#
+# Quotas: the -rsv ClusterQueue's cpuQuota/memQuota are exactly the one
+# reserved instance's own vCPU and memory (DescribeInstanceTypes above,
+# never a hardcoded size), and the -rsv pool's limits are the same
+# numbers as a backstop (issue #27's guidance for -rsv). Each -rsv canary
+# below asks for just over half of that, so one fits on the node and two
+# can never fit in the quota. -od/-flex get a small budget.
+
+RSV_CANARY_CPU="$((RSV_VCPUS * 1000 / 2 + 100))m"
+RSV_CANARY_MEM="$((RSV_MEM_MIB / 2 + 256))Mi"
+
+CAPACITY_BRANCH="e2e/${RUN_ID}/capacity-types"
+CAPACITY_CLONE="${WORK_DIR}/capacity-types"
+# GITOPS_REPO_URL, never REPO_ROOT -- see break_addon_branch()'s own comment.
+git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${CAPACITY_CLONE}" || fail "git clone (capacity-types)"
+checkout_revision_as "${CAPACITY_CLONE}" "${CAPACITY_BRANCH}" "${GITOPS_REVISION}" || fail "git checkout (capacity-types)"
+CELL_DIR="${CAPACITY_CLONE}/gitops/cells/${CLUSTER}"
+mkdir -p "${CELL_DIR}/capacity-pool" "${CELL_DIR}/smoke"
+
+# write_pool_file POOL CAPACITY_TYPE LIMITS_YAML [RESERVATION_YAML]
+write_pool_file() {
+  local pool="$1" ctype="$2" limits="$3" reservation="${4:-}"
+  {
+    printf '# e2e fixture for run %s (issue #27); lives only on %s.\n' "${RUN_ID}" "${CAPACITY_BRANCH}"
+    printf 'addon: capacity-pool-%s\nwave: capacity\ndir: gitops/charts/capacity-pool\nnamespace: kube-system\n' "${pool}"
+    printf 'values:\n  pool:\n    name: %s\n    capacityType: %s\n    limits:\n%s\n' "${pool}" "${ctype}" "${limits}"
+    [[ -z "${reservation}" ]] || printf '%s\n' "${reservation}"
+    printf 'valuesFrom:\n  - helmKey: clusterName\n    param: name\n'
+    printf '  - helmKey: nodeRole\n    annotationKey: distai.dev.annotations/karpenter-node-role\n'
+  } >"${CELL_DIR}/capacity-pool/${pool}.yaml"
+}
+# write_smoke_file POOL CPU_QUOTA MEM_QUOTA
+write_smoke_file() {
+  local pool="$1" cpu="$2" mem="$3" ns cq
+  ns="$(smoke_ns_of "${pool}")"
+  cq="$(smoke_cq_of "${pool}")"
+  {
+    printf '# e2e fixture for run %s (issue #27); lives only on %s.\n' "${RUN_ID}" "${CAPACITY_BRANCH}"
+    printf 'addon: smoke-%s\nwave: capacity\ndir: gitops/charts/smoke\nnamespace: %s\n' "${pool}" "${ns}"
+    printf 'values:\n  namespace: %s\n  clusterQueue:\n    name: %s\n    resourceFlavor: %s\n' "${ns}" "${cq}" "${pool}"
+    printf '    cpuQuota: "%s"\n    memQuota: "%s"\n  localQueue:\n    name: %s\n' "${cpu}" "${mem}" "${SMOKE_LQ_27}"
+  } >"${CELL_DIR}/smoke/${pool}.yaml"
+}
+
+# reservation.instanceMatchCriteria is left unset on purpose: the chart's
+# own default ("targeted") is what 11b-3 then reads back from the live
+# EC2NodeClass.
+write_pool_file "${POOL_RSV}" reserved "      cpu: \"${RSV_VCPUS}\"
+      memory: ${RSV_MEM_MIB}Mi" "  reservation:
+    tags:
+      ${TEST_TAG_KEY}: ${RUN_ID}"
+write_pool_file "${POOL_OD}" on-demand '      cpu: "8"'
+write_pool_file "${POOL_FLEX}" flex '      cpu: "8"'
+write_smoke_file "${POOL_RSV}" "${RSV_VCPUS}" "${RSV_MEM_MIB}Mi"
+write_smoke_file "${POOL_OD}" 4 16Gi
+write_smoke_file "${POOL_FLEX}" 4 16Gi
+
+git -C "${CAPACITY_CLONE}" add "gitops/cells/${CLUSTER}" || fail "git add (capacity-types)"
+git -C "${CAPACITY_CLONE}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
+  commit --quiet -m "test: -rsv/-od/-flex pools for e2e run ${RUN_ID} (never merged)" \
+  || fail "git commit (capacity-types)"
+push_disposable_branch "${CAPACITY_CLONE}" "${CAPACITY_BRANCH}" || fail "git push (capacity-types)"
+BROKEN_BRANCHES+=("${CAPACITY_BRANCH}")
+pass "pushed ${CAPACITY_BRANCH}: gitops/cells/${CLUSTER}/{capacity-pool,smoke}/{${POOL_RSV},${POOL_OD},${POOL_FLEX}}.yaml"
+
+run_bootstrap --revision "${CAPACITY_BRANCH}" || fail "bootstrap.sh --revision ${CAPACITY_BRANCH}"
+
+APPS_27=()
+for p in "${POOLS_27[@]}"; do APPS_27+=("${CLUSTER}-capacity-pool-${p}" "${CLUSTER}-smoke-${p}"); done
+for app in "${APPS_27[@]}"; do
+  wait_until 900 15 "${app} Healthy and Synced" app_healthy_synced "${app}" \
+    || fail "${app} did not reach Healthy+Synced: health=$(app_health "${app}") sync=$(app_sync "${app}")"
+done
+for app in "${APP_CAPACITY_POOL}" "${APP_SMOKE}"; do
+  wait_until 300 10 "${app} still Healthy and Synced on ${CAPACITY_BRANCH}" app_healthy_synced "${app}" \
+    || fail "${app} is not Healthy+Synced on ${CAPACITY_BRANCH}: health=$(app_health "${app}") sync=$(app_sync "${app}")"
+done
+pass "all six issue #27 Applications are Healthy+Synced, and the cell's own ${APP_CAPACITY_POOL}/${APP_SMOKE} stay so"
+
+# ---- 11b-3. each pool's own objects, read from the live cluster --------
+#
+# Acceptance criterion a, evidenced by each object's own spec on the
+# cluster, not by `helm template` (0.static.sh does that part).
+
+want_set="$(printf '%s\n' "${NODEPOOL}" "${POOLS_27[@]}" | sort)"
+[[ "$(list_names nodepools)" == "${want_set}" ]] \
+  || fail "NodePools are not exactly {${NODEPOOL} ${POOLS_27[*]}}: $(list_names nodepools | tr '\n' ' ')"
+[[ "$(list_names ec2nodeclasses)" == "$(printf '%s\n' "${NODECLASS}" "${POOLS_27[@]}" | sort)" ]] \
+  || fail "EC2NodeClasses are not exactly {${NODECLASS} ${POOLS_27[*]}}: $(list_names ec2nodeclasses | tr '\n' ' ')"
+[[ "$(list_names resourceflavors)" == "$(printf '%s\n' "${RESOURCEFLAVOR}" "${POOLS_27[@]}" | sort)" ]] \
+  || fail "ResourceFlavors are not exactly {${RESOURCEFLAVOR} ${POOLS_27[*]}}: $(list_names resourceflavors | tr '\n' ' ')"
+pass "one NodePool, EC2NodeClass and ResourceFlavor per pool: ${POOLS_27[*]} (plus the cell's own ${NODEPOOL})"
+
+# capacity_type_requirement POOL: "<operator>:<sorted values>" for every
+# karpenter.sh/capacity-type requirement on the live NodePool, ";"-joined.
+capacity_type_requirement() {
+  k get nodepool "$1" -o json | python3 -c '
+import json, sys
+reqs = json.load(sys.stdin)["spec"]["template"]["spec"].get("requirements", [])
+print(";".join(r.get("operator", "") + ":" + ",".join(sorted(r.get("values", [])))
+               for r in reqs if r.get("key") == "karpenter.sh/capacity-type"))'
+}
+# reservation_terms_ok POOL WANT: WANT is "none" or "tag"; with "tag", the
+# live EC2NodeClass must have exactly one term carrying exactly this run's
+# tag and instanceMatchCriteria targeted, together (terms are ORed, so a
+# separate instanceMatchCriteria-only term would select every targeted
+# reservation in the account), and no id.
+reservation_terms_ok() {
+  k get ec2nodeclass "$1" -o json | WANT="$2" TAG_KEY="${TEST_TAG_KEY}" TAG_VALUE="${RUN_ID}" python3 -c '
+import json, os, sys
+terms = json.load(sys.stdin)["spec"].get("capacityReservationSelectorTerms") or []
+if os.environ["WANT"] == "none":
+    ok = not terms
+else:
+    ok = terms == [{"tags": {os.environ["TAG_KEY"]: os.environ["TAG_VALUE"]}, "instanceMatchCriteria": "targeted"}]
+print(json.dumps(terms, sort_keys=True))
+sys.exit(0 if ok else 1)'
+}
+
+for p in "${POOLS_27[@]}"; do
+  case "${p}" in
+    "${POOL_RSV}") want_req="In:reserved"; want_terms="tag" ;;
+    "${POOL_OD}") want_req="In:on-demand"; want_terms="none" ;;
+    "${POOL_FLEX}") want_req="In:on-demand,spot"; want_terms="none" ;;
+  esac
+  got_req="$(capacity_type_requirement "${p}")"
+  [[ "${got_req}" == "${want_req}" ]] \
+    || fail "NodePool ${p}'s karpenter.sh/capacity-type requirement is [${got_req}], want exactly [${want_req}]"
+  [[ "$(k get nodepool "${p}" -o jsonpath='{.spec.template.spec.nodeClassRef.name}')" == "${p}" ]] \
+    || fail "NodePool ${p}'s nodeClassRef does not name EC2NodeClass ${p}"
+  [[ "$(k get resourceflavor "${p}" -o jsonpath='{.spec.nodeLabels.karpenter\.sh/nodepool}')" == "${p}" ]] \
+    || fail "ResourceFlavor ${p}'s nodeLabels['karpenter.sh/nodepool'] does not join to NodePool ${p}"
+  got_terms="$(reservation_terms_ok "${p}" "${want_terms}")" \
+    || fail "EC2NodeClass ${p}'s capacityReservationSelectorTerms are ${got_terms}, want ${want_terms}"
+  pass "pool ${p}: capacity-type [${got_req}], joined by karpenter.sh/nodepool, capacityReservationSelectorTerms ${got_terms}"
+done
+
+# Karpenter's own resolution of the -rsv selector: the EC2NodeClass status
+# lists exactly this run's reservation, and the -od/-flex ones list none.
+nodeclass_reservations() { k get ec2nodeclass "$1" -o jsonpath='{.status.capacityReservations[*].id}' 2>/dev/null; }
+rsv_resolved() { [[ "$(nodeclass_reservations "${POOL_RSV}")" == "${RSV_ID}" ]]; }
+wait_until 300 10 "EC2NodeClass ${POOL_RSV} resolves ${RSV_ID}" rsv_resolved \
+  || fail "EC2NodeClass ${POOL_RSV}'s status.capacityReservations is [$(nodeclass_reservations "${POOL_RSV}")], want exactly [${RSV_ID}]"
+for p in "${POOL_OD}" "${POOL_FLEX}"; do
+  reservations_out="$(k get ec2nodeclass "${p}" -o jsonpath='{.status.capacityReservations[*].id}')" \
+    || fail "kubectl get ec2nodeclass ${p} -o jsonpath=... failed outright (not evidence of an empty list)"
+  [[ -z "${reservations_out}" ]] \
+    || fail "EC2NodeClass ${p} resolved a capacity reservation it never selects: ${reservations_out}"
+done
+pass "Karpenter resolved ${RSV_ID} for EC2NodeClass ${POOL_RSV} only"
+
+# ---- 11b-4. canaries: -rsv (first), -od, -flex --------------------------
+#
+# Acceptance criteria b (first half) and c. Each canary is a suspended Job
+# addressed to its pool's own LocalQueue; Kueue unsuspends it on admission
+# and injects the ResourceFlavor's karpenter.sh/nodepool node selector, so
+# the node that launches comes from that pool and no other.
+
+# submit_canary NS JOB CPU MEMORY
+submit_canary() {
+  k apply -f - <<YAML
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: $2
+  namespace: $1
+  labels:
+    kueue.x-k8s.io/queue-name: ${SMOKE_LQ_27}
+    ${TEST_TAG_KEY}: ${RUN_ID}
+spec:
+  suspend: true
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: canary
+          image: public.ecr.aws/eks-distro/kubernetes/pause:3.10
+          resources:
+            requests:
+              cpu: $3
+              memory: $4
+YAML
+}
+job_admitted() { [[ "$(k get job "$2" -n "$1" -o jsonpath='{.spec.suspend}' 2>/dev/null)" == "false" ]]; }
+job_on_node() { [[ -n "$(job_node "$1" "$2")" ]]; }
+node_label() { k get node "$1" -o jsonpath="{.metadata.labels.$2}"; }
+pool_nodeclaims() { k get nodeclaims -l "karpenter.sh/nodepool=$1" --no-headers 2>/dev/null | wc -l | tr -d ' '; }
+
+# assert_admitted_on_pool NS JOB POOL: Kueue admitted the Job (its own
+# Workload's events), and its pod runs on a node of POOL. Sets
+# ADMITTED_NODE (a global, not printed: fail() must run in this shell, not
+# in a command substitution's subshell).
+assert_admitted_on_pool() {
+  local ns="$1" job="$2" pool="$3" wl events node
+  wait_until 300 10 "Kueue admits ${ns}/${job}" job_admitted "${ns}" "${job}" \
+    || fail "${ns}/${job} was never admitted (still suspended): $(k get workloads -n "${ns}" -o jsonpath='{.items[*].status.conditions}')"
+  wl="$(workload_of_job "${ns}" "${job}")"
+  [[ -n "${wl}" ]] || fail "no single Kueue Workload owned by ${ns}/${job}"
+  events="$(k get events -n "${ns}" --field-selector involvedObject.name="${wl}" -o jsonpath='{range .items[*]}{.reason}{" "}{end}')"
+  [[ "${events}" == *"Admitted"* || "${events}" == *"QuotaReserved"* ]] \
+    || fail "no Kueue admission event (Admitted/QuotaReserved) for Workload ${ns}/${wl}: events=[${events}]"
+  wait_until 900 15 "a node launches for ${ns}/${job}" job_on_node "${ns}" "${job}" \
+    || fail "${ns}/${job}'s pod never got a node: $(k get nodeclaims -l "karpenter.sh/nodepool=${pool}" -o wide 2>&1)"
+  node="$(job_node "${ns}" "${job}")"
+  [[ "$(node_label "${node}" 'karpenter\.sh/nodepool')" == "${pool}" ]] \
+    || fail "${ns}/${job} runs on ${node}, which is not from NodePool ${pool}"
+  pass "Kueue admitted ${ns}/${job} via Workload ${wl} (events: ${events}); its pod runs on ${node} from NodePool ${pool}"
+  ADMITTED_NODE="${node}"
+}
+
+RSV_NS="$(smoke_ns_of "${POOL_RSV}")"
+OD_NS="$(smoke_ns_of "${POOL_OD}")"
+FLEX_NS="$(smoke_ns_of "${POOL_FLEX}")"
+for ns in "${RSV_NS}" "${OD_NS}" "${FLEX_NS}"; do
+  k get localqueue "${SMOKE_LQ_27}" -n "${ns}" >/dev/null 2>&1 || fail "LocalQueue ${ns}/${SMOKE_LQ_27} not found"
+done
+submit_canary "${RSV_NS}" canary-1 "${RSV_CANARY_CPU}" "${RSV_CANARY_MEM}" || fail "kubectl apply ${RSV_NS}/canary-1"
+submit_canary "${OD_NS}" canary 500m 256Mi || fail "kubectl apply ${OD_NS}/canary"
+submit_canary "${FLEX_NS}" canary 500m 256Mi || fail "kubectl apply ${FLEX_NS}/canary"
+
+assert_admitted_on_pool "${RSV_NS}" canary-1 "${POOL_RSV}"
+RSV_NODE="${ADMITTED_NODE}"
+[[ "$(node_label "${RSV_NODE}" 'karpenter\.sh/capacity-type')" == "reserved" ]] \
+  || fail "node ${RSV_NODE} of ${POOL_RSV} has karpenter.sh/capacity-type=$(node_label "${RSV_NODE}" 'karpenter\.sh/capacity-type'), want reserved"
+[[ "$(node_label "${RSV_NODE}" 'karpenter\.k8s\.aws/capacity-reservation-id')" == "${RSV_ID}" ]] \
+  || fail "node ${RSV_NODE} has karpenter.k8s.aws/capacity-reservation-id=$(node_label "${RSV_NODE}" 'karpenter\.k8s\.aws/capacity-reservation-id'), want ${RSV_ID}"
+[[ "$(pool_nodeclaims "${POOL_RSV}")" -eq 1 ]] \
+  || fail "NodePool ${POOL_RSV} has $(pool_nodeclaims "${POOL_RSV}") NodeClaims, want exactly 1"
+RSV_INSTANCE_ID="$(k get node "${RSV_NODE}" -o jsonpath='{.spec.providerID}' | awk -F/ '{print $NF}')"
+[[ "$(aws ec2 describe-instances --instance-ids "${RSV_INSTANCE_ID}" \
+  --query 'Reservations[0].Instances[0].CapacityReservationId' --output text)" == "${RSV_ID}" ]] \
+  || fail "instance ${RSV_INSTANCE_ID} of node ${RSV_NODE} is not running in Capacity Reservation ${RSV_ID}"
+[[ "$(aws ec2 describe-capacity-reservations --capacity-reservation-ids "${RSV_ID}" \
+  --query 'CapacityReservations[0].AvailableInstanceCount' --output text)" == "0" ]] \
+  || fail "Capacity Reservation ${RSV_ID} still reports an available instance while ${RSV_NODE} runs in it"
+pass "exactly one node (${RSV_NODE}, ${RSV_INSTANCE_ID}) for ${POOL_RSV}: capacity-type=reserved, capacity-reservation-id=${RSV_ID}, and EC2 agrees (0 available)"
+
+assert_admitted_on_pool "${OD_NS}" canary "${POOL_OD}"
+OD_NODE="${ADMITTED_NODE}"
+[[ "$(node_label "${OD_NODE}" 'karpenter\.sh/capacity-type')" == "on-demand" ]] \
+  || fail "node ${OD_NODE} of ${POOL_OD} has karpenter.sh/capacity-type=$(node_label "${OD_NODE}" 'karpenter\.sh/capacity-type'), want on-demand"
+pass "${POOL_OD}: node ${OD_NODE} has karpenter.sh/capacity-type=on-demand"
+
+assert_admitted_on_pool "${FLEX_NS}" canary "${POOL_FLEX}"
+FLEX_NODE="${ADMITTED_NODE}"
+flex_type="$(node_label "${FLEX_NODE}" 'karpenter\.sh/capacity-type')"
+[[ "${flex_type}" == "spot" || "${flex_type}" == "on-demand" ]] \
+  || fail "node ${FLEX_NODE} of ${POOL_FLEX} has karpenter.sh/capacity-type=${flex_type}, want spot or on-demand"
+pass "${POOL_FLEX}: node ${FLEX_NODE} has karpenter.sh/capacity-type=${flex_type} (spot or on-demand)"
+
+# ---- 11b-5. a second -rsv canary is not admitted, by quota -------------
+#
+# Acceptance criterion b, second half. canary-1 still holds the reserved
+# node (pause never exits). canary-2 asks for the same just-over-half of
+# the reservation, so the ClusterQueue's quota (= the reservation's own
+# capacity) cannot hold both. The evidence is Kueue's own: the Workload's
+# QuotaReserved condition is False with a quota message, the
+# ClusterQueue counts one admitted and one pending Workload, the Job stays
+# suspended with no pod, and the -rsv pool still has exactly one NodeClaim
+# (Karpenter was never asked for a second node, so nothing here can be a
+# Karpenter launch failure).
+
+RSV_CQ="$(smoke_cq_of "${POOL_RSV}")"
+submit_canary "${RSV_NS}" canary-2 "${RSV_CANARY_CPU}" "${RSV_CANARY_MEM}" || fail "kubectl apply ${RSV_NS}/canary-2"
+
+# workload_quota_state NS JOB: prints "<status>|<reason>|<message>" of the
+# Job's Workload's QuotaReserved condition, plus "|admitted" if the
+# Workload has Admitted=True.
+workload_quota_state() {
+  local wl
+  wl="$(workload_of_job "$1" "$2")"
+  [[ -n "${wl}" ]] || return 1
+  k get workload "${wl}" -n "$1" -o json | python3 -c '
+import json, sys
+conds = json.load(sys.stdin).get("status", {}).get("conditions", [])
+q = [c for c in conds if c.get("type") == "QuotaReserved"]
+a = any(c.get("type") == "Admitted" and c.get("status") == "True" for c in conds)
+if q:
+    print("|".join([q[0].get("status", ""), q[0].get("reason", ""), q[0].get("message", "").replace("|", "/")]) + ("|admitted" if a else ""))'
+}
+pending_on_quota() {
+  local st
+  st="$(workload_quota_state "${RSV_NS}" canary-2)" || return 1
+  [[ "${st}" == False\|* && "${st,,}" == *quota* && "${st}" != *"|admitted" ]]
+}
+wait_until 300 10 "canary-2's Workload is pending on ${RSV_CQ}'s quota" pending_on_quota \
+  || fail "canary-2's Workload never reported QuotaReserved=False on quota: [$(workload_quota_state "${RSV_NS}" canary-2)]"
+info "canary-2's Workload QuotaReserved condition: $(workload_quota_state "${RSV_NS}" canary-2)"
+
+# Not a transient: still pending a minute later, while canary-1 still runs.
+sleep 60
+pending_on_quota || fail "canary-2 left the quota-pending state: [$(workload_quota_state "${RSV_NS}" canary-2)]"
+[[ "$(k get job canary-2 -n "${RSV_NS}" -o jsonpath='{.spec.suspend}')" == "true" ]] \
+  || fail "Job ${RSV_NS}/canary-2 is not suspended"
+canary_2_pods="$(k get pods -n "${RSV_NS}" -l job-name=canary-2 -o jsonpath='{.items[*].metadata.name}')" \
+  || fail "kubectl get pods -n ${RSV_NS} -l job-name=canary-2 failed outright (not evidence of no pod)"
+[[ -z "${canary_2_pods}" ]] \
+  || fail "Job ${RSV_NS}/canary-2 has a pod although it was never admitted"
+[[ "$(job_node "${RSV_NS}" canary-1)" == "${RSV_NODE}" ]] \
+  || fail "canary-1 no longer runs on ${RSV_NODE}, so canary-2's state is not evidence against a held node"
+cq_counts="$(k get clusterqueue "${RSV_CQ}" -o jsonpath='{.status.admittedWorkloads}/{.status.pendingWorkloads}')"
+[[ "${cq_counts}" == "1/1" ]] \
+  || fail "ClusterQueue ${RSV_CQ} admitted/pending Workloads are ${cq_counts}, want 1/1"
+[[ "$(pool_nodeclaims "${POOL_RSV}")" -eq 1 ]] \
+  || fail "NodePool ${POOL_RSV} has $(pool_nodeclaims "${POOL_RSV}") NodeClaims after canary-2, want exactly 1"
+pass "canary-2 is not admitted: Kueue holds it on ${RSV_CQ}'s quota (admitted/pending 1/1), still suspended with no pod, and ${POOL_RSV} still has exactly one NodeClaim"
+
+# ---- 11b-6. teardown: back to the cell as step 11 left it ---------------
+#
+# Re-point the cell at GITOPS_REVISION first: the six Applications then
+# disappear, and preserveResourcesOnDeletion (decision 8) leaves their
+# objects orphaned rather than deleting them, so they are deleted here by
+# hand -- after the Applications are gone, since a live Application with
+# selfHeal would recreate them. Order follows the finalizers: namespaces
+# (Jobs, pods, Workloads) before ClusterQueues, ClusterQueues before the
+# ResourceFlavors they name, NodePools (Karpenter drains and terminates
+# their nodes) before EC2NodeClasses. Then the reservation is cancelled
+# (acceptance criterion d) while this run is still passing; cleanup()
+# repeats that only if this point was never reached.
+
+run_bootstrap --revision "${GITOPS_REVISION}" || fail "bootstrap.sh (restoring --revision ${GITOPS_REVISION} after capacity-types)"
+app_gone() { ! k get application "$1" -n "${ARGOCD_NS}" >/dev/null 2>&1; }
+for app in "${APPS_27[@]}"; do
+  wait_until 300 10 "${app} removed" app_gone "${app}" || fail "${app} still exists after restoring --revision ${GITOPS_REVISION}"
+done
+for p in "${POOLS_27[@]}"; do
+  k delete namespace "$(smoke_ns_of "${p}")" --wait=true --timeout=300s >/dev/null || fail "kubectl delete namespace $(smoke_ns_of "${p}")"
+  k delete clusterqueue "$(smoke_cq_of "${p}")" --wait=true --timeout=300s >/dev/null || fail "kubectl delete clusterqueue $(smoke_cq_of "${p}")"
+  k delete resourceflavor "${p}" --wait=true --timeout=300s >/dev/null || fail "kubectl delete resourceflavor ${p}"
+done
+for p in "${POOLS_27[@]}"; do
+  k delete nodepool "${p}" --wait=true --timeout=900s >/dev/null || fail "kubectl delete nodepool ${p}"
+  k delete ec2nodeclass "${p}" --wait=true --timeout=600s >/dev/null || fail "kubectl delete ec2nodeclass ${p}"
+done
+rsv_instance_terminated() {
+  [[ "$(aws ec2 describe-instances --instance-ids "${RSV_INSTANCE_ID}" \
+    --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null)" == "terminated" ]]
+}
+wait_until 600 15 "reserved instance ${RSV_INSTANCE_ID} terminated" rsv_instance_terminated \
+  || fail "instance ${RSV_INSTANCE_ID} was not terminated after deleting NodePool ${POOL_RSV}"
+[[ "$(list_names nodepools)" == "${NODEPOOL}" && "$(list_names ec2nodeclasses)" == "${NODECLASS}" \
+  && "$(list_names resourceflavors)" == "${RESOURCEFLAVOR}" ]] \
+  || fail "the cell is not back to its own pool only: NodePools [$(list_names nodepools | tr '\n' ' ')], EC2NodeClasses [$(list_names ec2nodeclasses | tr '\n' ' ')], ResourceFlavors [$(list_names resourceflavors | tr '\n' ' ')]"
+[[ "$(k get localqueues -A --no-headers 2>/dev/null | wc -l | tr -d ' ')" -eq 1 ]] \
+  || fail "more than the cell's own LocalQueue remains: $(k get localqueues -A --no-headers 2>&1 | tr '\n' ' ')"
+{ app_healthy_synced "${APP_CAPACITY_POOL}" && app_healthy_synced "${APP_SMOKE}"; } \
+  || fail "${APP_CAPACITY_POOL}/${APP_SMOKE} are not Healthy+Synced after the step 11b teardown"
+pass "step 11b teardown: only ${NODEPOOL}/${NODECLASS}/${RESOURCEFLAVOR} and ${SMOKE_NS}/${SMOKE_LOCALQUEUE} remain, as after step 11"
+
+cancel_run_capacity_reservations || fail "Capacity Reservation ${RSV_ID} could not be cancelled"
+RSV_CANCELLED=1
+pass "Capacity Reservation ${RSV_ID} cancelled (acceptance criterion d; DescribeCapacityReservations reports cancelled)"
 
 # ------------------------------------- 12. ordering experiments (decision 4)
 #

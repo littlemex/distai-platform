@@ -1,0 +1,16 @@
+# Static-check input (0.static.sh), expected to FAIL `helm template`: a
+# taint's effect must be NoSchedule, PreferNoSchedule or NoExecute, the
+# three Kubernetes defines -- never a typo rendered straight into the
+# NodePool/ResourceFlavor. A minimal accelerator.taint-only fixture (not
+# a copy of accelerator-tenancy.yaml, which also sets resourceName,
+# methodLabel and tenancy.teamTaint), so a failure here can only come
+# from the one bad effect value below.
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: accel-team-a
+accelerator:
+  taint:
+    key: aws.amazon.com/neuron
+    value: "present"
+    effect: NoScheduleTypo

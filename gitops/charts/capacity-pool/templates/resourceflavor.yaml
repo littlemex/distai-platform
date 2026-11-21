@@ -6,6 +6,27 @@ apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
   name: {{ .Values.pool.name | quote }}
+{{- with include "capacity-pool.annotations" . }}
+{{ . | indent 2 }}
+{{- end }}
 spec:
   nodeLabels:
     karpenter.sh/nodepool: {{ .Values.pool.name | quote }}
+{{- /*
+The NodePool's own taints (capacity-pool.taints), mirrored as Kueue
+tolerations so a pod admitted through this flavor needs no hand-written
+toleration: operator Equal when the taint has a value, Exists otherwise.
+*/}}
+{{- with include "capacity-pool.taints" . | fromJsonArray }}
+  tolerations:
+{{- range . }}
+    - key: {{ .key | quote }}
+{{- if .value }}
+      operator: Equal
+      value: {{ .value | quote }}
+{{- else }}
+      operator: Exists
+{{- end }}
+      effect: {{ .effect }}
+{{- end }}
+{{- end }}

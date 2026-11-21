@@ -1,0 +1,15 @@
+# Static-check input (0.static.sh), expected to FAIL `helm template`:
+# reservation.instanceMatchCriteria accepts only "targeted" or "open"
+# (issue #27). Identical to reserved.yaml except for this one value.
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: cpu-rsv
+  capacityType: reserved
+  limits:
+    cpu: "2"
+    memory: 8192Mi
+reservation:
+  tags:
+    distai-platform-e2e: static-check
+  instanceMatchCriteria: any

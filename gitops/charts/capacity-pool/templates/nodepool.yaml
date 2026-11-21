@@ -1,20 +1,39 @@
-# One NodePool per release of this chart (RFC #25 Decision 9: a minimal
-# CPU-only skeleton - one capacity type, no -rsv/-od/-flex ordering across
-# several NodePools of this same pool name; #17's own PR adds that on top
-# of this chart, unchanged in name or shape).
+{{- /*
+pool.capacityType drives the karpenter.sh/capacity-type requirement
+(capacity-pool.requirements in _helpers.tpl): one capacity type per
+release, so -rsv, -od and -flex are three releases of this chart.
+*/}}
+# One NodePool per release of this chart (RFC #17: one NodePool per
+# ResourceFlavor; RFC #25 Decision 9: this chart's own name and the three
+# kinds it renders do not change between the minimal CPU-only skeleton and
+# the -rsv/-od/-flex extension, only the values do).
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
   name: {{ .Values.pool.name | quote }}
+{{- with include "capacity-pool.annotations" . }}
+{{ . | indent 2 }}
+{{- end }}
 spec:
   template:
+{{- with (default (dict) .Values.accelerator).methodLabel }}
+{{- if .key }}
+    metadata:
+      labels:
+        {{ .key | quote }}: {{ .value | toString | quote }}
+{{- end }}
+{{- end }}
     spec:
       nodeClassRef:
         group: karpenter.k8s.aws
         kind: EC2NodeClass
         name: {{ .Values.pool.name | quote }}
       requirements:
-{{ toYaml .Values.pool.requirements | indent 8 }}
+{{ include "capacity-pool.requirements" . | fromJsonArray | toYaml | indent 8 }}
+{{- with include "capacity-pool.taints" . | fromJsonArray }}
+      taints:
+{{ toYaml . | indent 8 }}
+{{- end }}
       terminationGracePeriod: 24h0m0s
   limits:
 {{ toYaml .Values.pool.limits | indent 4 }}

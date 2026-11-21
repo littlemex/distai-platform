@@ -25,4 +25,4 @@ spec:
             - name: "cpu"
               nominalQuota: {{ .Values.clusterQueue.cpuQuota | quote }}
             - name: "memory"
-              nominalQuota: "64Gi"
+              nominalQuota: {{ .Values.clusterQueue.memQuota | quote }}
