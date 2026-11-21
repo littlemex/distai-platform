@@ -5,8 +5,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lib.plan import load_plan  # noqa: E402
-from lib.status_model import load_status  # noqa: E402
+from datetime import timedelta  # noqa: E402
+
+from lib.plan import Plan, PlanItem, StatusSource, load_plan  # noqa: E402
+from lib.status_model import RawStatus, StatusDoc, load_status, parse_utc  # noqa: E402
 from render_board import render  # noqa: E402
 
 SAMPLE_DIR = Path(__file__).resolve().parents[1] / "sample"
@@ -156,3 +158,49 @@ def test_dependency_edges_rendered_for_every_depends_on():
     expected_edges = sum(len(item.depends_on) for item in plan.items)
     actual_edges = out.count('class="dep-')
     assert actual_edges == expected_edges
+
+
+def _one_item_plan_and_status(state: str, collected_hours_after_planned_end: float):
+    block_start = parse_utc("2026-01-01T00:00:00Z")
+    item = PlanItem(
+        id="x", name="X", lane="l",
+        planned_start=timedelta(hours=1), planned_duration=timedelta(hours=1),
+        depends_on=(), stop_condition="", status_source=StatusSource(kind="manual", key="x"),
+    )
+    plan = Plan(grace_minutes=15, items=(item,))
+    raw = RawStatus(state=state, actual_start=None, actual_end=None, updated_at=None, note="")
+    collected_at = block_start + item.planned_start + item.planned_duration + timedelta(hours=collected_hours_after_planned_end)
+    status = StatusDoc(block_start=block_start, collected_at=collected_at, items={"x": raw}, collection_errors=())
+    return plan, status
+
+
+def test_finished_item_with_no_actual_end_spans_the_planned_window_not_the_snapshot():
+    """A 'done'/'failed' entry with no actual_end on record means 'finished, exact end
+    unknown' — not 'still running'. Its bar must be the same width as its own planned
+    bar. Rendering with the snapshot many hours after the planned end makes the bug this
+    guards against (stretching the bar out to the snapshot line) obviously different in
+    width from the fix, rather than coincidentally close."""
+    for state in ("done", "failed"):
+        plan, status = _one_item_plan_and_status(state, collected_hours_after_planned_end=10)
+        out = render(plan, status)
+        planned_width = float(re.search(r'<rect class="bar-planned"[^>]*width="([\d.]+)"', out).group(1))
+        actual_width = float(re.search(r'<rect class="bar-actual"[^>]*width="([\d.]+)"', out).group(1))
+        assert abs(planned_width - actual_width) < 0.5, f"state={state}: planned={planned_width} actual={actual_width}"
+
+
+def test_running_item_with_no_actual_end_does_still_extend_to_the_snapshot():
+    """The contrast case for the test above: a genuinely still-running item legitimately
+    has no actual_end, and its bar must extend all the way to the snapshot line (it really
+    is still going) rather than being clipped to the planned window like a finished item."""
+    plan, status = _one_item_plan_and_status("running", collected_hours_after_planned_end=10)
+    out = render(plan, status)
+    planned_width = float(re.search(r'<rect class="bar-planned"[^>]*width="([\d.]+)"', out).group(1))
+    actual_width = float(re.search(r'<rect class="bar-actual"[^>]*width="([\d.]+)"', out).group(1))
+    assert actual_width > planned_width * 2
+
+
+def test_bar_planned_is_pointer_events_enabled_so_its_tooltip_is_reachable():
+    # SVG does not hit-test an unfilled shape's interior by default; without this, an
+    # overdue/not-started item's <title> tooltip would only trigger on its thin outline.
+    out = _render_sample()
+    assert "pointer-events: all;" in out
