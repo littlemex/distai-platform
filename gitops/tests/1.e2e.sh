@@ -2234,9 +2234,26 @@ pass "GET http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics returned ${dcgm_series_
 # values.yaml says it will do -- NetworkPolicy present and of the shape
 # the README claims, no ServiceMonitor CRD instance, and no
 # priorityClassName set on the running pod.
-[[ "$(k get networkpolicy -n "${DCGM_NS}" -o jsonpath='{.items[*].metadata.name}' 2>&1 | tr -d '[:space:]')" != "" ]] \
+dcgm_netpol_names="$(k get networkpolicy -n "${DCGM_NS}" -o jsonpath='{.items[*].metadata.name}' 2>&1)" \
+  || fail "kubectl get networkpolicy -n ${DCGM_NS} failed: ${dcgm_netpol_names}"
+[[ -n "$(tr -d '[:space:]' <<<"${dcgm_netpol_names}")" ]] \
   || fail "no NetworkPolicy exists in ${DCGM_NS}, but the chart's own networkPolicy.enabled is true"
-dcgm_servicemonitor_count="$(k get servicemonitors.monitoring.coreos.com -n "${DCGM_NS}" --ignore-not-found -o name 2>&1 | grep -c . || true)"
+# C-70, found running this exact check (dp-opt-r3): --ignore-not-found
+# only suppresses "no object of this kind exists"; it does nothing for
+# "this kind does not exist on this cluster at all" (no Prometheus
+# Operator CRD here, the expected and normal case), which kubectl
+# reports as a hard, non-zero-exit error on stderr -- piped into
+# `grep -c .` with 2>&1, that one error line was counted as "1
+# ServiceMonitor object", the opposite of what it meant.
+dcgm_sm_output="$(k get servicemonitors.monitoring.coreos.com -n "${DCGM_NS}" --ignore-not-found -o name 2>&1)"
+dcgm_sm_rc=$?
+if [[ "${dcgm_sm_rc}" -ne 0 ]]; then
+  [[ "${dcgm_sm_output}" == *"doesn't have a resource type"* || "${dcgm_sm_output}" == *"the server could not find the requested resource"* ]] \
+    || fail "kubectl get servicemonitors.monitoring.coreos.com -n ${DCGM_NS} failed, not with 'no such resource type': ${dcgm_sm_output}"
+  dcgm_servicemonitor_count=0
+else
+  dcgm_servicemonitor_count="$(echo "${dcgm_sm_output}" | grep -c . || true)"
+fi
 [[ "${dcgm_servicemonitor_count}" -eq 0 ]] \
   || fail "found ${dcgm_servicemonitor_count} ServiceMonitor object(s) in ${DCGM_NS}, but serviceMonitor.enabled is false"
 dcgm_pod_name="$(k get pods -n "${DCGM_NS}" -l "app.kubernetes.io/name=dcgm-exporter" -o jsonpath='{.items[0].metadata.name}')"
