@@ -1,0 +1,14 @@
+apiVersion: v2
+name: vllm-disagg-pd
+description: >-
+  vLLM prefill/decode disaggregated serving: a prefill Deployment and a decode
+  Deployment that move the KV cache with vLLM's own NixlConnector, behind a
+  small proxy that sends each request to prefill first and then streams the
+  answer from decode. Prefill and decode never share a node by default.
+type: application
+version: 0.1.0
+appVersion: "v0.34.0"
+home: https://github.com/littlemex/distai-platform
+sources:
+  - https://github.com/littlemex/distai-platform
+  - https://docs.vllm.ai/en/latest/features/disagg_prefill.html

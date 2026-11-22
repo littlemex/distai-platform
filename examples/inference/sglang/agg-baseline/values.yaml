@@ -1,0 +1,118 @@
+# One Deployment of SGLang engines, each running prefill and decode itself.
+# Unlike vLLM, SGLang's shipped scheduler defaults are not the tuned
+# aggregated baseline: mixed chunked prefill (decode tokens batched together
+# with a prefill chunk) is off by default, and the chunk size is picked from
+# the GPU's memory when it is not given. Both are therefore set explicitly
+# below (engine.scheduler), so the baseline is the tuned one and is the same
+# on every GPU type.
+
+image:
+  repository: lmsysorg/sglang
+  # Same pinned image as the disagg-pd chart, so a comparison changes the
+  # layout only. Pinned by tag and by digest (multi-arch index, Docker Hub).
+  tag: v0.5.23-efa
+  digest: sha256:644f315d1d48ade2f95d76c2a8a802541a027e7e56af289b17bd5d1fdf4c8fe7
+  pullPolicy: IfNotPresent
+
+model:
+  # Hugging Face model repository id. No default: the engine refuses to start
+  # (with a message saying so) until it is set.
+  name: ""
+  # Commit or tag of the model repository; pin it for any measurement.
+  revision: ""
+  servedModelName: ""
+  hfTokenSecret:
+    name: ""
+    key: token
+
+accelerator:
+  resourceName: nvidia.com/gpu
+
+engine:
+  replicas: 1
+  # Tensor parallel degree (--tp-size); GPUs this release uses =
+  # replicas x gpusPerEngine.
+  gpusPerEngine: 1
+  port: 8000
+  # The tuned aggregated baseline (RFC #37, Decision 8).
+  scheduler:
+    # --enable-mixed-chunk: mix running decodes into a prefill chunk's batch.
+    enableMixedChunk: true
+    # --chunked-prefill-size. Stated explicitly: left unset, SGLang picks
+    # 2048 to 16384 from the GPU's memory, so two GPU types would compare
+    # two different baselines. -1 disables chunked prefill (and with it
+    # mixed chunking); do not use -1 for the baseline.
+    chunkedPrefillSize: 8192
+  # Nodes the engines may run on. Empty: any node with the accelerator. To
+  # compare with disagg-pd on the same hardware, select the same nodes, for
+  # example {"distai.dev/pd-role": "prefill"}.
+  nodeSelector: {}
+  tolerations: []
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+  extraArgs: []
+  extraEnv: []
+  shmSizeLimit: 16Gi
+  cacheVolume:
+    emptyDir: {}
+  startupTimeoutSeconds: 1800
+  # The SGLang image has no non-root user of its own; it runs as root by
+  # default. These values run it as an arbitrary non-root UID instead, with
+  # HOME and every cache under the writable /cache volume. Confirmed on
+  # real hardware: the engine reaches Running/Ready under this security
+  # context (README, Known issues). If a JIT cache or a library insists on
+  # writing elsewhere, that shows up as a start-up error naming the path.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+
+# ClusterIP: reachable only from inside the cluster. SGLang has no
+# authentication of its own here.
+service:
+  type: ClusterIP
+  port: 8000
+
+metrics:
+  # Adds --enable-metrics, the sglang-metrics=true and component pod labels
+  # and the prometheus.io/* annotations that the "sglang" scrape job in
+  # examples/inference/_shared/dashboards/scrape-configs.yaml (and the
+  # upstream awsome-distributed-ai job of the same name) selects on. SGLang
+  # serves /metrics on the engine port.
+  enabled: true
+
+# Skeleton only (values and rendering, not built or measured on real
+# hardware yet). The same three tier names as the vLLM charts
+# (RFC #37, Decision 11), mapped onto SGLang's own HiCache:
+#   gpu-only (default): HiCache off, SGLang's own GPU-resident radix cache
+#     only.
+#   local: --enable-hierarchical-cache with an explicit host pool size,
+#     --hicache-size (L1 GPU + L2 host memory; L2 is node-local and owned by
+#     one engine, docs.sglang.io/advanced_features/hicache_design.html).
+#     Unlike vLLM's local/remote, this does select something real: the
+#     second tier is this engine's own host memory.
+#   remote: not available for SGLang here. SGLang's own HiCache docs list no
+#     Redis/ElastiCache L3 backend, so the chart fails to render instead of
+#     pretending (Decision 11 keeps the remote tier vLLM-only until that is
+#     confirmed).
+kvCacheTier:
+  mode: gpu-only
+  hicache:
+    # Host KV pool per engine, in GB as SGLang counts it (10^9 bytes,
+    # --hicache-size; mem_cache/pool_host/base.py). Required with
+    # mode=local: SGLang's own default sizes the host pool as a multiple of
+    # the GPU pool (2x), which can exceed the pod's memory request without
+    # anyone noticing. Raise engine.resources.requests.memory by at least
+    # this much.
+    sizeGb: 0
+    # Extra HiCache flags passed unchanged, for example
+    # ["--hicache-write-policy", "write_through"].
+    extraArgs: []
