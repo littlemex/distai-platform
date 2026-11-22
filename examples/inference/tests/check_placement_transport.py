@@ -715,26 +715,35 @@ def main():
                     out[c["name"]] = e.get("value", "<valueFrom>")
         return out
 
+    def role_workloads(docs, role_prefix):
+        """Workloads belonging to one role (disagg charts) or all workloads
+        (agg-baseline, role_prefix="engine" names the values.yaml block, not
+        a rendered role label)."""
+        if role_prefix not in ROLES:
+            return workloads(docs)
+        return roles_by(docs, ROLE_KEY)[role_prefix]
+
     def check_mps_gpu_mem_util(chart, name, role_prefix=""):
         p = (role_prefix + ".") if role_prefix else ""
+
         docs, err = R.render(chart)
         if check(f"{name}: default (mps disabled) renders GPU_MEMORY_UTILIZATION empty", docs is not None, err):
             vals = set()
-            for w in workloads(docs):
+            for w in role_workloads(docs, role_prefix):
                 vals |= set(gpu_mem_util_env(w).values())
-            check(f"{name}: default GPU_MEMORY_UTILIZATION is empty for every workload", vals == {""}, repr(vals))
+            check(f"{name}: default GPU_MEMORY_UTILIZATION is empty", vals == {""}, repr(vals))
 
         docs, err = R.render(chart, sets=[f"{p}mps.enabled=true", f"{p}mps.replicas=2"])
         if check(f"{name}: mps.enabled=true, replicas=2, no explicit value: helm template", docs is not None, err):
             vals = set()
-            for w in workloads(docs):
+            for w in role_workloads(docs, role_prefix):
                 vals |= set(gpu_mem_util_env(w).values())
             check(f"{name}: mps.enabled=true, replicas=2 computes the safe default 0.35 (0.70/2)", vals == {"0.35"}, repr(vals))
 
         docs, err = R.render(chart, sets=[f"{p}mps.enabled=true", f"{p}mps.replicas=2", f"{p}gpuMemoryUtilization=0.40"])
         if check(f"{name}: mps.enabled=true, replicas=2, explicit 0.40 (within the 0.45 ceiling): helm template", docs is not None, err):
             vals = set()
-            for w in workloads(docs):
+            for w in role_workloads(docs, role_prefix):
                 vals |= set(gpu_mem_util_env(w).values())
             check(f"{name}: explicit 0.40 is honored as-is", vals == {"0.40"}, repr(vals))
 
