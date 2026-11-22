@@ -1,26 +1,38 @@
 #!/usr/bin/env python3
-"""Cross-check the platform AppProject's own clusterResourceWhitelist/
-namespaceResourceWhitelist (gitops/bootstrap/appproject-whitelist.yaml)
-against every (group, kind) pair this checkout's own addons actually
-render -- the mechanical check gitops/bootstrap/appproject-whitelist.yaml's
-own header comment promises (#63, independent security-axis review pass,
-filed as "SA1" item 1).
+"""Cross-check the platform AppProject's own scoping (destinations and
+clusterResourceWhitelist/namespaceResourceWhitelist) against every object
+this checkout's own addons and cells actually render -- the mechanical
+check gitops/bootstrap/appproject-whitelist.yaml's own header comment
+promises (#63, independent security-axis review pass, filed as "SA1"
+item 1).
 
-For every gitops/addons/<name>/addon.yaml and gitops/addon-catalog/<name>/
-addon.yaml, `helm template` it (registry chart or local `dir:`, matching
-what Argo CD itself does) with that addon.yaml's own `values:` merged with
-`valuesFrom`'s own helmKey paths filled by an inert placeholder (the same
-technique check_pinned_crds.py's own placeholder_values() uses, imported
-from there rather than duplicated), and record every (apiVersion's group,
-kind) pair found. A pair missing from appproject-whitelist.yaml fails this
+For every gitops/addons/<name>/addon.yaml, gitops/addon-catalog/<name>/
+addon.yaml, and gitops/cells/*/{capacity-pool,smoke}/*.yaml, `helm
+template` it (registry chart or local `dir:`, matching what Argo CD
+itself does) with that file's own `values:` merged with `valuesFrom`'s
+own helmKey paths filled by an inert placeholder (the same technique
+check_pinned_crds.py's own placeholder_values() uses, imported from
+there rather than duplicated), and check every rendered object two ways:
+
+  1. its (apiVersion's group, kind) pair appears in appproject-whitelist.yaml
+     (either list - this check does not itself tell Namespaced from
+     Cluster-scoped kinds; appproject-whitelist.yaml puts each pair under
+     the one list it belongs to).
+  2. if the object is namespaced (has a metadata.namespace), that
+     namespace is one bootstrap.sh's own destinations.namespace
+     computation would actually include - EXPECTED_NAMESPACES below
+     mirrors that computation (every addon.yaml/addon-catalog/cells file's
+     own namespace: field, plus kube-system unconditionally - see that
+     script's own comment for why kube-system is unconditional). This is
+     a second, independent implementation of the same rule stated in
+     prose, not an import of bootstrap.sh's bash - if the two drift, this
+     check and bootstrap.sh's own behavior can disagree silently; keep
+     them in sync by hand.
+
+A pair or a namespace missing from the project's own scope fails this
 check -- it would otherwise reach a real cluster only to have Argo CD
-refuse to sync it, a failure mode this check moves to CI.
-
-What this intentionally does not do: tell Namespaced from Cluster-scoped
-kinds. appproject-whitelist.yaml puts each pair under the one list it
-belongs to; this check only asserts rendered pairs appear *somewhere* in
-the union of both lists (catching a missing entry), and separately warns
-(not fails) about an entry present in the whitelist but never actually
+refuse to sync it, a failure mode this check moves to CI. This check
+also separately warns (not fails) about a whitelist entry never actually
 rendered by anything (catching a stale, no-longer-needed grant) -- a
 warning, not a failure, since removing an unused grant is a judgement
 call this script should surface, not force.
@@ -41,6 +53,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from check_pinned_crds import helm_template_chart, placeholder_values  # noqa: E402
 
 FAILURES: list[str] = []
+ALWAYS_ALLOWED_NAMESPACES = {"kube-system"}
 
 
 def check(label: str, condition: bool, reason: str = "") -> None:
@@ -52,10 +65,10 @@ def check(label: str, condition: bool, reason: str = "") -> None:
         FAILURES.append(msg)
 
 
-def render_addon(path: str, workdir: str) -> str | None:
+def render_addon(path: str, workdir: str, repo_root: str) -> str | None:
     with open(path, encoding="utf-8") as f:
         doc = yaml.safe_load(f) or {}
-    rel = os.path.relpath(path)
+    rel = os.path.relpath(path, repo_root)
     name = doc.get("addon", os.path.basename(os.path.dirname(path)))
     namespace = doc.get("namespace") or "default"
 
@@ -71,10 +84,6 @@ def render_addon(path: str, workdir: str) -> str | None:
         return rendered
 
     if "dir" in doc:
-        # dir: is rooted at the repo root itself (e.g. "gitops/charts/
-        # optional-pool"); path is .../gitops/addons/<name>/addon.yaml, so
-        # three dirname()s up from it is the repo root.
-        repo_root = os.path.abspath(os.path.join(os.path.dirname(path), "..", "..", ".."))
         chart_ref = os.path.join(repo_root, doc["dir"])
         subprocess.run(["helm", "dependency", "build", chart_ref], capture_output=True, text=True, timeout=120)
         cmd = ["helm", "template", f"{name}-whitelist-check", chart_ref, "-n", namespace, "--create-namespace"]
@@ -97,48 +106,72 @@ def render_addon(path: str, workdir: str) -> str | None:
     return None
 
 
+def declared_namespace(path: str) -> str | None:
+    with open(path, encoding="utf-8") as f:
+        doc = yaml.safe_load(f) or {}
+    return doc.get("namespace")
+
+
 def main(root: str) -> int:
     gitops = os.path.join(root, "gitops")
     whitelist_path = os.path.join(gitops, "bootstrap", "appproject-whitelist.yaml")
     with open(whitelist_path, encoding="utf-8") as f:
         whitelist = yaml.safe_load(f) or {}
-    allowed = {
+    allowed_kinds = {
         (entry.get("group") or "", entry["kind"])
         for key in ("clusterResourceWhitelist", "namespaceResourceWhitelist")
         for entry in whitelist.get(key, [])
     }
 
-    addon_files = sorted(
-        glob.glob(os.path.join(gitops, "addons", "*", "addon.yaml"))
-        + glob.glob(os.path.join(gitops, "addon-catalog", "*", "addon.yaml"))
+    addon_files = sorted(glob.glob(os.path.join(gitops, "addons", "*", "addon.yaml")))
+    catalog_files = sorted(glob.glob(os.path.join(gitops, "addon-catalog", "*", "addon.yaml")))
+    cell_files = sorted(
+        glob.glob(os.path.join(gitops, "cells", "*", "capacity-pool", "*.yaml"))
+        + glob.glob(os.path.join(gitops, "cells", "*", "smoke", "*.yaml"))
     )
-    check(f"found at least one addon.yaml to check (found {len(addon_files)})", len(addon_files) >= 1)
+    all_files = addon_files + catalog_files + cell_files
+    check(f"found at least one addon.yaml/cells parameter file to check (found {len(all_files)})", len(all_files) >= 1)
 
-    seen: set[tuple[str, str]] = set()
+    allowed_namespaces = set(ALWAYS_ALLOWED_NAMESPACES)
+    for path in all_files:
+        ns = declared_namespace(path)
+        if ns:
+            allowed_namespaces.add(ns)
+
+    seen_kinds: set[tuple[str, str]] = set()
     with tempfile.TemporaryDirectory() as workdir:
-        for path in addon_files:
+        for path in all_files:
             rel = os.path.relpath(path, root)
-            rendered = render_addon(path, workdir)
+            rendered = render_addon(path, workdir, root)
             if rendered is None:
                 continue
             found_here: set[tuple[str, str]] = set()
+            bad_namespaces: set[str] = set()
             for doc in yaml.safe_load_all(rendered):
                 if not doc or "kind" not in doc:
                     continue
                 api_version = doc.get("apiVersion", "")
                 group = api_version.split("/", 1)[0] if "/" in api_version else ""
                 found_here.add((group, doc["kind"]))
-            seen |= found_here
-            missing = found_here - allowed
+                ns = (doc.get("metadata") or {}).get("namespace")
+                if ns and ns not in allowed_namespaces:
+                    bad_namespaces.add(ns)
+            seen_kinds |= found_here
+            missing = found_here - allowed_kinds
             check(
                 f"{rel}'s own rendered (group, kind) pairs are all in appproject-whitelist.yaml",
                 not missing,
                 f"missing: {sorted(missing)}",
             )
+            check(
+                f"{rel}'s own rendered objects all land in a namespace bootstrap.sh's destinations would include",
+                not bad_namespaces,
+                f"rendered into namespace(s) not in the expected destination set {sorted(allowed_namespaces)}: {sorted(bad_namespaces)}",
+            )
 
-    unused = allowed - seen
+    unused = allowed_kinds - seen_kinds
     if unused:
-        print(f"WARN appproject-whitelist.yaml has {len(unused)} entrie(s) no rendered addon actually uses: {sorted(unused)}")
+        print(f"WARN appproject-whitelist.yaml has {len(unused)} entrie(s) no rendered addon/cell file actually uses: {sorted(unused)}")
 
     if FAILURES:
         print(f"\n{len(FAILURES)} check(s) failed")

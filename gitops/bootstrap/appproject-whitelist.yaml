@@ -80,8 +80,23 @@ clusterResourceWhitelist:
     # addon.yaml or cells/ parameter file in this repository ever creates an
     # instance of any of them.
 
-# Namespace-scoped kinds every addon's own rendered output actually uses.
+# Namespace-scoped kinds every addon's own rendered output actually uses,
+# plus one kind no addon renders: ApplicationSet (#63, a Fable 5.2 review
+# found this missing). gitops/bootstrap/root-application.yaml (Object 3
+# below) is an Application, project: platform, whose own Git source is
+# gitops/appsets/ - the two literal ApplicationSet manifests there
+# (platform.ApplicationSet.yaml, cells.ApplicationSet.yaml) are therefore
+# resources this same AppProject's sync has to be allowed to create too,
+# the same "app of apps" pattern Argo CD's own docs describe (a parent
+# Application's project whitelist governs every resource its own source
+# renders, including a child ApplicationSet/Application, not only the
+# chart-rendered objects this file's other entries cover). ApplicationSet
+# is Namespaced in Argo CD's own CRD (lives alongside Application in the
+# capability's own namespace), so it belongs here, not in
+# clusterResourceWhitelist.
 namespaceResourceWhitelist:
+  - group: "argoproj.io"
+    kind: ApplicationSet
   - group: ""
     kind: ConfigMap
   - group: ""
