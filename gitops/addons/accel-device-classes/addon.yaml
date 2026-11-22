@@ -19,12 +19,9 @@
 # them. namespace is required by the ApplicationSet template's destination
 # but unused by this cluster-scoped chart.
 addon: accel-device-classes
-# RFC #41 Decision 1 (a later, independent PR): gitops/addons/ is
-# delivered unconditionally to every cell, no opt-out, and its own
-# check_addon_tiers.py requires every addon.yaml here to say so
-# explicitly. Added here so this PR's own add-ons do not fail that
-# check once both PRs are merged (found by combining the two
-# branches for a real p4d.24xlarge EFA verification run).
+# RFC #41 Decision 1: gitops/addons/ is delivered unconditionally to
+# every cell, no opt-out, and check_addon_tiers.py requires every
+# addon.yaml here to say so explicitly.
 tier: core
 wave: accelerators
 dir: gitops/charts/accel-device-classes

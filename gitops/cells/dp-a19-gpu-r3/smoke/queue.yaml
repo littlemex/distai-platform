@@ -5,8 +5,11 @@
 # section D) - needed so #25's own e2e steps (the admin smoke canary
 # through Kueue and Karpenter) still pass on this cell name, independent
 # of #28's own accelerator-specific checks, which use a separate bare pod
-# requesting nvidia.com/gpu directly (the smoke ClusterQueue's own
-# resourceGroups cover only cpu/memory, never an accelerator resource).
+# requesting nvidia.com/gpu directly. clusterQueue.acceleratorResource/
+# acceleratorQuota (#63, filed as #56) now cover that resource too,
+# matching gpu.yaml's own taint on it - a real-hardware check that a
+# Kueue-admitted Workload requesting it is actually admitted end to end
+# is still to be written (tracked in #56), not claimed here.
 addon: smoke
 wave: capacity
 dir: gitops/charts/smoke
@@ -14,3 +17,11 @@ namespace: distai-smoke
 values:
   clusterQueue:
     resourceFlavor: gpu
+    # #63/#56: gpu.yaml's own ResourceFlavor now carries an
+    # nvidia.com/gpu taint/toleration; without covering the same
+    # resource here, Kueue would still admit this chart's CPU-only
+    # canary through that flavor, landing it on the tainted GPU node
+    # for free, and no accelerator request would ever reach Kueue to
+    # exercise quota for it.
+    acceleratorResource: nvidia.com/gpu
+    acceleratorQuota: "1"
