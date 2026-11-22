@@ -172,8 +172,10 @@ plugin has reported it) — so `N` pending replicas, each requesting
 `nvidia.com/gpu: 1`, launched close together can in principle land on `N`
 separate single-GPU nodes instead of sharing one MPS-split GPU, and still
 reach `Running`/`Ready` with `RESTARTS=0` without ever exercising MPS at all.
-The pending run's own results must state each replica's own `spec.nodeName`
-explicitly for this reason, not rely on rollout status alone.
+The real-hardware results in `examples/inference/README.md`'s own "MPS" section state each
+replica's own `spec.nodeName` explicitly for this reason, not rely on rollout status alone — this
+is also why that section's own forms table is scored per-replica node identity, not pass/fail on
+`Running`/`Ready` alone.
 
 **Security, reviewed and found incomplete by Fable 5.2 (2026-11-22; recorded as an open
 finding, not resolved here)**: NVIDIA's own `mps-control-daemon` DaemonSet — the
