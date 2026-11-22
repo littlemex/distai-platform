@@ -265,12 +265,17 @@ the node"), so it does not add a sixth row to the table above:
 `distai.dev/neuron-method=device-plugin` - two releases of the one
 upstream chart (its own `nodeAffinity` is hardcoded in the chart's
 template, not values-driven, so a single release cannot OR the two
-vendor labels; see the add-on's own comment) - and each advertises
-`vpc.amazonaws.com/efa` on whichever of those nodes also has EFA network
-interfaces attached
-(`pool.networkInterfaces`, [#50](https://github.com/littlemex/distai-platform/issues/50)).
-Real hardware (`p4d.24xlarge`, two nodes, `NET/Libfabric`/GDRDMA
-`all_reduce_perf`) is in this PR's own Test Results.
+vendor labels; see the add-on's own comment) - **and both additionally
+require `distai.dev/efa-attached=true`**, a second label
+`capacity-pool` renders on a NodePool's node template only when
+`pool.networkInterfaces`
+([#50](https://github.com/littlemex/distai-platform/issues/50)) is
+non-empty: the method label by itself says nothing about whether EFA
+interfaces were ever configured, and confirmed on real hardware that
+this chart's own Pod crash-loops, not merely reports zero, on a
+method-labeled node with none (see "Known limits"). Real hardware
+(`p4d.24xlarge`, two nodes, `NET/Libfabric`/GDRDMA `all_reduce_perf`) is
+in this PR's own Test Results.
 
 ## Adding a cell
 
@@ -407,54 +412,58 @@ Real hardware (`p4d.24xlarge`, two nodes, `NET/Libfabric`/GDRDMA
   real increase in what that access is worth once held, and is recorded
   here rather than left for a reader to discover by diffing chart
   templates themselves.
-- **Confirmed on real hardware, not merely a theoretical risk: on an
-  EFA-capable node with zero physical EFA interfaces, this add-on's own
-  Pod crash-loops.** Both add-ons select by method label alone (#19
-  Decision 2's own opt-in), the same as the four existing `accel-*`
-  add-ons; neither additionally requires `pool.networkInterfaces` to be
-  non-empty, because no label records that fact today
-  (`capacity-pool`'s own `accelerator.methodLabel` and
-  `pool.networkInterfaces` are independent fields, #17's own chart). A
-  `g7`/`p4d` pool that opts into `nvidia-gpu-method=device-plugin`
-  without configuring EFA interfaces still gets this one more Pod
-  (`runAsUser: 0`, `hostNetwork: true` -- not `privileged`, now that
-  Fable 5.2 review round 1's finding B1 is fixed), matching by instance
-  type regardless of whether that specific pool happens to request
-  interfaces -- confirmed to be live risk, not a hypothetical one:
-  `gitops/cells/dp-a19-gpu-r3/capacity-pool/gpu.yaml` and
-  `dp-a19-trn-r3/capacity-pool/trn.yaml` (#28's own light-tier fixtures,
-  used by the existing e2e) both carry the method label with
-  `pool.networkInterfaces` unset and an `instance-family` requirement
-  wide enough to include an EFA-capable size.
-  Three real-machine attempts on an actual EFA-capable GPU instance
-  type (`g6e.12xlarge`, then `g5.12xlarge`) each hit EC2 capacity errors
-  before a node could be reached (`InsufficientCapacity`/
-  `UnfulfillableCapacity` in `ap-northeast-1` at the time, confirmed
-  read-only afterward not to be the same pricing-data gap
-  `trn2.3xlarge` has -- both instance types are offered in every AZ this
-  platform's foundation uses with a published on-demand price, just no
-  capacity at the time). A fourth and fifth attempt used a cheap,
-  EFA-capable, CPU-only instance type instead (`c5n.9xlarge`, no GPU
-  needed, far more available) and got a real node: the add-on's own
-  DaemonSet shows `desired: 1, current: 1`, and its one Pod
-  (`accel-efa-device-plugin-nvidia-aws-efa-k8s-device-plugin-<suffix>`)
-  is `phase: Completed` (never `Running`) with `restartCount` climbing
-  steadily (`0 -> 2 -> 3 -> 4 -> 5` over about 3 minutes of observation)
-  -- a genuine crash/restart loop, not a stable `efa=0` report and not a
-  stuck `ContainerCreating`. The exact in-container error was not
-  captured (a label-selector bug in the disposable verification
-  script's own diagnostics returned "No resources found" even once the
-  Pod was confirmed to exist by name via a plain `grep`, and was not
-  investigated further once the crash-loop fact itself was confirmed).
-  This does not break GPU/Neuron workloads on the node (the device
-  plugin for the accelerator itself is a separate DaemonSet), but it
-  does mean a method-labeled, EFA-less pool's `accelerators` step never
-  reaches `Healthy` for this add-on, and leaves a crash-looping Pod on
-  every such node. The fix (a label `capacity-pool` itself sets only
-  when `pool.networkInterfaces` is non-empty, ANDed into both add-ons'
-  own `nodeSelector`) is `#17`'s chart to add, not this PR's -- recorded
-  here as a named, now-confirmed-necessary follow-up, not a theoretical
-  one.
+- **A method label alone is not enough to select this add-on's own Pod
+  -- fixed in this PR, after being confirmed as a real regression on
+  real hardware, not shipped as a documented risk.** The method label
+  alone (#19 Decision 2's own opt-in, the same as the four existing
+  `accel-*` add-ons) says nothing about whether the pool carrying it
+  ever configured `pool.networkInterfaces`; `gitops/cells/dp-a19-gpu-r3/
+  capacity-pool/gpu.yaml` and `dp-a19-trn-r3/capacity-pool/trn.yaml`
+  (#28's own existing light-tier fixtures) both carry the method label
+  with `pool.networkInterfaces` unset, on an `instance-family` wide
+  enough to resolve to an EFA-capable size -- for `dp-a19-trn-r3`
+  specifically, *every* `trn2` size the pinned chart's own
+  `supportedInstanceLabels` lists (`trn2.3xlarge`, `trn2.48xlarge`) is
+  EFA-capable, so this was not an occasional risk for that fixture, it
+  was certain. Confirmed on real hardware what actually happens there,
+  not assumed: after three real-machine attempts on an EFA-capable GPU
+  instance type (`g6e.12xlarge`, then `g5.12xlarge`) each hit EC2
+  capacity errors before a node could be reached (confirmed read-only
+  afterward not to be the same pricing-data gap `trn2.3xlarge` has --
+  both instance types are offered with a published on-demand price,
+  just no capacity at the time), a cheap EFA-capable CPU-only instance
+  type (`c5n.9xlarge`, no GPU needed, far more available) got a real
+  node: this chart's own Pod does not simply report `efa=0` there, it
+  crash-loops (`phase: Completed`, never `Running`, `restartCount`
+  climbing `0 -> 2 -> 3 -> 4 -> 5` over about 3 minutes). This does not
+  break GPU/Neuron workloads on the node (the accelerator's own device
+  plugin is a separate DaemonSet), but it does leave the `accelerators`
+  step unhealthy on both of this platform's own existing fixtures,
+  every time Karpenter happens to resolve `dp-a19-gpu-r3` to an
+  EFA-capable size and *always* for `dp-a19-trn-r3` -- a real regression
+  this PR would otherwise have introduced on pools that work today.
+  The fix: `gitops/charts/capacity-pool`'s own `templates/nodepool.yaml`
+  now renders `distai.dev/efa-attached: "true"` on a NodePool's node
+  template whenever `pool.networkInterfaces` is non-empty (never
+  derived from the method label or the instance type, both of which a
+  pool can carry without ever requesting an EFA interface), and both
+  `accel-efa-device-plugin-*` releases AND it into their own
+  `nodeSelector` alongside the vendor method label. Confirmed by `helm
+  template`: neither existing fixture renders the new label (since
+  neither sets `pool.networkInterfaces`, so neither ever receives this
+  Pod at all now), while this PR's own real `p4d.24xlarge` test values
+  (which do set it) do render it. `gitops/tests/check_pinned_crds.py`
+  asserts the AND reaches the rendered DaemonSet for both releases, the
+  same silent-Helm-value risk its own method-label check already
+  guards against (confirmed to actually fail with a deliberately-broken
+  copy). This one field addition to `capacity-pool` is the one part of
+  this PR that reaches outside `gitops/addons/accel-efa-device-plugin-*`
+  -- `#17` otherwise owns this chart's shape, the same boundary #28/PR
+  #40 already drew, crossed here only because the regression this field
+  closes is this PR's own to fix, not a new capability added on `#17`'s
+  behalf; no existing consumer of `pool.networkInterfaces` or
+  `accelerator.methodLabel` changes behavior (the new label is purely
+  additive, gated on a field every current fixture leaves unset).
 - Both EFA add-ons' pinned image stays at the chart's own
   default Region (`us-west-2`), never overridden per cell: see the
   add-on's own `addon.yaml` comment for why (the platform's own

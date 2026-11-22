@@ -326,6 +326,27 @@ def main(repo_root, rendered_dir):
                     print(f"FAIL {label}: the rendered chart's own container(s) do not carry the hardened securityContext ({reason})")
                     failures += 1
 
+                # Fable 5.2 review round 4: a method label alone is not enough --
+                # confirmed on real hardware that this chart's own Pod crash-loops
+                # on an EFA-capable instance type with zero physical EFA interfaces,
+                # which a method-labeled pool can have (gitops/cells/dp-a19-gpu-r3,
+                # dp-a19-trn-r3, #28). The fix is capacity-pool's own
+                # distai.dev/efa-attached="true" label (set only when
+                # pool.networkInterfaces is non-empty) ANDed into both releases' own
+                # nodeSelector; this asserts that AND actually reaches the rendered
+                # DaemonSet, the same silent-Helm-value risk the method-label check
+                # above already guards against.
+                efa_result = check_method_label_rendered(label, rendered, "distai.dev/efa-attached", "true")
+                if efa_result is True:
+                    print(f"PASS {label}: a DaemonSet in the rendered chart also requires distai.dev/efa-attached=true")
+                else:
+                    print(
+                        f"FAIL {label}: no DaemonSet in the rendered chart requires distai.dev/efa-attached=true "
+                        "(a method label alone would schedule this Pod on an EFA-less node and crash-loop there, "
+                        "confirmed on real hardware)"
+                    )
+                    failures += 1
+
     if failures:
         return 1
 
