@@ -1,0 +1,60 @@
+# NVIDIA's DRA driver: publishes each GPU as a DRA device (ResourceSlice)
+# on every node whose NodePool opts into the DRA method. One of four
+# accelerator add-ons in the "accelerators" step (#25 Decision 5, #28
+# section A). The chart bundles its own DeviceClass gpu.nvidia.com with
+# extendedResourceName: nvidia.com/gpu (#19 E0), so a Layer 1 pod
+# (resources.limits nvidia.com/gpu) reaches a DRA node without a platform
+# DeviceClass - unlike Neuron (see accel-device-classes/addon.yaml).
+#
+# gpuResourcesEnabledOverride: true is required, not optional: the chart
+# ships whole-GPU allocation off by default ("not yet officially
+# supported", upstream install docs), and without it the driver publishes
+# no GPU device at all, so #19 E1's result could not be reproduced on this
+# pinned chart (#28, Facts checked).
+#
+# Opt-in by method label only (#19 Decision 2). The per-node advertiser in
+# this chart is the kubeletPlugin DaemonSet, and its keys live under
+# kubeletPlugin: the chart has no top-level nodeSelector (chart values.yaml,
+# branch release-0.5, version 0.5.1), so #28's Interface table key
+# "nodeSelector" is applied as kubeletPlugin.nodeSelector here. Its default
+# required affinity matches only NFD- or GPU-Operator-set labels, which
+# this platform does not run, so it is replaced by the method label in the
+# same way as accel-nvidia-device-plugin/addon.yaml (Helm replaces the
+# nodeSelectorTerms list rather than merging it). The controller
+# Deployment is cluster-wide, not per node, and keeps its chart defaults.
+#
+# Not launched on a real node in #28: #19 E2 showed a dynamically
+# provisioned DRA pool never initializes (Initialized=Unknown); a static
+# NodePool for DRA is #19 Decision 4's and #27's scope. This file is
+# statically checked only (#28, Acceptance criteria).
+#
+# Chart source: https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu
+# (branch release-0.5, chart version 0.5.1), OCI:
+#   oci://registry.k8s.io/dra-driver-nvidia/charts/dra-driver-nvidia-gpu:0.5.1
+# confirmed 2026-11-19 (#28, Facts checked).
+addon: accel-nvidia-dra
+# RFC #41 Decision 1 (a later, independent PR): gitops/addons/ is
+# delivered unconditionally to every cell, no opt-out, and its own
+# check_addon_tiers.py requires every addon.yaml here to say so
+# explicitly. Added here so this PR's own add-ons do not fail that
+# check once both PRs are merged (found by combining the two
+# branches for a real p4d.24xlarge EFA verification run).
+tier: core
+chart: dra-driver-nvidia-gpu
+repoURL: registry.k8s.io/dra-driver-nvidia/charts
+version: "0.5.1"
+wave: accelerators
+namespace: dra-driver-nvidia-gpu
+values:
+  gpuResourcesEnabledOverride: true
+  kubeletPlugin:
+    nodeSelector:
+      distai.dev/nvidia-gpu-method: dra
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: distai.dev/nvidia-gpu-method
+                  operator: In
+                  values: ["dra"]

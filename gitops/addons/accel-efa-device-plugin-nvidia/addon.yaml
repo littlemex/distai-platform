@@ -1,0 +1,147 @@
+# The EFA advertiser, NVIDIA-GPU-method half. Makes vpc.amazonaws.com/efa
+# a real, schedulable extended resource on any node that (a) opted into
+# distai.dev/nvidia-gpu-method=device-plugin (#19 Decision 2's own label,
+# set through capacity-pool's accelerator.methodLabel, #17's own shape),
+# (b) actually has EFA network interfaces attached
+# (distai.dev/efa-attached=true, capacity-pool's own label, set only when
+# pool.networkInterfaces is non-empty -- see "A method label alone is not
+# enough" below), and (c) is an instance type this chart's own pinned
+# version already knows carries EFA (see "Two releases, not one" below).
+# Without
+# this chart, Karpenter can attach EFA network interfaces at the EC2
+# level (gitops/charts/capacity-pool's own pool.networkInterfaces, #50),
+# but Kubernetes never sees them: allocatable.vpc.amazonaws.com/efa reads
+# 0 until something in the advertiser layer (#19's own three-layer model:
+# kernel driver, advertiser, installer) tells kubelet about them. This
+# PR's own Test Results is the real-hardware confirmation that this chart
+# is that missing advertiser.
+#
+# #19 Decision 4's own row for this device class: "EFA | Same as the GPU
+# on the node | Follows the GPU | Follows the GPU". EFA has no vendor of
+# its own, so it rides whichever vendor's device-plugin method a node
+# already opted into (#28 section A's pattern, generalized: EFA selects
+# by the *GPU's or Neuron's own* method label, not a method label of its
+# own).
+#
+# Two releases, not one (a real finding, not this PR's first draft):
+# unlike NVIDIA's/Neuron's own device plugin charts
+# (addons/accel-nvidia-device-plugin, addons/accel-neuron-device-plugin),
+# this chart's template has no values-driven `affinity` field at all --
+# its nodeAffinity (built from supportedInstanceLabels.keys/.values) is
+# hardcoded in templates/daemonset.yaml, with no `{{ .Values.affinity }}`
+# reference anywhere, confirmed by reading the pinned chart version's own
+# template; a values override of `affinity:` is accepted by Helm (it is a
+# real key under .Values) but silently has no effect (confirmed by
+# `helm template`, 2026-11-22: the override rendered the chart's own
+# default instance-type affinity unchanged). Only `nodeSelector` (a flat
+# map, `{{- with .Values.nodeSelector }}`) is actually read, and a flat
+# nodeSelector ANDs every key -- it cannot express "nvidia-gpu-method OR
+# neuron-method" in one release. The fix is the same shape Neuron's own
+# device-plugin/DRA split already uses (one chart, more than one release,
+# #25 Decision 5's unit): this release's nodeSelector carries
+# nvidia-gpu-method only, accel-efa-device-plugin-neuron's carries
+# neuron-method only, both in the "accelerators" step, both pinned to the
+# identical chart/version/image. Each release's DaemonSet still carries
+# the chart's own hardcoded instance-type affinity (ANDed with
+# nodeSelector, confirmed in the same render) -- a real improvement over
+# a single release with a replaced affinity, which would have dropped
+# that guard for every node either release selects.
+#
+# supportedInstanceLabels is left at the pinned chart version's own
+# default: confirmed by reading its values.yaml, 2026-11-22, it already
+# includes every instance type this platform onboards with EFA --
+# p4d.24xlarge, p5en.48xlarge, every EFA-carrying g7 size
+# (g7.8xlarge/12xlarge/24xlarge/48xlarge, not g7.2xlarge, which has none -
+# #50's own table), and every EFA-carrying trn2 size (trn2.3xlarge,
+# trn2.48xlarge, trn2-ac.24xlarge, trn2u.48xlarge, trn2u-ac.24xlarge). No
+# override is added here for that list.
+#
+# image.repository is left at the chart's own default
+# (602401143452.dkr.ecr.us-west-2.amazonaws.com/eks/aws-efa-k8s-device-plugin),
+# not overridden per cell Region: unlike karpenter/kueue's own
+# public.ecr.aws or registry.k8s.io registries, this one is a per-Region
+# copy of the same AWS-managed account, and a per-cell override would
+# need a new cell-registration-Secret annotation carrying the full
+# registry string (distai.dev.annotations/region only carries the bare
+# Region name, e.g. "ap-northeast-1", which this platform's own
+# templatePatch can only substitute as a whole parameter value, never
+# concatenate into a larger string -
+# gitops/appsets/platform.ApplicationSet.yaml, Facts checked). Confirmed
+# by hand, 2026-11-22: the us-west-2, us-east-1 and ap-northeast-1 copies
+# of this exact pinned tag resolve to the identical manifest-list digest
+# below, so a cross-Region pull is correct, only marginally slower on a
+# node's first cold start (a few MB) - deferred, not a defect, until a
+# cell's own egress cost makes it worth a new annotation.
+#
+# Chart source: https://github.com/aws/eks-charts
+# (stable/aws-efa-k8s-device-plugin, tag v0.5.35), classic Helm repository
+# (index.yaml, not OCI) https://aws.github.io/eks-charts, same shape
+# addons/accel-nvidia-device-plugin/addon.yaml already uses for a
+# non-OCI registry. appVersion/image.tag v0.5.22-eksbuild.9. Pinned image
+# digest, confirmed 2026-11-22 against the ECR v2 manifests API in three
+# Regions (identical in all three; Argo CD's own Application CRD has no
+# OCI-chart-digest field, the same reason addons/karpenter/addon.yaml
+# records its own digest as a comment -- here the chart's own image.tag
+# field can carry tag *and* digest together, so it is a real, enforced
+# pin, not only a comment):
+#   602401143452.dkr.ecr.<region>.amazonaws.com/eks/aws-efa-k8s-device-plugin
+#   :v0.5.22-eksbuild.9@sha256:a392d84ff82b23580fd92d0a6c770136c56d4a6ee979a47d1bf4e379a7171647
+#
+# The EFA DRA driver (aws-dranet, DeviceClass efa.networking.k8s.aws,
+# driver dra.net -- #19's own Upstream state table) is out of scope for
+# both accel-efa-device-plugin-* releases: see gitops/README.md's "Known
+# limits" for why, and #19/#50 for where it is expected to be designed.
+# securityContext overrides the chart's own default (privileged: true,
+# allowPrivilegeEscalation: true, runAsUser: 0) -- unlike hostNetwork
+# (hardcoded in the template, no values key can change it, gitops/README.md's
+# "Known limits" explains the consequence), this field is read from
+# .Values.securityContext and so is a real override. Confirmed on real
+# hardware, not assumed from the chart's own code: allocatable.vpc.amazonaws.com/efa
+# still read 4 on a live p4d.24xlarge node after rolling this exact override
+# out over the chart's own privileged default, both configurations checked
+# back to back on the identical node (Fable 5.2 review round 1, finding B1).
+# runAsUser stays 0 -- the chart's own device-plugin binary opens
+# /dev/infiniband and the kubelet device-plugin socket as root in its
+# default image, and this PR does not carry a rebuilt image to change that.
+#
+# A method label alone is not enough (a real, confirmed regression, not a
+# theoretical one): #19 Decision 2's own opt-in selects by the GPU's/
+# Neuron's own method label only, with no requirement that the pool
+# carrying that label ever configured pool.networkInterfaces. Two of this
+# platform's own existing fixtures (gitops/cells/dp-a19-gpu-r3/
+# capacity-pool/gpu.yaml, dp-a19-trn-r3/capacity-pool/trn.yaml, #28) carry
+# the method label with no EFA interfaces at all and an instance-family
+# wide enough to resolve to an EFA-capable size -- confirmed on real
+# hardware (a disposable c5n.9xlarge fixture carrying the same
+# combination): this chart's own Pod does not simply report efa=0 there,
+# it crash-loops (phase Completed, restartCount climbing steadily). The
+# fix is gitops/charts/capacity-pool's own distai.dev/efa-attached="true"
+# label, rendered on a NodePool's node template only when
+# pool.networkInterfaces is non-empty (never derived from the method
+# label or the instance type, both of which a pool can carry without
+# ever requesting an EFA interface) -- ANDed into this release's own
+# nodeSelector above, so a method-labeled pool that never configured EFA
+# interfaces never receives this Pod at all. Confirmed by `helm template`
+# against both existing fixtures (neither renders the label, since
+# neither sets pool.networkInterfaces) and against this PR's own real
+# p4d.24xlarge test values (which do set it).
+addon: accel-efa-device-plugin-nvidia
+tier: core
+chart: aws-efa-k8s-device-plugin
+repoURL: https://aws.github.io/eks-charts
+version: "v0.5.35"
+wave: accelerators
+namespace: kube-system
+values:
+  image:
+    tag: "v0.5.22-eksbuild.9@sha256:a392d84ff82b23580fd92d0a6c770136c56d4a6ee979a47d1bf4e379a7171647"
+  nodeSelector:
+    distai.dev/nvidia-gpu-method: device-plugin
+    distai.dev/efa-attached: "true"
+  securityContext:
+    privileged: false
+    allowPrivilegeEscalation: false
+    runAsNonRoot: false
+    runAsUser: 0
+    capabilities:
+      drop: ["ALL"]

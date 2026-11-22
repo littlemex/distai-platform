@@ -1,0 +1,5 @@
+# Nothing in this chart varies per cell: the DeviceClass name, its driver
+# selector and its extended resource name are fixed by #19 Decision 1(c)
+# and #28 section B. This file exists so every chart under gitops/charts/
+# has the same shape; it intentionally sets no value.
+{}

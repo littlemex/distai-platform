@@ -1,0 +1,24 @@
+# Parameter file for cells.ApplicationSet.yaml's Git file generator
+# (RFC #25 Decision 2/3/9), same shape as
+# gitops/cells/example-cell/smoke/queue.yaml and
+# gitops/cells/dp-a19-gpu-r3/smoke/queue.yaml. Requests the "trn"
+# ResourceFlavor this cell's own capacity-pool/trn.yaml creates (#28
+# section D). This PR's own 1.e2e.sh extension builds the Trainium cell
+# without exercising this file's own ClusterQueue/LocalQueue/canary flow
+# (its accelerator check is a separate bare pod requesting
+# aws.amazon.com/neuron directly -- the smoke ClusterQueue's own
+# resourceGroups cover only cpu/memory, never an accelerator resource);
+# this file still has to exist, matching gitops/cells/dp-a19-gpu-r3/'s own
+# pair, because Kueue's install docs (#25 Facts checked) have
+# ClusterQueue/LocalQueue admission depend on a Healthy webhook
+# cluster-wide regardless of whether this specific cell's own queue is
+# ever used, and because a future, unmodified run of 1.e2e.sh's base
+# (non-#28) flow against NAME=dp-a19-trn-r3 would need it the same way
+# gitops/cells/example-cell/ needs its own.
+addon: smoke
+wave: capacity
+dir: gitops/charts/smoke
+namespace: distai-smoke
+values:
+  clusterQueue:
+    resourceFlavor: trn

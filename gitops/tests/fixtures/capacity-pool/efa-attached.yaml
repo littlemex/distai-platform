@@ -1,0 +1,20 @@
+# Static-check input (0.static.sh): confirms distai.dev/efa-attached is derived from
+# pool.networkInterfaces containing an interfaceType: efa-only entry (Fable 5.2 review
+# round 5), not merely from the list being non-empty and not from accelerator.methodLabel
+# or the instance type -- the real p4d.24xlarge-class shape (#50), minimised to the one
+# card this check needs.
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: efa-attached-pool
+  networkInterfaces:
+    - networkCardIndex: 0
+      deviceIndex: 0
+      interfaceType: interface
+    - networkCardIndex: 0
+      deviceIndex: 1
+      interfaceType: efa-only
+accelerator:
+  methodLabel:
+    key: distai.dev/nvidia-gpu-method
+    value: device-plugin

@@ -94,7 +94,7 @@ separate `ApplicationSet` objects.
 | --- | --- | --- |
 | `platform` | `crds` (`karpenter-crd`) | yes |
 | `platform` | `controllers` (`karpenter`, `kueue`) | yes |
-| `platform` | `accelerators` | no - [#19](https://github.com/littlemex/distai-platform/issues/19) |
+| `platform` | `accelerators` (`accel-nvidia-device-plugin`, `accel-nvidia-dra`, `accel-neuron-device-plugin`, `accel-neuron-dra`, `accel-device-classes`, `accel-efa-device-plugin-nvidia`, `accel-efa-device-plugin-neuron`) | yes |
 | `platform` | `extras` | no - [#18](https://github.com/littlemex/distai-platform/issues/18)/[#23](https://github.com/littlemex/distai-platform/issues/23) |
 | `cells` | `capacity` (`capacity-pool/*`, `smoke/*`) | yes |
 | `cells` | `teams` | no - [#22](https://github.com/littlemex/distai-platform/issues/22) |
@@ -137,6 +137,59 @@ semver):
 | `karpenter` | `oci://public.ecr.aws/karpenter/karpenter` | `1.15.2` |
 | `kueue` | `oci://registry.k8s.io/kueue/charts/kueue` | `0.20.6` |
 
+Accelerator add-on pins, confirmed against each chart's upstream source on
+2026-11-19 ([#28](https://github.com/littlemex/distai-platform/issues/28),
+Facts checked; no content digest is recorded for these yet):
+
+| Add-on | Chart | Version |
+| --- | --- | --- |
+| `accel-nvidia-device-plugin` | `nvidia-device-plugin` from `https://nvidia.github.io/k8s-device-plugin` (classic Helm repository) | `0.20.2` |
+| `accel-nvidia-dra` | `oci://registry.k8s.io/dra-driver-nvidia/charts/dra-driver-nvidia-gpu` | `0.5.1` |
+| `accel-neuron-device-plugin`, `accel-neuron-dra` | `oci://public.ecr.aws/neuron/neuron-helm-chart` (one chart, two releases with opposite toggles) | `1.11.2` |
+| `accel-device-classes` | local chart `gitops/charts/accel-device-classes` | - |
+| `accel-efa-device-plugin-nvidia`, `accel-efa-device-plugin-neuron` | `aws-efa-k8s-device-plugin` from `https://aws.github.io/eks-charts` (classic Helm repository; one chart, two releases - its own `affinity` is not values-driven, so a single release cannot OR the two vendor method labels, see the add-on's own comment) | `v0.5.35` |
+
+## Accelerators
+
+A `NodePool` opts its nodes into exactly one advertiser per device class by
+setting a method label through `capacity-pool`'s
+`accelerator.methodLabel.key`/`.value`
+([#19](https://github.com/littlemex/distai-platform/issues/19) Decision 2;
+the value's own shape is [#17](https://github.com/littlemex/distai-platform/issues/17)'s):
+
+| Label | Value | Advertiser selected |
+| --- | --- | --- |
+| `distai.dev/nvidia-gpu-method` | `device-plugin` | `accel-nvidia-device-plugin` |
+| `distai.dev/nvidia-gpu-method` | `dra` | `accel-nvidia-dra` |
+| `distai.dev/neuron-method` | `device-plugin` | `accel-neuron-device-plugin` |
+| `distai.dev/neuron-method` | `dra` | `accel-neuron-dra` |
+
+A `NodePool` without a method label gets no advertiser, so every
+advertiser is always delivered and costs nothing on a cell that does not
+use it. `cells/dp-a19-gpu-r3/capacity-pool/gpu.yaml` and
+`cells/dp-a19-trn-r3/capacity-pool/trn.yaml` are the device-plugin-method
+pools the light-tier e2e launches nodes from.
+
+EFA has no vendor of its own (#19 Decision 4: "EFA | Same as the GPU on
+the node"), so it does not add a sixth row to the table above:
+`accel-efa-device-plugin-nvidia` selects
+`distai.dev/nvidia-gpu-method=device-plugin` and
+`accel-efa-device-plugin-neuron` selects
+`distai.dev/neuron-method=device-plugin` - two releases of the one
+upstream chart (its own `nodeAffinity` is hardcoded in the chart's
+template, not values-driven, so a single release cannot OR the two
+vendor labels; see the add-on's own comment) - **and both additionally
+require `distai.dev/efa-attached=true`**, a second label
+`capacity-pool` renders on a NodePool's node template only when
+`pool.networkInterfaces`
+([#50](https://github.com/littlemex/distai-platform/issues/50)) is
+non-empty: the method label by itself says nothing about whether EFA
+interfaces were ever configured, and confirmed on real hardware that
+this chart's own Pod crash-loops, not merely reports zero, on a
+method-labeled node with none (see "Known limits"). Real hardware
+(`p4d.24xlarge`, two nodes, `NET/Libfabric`/GDRDMA `all_reduce_perf`) is
+in this PR's own Test Results.
+
 ## Adding a cell
 
 1. Build the cell with `infra/foundation` and run `gitops/bootstrap/bootstrap.sh`
@@ -160,12 +213,187 @@ semver):
 - `gitops/charts/capacity-pool` declares one capacity type per release
   (`on-demand`, `reserved` selecting a Capacity Reservation by tag, or
   `flex`), so #17's `-rsv`/`-od`/`-flex` pools are separate releases; its
-  `accelerator`/`tenancy` values render taints and labels but enforce
-  nothing until #19 and #22 ship. Field-level detail is in
+  `accelerator.methodLabel`/`accelerator.taint`/`tenancy.teamTaint` values
+  render labels and taints but enforce nothing by themselves until #22
+  ships (#19's own `accel-*` advertisers select nodes by
+  `accelerator.methodLabel` and are delivered in the `accelerators` step
+  below). Field-level detail is in
   [`charts/capacity-pool/README.md`](./charts/capacity-pool/README.md).
-- No accelerator advertiser, team object, `sharedfs` or notifications
-  add-on ships here (RFC #25 Decision 9); their steps exist in the RFC but
-  have no `addon.yaml` yet, so they generate nothing today.
+- No team object, `sharedfs` or notifications add-on ships here (RFC #25
+  Decision 9); their steps exist in the RFC but have no `addon.yaml` yet,
+  so they generate nothing today.
+- The DRA method (`accel-nvidia-dra`, `accel-neuron-dra`) is delivered and
+  statically checked, but no dynamically provisioned `NodePool` initializes
+  a DRA node (#19 E2, E4c); a static `NodePool` for DRA is
+  [#27](https://github.com/littlemex/distai-platform/issues/27)'s scope.
+  Only the device-plugin method is verified on real nodes.
+- The EFA **DRA** driver (`aws-dranet`, DeviceClass
+  `efa.networking.k8s.aws`, driver `dra.net` - #19's own Upstream state
+  table) is out of scope for both `accel-efa-device-plugin-nvidia` and
+  `accel-efa-device-plugin-neuron`: these add-ons only ship the
+  device-plugin method (`vpc.amazonaws.com/efa` as a Layer 1 extended
+  resource), the same scope line #28 already drew between
+  `accel-nvidia-device-plugin`/`accel-neuron-device-plugin` and their own
+  `-dra` siblings. Pairing EFA's own DRA driver with the GPU/Neuron DRA
+  method on the same node (#19's own alignment measurement: `pcieRoot`
+  constraints, 45.8 vs 3.6-4.7 GB/s) is left to a follow-up issue; nothing
+  in either add-on's own nodeSelector shape blocks adding it later.
+- Both EFA add-ons run at a **higher trust level than this platform's
+  existing device-plugin add-ons** (checked against `accel-nvidia-device
+  -plugin`, the one with the closest role -- not re-checked against the
+  other three, which are not device-plugin DaemonSets with GPU-adjacent
+  device access in the same way): `helm template`-ing
+  `nvidia-device-plugin:0.20.2` with this platform's own pinned values
+  renders the active `nvidia-device-plugin-ctr` container's own
+  `securityContext` as `allowPrivilegeEscalation: false, capabilities:
+  {drop: ["ALL"]}`, and no `hostNetwork` key anywhere in the output
+  (confirmed by rendering the exact chart and values, not by reading
+  `podSecurityContext`, a different, pod-level field that says nothing
+  about the container). `aws-efa-k8s-device-plugin:v0.5.35`'s template
+  sets `hostNetwork: true` with no `{{- if }}` guard at all -- no values
+  key can turn it off without forking the chart, and that is not
+  attempted here. Its `securityContext`, by contrast, **is** read from
+  `.Values.securityContext` (`{{- toYaml .Values.securityContext |
+  nindent 12}}`, confirmed in the template) and so is overridable; the
+  chart's own default for that value is `privileged: true,
+  allowPrivilegeEscalation: true, runAsUser: 0`. Both add-ons override it
+  to `privileged: false, allowPrivilegeEscalation: false, capabilities:
+  {drop: ["ALL"]}` (`runAsUser` stays `0` -- the chart's own image opens
+  `/dev/infiniband` and the kubelet device-plugin socket as root, and no
+  rebuilt image is carried here to change that). This is not a guess: the
+  override was rolled out over the chart's own privileged default on a
+  live `p4d.24xlarge` node and `allocatable.vpc.amazonaws.com/efa` still
+  read `4` before and after, confirmed back to back on the identical node
+  (Fable 5.2 review round 1, finding B1; not yet separately confirmed on
+  a Neuron+EFA node, since EFA device enumeration does not itself depend
+  on the GPU/Neuron driver but no `trn2`-class hardware was available in
+  this PR's own real-machine run). `gitops/tests/check_pinned_crds.py`
+  now asserts this exact override reaches the exact pinned chart's own
+  rendered container, keyed by addon name rather than read back from
+  `addon.yaml`'s own values -- confirmed, with a deliberately-broken copy
+  during this check's own development, to actually fail if the override
+  is weakened or dropped (Fable 5.2 review round 2, finding N6). The
+  reduced-privilege confirmation above was on Amazon Linux 2023, the
+  only AMI family `gitops/charts/capacity-pool` uses today
+  (`values.yaml`'s own `amiFamily: AL2023`, no Bottlerocket pool exists
+  in this platform) -- a SELinux-enforcing host (Bottlerocket's own
+  default) could plausibly deny an unprivileged container the kubelet
+  device-plugin socket's `hostPath` differently than AL2023 does (Fable
+  5.2 review round 2, finding N7); not a gap in this PR until this
+  platform actually has a Bottlerocket pool to check it against.
+  If the override is ever lost anyway (the chart bumps and renames the
+  key, or a future PR removes it without that static check catching it
+  first), the chart's own `privileged: true` plus `runAsUser: 0` default
+  returns, which is effectively root on the node -- `privileged: true`
+  grants the host's own filesystem and device nodes directly (not
+  through the `/var/lib/kubelet/device-plugins` socket this chart
+  mounts for its own, narrower purpose: registering the extended
+  resource with kubelet, nothing else), which on a Kubernetes node
+  includes every co-located Pod's own service account token on disk,
+  not only this one Pod's intended `/dev/infiniband` access (corrected,
+  Fable 5.2 review round 3: an earlier draft of this sentence named the
+  device-plugin socket itself as the path to other Pods' tokens, which
+  it is not -- that socket only carries device-plugin registration
+  traffic).
+  The risk the remaining, non-overridable half carries today regardless:
+  `hostNetwork: true` means a Pod is not behind the extra network hop the
+  foundation's own IMDSv2 hop-limit-of-1 (#20, Facts checked) is meant to
+  stop -- `kubectl exec` into either release's Pod reaches
+  `http://169.254.169.254` on the node's own network namespace exactly
+  like any other process on that node, which can mean the node's own
+  `karpenter-node` IAM role credentials, even with `privileged: false`.
+  Who can reach this is Kubernetes RBAC and EKS access entries (the
+  foundation's own `admin_principal_arns`, #20), **not** Argo CD
+  `AppProject` destinations -- an earlier draft of this note cited "no
+  team `AppProject` targets `kube-system`" as the control, which is the
+  wrong layer: `AppProject` governs where Argo CD *deploys*, not who
+  holds `pods/exec` once a Pod exists. Editing either add-on's own
+  `values:` is the other way in; checked directly against the live
+  repository rather than assumed, 2026-11-22: a ruleset on `main`
+  (`protect-main`) requires every change to go through a pull request
+  (no direct push, no force-push, no deletion), but that ruleset's own
+  `require_code_owner_review` is `false` and `required_approving_review_
+  count` is `0` -- `.github/CODEOWNERS`' own comment ("Enforcement comes
+  from the branch ruleset on main, not from this file") is **not**
+  currently true: a PR against this file can be merged with zero
+  reviews. This is a real, repo-wide gap (not scoped to this PR, and not
+  one this PR's own `gh`-token permissions -- Contents/Issues/Pull
+  requests only, no Administration -- can fix), named here rather than
+  assumed closed because an earlier draft of this note cited it as a
+  control.
+  This add-on does not change who can reach `kube-system` today; it is a
+  real increase in what that access is worth once held, and is recorded
+  here rather than left for a reader to discover by diffing chart
+  templates themselves.
+- **A method label alone is not enough to select this add-on's own Pod
+  -- fixed in this PR, after being confirmed as a real regression on
+  real hardware, not shipped as a documented risk.** The method label
+  alone (#19 Decision 2's own opt-in, the same as the four existing
+  `accel-*` add-ons) says nothing about whether the pool carrying it
+  ever configured `pool.networkInterfaces`; `gitops/cells/dp-a19-gpu-r3/
+  capacity-pool/gpu.yaml` and `dp-a19-trn-r3/capacity-pool/trn.yaml`
+  (#28's own existing light-tier fixtures) both carry the method label
+  with `pool.networkInterfaces` unset, on an `instance-family` wide
+  enough to resolve to an EFA-capable size -- for `dp-a19-trn-r3`
+  specifically, *every* `trn2` size the pinned chart's own
+  `supportedInstanceLabels` lists (`trn2.3xlarge`, `trn2.48xlarge`) is
+  EFA-capable, so this was not an occasional risk for that fixture, it
+  was certain. Confirmed on real hardware what actually happens there,
+  not assumed: after three real-machine attempts on an EFA-capable GPU
+  instance type (`g6e.12xlarge`, then `g5.12xlarge`) each hit EC2
+  capacity errors before a node could be reached (confirmed read-only
+  afterward not to be the same pricing-data gap `trn2.3xlarge` has --
+  both instance types are offered with a published on-demand price,
+  just no capacity at the time), a cheap EFA-capable CPU-only instance
+  type (`c5n.9xlarge`, no GPU needed, far more available) got a real
+  node: this chart's own Pod does not simply report `efa=0` there, it
+  crash-loops (`phase: Completed`, never `Running`, `restartCount`
+  climbing `0 -> 2 -> 3 -> 4 -> 5` over about 3 minutes). This does not
+  break GPU/Neuron workloads on the node (the accelerator's own device
+  plugin is a separate DaemonSet), but it does leave the `accelerators`
+  step unhealthy on both of this platform's own existing fixtures,
+  every time Karpenter happens to resolve `dp-a19-gpu-r3` to an
+  EFA-capable size and *always* for `dp-a19-trn-r3` -- a real regression
+  this PR would otherwise have introduced on pools that work today.
+  The fix: `gitops/charts/capacity-pool`'s own `templates/nodepool.yaml`
+  now renders `distai.dev/efa-attached: "true"` on a NodePool's node
+  template whenever `pool.networkInterfaces` is non-empty (never
+  derived from the method label or the instance type, both of which a
+  pool can carry without ever requesting an EFA interface), and both
+  `accel-efa-device-plugin-*` releases AND it into their own
+  `nodeSelector` alongside the vendor method label. Confirmed by `helm
+  template`: neither existing fixture renders the new label (since
+  neither sets `pool.networkInterfaces`, so neither ever receives this
+  Pod at all now), while this PR's own real `p4d.24xlarge` test values
+  (which do set it) do render it. `gitops/tests/check_pinned_crds.py`
+  asserts the AND reaches the rendered DaemonSet for both releases, the
+  same silent-Helm-value risk its own method-label check already
+  guards against (confirmed to actually fail with a deliberately-broken
+  copy). This one field addition to `capacity-pool` is the one part of
+  this PR that reaches outside `gitops/addons/accel-efa-device-plugin-*`
+  -- `#17` otherwise owns this chart's shape, the same boundary #28/PR
+  #40 already drew, crossed here only because the regression this field
+  closes is this PR's own to fix, not a new capability added on `#17`'s
+  behalf; no existing consumer of `pool.networkInterfaces` or
+  `accelerator.methodLabel` changes behavior (the new label is purely
+  additive, gated on a field every current fixture leaves unset).
+- Both EFA add-ons' pinned image stays at the chart's own
+  default Region (`us-west-2`), never overridden per cell: see the
+  add-on's own `addon.yaml` comment for why (the platform's own
+  `valuesFrom` mechanism substitutes a whole parameter value, never
+  concatenates one into a larger string, and the registry host embeds the
+  Region in the middle of the string). The identical-digest check across
+  three Regions (`us-west-2`, `us-east-1`, `ap-northeast-1`) only shows
+  the *content* is Region-independent; it says nothing about whether a
+  given cell's own network path can reach `us-west-2`'s ECR endpoint.
+  This PR's own real-machine run pulled it successfully from
+  `ap-northeast-1` because `infra/foundation`'s default cell has a NAT
+  gateway (internet egress); a cell built with ECR reachable only through
+  Regional VPC endpoints and no NAT would not reach a different Region's
+  endpoint and would see `ImagePullBackOff` on every node this add-on
+  matches. Every cell's own EFA advertisement depends on `us-west-2`
+  reachability at each node's cold start until a per-Region override
+  exists -- a known condition, not only a deferred optimization.
 - `platform.ApplicationSet.yaml` and `cells.ApplicationSet.yaml`'s
   `goTemplate: true` plus `templatePatch` mechanism (Decision 2) is this
   PR's own construction, not a primary-sourced example from Argo CD's
