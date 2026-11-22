@@ -50,7 +50,7 @@ engine:
   # mps.replicas: 2 here must match). On real hardware (#37), this chart's
   # own default run (gpuMemoryUtilization unset, MPS-split node) did NOT
   # crash -- but ../disagg-pd's own default run, on the same node family,
-  # crashed deterministically on vLLM's startup memory check at a desired
+  # crashed repeatedly on vLLM's startup memory check at a desired
   # fraction near 0.92. Why the two charts' un-fixed defaults differ is not
   # established (examples/inference/README.md's own MPS investigation
   # states this as open, not this chart's own settled behavior); this field

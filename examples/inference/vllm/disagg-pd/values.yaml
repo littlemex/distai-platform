@@ -139,10 +139,12 @@ decode:
   extraArgs: []
   extraEnv: []
   # Same shape as prefill.mps/prefill.gpuMemoryUtilization above, set
-  # independently: in every real-hardware run this investigation tried,
-  # only prefill's own pool was MPS-split, but the two roles' nodeSelector
-  # values can point at any pool, so this is not assumed to always be the
-  # case.
+  # independently: in the 2-node disaggregated shape this investigation
+  # tried (form (c)), only prefill's own pool was MPS-split; in the
+  # same-node colocate shape (form (b), placement.sameNodeMeasurement),
+  # both roles land on the same MPS-split pool and both needed mps.enabled
+  # for round 4's own fix to work. The two roles' nodeSelector values can
+  # point at any pool, MPS-split or not, so neither shape is assumed.
   mps:
     enabled: false
     replicas: 2
