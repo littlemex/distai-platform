@@ -36,6 +36,55 @@ How to measure with them is described in [`_shared/README.md`](_shared/README.md
 already cover the vLLM charts do not cover the SGLang charts yet — a separate, deeper follow-up).
 All five combinations above now work end to end on real hardware.
 
+## MPS (GPU sub-device sharing), round 2: label-design fix and the 4 forms (real hardware, `us-east-1`, `g7.8xlarge`/`g7.48xlarge`, 2026-11-22)
+
+A prior round confirmed the MPS mechanism itself (`accelerator.sharingLabel`, see
+`gitops/charts/capacity-pool/README.md`) but left the actual label management broken: NVIDIA's
+`mps-control-daemon` DaemonSet needs a second node label (`nvidia.com/mps.capable=true`) this
+platform had no way to set except by hand after the node joined, and a later NodePool edit (read
+as Karpenter drift) silently destroyed that label on the replacement node before it could be
+relabeled. `capacity-pool`'s new `accelerator.mpsLabel` field closes this by rendering the label
+into the NodePool's own node template instead, alongside `sharingLabel`.
+
+**Drift-survival, confirmed on real hardware.** Forced an actual Karpenter-driven node replacement
+on an MPS-opted-in pool (`gpu-shared`, `g7.8xlarge`) by bumping `pool.rootVolumeSizeGi`. The
+replacement node (`ip-10-0-100-212`, confirmed different from the original `ip-10-0-100-89` by
+name) carried both `nvidia.com/mps.capable=true` and `nvidia.com/device-plugin.config=mps-2` with
+zero manual steps, and `nvidia.com/gpu` allocatable read `2` on it immediately — the drift no
+longer destroys the label. One rough edge observed at the moment of replacement: the
+`mps-control-daemon` Pod on the new node showed `1/2 Ready`, `Error`, 2 restarts, 44s after
+creation; by the time real workloads used that same node a few minutes later (T0/T1 below, both
+`RESTARTS=0`), the daemon had stabilized — consistent with the already-documented upstream
+config-watcher-sidecar-restarts-after-relabel oddity (`capacity-pool/README.md`), not a functional
+regression.
+
+**The 4 forms.** All four cells target this one drift-replaced node/pool pair unless noted.
+
+| Form | Engine | Result |
+| --- | --- | --- |
+| (a) Aggregated, 1 GPU x 2 replicas | vLLM | Confirmed: both replicas on the same node (`ip-10-0-100-212`), `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=3.997`, TTFT p50/p90/p99 = 8.6/11.1/18.9 ms |
+| (a) Aggregated, 1 GPU x 2 replicas | SGLang | Confirmed: both replicas on the same node, `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=4.005`, TTFT p50/p90/p99 = 9.6/66.7/92.8 ms |
+| (b) Same-node prefill+decode colocate | vLLM | **Not confirmed this round.** The first attempt used `placement.sameNodeMeasurement=true` without also setting `placement.enforceAntiAffinity=false`, which (per this chart's own values.yaml/NOTES.txt) renders the chart's own documented "fault-injection shape" (required anti-affinity) instead of colocation — decode stayed `Pending` for the full 12-minute timeout, exactly as the chart's own NOTES.txt predicts for that combination. A same-day retry with the correct flag (`enforceAntiAffinity=false`) still left decode `Pending` with `node=<none>` for its own 12-minute window — most likely racing a lingering GPU allocation from the just-uninstalled first attempt (the retry's own wait only checked that the Helm release was gone, not that the Pod's GPU allocation had actually been released by the device plugin), not re-investigated further within this round's time box. A targeted round-3 retry, with an explicit per-deployment rollout check and a longer settle window, is in progress/pending — see the Known issues table below for the final call |
+| (b) Same-node prefill+decode colocate | SGLang | Confirmed (on the retry, with `enforceAntiAffinity=false`): decode, prefill and the router all on the same node (`ip-10-0-100-212`), `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=4.001`, TTFT p50/p90/p99 = 18.2/22.8/146.2 ms |
+| (c) 2-node disaggregated over EFA, MPS-shared prefill | vLLM | **Failed, root cause not yet closed.** `decode` (separate `g7.8xlarge` node) reached `Running`/`Ready`; both `prefill` replicas (same `g7.48xlarge` MPS-shared node) crash-looped (`0/1 Running`, 4 restarts in 10 minutes) — the deployment never rolled out. A round-3 retry with full container-log capture on the crash is in progress/pending — see the Known issues table below |
+| (c) 2-node disaggregated over EFA, MPS-shared prefill | SGLang | Functionally confirmed: `decode` (separate `g7.8xlarge` node) and both `prefill` replicas (same `g7.48xlarge` MPS-shared node) all `Running`/`Ready`, `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=1.338`. **Two things this round could not confirm, stated precisely rather than assumed**: (1) the EFA `hw_counters` diagnostic (`rdma_write_bytes`/`rdma_read_bytes` under `/sys/class/infiniband/*/ports/1/hw_counters/`) returned empty for every pod, before and after load — a diagnostic-command problem this round did not have time to root-cause, not evidence either way that EFA traffic did or did not move; (2) no GPU UUID was captured for either prefill replica, so whether the two MPS clients actually landed on the SAME physical GPU (true MPS sharing) or on two of the node's 8 physical GPUs (same node, no sharing, still functionally correct) is not distinguished by any check this round ran — a real gap in the test's own evidence, found by Fable 5.2 review, not yet closed |
+
+**SGLang HiCache cold/warm retry (round 2).** Cold pass confirmed again (`exit-code=0`); the warm
+pass (same prefix set, re-applying the `load-replay` Job under the same name after deleting the
+prior one) did not produce a result this round (`exit-code` empty) — the retry's own fix (wait for
+the deleted Job's Pod to actually disappear, not just the Job object, before reapplying) is being
+tried in round 3; see the Known issues table below for the final call.
+
+**Known issues, to be resolved by the end of this investigation (not left silently open):**
+
+| # | What | Status |
+| --- | --- | --- |
+| 1 | vLLM same-node MPS colocate (form (b)) | Round 3 in progress |
+| 2 | vLLM 2-node MPS-disagg-over-EFA prefill crash loop (form (c)) | Round 3 in progress, full logs being captured |
+| 3 | SGLang HiCache warm pass | Round 3 in progress |
+| 4 | EFA byte-counter evidence for form (c) | Diagnostic command bug, not yet fixed |
+| 5 | GPU-UUID evidence that MPS clients share one physical GPU in form (c) | Not captured this round, no fix attempted yet |
+
 ## Conventions
 
 - Node roles are told apart by a node label, `distai.dev/pd-role` by default, and every chart lets you change the key.
