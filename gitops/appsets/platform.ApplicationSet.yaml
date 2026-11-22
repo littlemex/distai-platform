@@ -119,13 +119,20 @@ spec:
       # an upstream registry - same "dir" shape cells.ApplicationSet.yaml
       # already uses for capacity-pool/smoke (#25 Decision 2), applied
       # here because this one addon.yaml has no chart/repoURL/version.
-      # This branch fully replaces the base template's source, which
-      # otherwise renders repoURL/chart/targetRevision all empty for a
-      # dir-only addon.yaml - an invalid Application with no repoURL.
+      # This branch is merged onto the base template's own source above
+      # by templatePatch's own merge-patch semantics (same mechanism the
+      # syncOptions block below this one relies on), not a replacement of
+      # it - which otherwise renders repoURL/chart/targetRevision all
+      # empty for a dir-only addon.yaml, an invalid Application with no
+      # repoURL.
+      #
       # chart: null below is explicit, NOT harmless to omit (#63, found
       # independently a second time and corrected here): the base
-      # template's own "{{ .chart }}" does not render as an empty string
-      # for a dir-only addon.yaml's missing .chart key. goTemplateOptions
+      # template's own chart value does not render as an empty string
+      # for a dir-only addon.yaml's missing chart key (not written with
+      # the live template braces here on purpose - this whole block is
+      # itself rendered as a Go template, and writing them literally
+      # would evaluate rather than describe). goTemplateOptions
       # missingkey=zero returns the zero value of the map's value type,
       # and for a map[string]interface{} (what a parsed addon.yaml's own
       # params decode to) that zero value is a nil interface{}, which Go's
@@ -134,9 +141,14 @@ spec:
       # make Argo CD treat this as a (broken) Helm chart source instead of
       # a Git path source, and this Application would never sync. A JSON
       # Merge Patch "null" removes the key entirely, which is what this
-      # branch actually needs -- confirmed by reproducing Go's own
-      # text/template missingkey=zero behavior for an untyped map
-      # (documented Go quirk, golang/go#24963 and widely reported).
+      # branch actually needs. The "<no value>" half of this is confirmed
+      # by reproducing Go's own text/template missingkey=zero behavior for
+      # an untyped map (documented Go quirk, golang/go#24963 and widely
+      # reported); the merge-patch-removes-the-key half is Argo CD's own
+      # documented JSON Merge Patch semantics, not independently re-run
+      # against a live Application - verify this on a real cluster before
+      # relying on it (same caveat as goTemplate itself, this file's own
+      # header comment).
       source:
         repoURL: https://github.com/littlemex/distai-platform.git
         path: "{{ .dir }}"
