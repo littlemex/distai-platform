@@ -107,9 +107,10 @@ by other processes.
 and could not explain why form (a) (also two vLLM processes on one `mps-2`-split GPU) succeeded
 under what it assumed was the same mechanism — stated as an open contradiction, no fix proposed.
 
-**Round 4 (real hardware, `us-east-1`, `g7.8xlarge`/`g7.48xlarge`, 2026-11-22) narrows this.**
-Reading form (a)'s own engine log directly (not done in round 3) shows it never risks the
-traceback above at all:
+**Round 4 (real hardware, `us-east-1`, `g7.8xlarge`/`g7.48xlarge`, 2026-11-22) adds one new real
+data point, and does NOT resolve the contradiction** — an earlier draft of this section claimed it
+did; that claim did not survive review and is corrected here. Reading form (a)'s own engine log
+directly (not done in round 3) shows:
 
 ```text
 INFO [gpu_worker.py:1175] Free memory on device (15.72/31.38 GiB) on startup. Desired GPU memory
@@ -122,62 +123,68 @@ use is 29.64 GiB.
 per request: 33.88x
 ```
 
-This is an `INFO` line, not an error, and `vllm/agg-baseline` requests the GPU's *default* fraction
-(`1.0` on this pinned image — not `0.92`, a number round 3 never confirmed came from either chart
-and this round shows is not vLLM's effective default here either). vLLM's own memory-sizing is
-elastic on this path: when the free device memory (`15.72 GiB`, MPS's own per-client share) cannot
-cover the *desired* KV-cache size, it clamps the actual KV-cache allocation down to what fits
-*after* the fixed, non-elastic cost (weights + activation + CUDA graph, `1.21 + 0.52 + 0.25 ≈
-1.98 GiB` here) and starts anyway — it only raises the `ValueError` above when even that fixed cost
-does not fit inside the free share. Form (a)'s own fixed cost (`1.98 GiB`) is comfortably under
-`15.72 GiB`, so it was never going to hit the failing branch regardless of the `1.0` fraction it
-requested — the "open contradiction" was never a contradiction once form (a)'s own log is read: it
-simply never exercises the code path that raises.
+This is an `INFO` line, not an error — `vllm/agg-baseline` did not crash. But it is **not** evidence
+of a graceful clamp to the MPS-limited free share either: `Current kv cache memory in use is
+29.64 GiB` is close to the *desired*, whole-device-sized `29.25 GiB` the message itself offers as
+"fit into requested memory" — far above the `15.72 GiB` the same line reports as free. Whatever
+vLLM actually did here, it was not "shrink the allocation to fit inside 15.72 GiB and start" (that
+would read closer to the message's own `13.6 GiB` "fully utilize gpu memory" alternative); the
+engine still reports the KV cache as sized near the full desired fraction, and still did not raise.
+Why that specific combination does not trigger the `ValueError` round 3 reproduced on `disagg-pd`
+is **not established by this log**. The round-3 traceback itself reported a desired fraction of
+`0.92`; this round's own `agg-baseline` log reports `1.0` — two different numbers, from two
+different charts, and this round did not test whether that difference (rather than the
+`NixlConnector`-vs-not difference, or a different vLLM/image behavior, or something else) is what
+matters. **The "open contradiction" from round 3 stands, with one additional, only partly
+understood, real log added to it — it is not resolved, and no claim that it is resolved should be
+read into this page or any PR text citing it.**
 
 **The fix applied in this PR (`engine.mps`/`*.mps` + `gpuMemoryUtilization`, see Changes) is
-confirmed working on real hardware for the previously-crashing case.** `disagg-pd`'s same-node
-colocate (form (b)'s corrected shape, `placement.sameNodeMeasurement=true`,
-`enforceAntiAffinity=false`, NIXL over UCX rather than LIBFABRIC this round, to measure on a single
-EFA-less `g7.8xlarge`) with `prefill.mps.enabled=true`/`decode.mps.enabled=true`,
-`mps.replicas: 2` (the chart's own computed default, `0.70/2 = 0.35`) reached `Running`/`Ready` on
-both roles, `RESTARTS=0`, and served a real completion through the proxy
-(`" Paris. It was founded in the 12th century, and it's"`). The same cell's own unmodified
-`disagg-pd` (no `mps.*` set, vLLM's own default fraction, same node) reproduced the original
-`CrashLoopBackOff` (confirmed again, though this round's own log capture missed the crashing
-container's exact traceback — `kubectl logs` without `--previous` caught the live container
-between restarts, a gap in this round's own script, not a different failure mode; the pods'
-`RESTARTS` counter and `CrashLoopBackOff` status are still real, direct evidence of the same
-regression).
+confirmed working on real hardware for the previously-crashing case — independent of whether the
+paragraph above is ever fully explained.** `disagg-pd`'s same-node colocate (form (b)'s corrected
+shape, `placement.sameNodeMeasurement=true`, `enforceAntiAffinity=false`, NIXL over UCX rather than
+LIBFABRIC this round, to measure on a single EFA-less `g7.8xlarge`) with
+`prefill.mps.enabled=true`/`decode.mps.enabled=true`, `mps.replicas: 2` (the chart's own computed
+default, `0.70/2 = 0.35`) reached `Running`/`Ready` on both roles, `RESTARTS=0`, and served a real
+completion through the proxy (`" Paris. It was founded in the 12th century, and it's"`). The same
+cell's own unmodified `disagg-pd` (no `mps.*` set, vLLM's own default fraction, same node)
+reproduced the original `CrashLoopBackOff` (confirmed again by `RESTARTS`/pod status, though this
+round's own log capture missed the crashing container's exact traceback — `kubectl logs` without
+`--previous` caught the live container between restarts, a gap in this round's own script, not
+evidence of a different failure mode, but not a re-confirmation of the exact `ValueError` either).
+**This A/B pair (same node, same cell, only `mps.*` changed) is the one claim this round makes with
+confidence: setting an explicit, MPS-aware fraction turns a real crash loop into a real, working
+server on real hardware.** Why `disagg-pd`'s own un-fixed default takes a different path than
+`agg-baseline`'s own un-fixed default is left exactly as open as round 3 left it — the leading
+candidate, not confirmed in isolation and not elevated to fact anywhere in this PR's own template
+comments, is that `NixlConnector`'s own memory registration (present in every `disagg-pd`/
+`disagg-pd-llmd` role, absent from `agg-baseline`'s default `gpu-only` tier) changes which branch
+vLLM's own memory sizing takes; a difference in the two charts' pinned image build or vLLM version
+behavior was not ruled out either.
 
-**What is still not settled**: *why* `disagg-pd`'s own default run takes the failing branch
-(fixed cost does not fit) while `agg-baseline`'s does not, when neither chart sets an explicit
-fraction and both default to `1.0` on this image, is not nailed down by a log of the exact crash
-this round (the gap above). The most likely candidate, not tested in isolation this round, is that
-`NixlConnector`'s own memory registration for the KV transfer (present in every `disagg-pd`/
-`disagg-pd-llmd` role, absent from `agg-baseline`'s default `gpu-only` tier — see `engines.yaml`'s
-own command script) adds to the *fixed*, non-elastic cost that must fit before vLLM even tries to
-clamp the KV cache — stated as the leading candidate, not confirmed. This does not block the fix
-above: the fix does not depend on diagnosing the exact fixed-cost delta, it simply gives every role
-an explicit, MPS-aware fraction so the elastic KV-cache sizing never has to find out the hard way
-whether the fixed cost fits.
-
-**SGLang HiCache cold/warm, closed in round 4 (first full pass after two rounds that each failed
-for an unrelated infra reason — a Job-name-reuse bug, then an engine rollout timeout on a shared
-cluster).** Run in isolation this round (dedicated namespace, no concurrent test, `g7.8xlarge`
-decode-pool node, `kvCacheTier.mode=local`, `--hicache-size 4`): a cold request and a warm
-request with the identical long, repeated-filler prefix both returned a real completion;
-`TTFT_PROXY_TOTAL_TIME` (curl's own `time_starttransfer`) was `0.058s` cold and `0.038s` warm — a
-`~35%` drop on the same prefix, directionally consistent with a hierarchical-cache hit, from a
-single sample per condition (not a throughput benchmark; repeat with more samples before citing a
-percentage anywhere outside this page).
+**SGLang HiCache cold/warm, the cold/warm pass itself completed for the first time in round 4,
+after two rounds that each failed for an unrelated infra reason (a Job-name-reuse bug, then an
+engine rollout timeout on a shared cluster) — the TTFT numbers are real, but do not confirm
+HiCache's own hit behavior specifically, stated plainly rather than overclaimed.** Run in
+isolation this round (dedicated namespace, no concurrent test, `g7.8xlarge` decode-pool node,
+`kvCacheTier.mode=local`, `--hicache-size 4`): a cold request and a warm request with the
+identical long, repeated-filler prefix both returned a real completion;
+`TTFT_PROXY_TOTAL_TIME` (curl's own `time_starttransfer`) was `0.058s` cold and `0.038s` warm.
+This drop is consistent with a cache hit, but SGLang's own always-on GPU radix cache (on
+regardless of `kvCacheTier.mode`) or an ordinary first-request warmup effect (CUDA graph capture,
+connection setup) could produce the identical shape without HiCache's own hierarchical tier doing
+anything — this single cold/warm pair, with no HiCache-off control run in the same session, does
+not distinguish between those explanations. What this round closes is narrower than "HiCache
+improves TTFT": it closes "the cold/warm pass can run end to end without hitting the two
+unrelated bugs the prior rounds hit."
 
 **Known issues, status after round 4:**
 
 | # | What | Status |
 | --- | --- | --- |
-| 1 | vLLM same-node MPS colocate (form (b)) | **Fixed and confirmed on real hardware** (`engine.mps`/`*.mps` + `gpuMemoryUtilization`, see Changes). The "open contradiction" is narrowed: form (a) never risked the failing branch (round 4's own log reading); the exact fixed-cost delta that makes `disagg-pd`'s own default run fail is not isolated (leading candidate: `NixlConnector`'s own memory registration, not confirmed) |
+| 1 | vLLM same-node MPS colocate (form (b)) | **Fixed and confirmed on real hardware** (`engine.mps`/`*.mps` + `gpuMemoryUtilization`, see Changes): the A/B pair above (same node, only `mps.*` changed) turns a real crash loop into a real, working server. **The "open contradiction" from round 3 is NOT resolved** — round 4 adds one more real log (form (a) logs an `INFO` line and does not clamp to the reported free share either, a new, only partly understood data point) but does not explain why `disagg-pd`'s own un-fixed default takes a different path than `agg-baseline`'s own un-fixed default; leading candidate (`NixlConnector`'s own memory registration), not confirmed in isolation |
 | 2 | vLLM 2-node MPS-disagg-over-EFA prefill crash loop (form (c)) | Not re-verified with the fix this round: a fresh `g7.48xlarge` node's own image pull exceeded the Deployment's default `progressDeadlineSeconds` (600s) before the prefill pods left `ContainerCreating`, an unrelated infra timing issue, not re-attempted to stay inside the real-hardware time budget — still open |
-| 3 | SGLang HiCache warm pass | **Closed in round 4** (see above) |
+| 3 | SGLang HiCache warm pass | The pass itself runs end to end now (round 4, see above); whether the observed TTFT drop is attributable to HiCache specifically, versus SGLang's own always-on radix cache or ordinary warmup, is not distinguished by this round's own single cold/warm pair — still open as a HiCache-specific measurement |
 | 4 | EFA byte-counter evidence for form (c) | Not re-attempted this round (blocked by #2 above for vLLM; SGLang's own symmetric counters were already confirmed in an earlier round, see [#37](https://github.com/littlemex/distai-platform/issues/37#issuecomment-7080618555)) |
 | 5 | GPU-UUID evidence for form (c) | **Closed for SGLang in round 4**: the two prefill replicas got two different physical GPU UUIDs (`GPU-cb86dd16...`/`GPU-f50ed8a5...`) — this topology's two MPS-shared "replicas" land on two of the node's 8 physical GPUs, not one shared GPU; still open for vLLM (blocked by #2) |
 
