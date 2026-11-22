@@ -153,11 +153,14 @@ bar this field exists to clear, not merely that Karpenter stamped
 be close to tautological). What is, and is not, independently re-confirmed
 here: the node's own labels and allocatable count were read directly after
 the replacement; the `mps-control-daemon` Pod's own health was NOT re-observed
-at that same moment (it showed `1/2 Ready`, `Error`, 2 restarts, 44s after the
-replacement — a real, observed state, not the "config-watcher sidecar restarts
-after relabel, main container stays healthy" oddity this section's own
-baseline cites, since no relabel happened here and the Pod itself reported
-`Error`). A real workload was served from this same node a few minutes later
+at that same moment (`kubectl get pods` showed `1/2 Ready`, `Error`, 2 restarts,
+44s after the replacement — Pod-level status; which of its two containers
+reported `Error` was not captured, so whether this is the same "config-watcher
+sidecar restarts after relabel, main container stays healthy" oddity this
+section's own baseline cites is not established either way — no relabel
+happened here, which argues against it, but a Pod-level `1/2 Ready` is also
+consistent with one container, sidecar included, failing). A real workload
+was served from this same node a few minutes later
 with `RESTARTS=0` (see `examples/inference/README.md`'s own "MPS" section,
 form (a)), which is evidence the daemon had become healthy by then, but that
 inference stands in place of a direct re-read of the daemon Pod's own status
@@ -172,10 +175,12 @@ plugin has reported it) — so `N` pending replicas, each requesting
 `nvidia.com/gpu: 1`, launched close together can in principle land on `N`
 separate single-GPU nodes instead of sharing one MPS-split GPU, and still
 reach `Running`/`Ready` with `RESTARTS=0` without ever exercising MPS at all.
-The real-hardware results in `examples/inference/README.md`'s own "MPS" section state each
-replica's own `spec.nodeName` explicitly for this reason, not rely on rollout status alone — this
-is also why that section's own forms table is scored per-replica node identity, not pass/fail on
-`Running`/`Ready` alone.
+The real-hardware results in `examples/inference/README.md`'s own "MPS" section name each
+replica's own node where that distinction matters most (forms (a) and (b), where both roles are
+meant to land on the SAME node) rather than relying on rollout status alone; form (c)'s own rows
+name instance types, not node identity, because the open question there is a different one (same
+node but possibly different physical GPUs of the 8 — see that section's own stated gap), not
+whether Karpenter launched extra nodes.
 
 **Security, reviewed and found incomplete by Fable 5.2 (2026-11-22; recorded as an open
 finding, not resolved here)**: NVIDIA's own `mps-control-daemon` DaemonSet — the
