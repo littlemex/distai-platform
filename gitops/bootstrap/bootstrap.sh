@@ -190,13 +190,30 @@ done <<< "${ADDON_REPOS}"
 # identity actually needs, since every admin-delivered Application's own
 # namespace is already a declared, reviewed fact in this checkout, not a
 # runtime choice.
-ADDON_NAMESPACES="$( { grep -h '^namespace:' "${REPO_ROOT}"/gitops/addons/*/addon.yaml "${REPO_ROOT}"/gitops/addon-catalog/*/addon.yaml 2>/dev/null || true; } \
+# Also scans gitops/cells/*/{capacity-pool,smoke}/*.yaml (#63, a Fable
+# 5.2 review of an earlier version of this fix found that cells.
+# ApplicationSet.yaml's own per-cell parameter files - which use this same
+# AppProject - declare namespaces (distai-smoke, every capacity-pool
+# pool's own namespace) this grep did not scan at all, since it looked
+# only at gitops/addons/ and gitops/addon-catalog/).
+ADDON_NAMESPACES="$( { grep -h '^namespace:' "${REPO_ROOT}"/gitops/addons/*/addon.yaml "${REPO_ROOT}"/gitops/addon-catalog/*/addon.yaml "${REPO_ROOT}"/gitops/cells/*/capacity-pool/*.yaml "${REPO_ROOT}"/gitops/cells/*/smoke/*.yaml 2>/dev/null || true; } \
   | sed -E 's/^namespace:[[:space:]]*//; s/^"(.*)"$/\1/' | sort -u)"
 
+# kube-system is always included, not only when some addon.yaml happens to
+# declare it as its own primary namespace (#63: the same Fable 5.2 review
+# found that Karpenter's and Kueue's own pinned charts each render a
+# second RBAC object - a leader-election Role/RoleBinding - directly into
+# kube-system regardless of either chart's own configured namespace,
+# confirmed by rendering both; the previous version of this script only
+# included kube-system because karpenter/addon.yaml happens to also set
+# namespace: kube-system as its own primary value - true today, but an
+# accident this script should not depend on staying true).
 DESTINATIONS_YAML="    - name: \"${CLUSTER_NAME}\"
-      namespace: \"${ARGOCD_NAMESPACE}\""
+      namespace: \"${ARGOCD_NAMESPACE}\"
+    - name: \"${CLUSTER_NAME}\"
+      namespace: \"kube-system\""
 while IFS= read -r ns; do
-  [[ -n "${ns}" && "${ns}" != "${ARGOCD_NAMESPACE}" ]] || continue
+  [[ -n "${ns}" && "${ns}" != "${ARGOCD_NAMESPACE}" && "${ns}" != "kube-system" ]] || continue
   DESTINATIONS_YAML="${DESTINATIONS_YAML}
     - name: \"${CLUSTER_NAME}\"
       namespace: \"${ns}\""

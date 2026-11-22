@@ -78,26 +78,35 @@ cell's registration under the same name.
 
 Every `Application` this platform generates (`platform.ApplicationSet.yaml`
 and `cells.ApplicationSet.yaml` alike) uses the one `platform` `AppProject`,
-and `var.argocd.role_mappings`' `ADMIN`/`EDITOR`/`VIEWER` roles are all
+and `var.argocd.role_mappings`' `ADMIN`/`EDITOR` roles (`VIEWER` is
+read-only within the project and does not change what follows) are
 roles *within that one project* - there is no narrower, per-team project
 until #22 ships. `destinations.namespace` and `sourceRepos` are computed by
-`bootstrap.sh` from this checkout's own `gitops/addons/*/addon.yaml` and
-`gitops/addon-catalog/*/addon.yaml` at `HEAD`, the same way, every run:
-only the namespaces and chart registries an addon actually declares, never
-`"*"`. `clusterResourceWhitelist`/`namespaceResourceWhitelist` are still
-`"*"`/`"*"` (bootstrap.sh's own comment explains why: several addons wrap
-an unpinned third-party chart whose exact object set is not enumerated
-here, and a wrong hand-typed kind list would risk blocking a legitimate
-sync rather than narrowing anything real) - tracked as a follow-up in #49.
+`bootstrap.sh` from this checkout's own `gitops/addons/*/addon.yaml`,
+`gitops/addon-catalog/*/addon.yaml` and `gitops/cells/*/{capacity-pool,
+smoke}/*.yaml` at `HEAD`, the same way, every run: only the namespaces and
+chart registries an addon or cell parameter file actually declares (plus
+`kube-system`, always included - Karpenter's and Kueue's own pinned
+charts each render a second RBAC object there regardless of either
+chart's own configured namespace, confirmed by rendering both), never
+`"*"`. `clusterResourceWhitelist`/`namespaceResourceWhitelist` are a
+hand-maintained, reviewed list in `gitops/bootstrap/appproject-whitelist.yaml`
+(not `"*"`/`"*"` either), derived by rendering every addon and cross-checked
+by `gitops/tests/check_appproject_whitelist.py` - see that file's own
+header comment for why this list is hand-maintained rather than derived
+live at bootstrap time.
 
 `syncPolicy.automated.selfHeal`/`prune` stay unconditional for every
 generated `Application` (RFC #25 Decision 6: a merge to `main` moves every
 cell once `stable` moves, with no separate "approve this sync" step by
 design). Combined with a role mapped to `ADMIN`, that is full write access
-to everything this one `AppProject` allows - today, the namespaces and
-chart registries above, not literally anything in the cluster. The
+to everything this one `AppProject` allows - the namespaces, chart
+registries and resource kinds above, narrower than the IAM role's own
+`AmazonEKSClusterAdminPolicy` grant but still enough to create a
+`ClusterRoleBinding` and a `Deployment` in `kube-system`, which is itself
+cluster-admin-equivalent in practice, not a narrow grant. The
 compensating controls until #22's per-team projects exist are: this
-namespace/registry scoping, mapping a group to `ADMIN` only when it should
+namespace/registry/kind scoping, mapping a group to `ADMIN` only when it should
 have that access (the `argocd` variable's own description), and closing
 [#53](https://github.com/littlemex/distai-platform/issues/53) (`main`'s
 branch ruleset requires no review and no passing check today, so the one
