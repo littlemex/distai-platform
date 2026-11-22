@@ -181,23 +181,30 @@ A follow-up round, both engines, to close the gaps the 2026-11-22 MPS round abov
 
 **MPS + disaggregation (same-node colocate, and the 2-node MPS-prefill/plain-decode shape over real EFA): not completed, root cause identified.** NVIDIA's `k8s-device-plugin` chart's `mps-control-daemon` DaemonSet hardcodes `nodeSelector: {nvidia.com/mps.capable: "true"}` (confirmed by rendering `templates/daemonset-mps-control-daemon.yml`, tag v0.20.2) — the same label the earlier MPS round's own README section already named as "separately required... this platform runs no NFD/GPU Operator to set either automatically", i.e. manual labeling is the only way to satisfy it today. This round hit a real, reproducible interaction: editing a `capacity-pool` NodePool's own `requirements` (for example to add that label as a Karpenter-managed requirement, so future nodes self-label) is read by Karpenter as drift on any already-running node from that NodePool, which replaces the node — wiping out a manually-applied `nvidia.com/mps.capable=true` label faster than the replacement's own device-plugin pod could come up and be manually re-labeled, especially once more than one such edit happened in sequence. Every MPS-opted-in node this round reached showed `nvidia.com/gpu: 0` allocatable (the `mps-control-daemon` container's own log: `error waiting for MPS daemon: error checking MPS daemon health: failed to send command to MPS daemon: exit status 1`) at the moment a test tried to use it, each time because the node had just been replaced. Time-boxed at 30 minutes of active fixing (the coordinator's own limit); not resolved in that window. **Recommendation for a future round**: label the node once, then make no further `capacity-pool` NodePool edits on it for the rest of that round — treat the manual label as fragile against any NodePool spec change, not just against GFD's absence.
 
-**MPS's own vLLM startup-memory defect, fixed (round 4, real hardware, 2026-11-22).** The MPS round
-above (and `../../README.md`'s own "MPS" section) found vLLM's startup memory check failing
-deterministically under MPS sub-device sharing: it sizes its own desired KV-cache budget against
-the GPU's *whole* physical memory, not this process's own MPS-limited share, and on some paths
-that check is a hard `ValueError`, not a clamp. `prefill.mps`/`decode.mps` (`enabled`, `replicas`)
-plus `prefill.gpuMemoryUtilization`/`decode.gpuMemoryUtilization` close this: set `mps.enabled: true`
-and `mps.replicas` to match the pool's own `accelerator.sharingLabel` split (for example `mps-2` ->
-`replicas: 2`) and this chart renders a safe `--gpu-memory-utilization` (`0.70/replicas` by default,
-`0.35` for `replicas: 2`) instead of leaving vLLM's own default in place; an explicit
-`gpuMemoryUtilization` is honored as-is but rejected at `helm template`/`install` time (not
-discovered later as a crash loop) if it exceeds a `0.90/replicas` ceiling. Confirmed on real
-hardware: the same-node colocate shape (`placement.sameNodeMeasurement=true`,
+**MPS's own vLLM startup-memory crash on this chart, fixed and confirmed on real hardware (round 4,
+2026-11-22).** This chart's own un-fixed default (no `gpuMemoryUtilization` set) crash-looped
+repeatedly on an MPS-split node (vLLM's own startup memory check, `ValueError`, a desired fraction
+near `0.92` against a reported free share of about half the physical device) -- confirmed for this
+chart specifically; `../../README.md`'s own "MPS" section states plainly that this is not shown to
+be a universal rule every vLLM chart hits under MPS (`../agg-baseline`'s own un-fixed default did
+not crash under the same split, for a reason that round 4's own real-hardware evidence does not
+settle). `prefill.mps`/`decode.mps` (`enabled`, `replicas`) plus
+`prefill.gpuMemoryUtilization`/`decode.gpuMemoryUtilization` close the crash on this chart: set
+`mps.enabled: true` and `mps.replicas` to match the pool's own `accelerator.sharingLabel` split
+(for example `mps-2` -> `replicas: 2`) and this chart renders a safe `--gpu-memory-utilization`
+(`0.70/replicas` by default, `0.35` for `replicas: 2`) instead of leaving vLLM's own default in
+place; an explicit `gpuMemoryUtilization` is honored as-is but rejected at `helm
+template`/`install` time (not discovered later as a crash loop) if it exceeds a `0.90/replicas`
+ceiling. Confirmed on real hardware with a direct A/B pair (same node, same cell, only `mps.*`
+changed): the same-node colocate shape (`placement.sameNodeMeasurement=true`,
 `enforceAntiAffinity=false`) that `CrashLoopBackOff`s with this chart's own unmodified defaults on
 an MPS-split node reached `Running`/`Ready`, `RESTARTS=0`, and served a real completion once
-`prefill.mps.enabled`/`decode.mps.enabled` were set to `true`. See `../../README.md`'s own "MPS"
-section for the full real-hardware log and what is and is not yet explained about why this chart's
-own default run fails while `agg-baseline`'s own default run does not.
+`prefill.mps.enabled`/`decode.mps.enabled` were set to `true`. The 2-node, EFA-backed version of
+this shape (form (c)) was not re-verified with the fix this round (see "Known issues" above) --
+treat this fix as confirmed for the same-node shape only until that gap closes. See
+`../../README.md`'s own "MPS" section for the full real-hardware log and what is and is not yet
+explained about why this chart's own default run crashes while `agg-baseline`'s own default run
+does not.
 
 **3-node prefill:decode ratio over real EFA, both ratios, both engines — confirmed working, real traffic (no MPS involved; `g7.8xlarge` x3, `distai.dev/pd-role` splits 2 spot + 1 on-demand node automatically via two NodePools per role — a primary `flex` pool capped at one node and an on-demand-only overflow pool, so whichever role needs the second replica is the one that spills onto on-demand, never both at once).**
 
@@ -245,7 +252,7 @@ Use the in-cluster load replay and the scorer in [`../../_shared/`](../../_share
 | `prefill.extraArgs`, `decode.extraArgs` | `[]` | Extra `vllm serve` arguments per role |
 | `prefill.extraEnv`, `decode.extraEnv` | `[]` | Extra environment variables per role |
 | `prefill.resources`, `decode.resources` | 4 CPU, 32Gi requested | CPU and memory; GPU and EFA limits are added from the values above |
-| `prefill.mps`, `decode.mps` (`.enabled`, `.replicas`) | `false`, `2` | Set `enabled: true` and `replicas` to match this role's own pool's `accelerator.sharingLabel` MPS split; computes a safe `--gpu-memory-utilization` and makes `gpuMemoryUtilization` above fail to render if it exceeds the MPS-aware ceiling (see "MPS's own vLLM startup-memory defect" above) |
+| `prefill.mps`, `decode.mps` (`.enabled`, `.replicas`) | `false`, `2` | Set `enabled: true` and `replicas` to match this role's own pool's `accelerator.sharingLabel` MPS split; computes a safe `--gpu-memory-utilization` and makes `gpuMemoryUtilization` below fail to render if it exceeds the MPS-aware ceiling (see "MPS's own vLLM startup-memory crash on this chart" above) |
 | `prefill.gpuMemoryUtilization`, `decode.gpuMemoryUtilization` | `""` | `""` leaves vLLM's own built-in default alone (unchanged behavior). An explicit value is always honored; combined with `mps.enabled: true` it must be at or below `0.90/mps.replicas` |
 | `engine.port` | `8000` | Engine HTTP port, also serving `/metrics` |
 | `engine.shmSizeLimit` | `16Gi` | Size of the memory-backed `/dev/shm` |

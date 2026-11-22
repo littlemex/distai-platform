@@ -47,12 +47,15 @@ engine:
   startupTimeoutSeconds: 1800
   # Set when this release's replicas land on an MPS-split GPU
   # (capacity-pool's own accelerator.sharingLabel, e.g. "mps-2" ->
-  # mps.replicas: 2 here must match). Confirmed on real hardware (#37):
-  # vLLM's own startup memory check sizes its request against the WHOLE
-  # physical device, not this engine's own MPS-limited share, so leaving
-  # gpuMemoryUtilization at vLLM's own default (or any value above roughly
-  # 1/replicas) fails this check deterministically once a replica lands on
-  # an MPS-split node. gpuMemoryUtilization: "" (default) computes a safe
+  # mps.replicas: 2 here must match). On real hardware (#37), this chart's
+  # own default run (gpuMemoryUtilization unset, MPS-split node) did NOT
+  # crash -- but ../disagg-pd's own default run, on the same node family,
+  # crashed deterministically on vLLM's startup memory check at a desired
+  # fraction near 0.92. Why the two charts' un-fixed defaults differ is not
+  # established (examples/inference/README.md's own MPS investigation
+  # states this as open, not this chart's own settled behavior); this field
+  # exists so a caller does not have to find out either way by trial.
+  # gpuMemoryUtilization: "" (default) computes a safe
   # fraction from mps.replicas when mps.enabled is true, and leaves vLLM's
   # own default alone (the flag is not passed at all) when mps.enabled is
   # false, matching this chart's behavior before this field existed. An
