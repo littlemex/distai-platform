@@ -1,0 +1,25 @@
+# The EFA advertiser, Neuron-method half. See
+# addons/accel-efa-device-plugin-nvidia/addon.yaml for the full rationale
+# ("Two releases, not one") -- this release is identical except for the
+# one nodeSelector key, selecting nodes that opted into
+# distai.dev/neuron-method=device-plugin instead (for example
+# trn2.48xlarge, which carries both EFA and multiple Neuron devices).
+#
+# Chart source, version and pinned image digest: identical to
+# accel-efa-device-plugin-nvidia/addon.yaml; not repeated here.
+#
+# The EFA DRA driver (aws-dranet) is out of scope for both
+# accel-efa-device-plugin-* releases: see gitops/README.md's "Known
+# limits", and #19/#50 for where it is expected to be designed.
+addon: accel-efa-device-plugin-neuron
+tier: core
+chart: aws-efa-k8s-device-plugin
+repoURL: https://aws.github.io/eks-charts
+version: "v0.5.35"
+wave: accelerators
+namespace: kube-system
+values:
+  image:
+    tag: "v0.5.22-eksbuild.9@sha256:a392d84ff82b23580fd92d0a6c770136c56d4a6ee979a47d1bf4e379a7171647"
+  nodeSelector:
+    distai.dev/neuron-method: device-plugin

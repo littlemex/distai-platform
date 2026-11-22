@@ -79,6 +79,15 @@ def main(root: str) -> int:
         "addons/accel-neuron-dra/addon.yaml",
         "addons/accel-device-classes/addon.yaml",
         "charts/accel-device-classes/Chart.yaml",
+        # Issue #50/the EFA Capacity Block work: the EFA advertiser, two
+        # more accelerators-step add-ons alongside the five above (no new
+        # chart of their own - no "charts/..." entry needed). Two
+        # releases of the same chart, not one: see
+        # addons/accel-efa-device-plugin-nvidia/addon.yaml's own comment
+        # ("Two releases, not one") for why a single release cannot
+        # express this add-on's own OR-across-two-vendor-labels opt-in.
+        "addons/accel-efa-device-plugin-nvidia/addon.yaml",
+        "addons/accel-efa-device-plugin-neuron/addon.yaml",
     ]
     for rel in required:
         check(f"file gitops/{rel} exists", os.path.isfile(os.path.join(gitops, rel)))
@@ -112,6 +121,8 @@ def main(root: str) -> int:
         "accel-neuron-device-plugin",
         "accel-neuron-dra",
         "accel-device-classes",
+        "accel-efa-device-plugin-nvidia",
+        "accel-efa-device-plugin-neuron",
     }
     check(
         f"addons/ contains exactly {sorted(expected_addon_dirs)} (#25 decision 9, #28 Interface)",
