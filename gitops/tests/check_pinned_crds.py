@@ -118,6 +118,84 @@ def extract_served_versions(rendered_text):
     return out
 
 
+def helm_template_dir_chart(addon_doc, repo_root, workdir):
+    """Same idea as helm_template_chart, for a local dir:-sourced chart
+    (gitops/addon-catalog/<name>/addon.yaml) instead of a registry one --
+    dcgm-exporter's own wrapper around an upstream `dependencies:` entry
+    is the one that needs this (#63, independent security-axis review
+    pass, filed as "SA3" item 2). `helm dependency build` resolves that
+    dependency into charts/ first, the same step gitops/tests/0.static.sh's
+    own helm lint/template steps already run for this chart."""
+    chart_ref = os.path.join(repo_root, addon_doc["dir"])
+    subprocess.run(["helm", "dependency", "build", chart_ref], capture_output=True, text=True, timeout=120)
+    name = addon_doc.get("addon", os.path.basename(chart_ref))
+    cmd = ["helm", "template", f"{name}-pinned-crd-check", chart_ref]
+    namespace = addon_doc.get("namespace")
+    if namespace:
+        cmd += ["-n", namespace, "--create-namespace"]
+    values = placeholder_values(addon_doc)
+    values_path = None
+    if values:
+        values_path = os.path.join(workdir, f"{name}-values.yaml")
+        with open(values_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(values, f)
+        cmd += ["-f", values_path]
+    proc = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0:
+        print(f"FAIL helm template {addon_doc['dir']} (for securityContext check): {proc.stderr.strip()}")
+        return None
+    return proc.stdout
+
+
+def container_security_contexts(ds_spec):
+    """Every container's own rendered securityContext in a DaemonSet's pod
+    template (init and regular; a dropped-privilege override on one and not
+    the other would otherwise go unnoticed)."""
+    pod_spec = (ds_spec.get("template") or {}).get("spec") or {}
+    containers = list(pod_spec.get("initContainers") or []) + list(pod_spec.get("containers") or [])
+    return [(c.get("name", "?"), c.get("securityContext") or {}) for c in containers]
+
+
+def check_security_context_rendered(rendered_text, expected):
+    """A fixed, named securityContext policy, checked against the exact
+    pinned chart's own rendered output (#63, filed as "SA3" item 2) -
+    dcgm-exporter's own hardening (allowPrivilegeEscalation: false,
+    capabilities add SYS_ADMIN/drop ALL, runAsNonRoot: false, runAsUser:
+    0), kept here rather than read back from addon.yaml's own values on
+    purpose: reading the expectation from the same file being checked
+    would pass trivially the moment that file's own override is weakened
+    or dropped. Returns (True, "") or (False, reason). No DaemonSet in
+    the chart's output at all is reported as a reason, not a silent pass
+    -- that would otherwise look identical to "override lost"."""
+    found_any_daemonset = False
+    mismatches = []
+    for doc in yaml.safe_load_all(rendered_text):
+        if not doc or doc.get("kind") != "DaemonSet":
+            continue
+        found_any_daemonset = True
+        for name, actual in container_security_contexts(doc.get("spec") or {}):
+            for key, want in expected.items():
+                got = actual.get(key)
+                if got != want:
+                    mismatches.append(f"container {name!r}: {key}={got!r}, expected {want!r}")
+    if not found_any_daemonset:
+        return False, "the rendered chart has no DaemonSet at all to carry a securityContext"
+    if mismatches:
+        return False, "; ".join(mismatches)
+    return True, ""
+
+
+# Addon label -> expected securityContext (#63, filed as "SA3" item 2).
+SECURITY_CONTEXT_EXPECTATIONS = {
+    "dcgm-exporter": {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"add": ["SYS_ADMIN"], "drop": ["ALL"]},
+        "runAsNonRoot": False,
+        "runAsUser": 0,
+    },
+}
+
+
 def main(repo_root, rendered_dir):
     failures = 0
     served = {}
@@ -144,6 +222,29 @@ def main(repo_root, rendered_dir):
             skip_crds = bool(doc.get("skipCrds"))
             suffix = " (skipCrds: its own crds/-folder CRDs are not applied)" if skip_crds else ""
             print(f"INFO {label} ({chart}:{doc['version']}) ships {len(crds)} CustomResourceDefinition kind(s){suffix}")
+
+    # Local dir:-sourced addon-catalog charts (dcgm-exporter, #63 filed
+    # as "SA3" item 2): these ship no CRD of their own, so they sit
+    # outside the registry-chart loop above, but a securityContext
+    # expectation in SECURITY_CONTEXT_EXPECTATIONS still applies to them.
+    catalog_files = sorted(glob.glob(os.path.join(repo_root, "gitops", "addon-catalog", "*", "addon.yaml")))
+    with tempfile.TemporaryDirectory() as catalog_workdir:
+        for addon_path in catalog_files:
+            with open(addon_path, encoding="utf-8") as f:
+                doc = yaml.safe_load(f) or {}
+            label = doc.get("addon", os.path.basename(os.path.dirname(addon_path)))
+            if "dir" not in doc or label not in SECURITY_CONTEXT_EXPECTATIONS:
+                continue
+            rendered = helm_template_dir_chart(doc, repo_root, catalog_workdir)
+            if rendered is None:
+                failures += 1
+                continue
+            ok, reason = check_security_context_rendered(rendered, SECURITY_CONTEXT_EXPECTATIONS[label])
+            if ok:
+                print(f"PASS {label}: the rendered chart's own container(s) carry the hardened securityContext")
+            else:
+                print(f"FAIL {label}: the rendered chart's own container(s) do not carry the hardened securityContext ({reason})")
+                failures += 1
 
     if failures:
         return 1
