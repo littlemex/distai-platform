@@ -63,6 +63,8 @@ Run the same load replay and scorer from [`../../_shared/`](../../_shared/) agai
 | `engine.nodeSelector` | `{}` | Nodes the engines may run on |
 | `engine.tolerations` | `[]` | Tolerations, for example for GPU node taints |
 | `engine.resources` | 4 CPU, 32Gi requested | CPU and memory; the GPU limit is added from `gpusPerEngine` |
+| `engine.mps` (`.enabled`, `.replicas`) | `false`, `2` | Set `enabled: true` and `replicas` to match this release's own pool's `accelerator.sharingLabel` MPS split if it runs on one; computes a safe `--gpu-memory-utilization` and makes `gpuMemoryUtilization` below fail to render if it exceeds the MPS-aware ceiling. This chart was not the one found crashing under MPS (`../../README.md`'s own "MPS" section) — kept at the same default as `disagg-pd` for one rule a reader of both charts can hold in their head, not because this chart's own real-hardware evidence requires it |
+| `engine.gpuMemoryUtilization` | `""` | `""` leaves vLLM's own built-in default alone (unchanged behavior). An explicit value is always honored; combined with `mps.enabled: true` it must be at or below `0.90/mps.replicas` |
 | `engine.extraArgs` / `engine.extraEnv` | `[]` | Extra `vllm serve` arguments and environment variables |
 | `engine.port` | `8000` | Engine HTTP port, also serving `/metrics` |
 | `engine.shmSizeLimit` | `16Gi` | Size of the memory-backed `/dev/shm` |
