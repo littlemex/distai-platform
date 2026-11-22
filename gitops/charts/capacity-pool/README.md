@@ -126,15 +126,22 @@ fails closed the same way every other opt-in field in this chart does — a pool
 that never sets `mpsLabel` renders no label and is never selected by
 `mps-control-daemon`.
 
-**[PENDING REAL-HARDWARE VERIFICATION of `accelerator.mpsLabel` — this
-paragraph is filled in with measured values from this round's run, not before
-it finishes]** Plan: set `sharingLabel={key: nvidia.com/device-plugin.config,
-value: mps-N}` and `mpsLabel={key: nvidia.com/mps.capable, value: "true"}` on
-one pool, confirm the resulting node advertises the split `nvidia.com/gpu`
-count from first `Ready` with no manual `kubectl label` step, then force a
-Karpenter-driven node replacement on the same pool (an unrelated `requirements`
-edit) and confirm the replacement node carries the same labels without
-reapplying anything by hand — the exact failure this field exists to close.
+**Confirmed on real hardware**: set `sharingLabel={key: nvidia.com/device-plugin.config,
+value: mps-2}` and `mpsLabel={key: nvidia.com/mps.capable, value: "true"}` on
+one pool (`gpu-shared`, `g7.8xlarge`), then forced an actual Karpenter-driven node
+replacement on that same pool (bumped `pool.rootVolumeSizeGi`, a real EC2NodeClass
+hash change). The replacement node (a genuinely different instance, confirmed by
+node name) carried both labels with zero manual steps, and `Allocatable`'s
+`nvidia.com/gpu` read `2` on it immediately — the exact failure this field exists
+to close. What is, and is not, independently re-confirmed here: the node's own
+labels and allocatable count were read directly after the replacement; the
+`mps-control-daemon` Pod's own health was NOT re-observed at that same moment (it
+showed `1/2 Ready`, `Error`, 2 restarts, 44s after the replacement). A real
+workload was served from this same node a few minutes later with `RESTARTS=0`
+(see `examples/inference/README.md`'s own "MPS" section, form (a)), which is
+evidence the daemon had become healthy by then, but that inference stands in
+place of a direct re-read of the daemon Pod's own status at a later timestamp —
+not yet done.
 Checked on a `Running`/`RESTARTS=0` result, not assumed from it (found by
 Fable 5.2 review, 2026-11-22): Karpenter's own scheduling simulation decides
 whether to launch a node from a pending Pod's request using the instance
@@ -175,7 +182,7 @@ something this platform's `accelerator.sharingLabel` field adds — but it means
 **every MPS-opted-in NodePool already carries a host-process-namespace-sharing
 daemon, independent of and in addition to** the separate `hostIPC` question an
 earlier round of this same investigation raised and reverted for the LMCache mp
-server (see `vllm/disagg-pd/README.md`'s own "KV cache tiers" section). Three
+server (see `vllm/disagg-pd/README.md`'s own "KV cache tiers" section). Four
 items this round leaves open, not closed:
 1. This platform has no admission control (Pod Security Admission, Kyverno, or
    equivalent) rejecting `hostPID`/`privileged`/`hostIPC`/`hostPath` in any

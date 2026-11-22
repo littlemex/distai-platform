@@ -36,7 +36,7 @@ How to measure with them is described in [`_shared/README.md`](_shared/README.md
 already cover the vLLM charts do not cover the SGLang charts yet — a separate, deeper follow-up).
 All five combinations above now work end to end on real hardware.
 
-## MPS (GPU sub-device sharing), round 2: label-design fix and the 4 forms (real hardware, `us-east-1`, `g7.8xlarge`/`g7.48xlarge`, 2026-11-22)
+## MPS (GPU sub-device sharing), round 2: label-design fix and the 3 forms (real hardware, `us-east-1`, `g7.8xlarge`/`g7.48xlarge`, 2026-11-22)
 
 A prior round confirmed the MPS mechanism itself (`accelerator.sharingLabel`, see
 `gitops/charts/capacity-pool/README.md`) but left the actual label management broken: NVIDIA's
@@ -58,7 +58,7 @@ creation; by the time real workloads used that same node a few minutes later (T0
 config-watcher-sidecar-restarts-after-relabel oddity (`capacity-pool/README.md`), not a functional
 regression.
 
-**The 4 forms.** All four cells target this one drift-replaced node/pool pair unless noted.
+**The 3 forms, each tried on both engines.** All cells target this one drift-replaced node/pool pair unless noted.
 
 | Form | Engine | Result |
 | --- | --- | --- |
@@ -69,10 +69,10 @@ regression.
 | (c) 2-node disaggregated over EFA, MPS-shared prefill | vLLM | **Blocked by the same defect, root-caused in round 3.** `decode` (separate `g7.8xlarge` node) reached `Running`/`Ready`; both `prefill` replicas (same `g7.48xlarge` MPS-shared node) crash-looped in both round 2 and round 3 |
 | (c) 2-node disaggregated over EFA, MPS-shared prefill | SGLang | Functionally confirmed: `decode` (separate `g7.8xlarge` node) and both `prefill` replicas (same `g7.48xlarge` MPS-shared node) all `Running`/`Ready`, `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=1.338`. **Two things this investigation could not confirm, stated precisely rather than assumed, and not yet closed**: (1) the EFA `hw_counters` diagnostic (`rdma_write_bytes`/`rdma_read_bytes` under `/sys/class/infiniband/*/ports/1/hw_counters/`) returned empty for every pod, before and after load, in round 2 — a diagnostic-command problem, not re-attempted in round 3 to stay inside the 3-hour real-hardware time budget; (2) no GPU UUID was captured for either prefill replica, so whether the two MPS clients actually landed on the SAME physical GPU (true MPS sharing) or on two of the node's 8 physical GPUs (same node, no sharing, still functionally correct) is not distinguished by any check this investigation ran — a real gap in the test's own evidence, found by Fable 5.2 review |
 
-### Root cause, found in round 3: vLLM's default `--gpu-memory-utilization` is incompatible with any MPS split
+### Proximate cause for vLLM forms (b) and (c), found in round 3 -- NOT yet a full explanation (see the open contradiction below)
 
-Both vLLM failures above ((b) and (c)) are the **same defect**, confirmed from the crashing
-container's own traceback (`vllm/v1/worker/gpu_worker.py`'s `request_memory`):
+Forms (b) and (c)'s vLLM crashes show the **same traceback**
+(`vllm/v1/worker/gpu_worker.py`'s `request_memory`):
 
 ```text
 ValueError: Free memory on device cuda:0 (15.72/31.38 GiB) on startup is less than desired GPU
@@ -81,22 +81,30 @@ by other processes.
 ```
 
 vLLM's own startup check computes its memory budget as `gpu_memory_utilization * TOTAL physical
-device memory` (here, `0.92 * 31.38 GiB = 28.87 GiB`) and refuses to start unless that much is
-free. NVIDIA's MPS control daemon, independently, enforces an equal per-client share of that same
-total (`capacity-pool/README.md`'s own confirmed log line, `set_default_device_pinned_mem_limit 0
-16311M` — half of 31.38 GiB, i.e. the exact `15.72 GiB` the error reports as free). vLLM's own
-check and MPS's own enforcement are each correct on their own terms; together, on an `mps-2` pool,
-every vLLM Pod that does not lower its own memory utilization below roughly its MPS share will
-fail this check deterministically, every time, regardless of placement (same-node colocate in form
-(b) and the EFA-disaggregated prefill in form (c) hit the identical error, since both put more than
-one vLLM process on one MPS-split GPU). This is why both vLLM MPS forms failed while SGLang's own
-two MPS forms ((a) and (b)/(c)) did not: this round did not have time to confirm SGLang's own exact
-memory-sizing mechanism, but it empirically tolerates the same MPS split vLLM's own fixed default
-does not. **Fix, not yet applied**: set vLLM's `--gpu-memory-utilization` (this chart's
-`engine.gpuMemoryUtilization` equivalent, if present, or a new value) below the MPS config's own
-per-client share (for `mps-2`, below `~0.45-0.48` to leave headroom) whenever
-`accelerator.sharingLabel`/`mpsLabel` opt a pool into MPS — tracked as a follow-up, not implemented
-in this PR.
+device memory` (here, `0.92 * 31.38 GiB ≈ 28.87 GiB`) and refuses to start unless that much is
+free; the `15.72 GiB` it found free is close to (not exactly) half of `31.38 GiB`, matching
+`capacity-pool/README.md`'s own confirmed MPS pinned-memory-limit log line
+(`set_default_device_pinned_mem_limit 0 16311M` ≈ `15.93 GiB`) within the rounding these two
+numbers carry. This is a confirmed, real, reproducible proximate cause for (b) and (c): two vLLM
+processes, both at the ~0.92 default, cannot both fit inside one MPS-split GPU's own per-client
+memory share.
+
+**This does not explain form (a), and that contradiction is not resolved here, stated plainly
+rather than glossed over.** Form (a)/vLLM also put two vLLM processes on one `mps-2`-split GPU
+(the same mechanism the paragraph above says should fail) and it succeeded, `RESTARTS=0`, on the
+same day, same node family. Two candidate explanations were not tested this round and so are not
+claimed: (1) `vllm/agg-baseline` and `vllm/disagg-pd` might compute or request a different
+effective `gpu_memory_utilization` (not confirmed — neither chart sets this value explicitly in
+`values.yaml`, so if they differ it is from a vLLM-side default difference between the two code
+paths, not a value this platform sets); (2) form (a) ran immediately after the drift-replacement
+test, while `mps-control-daemon` was still observed `Error`/restarting on that same node (see
+above) — if the per-client memory *pinning* was not yet actually enforced at that exact moment,
+form (a)'s two engines may not have been memory-limited the way (b)/(c) were minutes later once
+the daemon had stabilized. Neither is confirmed; both are left as open questions for the next
+round, not resolved by this one. **No fix is proposed or applied in this PR** until the
+discrepancy above is understood — the only claim this round makes is the proximate traceback for
+(b)/(c), not a general "vLLM cannot share an MPS GPU" claim the same page's own form (a) result
+would contradict.
 
 **SGLang HiCache cold/warm retry.** Cold pass confirmed again in both round 2 and round 3
 (`exit-code=0`). The warm pass remains unconfirmed in both rounds: round 2 produced an empty
@@ -110,12 +118,11 @@ on a cluster shared with the other round-3 tests above; not re-investigated furt
 
 | # | What | Status |
 | --- | --- | --- |
-| 1 | vLLM same-node MPS colocate (form (b)) | Root cause found (`--gpu-memory-utilization` vs. MPS share); fix not yet applied |
-| 2 | vLLM 2-node MPS-disagg-over-EFA prefill crash loop (form (c)) | Same root cause as #1; fix not yet applied |
+| 1 | vLLM same-node MPS colocate (form (b)) | Proximate cause found (`--gpu-memory-utilization` vs. MPS share); contradicted by form (a)'s own success, not resolved; no fix proposed |
+| 2 | vLLM 2-node MPS-disagg-over-EFA prefill crash loop (form (c)) | Same proximate cause and same open contradiction as #1 |
 | 3 | SGLang HiCache warm pass | Not reached in round 3 (engine rollout timeout, not investigated further); still open |
 | 4 | EFA byte-counter evidence for form (c) | Diagnostic command bug, not fixed this investigation |
 | 5 | GPU-UUID evidence that MPS clients share one physical GPU in form (c) | Not captured this investigation |
-
 ## Conventions
 
 - Node roles are told apart by a node label, `distai.dev/pd-role` by default, and every chart lets you change the key.
