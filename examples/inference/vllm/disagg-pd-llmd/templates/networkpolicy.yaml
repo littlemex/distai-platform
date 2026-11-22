@@ -15,6 +15,7 @@
 */}}
 {{- range $role := list "prefill" "decode" }}
 {{- $peer := ternary "decode" "prefill" (eq $role "prefill") }}
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
