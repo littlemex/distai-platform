@@ -1,9 +1,13 @@
 # The EFA advertiser, NVIDIA-GPU-method half. Makes vpc.amazonaws.com/efa
-# a real, schedulable extended resource on any node that both (a) opted
-# into distai.dev/nvidia-gpu-method=device-plugin (#19 Decision 2's own
-# label, set through capacity-pool's accelerator.methodLabel, #17's own
-# shape) and (b) is an instance type this chart's own pinned version
-# already knows carries EFA (see "Two releases, not one" below). Without
+# a real, schedulable extended resource on any node that (a) opted into
+# distai.dev/nvidia-gpu-method=device-plugin (#19 Decision 2's own label,
+# set through capacity-pool's accelerator.methodLabel, #17's own shape),
+# (b) actually has EFA network interfaces attached
+# (distai.dev/efa-attached=true, capacity-pool's own label, set only when
+# pool.networkInterfaces is non-empty -- see "A method label alone is not
+# enough" below), and (c) is an instance type this chart's own pinned
+# version already knows carries EFA (see "Two releases, not one" below).
+# Without
 # this chart, Karpenter can attach EFA network interfaces at the EC2
 # level (gitops/charts/capacity-pool's own pool.networkInterfaces, #50),
 # but Kubernetes never sees them: allocatable.vpc.amazonaws.com/efa reads
@@ -99,6 +103,28 @@
 # runAsUser stays 0 -- the chart's own device-plugin binary opens
 # /dev/infiniband and the kubelet device-plugin socket as root in its
 # default image, and this PR does not carry a rebuilt image to change that.
+#
+# A method label alone is not enough (a real, confirmed regression, not a
+# theoretical one): #19 Decision 2's own opt-in selects by the GPU's/
+# Neuron's own method label only, with no requirement that the pool
+# carrying that label ever configured pool.networkInterfaces. Two of this
+# platform's own existing fixtures (gitops/cells/dp-a19-gpu-r3/
+# capacity-pool/gpu.yaml, dp-a19-trn-r3/capacity-pool/trn.yaml, #28) carry
+# the method label with no EFA interfaces at all and an instance-family
+# wide enough to resolve to an EFA-capable size -- confirmed on real
+# hardware (a disposable c5n.9xlarge fixture carrying the same
+# combination): this chart's own Pod does not simply report efa=0 there,
+# it crash-loops (phase Completed, restartCount climbing steadily). The
+# fix is gitops/charts/capacity-pool's own distai.dev/efa-attached="true"
+# label, rendered on a NodePool's node template only when
+# pool.networkInterfaces is non-empty (never derived from the method
+# label or the instance type, both of which a pool can carry without
+# ever requesting an EFA interface) -- ANDed into this release's own
+# nodeSelector above, so a method-labeled pool that never configured EFA
+# interfaces never receives this Pod at all. Confirmed by `helm template`
+# against both existing fixtures (neither renders the label, since
+# neither sets pool.networkInterfaces) and against this PR's own real
+# p4d.24xlarge test values (which do set it).
 addon: accel-efa-device-plugin-nvidia
 tier: core
 chart: aws-efa-k8s-device-plugin
@@ -111,6 +137,7 @@ values:
     tag: "v0.5.22-eksbuild.9@sha256:a392d84ff82b23580fd92d0a6c770136c56d4a6ee979a47d1bf4e379a7171647"
   nodeSelector:
     distai.dev/nvidia-gpu-method: device-plugin
+    distai.dev/efa-attached: "true"
   securityContext:
     privileged: false
     allowPrivilegeEscalation: false

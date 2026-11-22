@@ -16,11 +16,28 @@ metadata:
 {{- end }}
 spec:
   template:
-{{- with (default (dict) .Values.accelerator).methodLabel }}
-{{- if .key }}
+{{- $methodLabel := (default (dict) .Values.accelerator).methodLabel }}
+{{- $hasMethodLabel := and $methodLabel $methodLabel.key }}
+{{- $hasEfa := gt (len (default (list) .Values.pool.networkInterfaces)) 0 }}
+{{- if or $hasMethodLabel $hasEfa }}
     metadata:
       labels:
-        {{ .key | quote }}: {{ .value | toString | quote }}
+{{- if $hasMethodLabel }}
+        {{ $methodLabel.key | quote }}: {{ $methodLabel.value | toString | quote }}
+{{- end }}
+{{- if $hasEfa }}
+        # Set only when this pool's own EC2NodeClass actually attaches EFA network
+        # interfaces (pool.networkInterfaces non-empty, #50) -- not derived from the
+        # accelerator method label or the instance type, both of which a pool can
+        # carry without ever requesting an EFA interface. accel-efa-device-plugin-*
+        # (#19/#50) AND into this label on top of the vendor method label, so a
+        # method-labeled pool that never configured EFA interfaces never gets that
+        # DaemonSet's Pod at all -- confirmed on real hardware (distai-platform PR
+        # for accel-efa-device-plugin-nvidia/-neuron) that the pinned
+        # aws-efa-k8s-device-plugin chart's own Pod crash-loops on an EFA-capable
+        # instance type with zero physical EFA interfaces, which is exactly the
+        # combination this label is designed to keep that Pod away from.
+        distai.dev/efa-attached: "true"
 {{- end }}
 {{- end }}
     spec:
