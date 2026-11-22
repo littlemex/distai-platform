@@ -255,7 +255,7 @@ EXPECTED_FIXTURES = {
         "on-demand-default", "reserved", "flex", "accelerator-tenancy", "taint-no-value",
         "reserved-no-tags", "unknown-capacity-type", "capacity-type-in-requirements",
         "invalid-instance-match-criteria", "invalid-taint-effect", "duplicate-taint",
-        "empty-tag-value",
+        "empty-tag-value", "team-taint-no-value",
     },
     "smoke": {"default", "mem-quota"},
 }
@@ -264,7 +264,7 @@ EXPECTED_FIXTURES = {
 EXPECTED_MUST_FAIL = {
     "reserved-no-tags", "unknown-capacity-type", "capacity-type-in-requirements",
     "invalid-instance-match-criteria", "invalid-taint-effect", "duplicate-taint",
-    "empty-tag-value",
+    "empty-tag-value", "team-taint-no-value",
 }
 
 

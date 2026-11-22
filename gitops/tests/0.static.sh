@@ -358,6 +358,7 @@ expect_render_failure=(
   "capacity-pool/invalid-taint-effect"
   "capacity-pool/duplicate-taint"
   "capacity-pool/empty-tag-value"
+  "capacity-pool/team-taint-no-value"
 )
 must_fail() {
   local key="$1" f
@@ -373,7 +374,17 @@ must_fail() {
 # edit on any PR adding tests/fixtures/<new-chart>/, the same hardcoded-
 # set problem check_gitops_contract.py's own addon_dirs already hit once
 # independently.
-mapfile -t fixture_charts < <(find "${FIXTURES_DIR}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+mapfile -t fixture_charts < <(find "${FIXTURES_DIR}" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)
+# A Fable 5.2 review found the derive-from-filesystem change above
+# silently inverted a guarantee: the old hardcoded "for chart in
+# capacity-pool smoke" meant a missing tests/fixtures/smoke/ directory
+# (Git does not track empty directories) produced no failure here at
+# all - this script, run on a checkout missing that directory, would
+# simply iterate zero charts and report success, where the loop body's
+# own "no fixtures found" FAIL was unreachable. Failing on zero charts
+# here, before the loop, restores the original fail-closed guarantee
+# without reintroducing a hand-typed chart list.
+[[ "${#fixture_charts[@]}" -ge 1 ]] || { echo "FAIL no chart directories found under tests/fixtures/"; failures=$((failures + 1)); }
 for chart in "${fixture_charts[@]}"; do
   mapfile -t chart_fixtures < <(find "${FIXTURES_DIR}/${chart}" -name '*.yaml' 2>/dev/null | sort)
   if [[ "${#chart_fixtures[@]}" -eq 0 ]]; then
