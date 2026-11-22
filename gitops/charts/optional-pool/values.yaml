@@ -21,7 +21,12 @@ pool:
   # Shared by the NodePool and its EC2NodeClass. Must not collide with any
   # capacity-pool pool.name in the same cell (both charts create
   # cluster-scoped NodePool/EC2NodeClass objects by this name).
-  name: optional
+  # "optional-pool", not the chart's own directory-derived short form
+  # ("optional") this value used to carry (#63, filed as #58): the
+  # rendered object's own name is what gitops/README.md's "Adding a
+  # cell" table already calls it, and what `kubectl get nodepool` should
+  # actually find.
+  name: optional-pool
   # Deliberately small and fixed: this pool exists for admin-delivered
   # platform-optional component pods only (Decision 1's own definition),
   # never team/workload capacity (gitops/charts/capacity-pool's own job).
