@@ -27,6 +27,14 @@ pool:
   # cell" table already calls it, and what `kubectl get nodepool` should
   # actually find.
   name: optional-pool
+
+  # The one capacity type this pool launches - always "on-demand" (an
+  # admin component should not be evicted by a Spot interruption), but
+  # the same field name and the same validation as gitops/charts/
+  # capacity-pool's own pool.capacityType (#63, filed as #58 Option A),
+  # not a chart-specific shortcut. See templates/_helpers.tpl.
+  capacityType: on-demand
+
   # Deliberately small and fixed: this pool exists for admin-delivered
   # platform-optional component pods only (Decision 1's own definition),
   # never team/workload capacity (gitops/charts/capacity-pool's own job).
@@ -36,22 +44,23 @@ pool:
     consolidationPolicy: WhenEmptyOrUnderutilized
     consolidateAfter: 60s
 
-# Same on-demand, amd64, c/m/r, generation > 5 shape as
-# gitops/charts/capacity-pool's own default requirements: on-demand
-# because an admin component should not be evicted by a Spot interruption.
-requirements:
-  - key: karpenter.sh/capacity-type
-    operator: In
-    values: ["on-demand"]
-  - key: kubernetes.io/arch
-    operator: In
-    values: ["amd64"]
-  - key: karpenter.k8s.aws/instance-category
-    operator: In
-    values: ["c", "m", "r"]
-  - key: karpenter.k8s.aws/instance-generation
-    operator: Gt
-    values: ["5"]
+  # Every other scheduling requirement. Must not contain
+  # karpenter.sh/capacity-type (the render fails if it does): capacityType
+  # above is the only place the capacity type is declared - the same
+  # nesting and the same rule as gitops/charts/capacity-pool's own
+  # pool.requirements, not a top-level requirements: key of this chart's
+  # own (#63, filed as #58 Option A: the two charts used to disagree on
+  # where this list lives).
+  requirements:
+    - key: kubernetes.io/arch
+      operator: In
+      values: ["amd64"]
+    - key: karpenter.k8s.aws/instance-category
+      operator: In
+      values: ["c", "m", "r"]
+    - key: karpenter.k8s.aws/instance-generation
+      operator: Gt
+      values: ["5"]
 
 # Pinned, not "latest", and identical to gitops/charts/capacity-pool's own
 # pin (see that chart's values.yaml for where al2023@v20261112 was
