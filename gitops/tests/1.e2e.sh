@@ -188,6 +188,19 @@ RSV_CANCELLED=0
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 pass() { log "PASS $*"; }
+# Stops this run immediately (#63, filed as #61 item 4): a stateful e2e
+# step builds on the cluster state the previous step left behind, so one
+# step's failure makes every later step's own precondition unknown --
+# continuing past it would not report more facts, it would report noise.
+# This is deliberately NOT the same contract as gitops/tests/0.static.sh's
+# run_check() (which accumulates every failure and keeps going -- right
+# for independent, stateless static checks, where one bad chart should
+# not hide a problem in an unrelated one) or examples/inference/tests/
+# 0.static.sh's own fail() (which counts and returns, the same
+# accumulating contract under the same name as this file's stopping one --
+# a line copied between the two changes meaning silently, which is why
+# this comment exists). 2.upgrade.sh's own fail() is identical to this one
+# for the same reason: an upgrade e2e is also stateful.
 fail() {
   FAILED_STEP="$*"
   log "FAIL $*"
