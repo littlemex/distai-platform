@@ -136,8 +136,9 @@ and `Allocatable`, and the real MPS control daemon split the device 50/50
 (`set_default_device_pinned_mem_limit 0 16311M`, `set_default_active_thread_percentage 50`
 in its own log — both numbers are exactly 100%/`replicas` and the daemon's own
 reading of the device's total memory/`replicas` (`16311M`, close to but not
-identical to the `31.38 GiB` vLLM itself reports elsewhere on this page as the
-device total — which of the two readings is more precise was not checked),
+identical to the `31.38 GiB` vLLM itself reports as the device total in
+`examples/inference/README.md`'s own "MPS" section — which of the two
+readings is more precise was not checked),
 confirmed from the daemon's own log, not computed by this
 chart). Two `vllm/agg-baseline` replicas (`engine.replicas=2`, no chart change
 needed — each still just requests `nvidia.com/gpu: 1`) both scheduled onto
