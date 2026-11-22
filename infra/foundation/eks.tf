@@ -50,6 +50,40 @@ resource "aws_iam_role_policy_attachment" "cluster" {
   policy_arn = "arn:${local.partition}:iam::aws:policy/AmazonEKSClusterPolicy"
 }
 
+# Envelope encryption for Kubernetes Secrets (#63, filed as "SA3"): without
+# this, aws_eks_cluster.this stores every Secret with only EKS's own
+# platform-level encryption at rest, not the extra KMS layer the EKS best
+# practices guide recommends and that this stack already has real Secrets
+# needing (the cell-registration Secret, #51's own model-token Secret).
+# EKS needs kms:DescribeKey/CreateGrant on the cluster's own IAM role - the
+# key's default policy (full access to the account root) already lets that
+# role's own account grant it, so no separate key policy statement is
+# added here. enable_key_rotation is AWS's own recommended default for a
+# key with no planned manual rotation process.
+resource "aws_kms_key" "secrets" {
+  description             = "${var.name} EKS Kubernetes Secrets envelope encryption"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+}
+
+resource "aws_kms_alias" "secrets" {
+  name          = "alias/${var.name}-eks-secrets"
+  target_key_id = aws_kms_key.secrets.key_id
+}
+
+data "aws_iam_policy_document" "cluster_kms" {
+  statement {
+    actions   = ["kms:DescribeKey", "kms:CreateGrant"]
+    resources = [aws_kms_key.secrets.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "cluster_kms" {
+  name   = "eks-secrets-kms"
+  role   = aws_iam_role.cluster.name
+  policy = data.aws_iam_policy_document.cluster_kms.json
+}
+
 # --- Cluster -----------------------------------------------------------------
 
 # Created by Terraform (not by EKS) so that the retention is bounded and the
@@ -78,6 +112,13 @@ resource "aws_eks_cluster" "this" {
     public_access_cidrs     = var.endpoint_public_access_cidrs
   }
 
+  encryption_config {
+    provider {
+      key_arn = aws_kms_key.secrets.arn
+    }
+    resources = ["secrets"]
+  }
+
   upgrade_policy {
     support_type = "STANDARD"
   }
@@ -91,6 +132,7 @@ resource "aws_eks_cluster" "this" {
 
   depends_on = [
     aws_iam_role_policy_attachment.cluster,
+    aws_iam_role_policy.cluster_kms,
     aws_cloudwatch_log_group.cluster,
   ]
 }
@@ -201,10 +243,25 @@ locals {
   # AmazonEKS_CNI_Policy is not here: a pod on a node with this role cannot
   # attach or detach ENIs, because that permission now lives only on the
   # vpc-cni Pod Identity role above, bound to kube-system/aws-node.
+  #
+  # AmazonSSMManagedInstanceCore is not here either (#63, independent
+  # security-axis review pass, filed as "SA3"): that managed policy's own
+  # `ssm:GetParameter`/`ssm:GetParameters` are granted on Resource "*"
+  # (confirmed against the live policy, version v2, 2026-11-23), letting
+  # any process on a node (a hostNetwork Pod, a container escape) read
+  # every plaintext SSM parameter in the account by name, region-wide -
+  # broader than Session Manager connectivity, the only thing this
+  # platform's own runbooks (SSM Session Manager, no SSH) actually need
+  # from it. aws_iam_role_policy.node_ssm_session_only below grants
+  # exactly the actions Session Manager's own documentation lists for
+  # that (ssmmessages/ec2messages plus ssm:UpdateInstanceInformation so
+  # the instance registers as a managed node at all), dropping
+  # GetParameter/GetParameters, GetDocument, PutInventory and every
+  # patch/association/compliance action the managed policy also grants
+  # that this platform's nodes have no documented use for.
   node_managed_policies = [
     "AmazonEKSWorkerNodePolicy",
     "AmazonEC2ContainerRegistryPullOnly",
-    "AmazonSSMManagedInstanceCore",
   ]
 }
 
@@ -218,6 +275,41 @@ resource "aws_iam_role_policy_attachment" "system_node" {
 
   role       = aws_iam_role.system_node.name
   policy_arn = "arn:${local.partition}:iam::aws:policy/${each.value}"
+}
+
+# Session Manager connectivity only, not AmazonSSMManagedInstanceCore's full
+# grant (see the comment on local.node_managed_policies above). Actions and
+# their Resource "*" scoping are copied verbatim from that managed policy's
+# own two ssmmessages/ec2messages statements, confirmed against the live
+# policy (v2, 2026-11-23): neither service supports a narrower resource
+# scope (every real-world example and this account's own managed policy use
+# "*" for both). ssm:UpdateInstanceInformation is the one ssm:* action kept,
+# since without it the instance never registers as a managed node and
+# Session Manager cannot find it at all.
+data "aws_iam_policy_document" "node_ssm_session_only" {
+  statement {
+    sid       = "SessionManagerChannel"
+    actions   = ["ssmmessages:CreateControlChannel", "ssmmessages:CreateDataChannel", "ssmmessages:OpenControlChannel", "ssmmessages:OpenDataChannel"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "SessionManagerEc2Messages"
+    actions   = ["ec2messages:AcknowledgeMessage", "ec2messages:DeleteMessage", "ec2messages:FailMessage", "ec2messages:GetEndpoint", "ec2messages:GetMessages", "ec2messages:SendReply"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "SessionManagerRegistration"
+    actions   = ["ssm:UpdateInstanceInformation"]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "system_node_ssm_session_only" {
+  name   = "ssm-session-only"
+  role   = aws_iam_role.system_node.name
+  policy = data.aws_iam_policy_document.node_ssm_session_only.json
 }
 
 # IMDSv2 only, one hop: a pod on a system node that does not use the host
@@ -238,6 +330,32 @@ resource "aws_launch_template" "system_node" {
     http_endpoint               = "enabled"
     http_tokens                 = "required"
     http_put_response_hop_limit = 1
+  }
+
+  # Every value below except "encrypted" matches this node group's own AMI
+  # (ami_type AL2023_x86_64_STANDARD)'s own root block device exactly -
+  # confirmed against a real `describe-images` of the SSM recommended-AMI
+  # parameter this platform already pins to (#50/karpenter-crd's own
+  # comment), 2026-11-23: device /dev/xvda, 20 GiB, gp3, 3000 IOPS, 125
+  # MiB/s throughput, delete-on-termination true, encrypted FALSE at the
+  # AMI's own snapshot. Account-level "EBS encryption by default" is one
+  # way to fix that, but nothing in this layer enforces the account has it
+  # on (#63, filed as "SA3") - without this block, a node's root volume is
+  # only encrypted if someone else set that account-wide setting. This
+  # block makes the guarantee explicit here instead, with every other
+  # field pinned to the AMI's own current default so this change is
+  # encryption only, not a capacity or performance change.
+  block_device_mappings {
+    device_name = "/dev/xvda"
+
+    ebs {
+      volume_size           = 20
+      volume_type           = "gp3"
+      iops                  = 3000
+      throughput            = 125
+      delete_on_termination = true
+      encrypted             = true
+    }
   }
 
   update_default_version = true

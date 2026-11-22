@@ -47,6 +47,17 @@ resource "aws_iam_role_policy_attachment" "karpenter_node" {
   policy_arn = "arn:${local.partition}:iam::aws:policy/${each.value}"
 }
 
+# Session Manager connectivity only - see the comment on
+# local.node_managed_policies and data.aws_iam_policy_document.
+# node_ssm_session_only, both in eks.tf. Every Karpenter-launched node
+# shares this one role, so this is the policy a team's own capacity-pool
+# node gets too, not only this system role's own nodes.
+resource "aws_iam_role_policy" "karpenter_node_ssm_session_only" {
+  name   = "ssm-session-only"
+  role   = aws_iam_role.karpenter_node.name
+  policy = data.aws_iam_policy_document.node_ssm_session_only.json
+}
+
 resource "aws_eks_access_entry" "karpenter_node" {
   cluster_name  = aws_eks_cluster.this.name
   principal_arn = aws_iam_role.karpenter_node.arn
