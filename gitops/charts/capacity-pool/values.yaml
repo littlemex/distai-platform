@@ -2,8 +2,12 @@
 # come from a cells/<cluster-name>/capacity-pool/*.yaml parameter file via
 # cells.ApplicationSet.yaml's valuesFrom (clusterName from the Cluster
 # generator's own "name" param; nodeRole from the registration Secret's
-# distai.dev.annotations/karpenter-node-role annotation, the one Terraform
-# output no platform add-on reads - RFC #25 Decision 2).
+# distai.dev.annotations/karpenter-node-role annotation - RFC #25 Decision
+# 2). This was previously described as "the one Terraform output no
+# platform add-on reads"; #41's optional-pool (a platform add-on, core
+# tier) reads exactly this annotation too (#63, filed as #58) - the
+# annotation is not cell-specific-parameter-file-only, only nodeRole's
+# *value* is cell-specific.
 clusterName: ""
 nodeRole: ""
 
