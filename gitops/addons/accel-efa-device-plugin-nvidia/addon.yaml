@@ -87,6 +87,18 @@
 # driver dra.net -- #19's own Upstream state table) is out of scope for
 # both accel-efa-device-plugin-* releases: see gitops/README.md's "Known
 # limits" for why, and #19/#50 for where it is expected to be designed.
+# securityContext overrides the chart's own default (privileged: true,
+# allowPrivilegeEscalation: true, runAsUser: 0) -- unlike hostNetwork
+# (hardcoded in the template, no values key can change it, gitops/README.md's
+# "Known limits" explains the consequence), this field is read from
+# .Values.securityContext and so is a real override. Confirmed on real
+# hardware, not assumed from the chart's own code: allocatable.vpc.amazonaws.com/efa
+# still read 4 on a live p4d.24xlarge node after rolling this exact override
+# out over the chart's own privileged default, both configurations checked
+# back to back on the identical node (Fable 5.2 review round 1, finding B1).
+# runAsUser stays 0 -- the chart's own device-plugin binary opens
+# /dev/infiniband and the kubelet device-plugin socket as root in its
+# default image, and this PR does not carry a rebuilt image to change that.
 addon: accel-efa-device-plugin-nvidia
 tier: core
 chart: aws-efa-k8s-device-plugin
@@ -99,3 +111,10 @@ values:
     tag: "v0.5.22-eksbuild.9@sha256:a392d84ff82b23580fd92d0a6c770136c56d4a6ee979a47d1bf4e379a7171647"
   nodeSelector:
     distai.dev/nvidia-gpu-method: device-plugin
+  securityContext:
+    privileged: false
+    allowPrivilegeEscalation: false
+    runAsNonRoot: false
+    runAsUser: 0
+    capabilities:
+      drop: ["ALL"]
