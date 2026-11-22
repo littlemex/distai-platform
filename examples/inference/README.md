@@ -32,9 +32,8 @@ How to measure with them is described in [`_shared/README.md`](_shared/README.md
 | [`_shared/dashboards/sglang-pd.json`](_shared/dashboards/sglang-pd.json) | Yes | Not yet fed by a real SGLang run in this round: this round's Prometheus check (see `vllm/agg-baseline`'s own Status) scraped a vLLM engine only. SGLang's own `/metrics` was not inspected, and `sglang-pd.json`'s panels were not opened against a real Grafana |
 
 `tests/0.static.sh` covers `vllm/disagg-pd-llmd` and, as of this round, both SGLang charts' own
-`helm lint`/`helm template`/kubeconform (the SGLang-specific placement/transport values-contract
-checks that already cover the vLLM charts do not cover the SGLang charts yet — a separate, deeper
-follow-up). The llm-d row above is the only one of the five combinations whose request path does
+`helm lint`/`helm template`/kubeconform (the placement/transport values-contract checks that
+already cover the vLLM charts do not cover the SGLang charts yet — a separate, deeper follow-up). The llm-d row above is the only one of the five combinations whose request path does
 not work end to end yet; it is a real, reproduced failure, not an untested path.
 
 ## Conventions

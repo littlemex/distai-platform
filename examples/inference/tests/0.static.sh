@@ -227,6 +227,41 @@ for chart in "${DISAGG}" "${AGG}" "${LLMD}" "${SGLANG_DISAGG}" "${SGLANG_AGG}"; 
     bash -c "'${HELM}' template contract-test '${chart}' --namespace contract-test > '${RENDERED_DIR}/${rendered_name}.yaml'"
 done
 
+# A render against default values only (above) does not reach a template
+# branch gated on a non-default value. vllm/disagg-pd-llmd's own
+# routingSidecar.ssrfProtection=false branch is exactly one such case,
+# root-caused on a real review round: a volumeMount and its volume were
+# each gated on a different condition, so ssrfProtection=false rendered a
+# Pod spec naming a volumeMount whose volume was never defined -- the API
+# server rejects that at apply time, something no schema-only kubeconform
+# check catches either (a dangling volume reference is not a schema
+# violation). Render that one non-default value explicitly and check every
+# container's own volumeMounts against the Pod's own volumes, for every
+# Deployment this chart renders, not only the one that broke.
+if [[ -f "${LLMD}/Chart.yaml" ]]; then
+  run_check "helm template vllm/disagg-pd-llmd (routingSidecar.ssrfProtection=false): no dangling volumeMount" \
+    bash -c "'${HELM}' template contract-test '${LLMD}' --namespace contract-test \
+      --set model.name=contract-test-model --set routingSidecar.ssrfProtection=false \
+      > '${WORK_DIR}/llmd-ssrf-false.yaml' && \
+      '${UV}' run --no-project -q --with 'pyyaml==${PYTHON_YAML_VERSION}' '${PYTHON}' - '${WORK_DIR}/llmd-ssrf-false.yaml' <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+bad = []
+for d in docs:
+    if d.get('kind') != 'Deployment':
+        continue
+    spec = d['spec']['template']['spec']
+    names = {v['name'] for v in spec.get('volumes', [])}
+    for c in spec.get('containers', []) + spec.get('initContainers', []):
+        for vm in c.get('volumeMounts', []):
+            if vm['name'] not in names:
+                bad.append(f\"{d['metadata']['name']}/{c['name']} mounts {vm['name']!r}, not in volumes {sorted(names)}\")
+if bad:
+    print('\\n'.join(bad))
+    sys.exit(1)
+PY"
+fi
+
 # ------------------------------------------------------- 5. kubeconform
 
 KUBECONFORM_BIN="${WORK_DIR}/kubeconform"

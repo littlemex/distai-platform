@@ -141,8 +141,9 @@ engine:
   startupTimeoutSeconds: 1800
   # The SGLang image has no non-root user of its own; it runs as root by
   # default. These values run it as an arbitrary non-root UID instead, with
-  # HOME and every cache under the writable /cache volume. Not yet run on
-  # real hardware.
+  # HOME and every cache under the writable /cache volume. Confirmed on
+  # real hardware: both engines and the router reach Running/Ready under
+  # this security context (README, Known issues).
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 1000
