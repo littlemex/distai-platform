@@ -1,0 +1,16 @@
+# NetworkPolicy for Karpenter's own controller Pod (#63, filed as "SA4").
+# A separate Application from karpenter/addon.yaml, delivered in the same
+# "controllers" wave - see gitops/addons/kueue-netpol/addon.yaml's own
+# comment on why ordering between the two does not matter. dir, not
+# chart/repoURL/version: a platform-owned object, never an upstream
+# registry chart (RFC #25 Decision 2).
+#
+# namespace must equal karpenter/addon.yaml's own namespace: value
+# exactly - see gitops/charts/karpenter-netpol/README.md.
+addon: karpenter-netpol
+tier: core
+dir: gitops/charts/karpenter-netpol
+wave: controllers
+namespace: kube-system
+values:
+  namespace: kube-system

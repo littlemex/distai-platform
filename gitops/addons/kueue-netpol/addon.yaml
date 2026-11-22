@@ -1,0 +1,18 @@
+# NetworkPolicy for Kueue's own controller-manager Pod (#63, filed as
+# "SA4"). A separate Application from kueue/addon.yaml, delivered in the
+# same "controllers" wave: order between the two does not matter (a
+# NetworkPolicy applied before the Pod exists simply has nothing to
+# select yet; applied after, traffic is briefly unrestricted - neither
+# is a correctness problem a dependency edge would need to prevent). dir,
+# not chart/repoURL/version: this is a platform-owned object, never an
+# upstream registry chart (RFC #25 Decision 2).
+#
+# namespace must equal kueue/addon.yaml's own namespace: value exactly -
+# see gitops/charts/kueue-netpol/README.md.
+addon: kueue-netpol
+tier: core
+dir: gitops/charts/kueue-netpol
+wave: controllers
+namespace: kueue-system
+values:
+  namespace: kueue-system

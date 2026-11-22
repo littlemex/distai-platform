@@ -1,0 +1,30 @@
+# Default-deny, name-the-exception (#63, filed as "SA4"). Before this
+# chart, any Pod in any namespace could reach every port Karpenter's own
+# controller Pod listens on. At this pinned version (1.15.2) that is only
+# metrics (8080) and the health probe (8081) - no webhook port exists to
+# protect (older Karpenter releases shipped a knative-style webhook
+# server; the chart no longer does, confirmed by rendering it).
+#
+# Only the health probe is opened: the same "source cannot be matched by
+# a selector" reasoning Kueue's own upstream NetworkPolicy component
+# documents for its own probe port applies here too (kubelet, on this
+# Pod's own node, is the caller). Metrics (8080) stays denied: no
+# Prometheus Operator CRDs or scraper exist in a cell yet (the same state
+# dcgm-exporter's and kueue-netpol's own NetworkPolicy document) - narrow
+# it to a real scraper's identity once one exists, rather than opening it
+# to every Pod in the meantime.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: karpenter-controller
+  namespace: {{ required "namespace is required" .Values.namespace | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml (required "podSelector is required" .Values.podSelector) | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    # kubelet (this Pod's own node) -> the liveness/readiness probe.
+    - ports:
+        - protocol: TCP
+          port: 8081

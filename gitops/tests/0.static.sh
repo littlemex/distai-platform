@@ -269,6 +269,21 @@ run_check "pinned-chart-version CRDs (check_pinned_crds.py)" \
   "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
   python3 "${SCRIPT_DIR}/check_pinned_crds.py" "${REPO_ROOT}" "${RENDERED_DIR}"
 
+# -------------------------------------- 8. AppProject whitelist cross-check
+#
+# #63, filed as "SA1" item 1: gitops/bootstrap/appproject-whitelist.yaml
+# (the platform AppProject's own clusterResourceWhitelist/
+# namespaceResourceWhitelist) is a hand-maintained list, not derived live
+# at bootstrap time. check_appproject_whitelist.py is what keeps it honest:
+# it helm-templates every gitops/addons/*/addon.yaml and gitops/
+# addon-catalog/*/addon.yaml fresh (needs network access to each add-on's
+# own registry, like check_pinned_crds.py above) and fails if any rendered
+# (group, kind) pair is missing from that file - the drift this script
+# exists to catch before it reaches a real cluster as a refused sync.
+run_check "platform AppProject whitelist (check_appproject_whitelist.py)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_appproject_whitelist.py" "${REPO_ROOT}"
+
 echo
 if [[ "${failures}" -eq 0 ]]; then
   echo "RESULT PASS: all static checks passed"

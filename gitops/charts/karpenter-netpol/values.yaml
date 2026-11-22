@@ -1,0 +1,10 @@
+# Namespace karpenter/addon.yaml delivers its controller Deployment into.
+# No default: must match that file's own namespace: field exactly.
+namespace: ""
+
+# Pod labels the pinned chart's own Deployment sets on its controller Pod
+# (helm template oci://public.ecr.aws/karpenter/karpenter:1.15.2, confirmed
+# 2026-11-23). A version bump that changes these needs a reviewed diff
+# here too.
+podSelector:
+  app.kubernetes.io/name: karpenter

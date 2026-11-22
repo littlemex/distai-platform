@@ -50,5 +50,25 @@ values:
     tolerations:
       - key: CriticalAddonsOnly
         operator: Exists
+    # A toleration grants eligibility, it does not exclude every other
+    # node (#63, filed as "SA3"): nothing stopped this Deployment's Pod
+    # from also landing on a Karpenter-launched node (a team's own
+    # capacity-pool node, or optional-pool's), where it holds a Pod
+    # Identity role and matters where it runs. Karpenter's own chart
+    # already carries this exact affinity by default (confirmed with
+    # `helm show values`, tag v1.15.2: `karpenter.sh/nodepool
+    # DoesNotExist`) - every Karpenter-launched node is labelled
+    # `karpenter.sh/nodepool` by Karpenter itself, so this excludes any
+    # of them generically, not only today's system node group by name.
+    # Kueue's own chart default (`affinity: {}`) has no such rule, so it
+    # is added here explicitly, matching Karpenter's own convention
+    # rather than inventing a different one.
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: karpenter.sh/nodepool
+                  operator: DoesNotExist
 syncOptions:
   - ServerSideApply=true
