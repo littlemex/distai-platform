@@ -3,13 +3,17 @@
 # gitops/cells/example-cell/smoke/queue.yaml and
 # gitops/cells/dp-a19-gpu-r3/smoke/queue.yaml. Requests the "trn"
 # ResourceFlavor this cell's own capacity-pool/trn.yaml creates (#28
-# section D). This PR's own 1.e2e.sh extension builds the Trainium cell
-# without exercising this file's own ClusterQueue/LocalQueue/canary flow
-# (its accelerator check is a separate bare pod requesting
-# aws.amazon.com/neuron directly -- the smoke ClusterQueue's own
-# resourceGroups cover only cpu/memory, never an accelerator resource);
-# this file still has to exist, matching gitops/cells/dp-a19-gpu-r3/'s own
-# pair, because Kueue's install docs (#25 Facts checked) have
+# section D). clusterQueue.acceleratorResource/acceleratorQuota (#63,
+# filed as #56) now cover aws.amazon.com/neuron too, matching trn.yaml's
+# own taint on that resource -- this still does not, by itself, make
+# 1.e2e.sh's own accelerator check (a bare pod requesting
+# aws.amazon.com/neuron directly) go through Kueue; it proves the
+# ResourceFlavor/ClusterQueue accept the resource without rejecting the
+# render or the apply, not that a Kueue-admitted Workload requesting it
+# is actually admitted end to end -- that is a real-hardware check still
+# to be written (tracked in #56), not claimed here. This file still has
+# to exist, matching gitops/cells/dp-a19-gpu-r3/'s own pair, because
+# Kueue's install docs (#25 Facts checked) have
 # ClusterQueue/LocalQueue admission depend on a Healthy webhook
 # cluster-wide regardless of whether this specific cell's own queue is
 # ever used, and because a future, unmodified run of 1.e2e.sh's base
@@ -22,3 +26,12 @@ namespace: distai-smoke
 values:
   clusterQueue:
     resourceFlavor: trn
+    # #63/#56: trn.yaml's own ResourceFlavor now carries an
+    # aws.amazon.com/neuron taint/toleration; without covering the same
+    # resource here, Kueue would still admit this chart's CPU-only
+    # canary through that flavor, landing it on the tainted Trainium
+    # node for free, and no accelerator request would ever reach Kueue
+    # to exercise quota for it. acceleratorQuota: "1" matches this
+    # pool's own single-instance-type, one-neuroncore-per-canary shape.
+    acceleratorResource: aws.amazon.com/neuron
+    acceleratorQuota: "1"

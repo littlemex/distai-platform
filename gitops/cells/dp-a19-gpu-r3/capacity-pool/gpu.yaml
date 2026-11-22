@@ -59,6 +59,17 @@ values:
     rootVolumeSizeGi: "100Gi"
   accelerator:
     resourceName: nvidia.com/gpu
+    # #63/#56: this pool previously set resourceName/methodLabel only,
+    # with no taint - nothing stopped an ordinary CPU-only pod from
+    # landing on this GPU node for free, stranding its GPU(s) at no
+    # Kueue quota cost (#22 Decision 10 H4). key matches resourceName
+    # itself: any pod actually requesting the device, from whichever
+    # team, may use it; #22's own per-team exclusivity is a separate
+    # taint (tenancy.teamTaint), not this one.
+    taint:
+      key: nvidia.com/gpu
+      value: "true"
+      effect: NoSchedule
     methodLabel:
       key: distai.dev/nvidia-gpu-method
       value: device-plugin
@@ -67,7 +78,6 @@ valuesFrom:
   - helmKey: clusterName
     param: name
   # infra/foundation output karpenter_node_role_name, carried by the
-  # registration Secret (RFC #25 Decision 1/2) - the one annotation no
-  # platform add-on reads.
+  # registration Secret (RFC #25 Decision 1/2).
   - helmKey: nodeRole
     annotationKey: distai.dev.annotations/karpenter-node-role
