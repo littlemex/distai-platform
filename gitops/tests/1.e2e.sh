@@ -32,7 +32,7 @@
 #      re-adopts them without duplicating; destroy still removes every
 #      instance directly.
 #
-# Issue #41 (platform-optional add-ons), step 15: a cell's own
+# Issue #41 (platform-optional add-ons), step 14b: a cell's own
 # gitops/cells/<cell>/addons/dcgm-exporter.yaml marker file generates a
 # dcgm-exporter Application through addons-optional.ApplicationSet.yaml
 # (absent without it), the Application reaches Healthy+Synced, its
@@ -171,8 +171,8 @@ BOOTSTRAP_RAN=0
 BROKEN_BRANCHES=()
 CLEANUP_FAILED=0
 CELL_FIXTURE_BRANCH=""
-# Step 15's GPU NodePool/EC2NodeClass/trigger Pod test fixture (issue #41),
-# named per run; empty until step 15 applies it. cleanup() deletes all
+# Step 14b's GPU NodePool/EC2NodeClass/trigger Pod test fixture (issue #41),
+# named per run; empty until step 14b applies it. cleanup() deletes all
 # three by this name on any failure path that reaches it.
 GPU_FIXTURE_NAME=""
 
@@ -593,14 +593,14 @@ cleanup() {
         k delete job canary --ignore-not-found --wait=false >/dev/null 2>&1
         k delete application root -n "${ARGOCD_NS}" --cascade=background --ignore-not-found >/dev/null 2>&1
       fi
-      # Step 15's test fixture, never part of the platform: deleting the
+      # Step 14b's test fixture, never part of the platform: deleting the
       # NodePool lets Karpenter drain its GPU node before the destroy below;
       # the foundation teardown guard terminates it regardless.
       if [[ -n "${GPU_FIXTURE_NAME}" ]]; then
         k delete pod "${GPU_FIXTURE_NAME}" -n default --ignore-not-found --wait=false >/dev/null 2>&1
         k delete nodepool "${GPU_FIXTURE_NAME}" --ignore-not-found --wait=false >/dev/null 2>&1
         k delete ec2nodeclass "${GPU_FIXTURE_NAME}" --ignore-not-found --wait=false >/dev/null 2>&1
-        info "cleanup: deleted the step 15 GPU test fixture ${GPU_FIXTURE_NAME} (Pod, NodePool, EC2NodeClass)"
+        info "cleanup: deleted the step 14b GPU test fixture ${GPU_FIXTURE_NAME} (Pod, NodePool, EC2NodeClass)"
       fi
       tf "${DESTROY_FROM_ROOT}" destroy -auto-approve -input=false -var-file="${TFVARS}"
       local destroy_rc=$?
@@ -1876,7 +1876,7 @@ ec2nodeclasses_after="$(k get ec2nodeclasses -o jsonpath='{.items[*].metadata.na
   || fail "EC2NodeClass ${NODECLASS}'s creationTimestamp changed -- it was deleted and recreated, not re-adopted"
 pass "re-running bootstrap.sh re-adopted the same NodePool and EC2NodeClass (unchanged creationTimestamps), not a duplicate"
 
-# ---------------- 15. platform-optional add-on: dcgm-exporter (issue #41)
+# ---------------- 14b. platform-optional add-on: dcgm-exporter (issue #41)
 #
 # Issue #41 Decision 3/4: a cell opts into a platform-optional component
 # by the mere presence of gitops/cells/<cell>/addons/<addon>.yaml, read by
@@ -2079,7 +2079,7 @@ fi
 # tag; metadataOptions repeats that template's IMDSv2 settings. The root
 # volume is set explicitly because the NVIDIA AMI and the dcgm-exporter
 # image are larger than the CPU pools need. Every instance carries this
-# run's TEST_TAG_KEY tag, so step 16's leftover check finds it.
+# run's TEST_TAG_KEY tag, so step 15's leftover check finds it.
 GPU_FIXTURE_NAME="e2e-gpu-$(python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:12])' "${RUN_ID}")"
 gpu_role="$(k get ec2nodeclass "${NODECLASS}" -o jsonpath='{.spec.role}')"
 gpu_ami_family="$(k get ec2nodeclass "${NODECLASS}" -o jsonpath='{.spec.amiFamily}')"
@@ -2174,7 +2174,7 @@ spec:
           cpu: 100m
           memory: 64Mi
 YAML
-k apply -f "${WORK_DIR}/gpu-fixture.yaml" || fail "kubectl apply the step 15 GPU test fixture"
+k apply -f "${WORK_DIR}/gpu-fixture.yaml" || fail "kubectl apply the step 14b GPU test fixture"
 pass "applied the GPU test fixture ${GPU_FIXTURE_NAME} (EC2NodeClass, NodePool limited to cpu 8, trigger Pod)"
 
 # ---- 15d. dcgm-exporter lands on the GPU node, and only there
@@ -2372,7 +2372,7 @@ wait_until 300 10 "dcgm-exporter Application disappears once its marker file is 
 pass "removing ${DCGM_MARKER_REL} removed ${APP_DCGM} and orphaned DaemonSet ${DCGM_NS}/${DCGM_DS} and namespace ${DCGM_NS} (same UIDs) -- issue #41 Decision 4's removal half"
 
 # ---- 15f. restore GITOPS_REVISION, delete the GPU test fixture
-run_bootstrap --revision "${GITOPS_REVISION}" || fail "bootstrap.sh (restoring --revision ${GITOPS_REVISION} after step 15)"
+run_bootstrap --revision "${GITOPS_REVISION}" || fail "bootstrap.sh (restoring --revision ${GITOPS_REVISION} after step 14b)"
 if [[ "${ADD_DCGM_REVISION}" == "${GITOPS_REVISION}" ]]; then
   wait_until 600 15 "dcgm-exporter Application reappears and reaches Synced" app_synced "${APP_DCGM}" \
     || fail "${APP_DCGM} did not reappear and reach Synced after restoring --revision ${GITOPS_REVISION}"
@@ -2381,11 +2381,11 @@ if [[ "${ADD_DCGM_REVISION}" == "${GITOPS_REVISION}" ]]; then
   pass "restoring the marker file re-adopted the orphaned DaemonSet ${DCGM_NS}/${DCGM_DS} (unchanged UID)"
 fi
 k delete pod "${GPU_FIXTURE_NAME}" -n default --ignore-not-found --wait=true --timeout=120s >/dev/null \
-  || fail "kubectl delete the step 15 trigger Pod ${GPU_FIXTURE_NAME}"
+  || fail "kubectl delete the step 14b trigger Pod ${GPU_FIXTURE_NAME}"
 k delete nodepool "${GPU_FIXTURE_NAME}" --ignore-not-found --wait=true --timeout=900s >/dev/null \
-  || fail "kubectl delete the step 15 NodePool ${GPU_FIXTURE_NAME}"
+  || fail "kubectl delete the step 14b NodePool ${GPU_FIXTURE_NAME}"
 k delete ec2nodeclass "${GPU_FIXTURE_NAME}" --ignore-not-found --wait=true --timeout=600s >/dev/null \
-  || fail "kubectl delete the step 15 EC2NodeClass ${GPU_FIXTURE_NAME}"
+  || fail "kubectl delete the step 14b EC2NodeClass ${GPU_FIXTURE_NAME}"
 # Capture kubectl's own exit code before treating an empty result
 # as "no nodes" -- `2>/dev/null` with command substitution makes an API
 # error and a genuinely empty list produce the identical empty string,
@@ -2399,7 +2399,7 @@ wait_until 900 20 "the GPU test fixture's node is gone" gpu_fixture_nodes_gone \
   || fail "node(s) from NodePool ${GPU_FIXTURE_NAME} remain after deleting it: $(k get nodes -l "karpenter.sh/nodepool=${GPU_FIXTURE_NAME}" -o name 2>&1 | tr '\n' ' ')"
 pass "deleted the GPU test fixture ${GPU_FIXTURE_NAME} and its node"
 
-# ------------------------------------------------------- 16. destroy
+# ------------------------------------------------------- 15. destroy
 #
 # Acceptance criterion 7, last clause: destroying the cell still has the
 # foundation's teardown guard (#20/#21) terminate every Karpenter instance

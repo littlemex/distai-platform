@@ -265,8 +265,13 @@ def selftest() -> int:
                 ok = rc == 0 and not fails
                 detail = f"expected a clean pass, got rc={rc} failures={fails}"
             else:
-                ok = rc != 0 and any(expect_substr in f for f in fails) and len(fails) <= 2
-                detail = f"expected exactly the {expect_substr!r} rule to fail (±1 unrelated), got {fails}"
+                # #63 (filed as #55 item 7): these cases are each named "fails
+                # only" one specific rule, but the assertion let a second,
+                # unrelated failure through silently (len(fails) <= 2). Tightened
+                # to match what the case names actually claim -- exactly one
+                # failure, and it is the expected one.
+                ok = rc != 0 and len(fails) == 1 and expect_substr in fails[0]
+                detail = f"expected exactly one failure, the {expect_substr!r} rule, got {fails}"
             check(f"selftest: {name}", ok, detail)
             if not ok:
                 failures += 1
