@@ -181,7 +181,7 @@ separate `ApplicationSet` objects.
 | --- | --- | --- |
 | `platform` | `crds` (`karpenter-crd`) | yes |
 | `platform` | `controllers` (`karpenter`, `kueue`) | yes |
-| `platform` | `accelerators` (`accel-nvidia-device-plugin`, `accel-nvidia-dra`, `accel-neuron-device-plugin`, `accel-neuron-dra`, `accel-device-classes`) | yes |
+| `platform` | `accelerators` (`accel-nvidia-device-plugin`, `accel-nvidia-dra`, `accel-neuron-device-plugin`, `accel-neuron-dra`, `accel-device-classes`, `accel-efa-device-plugin-nvidia`, `accel-efa-device-plugin-neuron`) | yes |
 | `platform` | `extras` | no - [#18](https://github.com/littlemex/distai-platform/issues/18)/[#23](https://github.com/littlemex/distai-platform/issues/23) |
 | `cells` | `capacity` (`capacity-pool/*`, `smoke/*`) | yes |
 | `cells` | `teams` | no - [#22](https://github.com/littlemex/distai-platform/issues/22) |
@@ -234,6 +234,7 @@ Facts checked; no content digest is recorded for these yet):
 | `accel-nvidia-dra` | `oci://registry.k8s.io/dra-driver-nvidia/charts/dra-driver-nvidia-gpu` | `0.5.1` |
 | `accel-neuron-device-plugin`, `accel-neuron-dra` | `oci://public.ecr.aws/neuron/neuron-helm-chart` (one chart, two releases with opposite toggles) | `1.11.2` |
 | `accel-device-classes` | local chart `gitops/charts/accel-device-classes` | - |
+| `accel-efa-device-plugin-nvidia`, `accel-efa-device-plugin-neuron` | `aws-efa-k8s-device-plugin` from `https://aws.github.io/eks-charts` (classic Helm repository; one chart, two releases - its own `affinity` is not values-driven, so a single release cannot OR the two vendor method labels, see the add-on's own comment) | `v0.5.35` |
 
 ## Accelerators
 
@@ -255,6 +256,21 @@ advertiser is always delivered and costs nothing on a cell that does not
 use it. `cells/dp-a19-gpu-r3/capacity-pool/gpu.yaml` and
 `cells/dp-a19-trn-r3/capacity-pool/trn.yaml` are the device-plugin-method
 pools the light-tier e2e launches nodes from.
+
+EFA has no vendor of its own (#19 Decision 4: "EFA | Same as the GPU on
+the node"), so it does not add a sixth row to the table above:
+`accel-efa-device-plugin-nvidia` selects
+`distai.dev/nvidia-gpu-method=device-plugin` and
+`accel-efa-device-plugin-neuron` selects
+`distai.dev/neuron-method=device-plugin` - two releases of the one
+upstream chart (its own `nodeAffinity` is hardcoded in the chart's
+template, not values-driven, so a single release cannot OR the two
+vendor labels; see the add-on's own comment) - and each advertises
+`vpc.amazonaws.com/efa` on whichever of those nodes also has EFA network
+interfaces attached
+(`pool.networkInterfaces`, [#50](https://github.com/littlemex/distai-platform/issues/50)).
+Real hardware (`p4d.24xlarge`, two nodes, `NET/Libfabric`/GDRDMA
+`all_reduce_perf`) is in this PR's own Test Results.
 
 ## Adding a cell
 
@@ -293,6 +309,25 @@ pools the light-tier e2e launches nodes from.
   a DRA node (#19 E2, E4c); a static `NodePool` for DRA is
   [#27](https://github.com/littlemex/distai-platform/issues/27)'s scope.
   Only the device-plugin method is verified on real nodes.
+- The EFA **DRA** driver (`aws-dranet`, DeviceClass
+  `efa.networking.k8s.aws`, driver `dra.net` - #19's own Upstream state
+  table) is out of scope for both `accel-efa-device-plugin-nvidia` and
+  `accel-efa-device-plugin-neuron`: these add-ons only ship the
+  device-plugin method (`vpc.amazonaws.com/efa` as a Layer 1 extended
+  resource), the same scope line #28 already drew between
+  `accel-nvidia-device-plugin`/`accel-neuron-device-plugin` and their own
+  `-dra` siblings. Pairing EFA's own DRA driver with the GPU/Neuron DRA
+  method on the same node (#19's own alignment measurement: `pcieRoot`
+  constraints, 45.8 vs 3.6-4.7 GB/s) is left to a follow-up issue; nothing
+  in either add-on's own nodeSelector shape blocks adding it later.
+- Both EFA add-ons' pinned image stays at the chart's own
+  default Region (`us-west-2`), never overridden per cell: see the
+  add-on's own `addon.yaml` comment for why (the platform's own
+  `valuesFrom` mechanism substitutes a whole parameter value, never
+  concatenates one into a larger string, and the registry host embeds the
+  Region in the middle of the string). Confirmed functionally
+  Region-independent (identical digest pulled from three Regions), so
+  this is a deferred optimization, not a defect.
 - `platform.ApplicationSet.yaml` and `cells.ApplicationSet.yaml`'s
   `goTemplate: true` plus `templatePatch` mechanism (Decision 2) is this
   PR's own construction, not a primary-sourced example from Argo CD's
