@@ -11,9 +11,11 @@
 # the generated Application, never a chart value): ServerSideApply=true
 # matches Kueue's own install docs (kubectl apply --server-side), consistent
 # with - not stated as caused by - its CRDs exceeding the client-side
-# last-applied-configuration annotation's size limit; CreateNamespace=true
-# because this chart's own namespace (below) does not exist until Argo CD
-# creates it.
+# last-applied-configuration annotation's size limit. CreateNamespace=true
+# no longer needs restating here (#63/#64 fixed platform.ApplicationSet.yaml's
+# templatePatch to always render it ahead of any addon-specific entry) -
+# this chart's own namespace (below) still does not exist until Argo CD
+# creates it, the base template now guarantees that for every addon.
 #
 # deviceClassMappings is left unset here: it is Kueue's own cluster-wide
 # setting for admitting DRA-shaped quota, and #19's accelerator add-ons are
@@ -50,4 +52,3 @@ values:
         operator: Exists
 syncOptions:
   - ServerSideApply=true
-  - CreateNamespace=true

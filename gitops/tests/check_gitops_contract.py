@@ -81,18 +81,27 @@ def main(root: str) -> int:
         f"found: {cell_smoke_files}",
     )
 
-    # First-PR scope (decision 9): no accelerators/ or teams/* yet, and no
-    # addon.yaml outside the three add-ons this PR delivers.
+    # Every directory under addons/ has exactly one addon.yaml, and that
+    # file is independently structurally valid (checked below via
+    # check_addon_yaml). This PR shipped a hand-typed, exact-equality set
+    # here instead (decision 9's first-PR scope: karpenter-crd, karpenter,
+    # kueue); #28/#40/#41 each then extended their own copy of that literal
+    # for their own addons, so the merged tree's real addon count matched
+    # neither copy and the check failed on merge regardless of which PR
+    # landed second (#63, filed as #55). This directory-shape check is
+    # derived from the filesystem, like sourceRepos already is in
+    # bootstrap.sh, and needs no further edit as addons/ grows; the three
+    # addon.yaml files this PR's own Decisions discuss by name are still
+    # checked explicitly below, independent of this generic shape check.
     addon_dirs = sorted(
         d
         for d in os.listdir(os.path.join(gitops, "addons"))
         if os.path.isdir(os.path.join(gitops, "addons", d))
     ) if os.path.isdir(os.path.join(gitops, "addons")) else []
-    expected_addon_dirs = {"karpenter-crd", "karpenter", "kueue"}
     check(
-        "addons/ contains only karpenter-crd, karpenter, kueue in this PR (decision 9)",
-        set(addon_dirs) == expected_addon_dirs,
-        f"found: {addon_dirs}, expected exactly {sorted(expected_addon_dirs)}",
+        "addons/ contains at least karpenter-crd, karpenter, kueue",
+        {"karpenter-crd", "karpenter", "kueue"}.issubset(set(addon_dirs)),
+        f"found: {addon_dirs}",
     )
     for cluster_dir in glob.glob(os.path.join(gitops, "cells", "*")):
         teams_glob = glob.glob(os.path.join(cluster_dir, "teams", "*.yaml"))
@@ -131,6 +140,21 @@ def main(root: str) -> int:
     karpenter_crd_doc = check_addon_yaml(os.path.join(gitops, "addons/karpenter-crd/addon.yaml"), allow_dir=False)
     karpenter_doc = check_addon_yaml(os.path.join(gitops, "addons/karpenter/addon.yaml"), allow_dir=False)
     kueue_doc = check_addon_yaml(os.path.join(gitops, "addons/kueue/addon.yaml"), allow_dir=False)
+
+    # Every other addons/ directory (whatever a later PR added) gets the
+    # same generic structural check, derived from the filesystem rather
+    # than a hand-typed per-PR list (see the comment above addon_dirs).
+    for addon_dir in addon_dirs:
+        if addon_dir in ("karpenter-crd", "karpenter", "kueue"):
+            continue
+        addon_yaml_files = glob.glob(os.path.join(gitops, "addons", addon_dir, "addon.yaml"))
+        check(
+            f"addons/{addon_dir}/ contains exactly one addon.yaml",
+            len(addon_yaml_files) == 1,
+            f"found: {glob.glob(os.path.join(gitops, 'addons', addon_dir, '*'))}",
+        )
+        if len(addon_yaml_files) == 1:
+            check_addon_yaml(addon_yaml_files[0], allow_dir=True)
 
     for rel_doc, doc in (("karpenter-crd", karpenter_crd_doc), ("karpenter", karpenter_doc), ("kueue", kueue_doc)):
         wave = doc.get("wave")
