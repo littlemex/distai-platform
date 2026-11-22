@@ -144,9 +144,12 @@ Every cell already enforces `NetworkPolicy` (`infra/foundation`'s VPC CNI
 `enableNetworkPolicy: "true"`), but enforcement with no policy objects is
 not segmentation: with nothing shipped, any Pod anywhere can reach any
 other Pod. An independent security-axis review pass (#63, filed as a
-private report "SA4") found exactly that true of `karpenter`/`kueue` -
-the only NetworkPolicy enforcement this platform turned on, with no
-policy object anywhere to make it mean anything.
+private report "SA4") found exactly that true of this platform's own
+add-ons: `karpenter`/`kueue` (the only NetworkPolicy enforcement this
+platform turned on, with no policy object anywhere to make it mean
+anything) and `dcgm-exporter` (#46 - its `NetworkPolicy` existed but its
+`allowedPeers` matched every namespace, the only real segmentation this
+stack shipped until this PR).
 
 The policy going forward: **default deny, name the exception**. An
 add-on that exposes a network port ships `networkPolicy.enabled: true`
@@ -155,10 +158,15 @@ add-on that exposes a network port ships `networkPolicy.enabled: true`
 peer allowed in by default; a cell (or a later PR, once a real consumer
 exists) adds exactly the peer that component needs, never a blanket
 `namespaceSelector: {}`/`podSelector: {}` "every pod" default.
+`dcgm-exporter`'s own `allowedPeers: []` (renders `ingress: []` -
+confirmed against the rendered manifest) was the first add-on to follow
+this: a functional no-op (nothing scrapes it yet) and a real boundary
+the day something does, since `dcgm-exporter.networkPolicy.allowedPeers`
+is a cell-overridable key for exactly that.
 
-`karpenter-netpol` and `kueue-netpol` (this PR) follow the one pattern
-researched for this exact problem: kube-apiserver's calls to a webhook
-or aggregated-API port, and kubelet's own health-probe calls, cannot be
+`karpenter-netpol` and `kueue-netpol` follow the one pattern researched
+for this exact problem: kube-apiserver's calls to a webhook or
+aggregated-API port, and kubelet's own health-probe calls, cannot be
 matched by a `podSelector`/`namespaceSelector` the way an ordinary Pod
 can - the control plane and a node's own kubelet are not addressable
 that way under VPC CNI. Rather than invent a workaround, both charts
@@ -253,8 +261,12 @@ semver):
 ## Adding a cell
 
 1. Build the cell with `infra/foundation` and run `gitops/bootstrap/bootstrap.sh`
-   against it (above). This alone delivers `karpenter-crd`, `karpenter` and
-   `kueue` cluster-wide - no `NodePool` exists yet.
+   against it (above). This alone delivers `karpenter-crd`, `karpenter`,
+   `kueue` cluster-wide, and `optional-pool` (RFC #41 Decision 1: a core
+   add-on, delivered to every cell) - the one `NodePool`/`EC2NodeClass`
+   pair that exists before any `cells/<cluster-name>/capacity-pool/*.yaml`
+   file does, an untainted, on-demand CPU pool with no Kueue
+   `ResourceFlavor` of its own. No *team* `NodePool` exists yet.
 2. Copy `gitops/cells/example-cell/` to `gitops/cells/<cluster-name>/`,
    replacing `example-cell` with the cell's own `cluster_name` output.
 3. In `capacity-pool/cpu.yaml`, keep or change `values.pool.name`; `dir`

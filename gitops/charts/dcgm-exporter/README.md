@@ -34,14 +34,14 @@ marker's override paths carry the same prefix. Run
 | `nodeSelector` | `karpenter.k8s.aws/instance-gpu-manufacturer: nvidia` | A Karpenter well-known label on every NVIDIA GPU node, so no device plugin or node-feature label is needed |
 | `tolerations` | `operator: Exists` | Lands on tainted GPU nodes too |
 | `priorityClassName` | `""` (upstream default is `system-node-critical`) | Must never displace a team's pod on a GPU node; not on the critical boot path |
-| `networkPolicy` | enabled, `allowedPeers: [{namespaceSelector: {}}]` | Ingress only from in-cluster pods, only to the metrics port |
+| `networkPolicy` | enabled, `allowedPeers: []` | Deny-by-default (#63/"SA4"): no peer is allowed in yet, since nothing in this repository scrapes the metrics port today; a cell overrides `allowedPeers` with its own scraper's identity once one exists |
 
 ## Catalog contract (RFC #41 Decision 4)
 
 | Item | Value |
 | --- | --- |
 | Default namespace | `dcgm-exporter` |
-| Who may create objects in it | Only the admin-owned `Application` that `addons-optional.ApplicationSet.yaml` generates, in the `platform` `AppProject`, today -- the only `AppProject` that exists. Once [#22](https://github.com/littlemex/distai-platform/issues/22) ships a team `AppProject`, that project's own destination allow-list is what must exclude this `enforce=privileged` namespace; nothing enforces that today, since #22's own mechanism does not exist yet to check against |
+| Who may deploy objects into it | Only the admin-owned `Application` that `addons-optional.ApplicationSet.yaml` generates, in the `platform` `AppProject`, today -- the only `AppProject` that exists. Once [#22](https://github.com/littlemex/distai-platform/issues/22) ships a team `AppProject`, that project's own destination allow-list is what must exclude this `enforce=privileged` namespace; nothing enforces that today, since #22's own mechanism does not exist yet to check against. This is *who can deploy here through Argo CD*, not *who can act on a Pod once it exists* -- that is Kubernetes RBAC and EKS access entries (the foundation's own `admin_principal_arns`), a different layer `AppProject` destinations do not reach (the same correction gitops/README.md makes for the EFA add-ons' own namespace) |
 | `dependsOn` | None today. RFC #41 Decision 5 names `prometheus`; it is added once that catalog entry exists (see the catalog entry's own comment) |
 | Infra prerequisites | At least one `NodePool` in the cell that launches NVIDIA GPU instances. Without one, the `DaemonSet` schedules no pod and costs nothing |
 | Overridable by a cell | `dcgm-exporter.resources` and `dcgm-exporter.networkPolicy.allowedPeers` only (`overridableKeys` in the catalog entry) |
@@ -94,7 +94,11 @@ One replica per node, so no `PodDisruptionBudget` applies; the upstream
   only sets those values and ships no `NetworkPolicy` manifest of its own.
   It needs a CNI that enforces `NetworkPolicy` -- `infra/foundation`
   already turns this on (`eks.tf`'s VPC CNI `enableNetworkPolicy: "true"`),
-  so every cell this chart can run on already enforces it.
+  so every cell this chart can run on already enforces it. The default is
+  deny-all ingress (`allowedPeers: []` renders `ingress: []`, checked
+  against the rendered manifest): until a cell names a real scraper, no
+  Pod anywhere in the cluster, including this one's own namespace, can
+  reach port 9400.
 - The upstream chart creates a `ClusterRole` and binding
   (`kubernetes.rbac.create: true`, its default) to read pod metadata for
   metric labels.

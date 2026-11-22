@@ -34,7 +34,11 @@ allowEmpty: true
 values:
   enabled: true
   pool:
-    name: optional
+    # Matches gitops/README.md's own "optional-pool NodePool" reference
+    # (#63, filed as #58) - this value overrides the chart's own default,
+    # which is the same string, so only one of the two needed the fix,
+    # but both are kept in sync rather than left to coincide by accident.
+    name: optional-pool
 valuesFrom:
   - helmKey: clusterName
     param: name
