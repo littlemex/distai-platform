@@ -1,0 +1,27 @@
+apiVersion: v2
+name: vllm-disagg-pd-llmd
+description: >-
+  vLLM prefill/decode disaggregated serving routed by the llm-d router: the
+  same prefill and decode engines as the disagg-pd chart (NixlConnector, the
+  same placement and transport values), but behind a Gateway API HTTPRoute,
+  an InferencePool and llm-d's Endpoint Picker (EPP) instead of a
+  hand-written proxy. The EPP picks a prefill and a decode endpoint for every
+  request; a routing sidecar in each decode pod runs the prefill call.
+type: application
+version: 0.1.0
+appVersion: "v0.34.0"
+home: https://github.com/littlemex/distai-platform
+sources:
+  - https://github.com/littlemex/distai-platform
+  - https://github.com/llm-d/llm-d-router/tree/v1.0.0/config/charts/llm-d-router-gateway
+  - https://github.com/llm-d/llm-d/tree/v1.0.0/guides/pd-disaggregation
+  - https://github.com/kubernetes-sigs/gateway-api-inference-extension/tree/v1.6.2
+dependencies:
+  # llm-d's own router chart (EPP Deployment, its ConfigMap, Service and RBAC,
+  # the InferencePool, and the HTTPRoute), used by reference rather than
+  # rewritten. Version v1.0.0 is the chart the llm-d v1.0.0 release's guides
+  # install (guides/env.sh ROUTER_CHART_VERSION).
+  - name: llm-d-router-gateway
+    version: v1.0.0
+    repository: oci://ghcr.io/llm-d/charts
+    alias: llmdRouter

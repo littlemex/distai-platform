@@ -1,0 +1,105 @@
+{{- $fullname := include "disagg.fullname" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-proxy
+  labels:
+    {{- include "disagg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+data:
+  proxy.py: |-
+    {{- .Files.Get "files/proxy.py" | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-proxy
+  labels:
+    {{- include "disagg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+spec:
+  replicas: {{ .Values.proxy.replicas }}
+  selector:
+    matchLabels:
+      {{- include "disagg.selector" (dict "root" . "component" "proxy") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "disagg.labels" . | nindent 8 }}
+        app.kubernetes.io/component: proxy
+      annotations:
+        checksum/proxy: {{ .Files.Get "files/proxy.py" | sha256sum }}
+    spec:
+      {{- with .Values.proxy.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.proxy.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.proxy.podSecurityContext | nindent 8 }}
+      containers:
+        - name: proxy
+          # The vLLM image already carries fastapi, uvicorn and httpx.
+          image: {{ include "disagg.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python3", "-I", "/opt/proxy/proxy.py"]
+          env:
+            - name: PREFILL_HOST
+              value: {{ printf "%s-prefill.%s.svc" $fullname .Release.Namespace | quote }}
+            - name: DECODE_HOST
+              value: {{ printf "%s-decode.%s.svc" $fullname .Release.Namespace | quote }}
+            - name: ENGINE_PORT
+              value: {{ .Values.engine.port | quote }}
+            - name: PORT
+              value: {{ .Values.proxy.port | quote }}
+            - name: RESOLVE_INTERVAL_SECONDS
+              value: {{ .Values.proxy.resolveIntervalSeconds | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.proxy.port }}
+          resources:
+            {{- toYaml .Values.proxy.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.proxy.containerSecurityContext | nindent 12 }}
+          # Ready only while at least one prefill and one decode engine are.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+          volumeMounts:
+            - name: proxy
+              mountPath: /opt/proxy
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: proxy
+          configMap:
+            name: {{ $fullname }}-proxy
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "disagg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "disagg.selector" (dict "root" . "component" "proxy") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
