@@ -59,6 +59,19 @@ app.kubernetes.io/component: {{ .component }}
 {{- if and (eq $t.backend "LIBFABRIC") (lt (int $r.efaDevices) 1) -}}
 {{- fail (printf "%s.efaDevices must be at least 1 with transport.backend=LIBFABRIC (FI_PROVIDER=efa needs an EFA device)" $role) -}}
 {{- end -}}
+{{- $mps := default (dict "enabled" false "replicas" 2) $r.mps -}}
+{{- if $mps.enabled -}}
+{{- if lt (int $mps.replicas) 1 -}}
+{{- fail (printf "%s.mps.replicas must be at least 1" $role) -}}
+{{- end -}}
+{{- $ceilingPct := div 90 (int $mps.replicas) -}}
+{{- if $r.gpuMemoryUtilization -}}
+{{- $explicitPct := int (mulf (float64 $r.gpuMemoryUtilization) 100) -}}
+{{- if gt $explicitPct $ceilingPct -}}
+{{- fail (printf "%s.gpuMemoryUtilization=%s exceeds the safe ceiling (0.%02d) for %s.mps.replicas=%d -- MPS splits this GPU's memory roughly evenly across replicas, but vLLM's own startup memory check sizes its request against the WHOLE physical device, not this engine's own MPS-limited share, so a value above this ceiling fails deterministically on real hardware (confirmed, distai-platform #37, examples/inference/README.md's own MPS investigation)" $role $r.gpuMemoryUtilization $ceilingPct $role (int $mps.replicas)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- $kvt := .Values.kvCacheTier -}}
 {{- if not (has $kvt.mode (list "gpu-only" "local" "remote")) -}}
@@ -93,6 +106,28 @@ app.kubernetes.io/component: {{ .component }}
 {{- $cfg := dict "lmcache.mp.host" (printf "tcp://%s" (first $parts)) "lmcache.mp.port" (atoi (last $parts)) -}}
 {{- $cfg = merge $cfg (deepCopy $lm.extraConfig) -}}
 {{- dict "kv_connector" "LMCacheMPConnector" "kv_role" "kv_both" "kv_connector_extra_config" $cfg | toJson -}}
+{{- end -}}
+
+{{/*
+  Effective --gpu-memory-utilization for one role (call with that role's own
+  values, e.g. .Values.prefill). Same shape and rationale as
+  ../disagg-pd/templates/_helpers.tpl's own disagg.gpuMemoryUtilization
+  (0.70/replicas default, not the bare 1/replicas MPS enforces, to leave
+  headroom for vLLM's own non-KV-cache memory and this chart's own
+  NixlConnector RDMA buffer registration - both confirmed real, additive
+  overhead on real hardware, #37); kept as a separate copy rather than a
+  shared partial because this chart has no dependency on ../disagg-pd today.
+*/}}
+{{- define "disagg.gpuMemoryUtilization" -}}
+{{- $r := . -}}
+{{- $mps := default (dict "enabled" false "replicas" 2) $r.mps -}}
+{{- if $r.gpuMemoryUtilization -}}
+{{- $r.gpuMemoryUtilization -}}
+{{- else if $mps.enabled -}}
+{{- printf "0.%02d" (div 70 (int $mps.replicas)) -}}
+{{- else -}}
+{{- "" -}}
+{{- end -}}
 {{- end -}}
 
 {{/* ---- llm-d routing: everything below exists only in this chart. ---- */}}

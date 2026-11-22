@@ -37,6 +37,42 @@ app.kubernetes.io/component: aggregated
 {{- if and $kvt.lmcache.mpServerEndpoint (not (regexMatch "^[^:/]+:[0-9]+$" $kvt.lmcache.mpServerEndpoint)) -}}
 {{- fail (printf "kvCacheTier.lmcache.mpServerEndpoint must be host:port with a numeric port and no scheme (the chart adds tcp:// itself), got %q" $kvt.lmcache.mpServerEndpoint) -}}
 {{- end -}}
+{{- $mps := default (dict "enabled" false "replicas" 2) .Values.engine.mps -}}
+{{- if $mps.enabled -}}
+{{- if lt (int $mps.replicas) 1 -}}
+{{- fail "engine.mps.replicas must be at least 1" -}}
+{{- end -}}
+{{- $ceilingPct := div 90 (int $mps.replicas) -}}
+{{- if .Values.engine.gpuMemoryUtilization -}}
+{{- $explicitPct := int (mulf (float64 .Values.engine.gpuMemoryUtilization) 100) -}}
+{{- if gt $explicitPct $ceilingPct -}}
+{{- fail (printf "engine.gpuMemoryUtilization=%s exceeds the safe ceiling (0.%02d) for engine.mps.replicas=%d -- MPS splits this GPU's memory roughly evenly across replicas, but vLLM's own startup memory check sizes its request against the WHOLE physical device, not this engine's own MPS-limited share, so a value above this ceiling fails deterministically on real hardware (confirmed, distai-platform #37, examples/inference/README.md's own MPS investigation)" .Values.engine.gpuMemoryUtilization $ceilingPct (int $mps.replicas)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+  Effective --gpu-memory-utilization (call with .Values.engine). Same shape
+  as ../disagg-pd/templates/_helpers.tpl's own disagg.gpuMemoryUtilization,
+  but this chart has no NixlConnector to stack a second buffer onto (the
+  gpu-only default renders no kv-transfer-config at all - see engine.yaml),
+  so its own default headroom need only cover vLLM's own non-KV-cache
+  memory, not an extra transfer-buffer allocation; kept at the same
+  0.70/replicas formula anyway for one rule a reader of both charts can
+  hold in their head, not because this chart's own real-hardware evidence
+  requires a less conservative number.
+*/}}
+{{- define "agg.gpuMemoryUtilization" -}}
+{{- $e := . -}}
+{{- $mps := default (dict "enabled" false "replicas" 2) $e.mps -}}
+{{- if $e.gpuMemoryUtilization -}}
+{{- $e.gpuMemoryUtilization -}}
+{{- else if $mps.enabled -}}
+{{- printf "0.%02d" (div 70 (int $mps.replicas)) -}}
+{{- else -}}
+{{- "" -}}
+{{- end -}}
 {{- end -}}
 
 {{/* Skeleton only; see ../disagg-pd/templates/_helpers.tpl's own
