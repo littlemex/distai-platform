@@ -215,8 +215,16 @@ for chart in "${DISAGG}" "${AGG}" "${LLMD}" "${SGLANG_DISAGG}" "${SGLANG_AGG}"; 
       "${HELM}" dependency build "${chart}"
   fi
   run_check "helm lint ${rel}" "${HELM}" lint "${chart}"
+  # The output filename must be unique across every chart in this loop, not
+  # just basename(chart): vllm/disagg-pd and sglang/disagg-pd both have
+  # basename "disagg-pd", and a plain basename-only filename silently
+  # overwrote one chart's rendered manifest with the other's, so
+  # kubeconform below validated only the last one written for each
+  # colliding name (confirmed: a run with both present rendered to only
+  # as many files as there are distinct basenames, not distinct charts).
+  rendered_name="${rel//\//-}"
   run_check "helm template ${rel} (default values)" \
-    bash -c "'${HELM}' template contract-test '${chart}' --namespace contract-test > '${RENDERED_DIR}/$(basename "${chart}").yaml'"
+    bash -c "'${HELM}' template contract-test '${chart}' --namespace contract-test > '${RENDERED_DIR}/${rendered_name}.yaml'"
 done
 
 # ------------------------------------------------------- 5. kubeconform

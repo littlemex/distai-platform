@@ -169,7 +169,7 @@ Use the in-cluster load replay and the scorer in [`../../_shared/`](../../_share
 | `placement.sharedPoolValue` | `shared` | The pool value both roles target when `sameNodeMeasurement=true` |
 | `placement.enforceAntiAffinity` | `true` | `false` swaps decode's required anti-affinity (against prefill) for a required affinity (toward prefill); only meaningful with `sameNodeMeasurement=true` |
 | `placement.tolerations` | `[]` | Tolerations for both roles, for example for GPU node taints |
-| `transport.backend` | `NIXL` | `--disaggregation-transfer-backend`: `NIXL` or `MOONCAKE` |
+| `transport.backend` | `NIXL` | `--disaggregation-transfer-backend`: `NIXL` or `MOONCAKE`. **Same value name as the [vLLM disagg-pd chart's own `transport.backend`](../../vllm/disagg-pd/#values), different enum** (`LIBFABRIC`/`UCX` there, selecting a NIXL backend directly, versus `NIXL`/`MOONCAKE` here, selecting between two different transfer mechanisms) — `--set transport.backend=LIBFABRIC` copied from that chart renders nothing this chart's templates fail closed on it |
 | `transport.sglangNixlBackend` | `LIBFABRIC` | `SGLANG_DISAGGREGATION_NIXL_BACKEND` with `NIXL`: `LIBFABRIC` or `UCX` |
 | `transport.mooncakeProtocol` | `efa` | `MOONCAKE_PROTOCOL` with `MOONCAKE`: `efa` or `tcp` |
 | `transport.forceEfaSameNode` | `false` | `true` sets `FI_EFA_ENABLE_SHM_TRANSFER=0` on both roles (else explicitly `1`); requires `NIXL` with `LIBFABRIC` and `placement.sameNodeMeasurement=true` |
