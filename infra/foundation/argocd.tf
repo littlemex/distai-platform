@@ -8,6 +8,22 @@
 data "aws_iam_policy_document" "argocd_assume" {
   count = var.argocd == null ? 0 : 1
 
+  # No aws:SourceAccount/aws:SourceArn condition here, unlike this layer's
+  # own Pod Identity trust policies (eks.tf, karpenter.tf) -- checked, not
+  # overlooked (#63, filed as a private report "SA1" item 5/3). Every
+  # published AWS example of this exact trust policy
+  # (docs.aws.amazon.com/eks/latest/userguide/argocd-register-clusters.html,
+  # the EKS managed Argo CD capability's own setup docs) has no Condition
+  # block, and nothing in AWS's own documentation says the
+  # capabilities.eks.amazonaws.com service principal passes either context
+  # key on this AssumeRole call. Adding an unconfirmed condition to the
+  # most privileged role in this stack risks the opposite of a narrowing:
+  # a failed AssumeRole breaks the capability (and, through it, every
+  # cell's own GitOps delivery) outright, not a confused-deputy path that
+  # is otherwise undemonstrated (SA1 item 5 already notes exploiting this
+  # gap needs iam:PassRole on this role, which nothing in this repository
+  # grants). This is a researched decision not to add the condition, not
+  # an unaddressed item.
   statement {
     actions = ["sts:AssumeRole", "sts:TagSession"]
 
