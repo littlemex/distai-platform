@@ -52,6 +52,12 @@ WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
 failures=0
+# Accumulates every failure and keeps going -- right for independent,
+# stateless static checks, where one bad chart should not hide a problem
+# in an unrelated one (#63, filed as #61 item 4; see 1.e2e.sh's own
+# fail() for the opposite, stop-immediately contract this repository's
+# stateful e2e scripts use under a different name, and why it is a
+# different name here on purpose).
 run_check() {
   local label="$1"
   shift
