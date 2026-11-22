@@ -407,36 +407,54 @@ Real hardware (`p4d.24xlarge`, two nodes, `NET/Libfabric`/GDRDMA
   real increase in what that access is worth once held, and is recorded
   here rather than left for a reader to discover by diffing chart
   templates themselves.
-- **A root, host-network Pod runs on more nodes than have EFA, and
-  whether it merely reports zero or crash-loops there is not yet
-  confirmed on real hardware.** Both add-ons select by method label
-  alone (#19 Decision 2's own opt-in), the same as the four existing
-  `accel-*` add-ons; neither additionally requires
-  `pool.networkInterfaces` to be non-empty, because no label records
-  that fact today (`capacity-pool`'s own `accelerator.methodLabel` and
+- **Confirmed on real hardware, not merely a theoretical risk: on an
+  EFA-capable node with zero physical EFA interfaces, this add-on's own
+  Pod crash-loops.** Both add-ons select by method label alone (#19
+  Decision 2's own opt-in), the same as the four existing `accel-*`
+  add-ons; neither additionally requires `pool.networkInterfaces` to be
+  non-empty, because no label records that fact today
+  (`capacity-pool`'s own `accelerator.methodLabel` and
   `pool.networkInterfaces` are independent fields, #17's own chart). A
   `g7`/`p4d` pool that opts into `nvidia-gpu-method=device-plugin`
   without configuring EFA interfaces still gets this one more Pod
   (`runAsUser: 0`, `hostNetwork: true` -- not `privileged`, now that
   Fable 5.2 review round 1's finding B1 is fixed), matching by instance
   type regardless of whether that specific pool happens to request
-  interfaces -- a real, if narrow, widening of this trust level's own
-  footprint beyond nodes that actually need it. Three real-machine
-  attempts to confirm the Pod's own behaviour there (`Running` reporting
-  `efa=0`, versus a crash loop) each hit EC2 capacity errors before a
-  node with this add-on's Pod on it could be checked (`g6e.12xlarge` and
-  `g5.12xlarge`, both `InsufficientCapacity`/`UnfulfillableCapacity` in
-  `ap-northeast-1` at the time, confirmed read-only afterward: both
-  instance types are offered in every AZ this platform's foundation
-  uses and both have a published on-demand price, so this was not the
-  same pricing-data gap `trn2.3xlarge` has -- just no capacity at the
-  time) -- stopped after three failed attempts rather than retried
-  further, so this remains an open question, not a confirmed "reports
-  zero" claim. The fix for the footprint itself (a label `capacity-pool`
-  itself sets only when `pool.networkInterfaces` is non-empty, ANDed
-  into both add-ons' own `nodeSelector`) is `#17`'s chart to add, not
-  this PR's -- recorded here as a named follow-up, not silently
-  accepted.
+  interfaces -- confirmed to be live risk, not a hypothetical one:
+  `gitops/cells/dp-a19-gpu-r3/capacity-pool/gpu.yaml` and
+  `dp-a19-trn-r3/capacity-pool/trn.yaml` (#28's own light-tier fixtures,
+  used by the existing e2e) both carry the method label with
+  `pool.networkInterfaces` unset and an `instance-family` requirement
+  wide enough to include an EFA-capable size.
+  Three real-machine attempts on an actual EFA-capable GPU instance
+  type (`g6e.12xlarge`, then `g5.12xlarge`) each hit EC2 capacity errors
+  before a node could be reached (`InsufficientCapacity`/
+  `UnfulfillableCapacity` in `ap-northeast-1` at the time, confirmed
+  read-only afterward not to be the same pricing-data gap
+  `trn2.3xlarge` has -- both instance types are offered in every AZ this
+  platform's foundation uses with a published on-demand price, just no
+  capacity at the time). A fourth and fifth attempt used a cheap,
+  EFA-capable, CPU-only instance type instead (`c5n.9xlarge`, no GPU
+  needed, far more available) and got a real node: the add-on's own
+  DaemonSet shows `desired: 1, current: 1`, and its one Pod
+  (`accel-efa-device-plugin-nvidia-aws-efa-k8s-device-plugin-<suffix>`)
+  is `phase: Completed` (never `Running`) with `restartCount` climbing
+  steadily (`0 -> 2 -> 3 -> 4 -> 5` over about 3 minutes of observation)
+  -- a genuine crash/restart loop, not a stable `efa=0` report and not a
+  stuck `ContainerCreating`. The exact in-container error was not
+  captured (a label-selector bug in the disposable verification
+  script's own diagnostics returned "No resources found" even once the
+  Pod was confirmed to exist by name via a plain `grep`, and was not
+  investigated further once the crash-loop fact itself was confirmed).
+  This does not break GPU/Neuron workloads on the node (the device
+  plugin for the accelerator itself is a separate DaemonSet), but it
+  does mean a method-labeled, EFA-less pool's `accelerators` step never
+  reaches `Healthy` for this add-on, and leaves a crash-looping Pod on
+  every such node. The fix (a label `capacity-pool` itself sets only
+  when `pool.networkInterfaces` is non-empty, ANDed into both add-ons'
+  own `nodeSelector`) is `#17`'s chart to add, not this PR's -- recorded
+  here as a named, now-confirmed-necessary follow-up, not a theoretical
+  one.
 - Both EFA add-ons' pinned image stays at the chart's own
   default Region (`us-west-2`), never overridden per cell: see the
   add-on's own `addon.yaml` comment for why (the platform's own
