@@ -66,6 +66,35 @@ wrapped upstream chart is pinned in the wrapper's own `Chart.yaml`, not
 in an `addon.yaml`. **workload** is scoped to one team and has no delivery path until
 [#22](https://github.com/littlemex/distai-platform/issues/22) ships.
 
+### `wave` and "optional" each name more than one thing
+
+Both terms are overloaded across this platform (#63, filed as #61 item
+3); this is the one place that lists every meaning rather than leaving
+a reader to infer which one applies from context.
+
+`wave` is:
+- A named ordering step for **core** add-ons and cells: `crds`,
+  `controllers`, `accelerators`, `capacity` (see Ordering below) --
+  these values gate `platform.ApplicationSet.yaml`'s/`cells.ApplicationSet.yaml`'s
+  own sync order, and nothing else reads them.
+- A numbered slot for **platform-optional** add-ons instead:
+  `optional-1`, `optional-2`, ... (for example
+  `cells/<cluster>/addons/dcgm-exporter.yaml`'s `wave: optional-1`) --
+  `addons-optional.ApplicationSet.yaml`'s own `dependsOn` ordering reads
+  these, a different mechanism from the named core steps above, sharing
+  only the field name.
+
+"optional" is, separately:
+- A tier name: **platform-optional** (above).
+- A core add-on's own name: `optional-pool`, the admin-owned `NodePool`
+  every cell gets regardless of tier.
+- That add-on's own rendered object name: `optional-pool` (the
+  `NodePool`/`EC2NodeClass` Karpenter actually creates).
+- A wave-value prefix: the `optional-N` numbering immediately above.
+
+None of these four refer to each other; reading "optional" or `wave` in
+one file never implies the meaning it carries in a different one.
+
 ## Bootstrapping a cell (once, after `terraform apply`)
 
 A freshly-applied cell has a running Argo CD capability with zero
