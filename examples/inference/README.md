@@ -64,26 +64,57 @@ regression.
 | --- | --- | --- |
 | (a) Aggregated, 1 GPU x 2 replicas | vLLM | Confirmed: both replicas on the same node (`ip-10-0-100-212`), `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=3.997`, TTFT p50/p90/p99 = 8.6/11.1/18.9 ms |
 | (a) Aggregated, 1 GPU x 2 replicas | SGLang | Confirmed: both replicas on the same node, `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=4.005`, TTFT p50/p90/p99 = 9.6/66.7/92.8 ms |
-| (b) Same-node prefill+decode colocate | vLLM | **Not confirmed this round.** The first attempt used `placement.sameNodeMeasurement=true` without also setting `placement.enforceAntiAffinity=false`, which (per this chart's own values.yaml/NOTES.txt) renders the chart's own documented "fault-injection shape" (required anti-affinity) instead of colocation — decode stayed `Pending` for the full 12-minute timeout, exactly as the chart's own NOTES.txt predicts for that combination. A same-day retry with the correct flag (`enforceAntiAffinity=false`) still left decode `Pending` with `node=<none>` for its own 12-minute window — most likely racing a lingering GPU allocation from the just-uninstalled first attempt (the retry's own wait only checked that the Helm release was gone, not that the Pod's GPU allocation had actually been released by the device plugin), not re-investigated further within this round's time box. A targeted round-3 retry, with an explicit per-deployment rollout check and a longer settle window, is in progress/pending — see the Known issues table below for the final call |
-| (b) Same-node prefill+decode colocate | SGLang | Confirmed (on the retry, with `enforceAntiAffinity=false`): decode, prefill and the router all on the same node (`ip-10-0-100-212`), `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=4.001`, TTFT p50/p90/p99 = 18.2/22.8/146.2 ms |
-| (c) 2-node disaggregated over EFA, MPS-shared prefill | vLLM | **Failed, root cause not yet closed.** `decode` (separate `g7.8xlarge` node) reached `Running`/`Ready`; both `prefill` replicas (same `g7.48xlarge` MPS-shared node) crash-looped (`0/1 Running`, 4 restarts in 10 minutes) — the deployment never rolled out. A round-3 retry with full container-log capture on the crash is in progress/pending — see the Known issues table below |
-| (c) 2-node disaggregated over EFA, MPS-shared prefill | SGLang | Functionally confirmed: `decode` (separate `g7.8xlarge` node) and both `prefill` replicas (same `g7.48xlarge` MPS-shared node) all `Running`/`Ready`, `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=1.338`. **Two things this round could not confirm, stated precisely rather than assumed**: (1) the EFA `hw_counters` diagnostic (`rdma_write_bytes`/`rdma_read_bytes` under `/sys/class/infiniband/*/ports/1/hw_counters/`) returned empty for every pod, before and after load — a diagnostic-command problem this round did not have time to root-cause, not evidence either way that EFA traffic did or did not move; (2) no GPU UUID was captured for either prefill replica, so whether the two MPS clients actually landed on the SAME physical GPU (true MPS sharing) or on two of the node's 8 physical GPUs (same node, no sharing, still functionally correct) is not distinguished by any check this round ran — a real gap in the test's own evidence, found by Fable 5.2 review, not yet closed |
+| (b) Same-node prefill+decode colocate | vLLM | **Blocked by a real, reproducible defect (root-caused in round 3, see below), not a scheduling issue.** Both the fault-injection-shape attempt (missing `enforceAntiAffinity=false`) and the corrected retry put prefill+decode on one MPS-shared GPU; in round 3's retry both containers reached `CrashLoopBackOff` with `successful_requests=0/40`, `failed_requests=40/40` |
+| (b) Same-node prefill+decode colocate | SGLang | Confirmed (with `enforceAntiAffinity=false`): decode, prefill and the router all on the same node (`ip-10-0-100-212`), `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=4.001`, TTFT p50/p90/p99 = 18.2/22.8/146.2 ms |
+| (c) 2-node disaggregated over EFA, MPS-shared prefill | vLLM | **Blocked by the same defect, root-caused in round 3.** `decode` (separate `g7.8xlarge` node) reached `Running`/`Ready`; both `prefill` replicas (same `g7.48xlarge` MPS-shared node) crash-looped in both round 2 and round 3 |
+| (c) 2-node disaggregated over EFA, MPS-shared prefill | SGLang | Functionally confirmed: `decode` (separate `g7.8xlarge` node) and both `prefill` replicas (same `g7.48xlarge` MPS-shared node) all `Running`/`Ready`, `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=1.338`. **Two things this investigation could not confirm, stated precisely rather than assumed, and not yet closed**: (1) the EFA `hw_counters` diagnostic (`rdma_write_bytes`/`rdma_read_bytes` under `/sys/class/infiniband/*/ports/1/hw_counters/`) returned empty for every pod, before and after load, in round 2 — a diagnostic-command problem, not re-attempted in round 3 to stay inside the 3-hour real-hardware time budget; (2) no GPU UUID was captured for either prefill replica, so whether the two MPS clients actually landed on the SAME physical GPU (true MPS sharing) or on two of the node's 8 physical GPUs (same node, no sharing, still functionally correct) is not distinguished by any check this investigation ran — a real gap in the test's own evidence, found by Fable 5.2 review |
 
-**SGLang HiCache cold/warm retry (round 2).** Cold pass confirmed again (`exit-code=0`); the warm
-pass (same prefix set, re-applying the `load-replay` Job under the same name after deleting the
-prior one) did not produce a result this round (`exit-code` empty) — the retry's own fix (wait for
-the deleted Job's Pod to actually disappear, not just the Job object, before reapplying) is being
-tried in round 3; see the Known issues table below for the final call.
+### Root cause, found in round 3: vLLM's default `--gpu-memory-utilization` is incompatible with any MPS split
 
-**Known issues, to be resolved by the end of this investigation (not left silently open):**
+Both vLLM failures above ((b) and (c)) are the **same defect**, confirmed from the crashing
+container's own traceback (`vllm/v1/worker/gpu_worker.py`'s `request_memory`):
+
+```text
+ValueError: Free memory on device cuda:0 (15.72/31.38 GiB) on startup is less than desired GPU
+memory utilization (0.92, 28.87 GiB). Decrease GPU memory utilization or reduce GPU memory used
+by other processes.
+```
+
+vLLM's own startup check computes its memory budget as `gpu_memory_utilization * TOTAL physical
+device memory` (here, `0.92 * 31.38 GiB = 28.87 GiB`) and refuses to start unless that much is
+free. NVIDIA's MPS control daemon, independently, enforces an equal per-client share of that same
+total (`capacity-pool/README.md`'s own confirmed log line, `set_default_device_pinned_mem_limit 0
+16311M` — half of 31.38 GiB, i.e. the exact `15.72 GiB` the error reports as free). vLLM's own
+check and MPS's own enforcement are each correct on their own terms; together, on an `mps-2` pool,
+every vLLM Pod that does not lower its own memory utilization below roughly its MPS share will
+fail this check deterministically, every time, regardless of placement (same-node colocate in form
+(b) and the EFA-disaggregated prefill in form (c) hit the identical error, since both put more than
+one vLLM process on one MPS-split GPU). This is why both vLLM MPS forms failed while SGLang's own
+two MPS forms ((a) and (b)/(c)) did not: this round did not have time to confirm SGLang's own exact
+memory-sizing mechanism, but it empirically tolerates the same MPS split vLLM's own fixed default
+does not. **Fix, not yet applied**: set vLLM's `--gpu-memory-utilization` (this chart's
+`engine.gpuMemoryUtilization` equivalent, if present, or a new value) below the MPS config's own
+per-client share (for `mps-2`, below `~0.45-0.48` to leave headroom) whenever
+`accelerator.sharingLabel`/`mpsLabel` opt a pool into MPS — tracked as a follow-up, not implemented
+in this PR.
+
+**SGLang HiCache cold/warm retry.** Cold pass confirmed again in both round 2 and round 3
+(`exit-code=0`). The warm pass remains unconfirmed in both rounds: round 2 produced an empty
+`exit-code` (the Job-name-reuse bug this round meant to fix); round 3's own retry (waiting for the
+old Job's Pod to actually disappear, not just the Job object, before reapplying) did not reach the
+warm pass at all — the engine's own rollout timed out before the cold/warm comparison could run,
+on a cluster shared with the other round-3 tests above; not re-investigated further within the
+3-hour real-hardware time budget for this investigation.
+
+**Known issues, final status for this investigation:**
 
 | # | What | Status |
 | --- | --- | --- |
-| 1 | vLLM same-node MPS colocate (form (b)) | Round 3 in progress |
-| 2 | vLLM 2-node MPS-disagg-over-EFA prefill crash loop (form (c)) | Round 3 in progress, full logs being captured |
-| 3 | SGLang HiCache warm pass | Round 3 in progress |
-| 4 | EFA byte-counter evidence for form (c) | Diagnostic command bug, not yet fixed |
-| 5 | GPU-UUID evidence that MPS clients share one physical GPU in form (c) | Not captured this round, no fix attempted yet |
+| 1 | vLLM same-node MPS colocate (form (b)) | Root cause found (`--gpu-memory-utilization` vs. MPS share); fix not yet applied |
+| 2 | vLLM 2-node MPS-disagg-over-EFA prefill crash loop (form (c)) | Same root cause as #1; fix not yet applied |
+| 3 | SGLang HiCache warm pass | Not reached in round 3 (engine rollout timeout, not investigated further); still open |
+| 4 | EFA byte-counter evidence for form (c) | Diagnostic command bug, not fixed this investigation |
+| 5 | GPU-UUID evidence that MPS clients share one physical GPU in form (c) | Not captured this investigation |
 
 ## Conventions
 
