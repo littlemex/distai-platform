@@ -214,10 +214,20 @@ spec:
               path: /health
               port: http
             periodSeconds: 5
+          {{- if $sc.ssrfProtection }}
+          # The routing-sidecar-token volume below only exists when
+          # ssrfProtection is true (that is the only case where a Pod-level
+          # serviceAccountName, and so a token to scope away from the vllm
+          # container, exists at all) -- this mount must share that exact
+          # condition, or helm template renders a volumeMount naming a
+          # volume that was never defined, which the API server rejects at
+          # apply time (not caught by a render-only check against default
+          # values, since ssrfProtection's own default is true).
           volumeMounts:
             - name: routing-sidecar-token
               mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               readOnly: true
+          {{- end }}
       {{- else }}
       automountServiceAccountToken: false
       {{- end }}
