@@ -1,0 +1,135 @@
+# In-cluster, open-loop load (run-load.sh) as a Kubernetes Job.
+#
+# Render with envsubst, naming the variables explicitly so the shell
+# variables of the script below are left alone:
+#   envsubst '${TARGET_URL} ${MODEL_ID} ${NUM_PROMPTS} ${REQUEST_RATE} ${MAX_SEND_LAG_MS} ${BENCH_EXTRA_ARGS}'
+# and apply into the namespace of the target Service, after creating the
+# load-replay-scripts ConfigMap (run-load.sh, driver.py); see
+# examples/inference/_shared/README.md.
+#
+# The pod keeps its results in /results and waits there (up to
+# RESULT_HOLD_SECONDS) until /results/.collected exists, so the results can
+# be copied out with `kubectl cp` before the pod ends. The Job's own status is
+# the run's verdict: it fails when the benchmark failed or the client fell
+# behind its arrival schedule.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: load-replay
+  labels:
+    app.kubernetes.io/name: load-replay
+---
+# Read-only access to the pods of this namespace only, for the before/after
+# pod snapshots.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: load-replay-pod-reader
+  labels:
+    app.kubernetes.io/name: load-replay
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: load-replay-pod-reader
+  labels:
+    app.kubernetes.io/name: load-replay
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: load-replay-pod-reader
+subjects:
+  - kind: ServiceAccount
+    name: load-replay
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load-replay
+  labels:
+    app.kubernetes.io/name: load-replay
+spec:
+  # A retried run would be a different run; a failure stays a failure.
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: load-replay
+    spec:
+      serviceAccountName: load-replay
+      restartPolicy: Never
+      securityContext:
+        # The vLLM image's own non-root user.
+        runAsNonRoot: true
+        runAsUser: 2000
+        runAsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: load
+          # The same pinned vLLM image as the serving charts: it carries
+          # `vllm bench serve`, so client and server versions match.
+          image: vllm/vllm-openai:v0.34.0-efa@sha256:c5248ff7ce6296602c730c646e8d53a42bea62bd43d60541c7076ba795ec975a
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              rc=0
+              /opt/load-replay/run-load.sh \
+                --target-url "${TARGET_URL}" --model "${MODEL_ID}" \
+                --num-prompts "${NUM_PROMPTS}" --request-rate "${REQUEST_RATE}" \
+                --max-send-lag-ms "${MAX_SEND_LAG_MS}" \
+                --namespace "$POD_NAMESPACE" --output /results/bench.json \
+                -- ${BENCH_EXTRA_ARGS} || rc=$?
+              echo "$rc" >/results/exit-code
+              echo "run-load.sh exited $rc; waiting for /results/.collected"
+              waited=0
+              while [ ! -e /results/.collected ] && [ "$waited" -lt "$RESULT_HOLD_SECONDS" ]; do
+                sleep 5
+                waited=$((waited + 5))
+              done
+              exit "$rc"
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HOME
+              value: /work
+            - name: HF_HOME
+              value: /work/hf
+            - name: RESULT_HOLD_SECONDS
+              value: "3600"
+            # Set HF_TOKEN from a Secret here if the tokenizer is gated.
+          resources:
+            requests:
+              cpu: "4"
+              memory: 8Gi
+            limits:
+              memory: 8Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: scripts
+              mountPath: /opt/load-replay
+              readOnly: true
+            - name: results
+              mountPath: /results
+            - name: work
+              mountPath: /work
+      volumes:
+        - name: scripts
+          configMap:
+            name: load-replay-scripts
+            defaultMode: 0555
+        - name: results
+          emptyDir: {}
+        - name: work
+          emptyDir: {}

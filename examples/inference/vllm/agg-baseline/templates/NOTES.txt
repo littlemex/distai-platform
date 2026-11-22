@@ -1,0 +1,8 @@
+Endpoint (cluster-internal): http://{{ include "agg.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+
+GPUs this release requests (the --gpu-count for score.py):
+  {{ mul (int .Values.engine.replicas) (int .Values.engine.gpusPerEngine) }} = {{ .Values.engine.replicas }} engines x {{ .Values.engine.gpusPerEngine }}
+{{- if not .Values.model.name }}
+
+WARNING: model.name is empty; the engine exits until it is set.
+{{- end }}
