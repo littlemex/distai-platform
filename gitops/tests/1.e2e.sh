@@ -159,7 +159,7 @@ STATE_KEY="distai-platform/${AWS_REGION}/${NAME}/foundation"
 RUN_ID="gitops-e2e-${NAME}-$(date -u +%Y%m%d%H%M%S)-${RANDOM}"
 TEST_TAG_KEY="distai-platform-e2e"
 # Same image+digest infra/foundation/tests/1.e2e.sh's own IMDS check
-# already pins: a scrape pod for step 15d's metrics check below.
+# already pins: a scrape pod for step 14b-d's metrics check below.
 DCGM_SCRAPE_CURL_IMAGE="docker.io/curlimages/curl@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
 
 APPLY_ATTEMPTED=0
@@ -1883,26 +1883,26 @@ pass "re-running bootstrap.sh re-adopted the same NodePool and EC2NodeClass (unc
 # the third ApplicationSet, addons-optional.ApplicationSet.yaml. This step
 # runs Decision 4's add-then-remove cycle on a real cell for the one
 # catalog entry that ships, dcgm-exporter:
-#   15a. without the marker file, no ${CLUSTER}-dcgm-exporter Application
+#   14b-a. without the marker file, no ${CLUSTER}-dcgm-exporter Application
 #        exists;
-#   15b. with it, the Application is generated and reaches Healthy+Synced
+#   14b-b. with it, the Application is generated and reaches Healthy+Synced
 #        while no node matches the DaemonSet's GPU nodeSelector;
-#   15c. a disposable GPU NodePool/EC2NodeClass TEST FIXTURE (applied with
+#   14b-c. a disposable GPU NodePool/EC2NodeClass TEST FIXTURE (applied with
 #        kubectl, never part of the platform) launches one NVIDIA node;
-#   15d. a dcgm-exporter pod becomes Ready on that node, and only there --
+#   14b-d. a dcgm-exporter pod becomes Ready on that node, and only there --
 #        not on the system node group, not on optional-pool's CPU pool;
-#   15e. removing the marker file removes the Application and orphans its
+#   14b-e. removing the marker file removes the Application and orphans its
 #        DaemonSet and Namespace (preserveResourcesOnDeletion: true);
-#   15f. the cell is restored to GITOPS_REVISION and the fixture deleted.
+#   14b-f. the cell is restored to GITOPS_REVISION and the fixture deleted.
 #
-# Which case 15a starts in depends on step 0: ensure_cell_fixture copies
+# Which case 14b-a starts in depends on step 0: ensure_cell_fixture copies
 # gitops/cells/example-cell/ verbatim, and example-cell ships
 # addons/dcgm-exporter.yaml, so a run with a derived fixture (and a run
 # with NAME=example-cell) has had the marker -- and a synced
-# dcgm-exporter Application -- since its first bootstrap. 15a therefore
+# dcgm-exporter Application -- since its first bootstrap. 14b-a therefore
 # removes the marker on a disposable branch first rather than assuming
 # it was never there. If GITOPS_REVISION's own cells/${NAME}/ has no
-# marker at all, 15a has nothing to remove and 15b adds example-cell's
+# marker at all, 14b-a has nothing to remove and 14b-b adds example-cell's
 # marker on a disposable branch instead.
 
 APP_DCGM="${CLUSTER}-dcgm-exporter"
@@ -1967,7 +1967,7 @@ dcgm_app_gone() {
 # Note: a failed `k get daemonsets` here would read as "no DaemonSets
 # exist" (the same risk class other checks in this step now guard
 # against), which would skip the dcgm-exporter namespace reset below and
-# let 15b pass its "re-adoption" assertion for the wrong reason. Left as
+# let 14b-b pass its "re-adoption" assertion for the wrong reason. Left as
 # is rather than guarded with fail(): this function is invoked through
 # `< <(dcgm_daemonsets)` process substitution, where `fail`'s own `exit`
 # would only terminate that subshell, not this script -- the same
@@ -1978,7 +1978,7 @@ dcgm_app_gone() {
 # here.
 dcgm_daemonsets() { k get daemonsets -n "${DCGM_NS}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | { grep -v '^$' || true; }; }
 
-# ---- 15a. no marker file, no Application
+# ---- 14b-a. no marker file, no Application
 mapfile -t dcgm_ds_before_removal < <(dcgm_daemonsets)
 run_bootstrap --revision "${NO_DCGM_REVISION}" || fail "bootstrap.sh --revision ${NO_DCGM_REVISION}"
 wait_until 300 10 "dcgm-exporter Application absent without its marker file" dcgm_app_gone \
@@ -1986,22 +1986,22 @@ wait_until 300 10 "dcgm-exporter Application absent without its marker file" dcg
 if [[ "${#dcgm_ds_before_removal[@]}" -ge 1 ]]; then
   # The Application synced from an earlier bootstrap. Its DaemonSet
   # surviving the Application's removal is a first, early observation of
-  # the orphaning 15e checks properly; then the namespace is deleted so
-  # that 15b proves the Application creates the DaemonSet, rather than
+  # the orphaning 14b-e checks properly; then the namespace is deleted so
+  # that 14b-b proves the Application creates the DaemonSet, rather than
   # only re-adopting an orphan. Cluster-scoped objects the chart may
-  # render (a ClusterRole, for example) are left and re-adopted in 15b.
+  # render (a ClusterRole, for example) are left and re-adopted in 14b-b.
   for ds in "${dcgm_ds_before_removal[@]}"; do
     k get daemonset "${ds}" -n "${DCGM_NS}" >/dev/null 2>&1 \
       || fail "DaemonSet ${DCGM_NS}/${ds} was deleted when ${APP_DCGM} was removed (expected orphaned, preserveResourcesOnDeletion: true)"
   done
   pass "removing the marker file removed ${APP_DCGM} and orphaned its DaemonSet(s) ${dcgm_ds_before_removal[*]} from the earlier bootstrap"
   k delete namespace "${DCGM_NS}" --wait=true --timeout=300s >/dev/null \
-    || fail "kubectl delete namespace ${DCGM_NS} (resetting the orphaned resources before 15b)"
-  info "deleted the orphaned namespace ${DCGM_NS} so that 15b starts from nothing"
+    || fail "kubectl delete namespace ${DCGM_NS} (resetting the orphaned resources before 14b-b)"
+  info "deleted the orphaned namespace ${DCGM_NS} so that 14b-b starts from nothing"
 fi
 pass "no Application ${APP_DCGM} exists at ${NO_DCGM_REVISION} (no ${DCGM_MARKER_REL})"
 
-# ---- 15b. marker file added: Application generated, Healthy+Synced
+# ---- 14b-b. marker file added: Application generated, Healthy+Synced
 #
 # No node matches the DaemonSet's nvidia nodeSelector yet (checked below),
 # so its desiredNumberScheduled is 0. Argo CD's DaemonSet health check
@@ -2022,7 +2022,7 @@ nvidia_node_names="$(k get nodes -l karpenter.k8s.aws/instance-gpu-manufacturer=
   || fail "kubectl get nodes -l karpenter.k8s.aws/instance-gpu-manufacturer=nvidia failed: ${nvidia_node_names}"
 nvidia_nodes="$(echo "${nvidia_node_names}" | grep -c . || true)"
 [[ "${nvidia_nodes}" -eq 0 ]] \
-  || fail "${nvidia_nodes} NVIDIA node(s) already exist before step 15c launches one; 15b's zero-matched-node expectation would not hold"
+  || fail "${nvidia_nodes} NVIDIA node(s) already exist before step 14b-c launches one; 14b-b's zero-matched-node expectation would not hold"
 run_bootstrap --revision "${ADD_DCGM_REVISION}" || fail "bootstrap.sh --revision ${ADD_DCGM_REVISION}"
 wait_until 300 10 "dcgm-exporter Application generated from its marker file" app_exists "${APP_DCGM}" \
   || fail "no Application ${APP_DCGM} appeared at ${ADD_DCGM_REVISION} (addons-optional ApplicationSet did not generate it)"
@@ -2062,7 +2062,7 @@ else
   info "${APP_DCGM}'s spec.syncPolicy.automated is ABSENT: the capability appears to honor RollingSync for addons-optional; issue #41 Decision 3's convergence claims need re-deriving"
 fi
 
-# ---- 15c. GPU NodePool/EC2NodeClass TEST FIXTURE
+# ---- 14b-c. GPU NodePool/EC2NodeClass TEST FIXTURE
 #
 # A throwaway fixture for proving placement, applied with kubectl and
 # never part of the shipped platform: one untainted NodePool/EC2NodeClass
@@ -2177,7 +2177,7 @@ YAML
 k apply -f "${WORK_DIR}/gpu-fixture.yaml" || fail "kubectl apply the step 14b GPU test fixture"
 pass "applied the GPU test fixture ${GPU_FIXTURE_NAME} (EC2NodeClass, NodePool limited to cpu 8, trigger Pod)"
 
-# ---- 15d. dcgm-exporter lands on the GPU node, and only there
+# ---- 14b-d. dcgm-exporter lands on the GPU node, and only there
 #
 # "|" between fields, never " ": see canary_node()'s own comment (step 11).
 dcgm_ready_node() {
@@ -2237,7 +2237,7 @@ pass "a dcgm-exporter pod is Ready on ${DCGM_NODE} (${dcgm_node_type}, nvidia, N
 # :9400/metrics would otherwise look identical to a working one here).
 # A failed `k get svc` here would otherwise read as "one Service named
 # <the error text>" -- mapfile/< <() never surfaces the piped command's
-# own exit code, same shape as the step 15d node-loop fix above.
+# own exit code, same shape as the step 14b-d node-loop fix above.
 dcgm_svc_output="$(k get svc -n "${DCGM_NS}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>&1)" \
   || fail "kubectl get svc -n ${DCGM_NS} failed: ${dcgm_svc_output}"
 mapfile -t dcgm_services <<<"${dcgm_svc_output}"
@@ -2263,14 +2263,14 @@ spec:
         requests: {cpu: 10m, memory: 16Mi}
         limits: {cpu: 100m, memory: 32Mi}
 YAML
-k apply -f "${WORK_DIR}/dcgm-scrape-pod.yaml" >/dev/null || fail "apply the step 15d metrics-scrape Pod"
+k apply -f "${WORK_DIR}/dcgm-scrape-pod.yaml" >/dev/null || fail "apply the step 14b-d metrics-scrape Pod"
 dcgm_scrape_done() {
   local phase
   phase="$(k get pod "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" -o jsonpath='{.status.phase}' 2>/dev/null)"
   [[ "${phase}" == "Succeeded" || "${phase}" == "Failed" ]]
 }
 wait_until 120 5 "the metrics-scrape Pod finished" dcgm_scrape_done \
-  || fail "the step 15d metrics-scrape Pod ${DCGM_SCRAPE_POD} never reached Succeeded/Failed"
+  || fail "the step 14b-d metrics-scrape Pod ${DCGM_SCRAPE_POD} never reached Succeeded/Failed"
 dcgm_scrape_phase="$(k get pod "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" -o jsonpath='{.status.phase}')" \
   || fail "kubectl get pod ${DCGM_SCRAPE_POD} -n ${DCGM_NS} failed: ${dcgm_scrape_phase}"
 dcgm_scrape_output="$(k logs "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" 2>&1)" \
@@ -2281,7 +2281,7 @@ echo "${dcgm_scrape_output}" | grep -qE '^DCGM_FI_DEV_[A-Z_]+(\{[^}]*\})? [0-9.e
   || fail "curl http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics succeeded but no DCGM_FI_DEV_* series appeared; first 10 lines: $(echo "${dcgm_scrape_output}" | head -10 | tr '\n' ' ')"
 dcgm_series_count="$(echo "${dcgm_scrape_output}" | grep -cE '^DCGM_FI_DEV_[A-Z_]+(\{[^}]*\})? [0-9.eE+-]+$')"
 k delete pod "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" --ignore-not-found --wait=true --timeout=60s >/dev/null \
-  || fail "kubectl delete the step 15d metrics-scrape Pod"
+  || fail "kubectl delete the step 14b-d metrics-scrape Pod"
 pass "GET http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics returned ${dcgm_series_count} DCGM_FI_DEV_* series from the real GPU on ${DCGM_NODE}"
 
 # Confirm the wrapper's own stated defaults against the real
@@ -2356,7 +2356,7 @@ rm -f "${dcgm_prio_errfile}"
   || fail "pod ${dcgm_pod_name} has priorityClassName=${dcgm_pod_priority_class}, expected none (the wrapper sets priorityClassName: \"\")"
 pass "NetworkPolicy exists in ${DCGM_NS}, no ServiceMonitor object, pod ${dcgm_pod_name} has no priorityClassName"
 
-# ---- 15e. marker file removed: Application gone, resources orphaned
+# ---- 14b-e. marker file removed: Application gone, resources orphaned
 #
 # Same reasoning as step 14: wait for the Application itself to be gone
 # first, so "still there" means "never going to be pruned", not "not yet".
@@ -2371,7 +2371,7 @@ wait_until 300 10 "dcgm-exporter Application disappears once its marker file is 
   || fail "namespace ${DCGM_NS} was deleted or replaced after removing the marker file (expected orphaned)"
 pass "removing ${DCGM_MARKER_REL} removed ${APP_DCGM} and orphaned DaemonSet ${DCGM_NS}/${DCGM_DS} and namespace ${DCGM_NS} (same UIDs) -- issue #41 Decision 4's removal half"
 
-# ---- 15f. restore GITOPS_REVISION, delete the GPU test fixture
+# ---- 14b-f. restore GITOPS_REVISION, delete the GPU test fixture
 run_bootstrap --revision "${GITOPS_REVISION}" || fail "bootstrap.sh (restoring --revision ${GITOPS_REVISION} after step 14b)"
 if [[ "${ADD_DCGM_REVISION}" == "${GITOPS_REVISION}" ]]; then
   wait_until 600 15 "dcgm-exporter Application reappears and reaches Synced" app_synced "${APP_DCGM}" \
