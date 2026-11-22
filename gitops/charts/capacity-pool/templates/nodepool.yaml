@@ -18,7 +18,22 @@ spec:
   template:
 {{- $methodLabel := (default (dict) .Values.accelerator).methodLabel }}
 {{- $hasMethodLabel := and $methodLabel $methodLabel.key }}
-{{- $hasEfa := gt (len (default (list) .Values.pool.networkInterfaces)) 0 }}
+{{- /*
+distai.dev/efa-attached must mean an EFA device is actually attached, not
+merely that pool.networkInterfaces is non-empty: Karpenter's own CEL
+validation on EC2NodeClass.spec.networkInterfaces requires a primary
+"interface" entry whenever the list is non-empty, but never requires an
+"efa-only" one, so a pool could in principle list only the primary ENI
+(the chart's own ec2nodeclass.yaml comment: "EFA (and any other
+non-default ENI attachment)") with zero EFA devices. Checking for at
+least one efa-only entry is the actual signal.
+*/}}
+{{- $hasEfa := false }}
+{{- range (default (list) .Values.pool.networkInterfaces) }}
+{{- if eq (toString .interfaceType) "efa-only" }}
+{{- $hasEfa = true }}
+{{- end }}
+{{- end }}
 {{- if or $hasMethodLabel $hasEfa }}
     metadata:
       labels:
@@ -26,8 +41,11 @@ spec:
         {{ $methodLabel.key | quote }}: {{ $methodLabel.value | toString | quote }}
 {{- end }}
 {{- if $hasEfa }}
-        # Set only when this pool's own EC2NodeClass actually attaches EFA network
-        # interfaces (pool.networkInterfaces non-empty, #50) -- not derived from the
+        # Set only when this pool's own EC2NodeClass actually attaches at least one
+        # EFA network interface (pool.networkInterfaces contains an interfaceType:
+        # efa-only entry, #50 -- non-empty alone is not enough: Karpenter's own CEL
+        # validation requires a primary "interface" entry whenever the list is
+        # non-empty but never requires an "efa-only" one) -- not derived from the
         # accelerator method label or the instance type, both of which a pool can
         # carry without ever requesting an EFA interface. accel-efa-device-plugin-*
         # (#19/#50) AND into this label on top of the vendor method label, so a
