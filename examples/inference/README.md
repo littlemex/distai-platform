@@ -70,10 +70,22 @@ done.
 | --- | --- | --- |
 | (a) Aggregated, 1 GPU x 2 replicas | vLLM | Confirmed: both replicas on the same node (`ip-10-0-100-212`), `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=3.997`, TTFT p50/p90/p99 = 8.6/11.1/18.9 ms |
 | (a) Aggregated, 1 GPU x 2 replicas | SGLang | Confirmed: both replicas on the same node (`ip-10-0-100-212`), `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=4.005`, TTFT p50/p90/p99 = 9.6/66.7/92.8 ms |
-| (b) Same-node prefill+decode colocate | vLLM | **Blocked by a real, reproducible defect (proximate cause found in round 3, not fully explained -- see below), not purely a scheduling issue.** Two distinct attempts, two distinct outcomes: the first (missing `enforceAntiAffinity=false`, the chart's own "fault-injection shape" -- its own `placement.enforceAntiAffinity` default renders a required anti-affinity that keeps decode off prefill's node, documented in `vllm/disagg-pd/values.yaml`/`NOTES.txt`) never colocated at all -- `decode` stayed `Pending`, `node=<none>`, for its own 12-minute window, exactly as that default predicts. The corrected retry (`enforceAntiAffinity=false`) did colocate both roles onto one node (`ip-10-0-75-10`), and only then crashed: both containers reached `CrashLoopBackOff`, `successful_requests=0/40`, `failed_requests=40/40` |
+| (b) Same-node prefill+decode colocate | vLLM | **Blocked by a real, reproducible defect (proximate cause found in round 3, not fully explained -- see below), not purely a scheduling issue.** Two distinct attempts, two distinct outcomes: the first (missing `enforceAntiAffinity=false`, the chart's own "fault-injection shape" -- its own `placement.enforceAntiAffinity` default renders a required anti-affinity that keeps decode off prefill's node, documented in `vllm/disagg-pd/values.yaml`/`NOTES.txt`) never colocated at all -- `decode` stayed `Pending`, `node=<none>`, for its own 12-minute window. Decode's own required anti-affinity would normally let Karpenter launch a second node instead of leaving it `Pending`, but the `gpu-shared` pool's own `limits: {cpu: "32"}` caps it to exactly one `g7.8xlarge` node (`32` vCPU), so no second node was available within that pool for decode to land on -- exactly the "fault-injection shape" the chart's own values.yaml/NOTES.txt describes for a one-node pool. The corrected retry (`enforceAntiAffinity=false`) did colocate both roles onto one node (`ip-10-0-75-10`), and only then crashed: both containers reached `CrashLoopBackOff`, `successful_requests=0/40`, `failed_requests=40/40` |
 | (b) Same-node prefill+decode colocate | SGLang | Confirmed (with `enforceAntiAffinity=false`): decode, prefill and the router all on the same node (`ip-10-0-100-212`), `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=4.001`, TTFT p50/p90/p99 = 18.2/22.8/146.2 ms |
 | (c) 2-node disaggregated over EFA, MPS-shared prefill | vLLM | **Blocked by the same proximate cause as (b), not fully explained -- see below.** `decode` (separate `g7.8xlarge` node) reached `Running`/`Ready`; both `prefill` replicas (same `g7.48xlarge` MPS-shared node) crash-looped in both round 2 and round 3 |
 | (c) 2-node disaggregated over EFA, MPS-shared prefill | SGLang | Functionally confirmed: `decode` (separate `g7.8xlarge` node) and both `prefill` replicas (same `g7.48xlarge` MPS-shared node) all `Running`/`Ready`, `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=1.338`. **Two things this investigation could not confirm, stated precisely rather than assumed, and not yet closed**: (1) the EFA `hw_counters` diagnostic (`rdma_write_bytes`/`rdma_read_bytes` under `/sys/class/infiniband/*/ports/1/hw_counters/`) returned empty for every pod, before and after load, in round 2 — a diagnostic-command problem, not re-attempted in round 3 to stay inside the 3-hour real-hardware time budget; (2) no GPU UUID was captured for either prefill replica, so whether the two MPS clients actually landed on the SAME physical GPU (true MPS sharing) or on two of the node's 8 physical GPUs (same node, no sharing, still functionally correct) is not distinguished by any check this investigation ran — a real gap in the test's own evidence, found by Fable 5.2 review |
+
+**`goodput_per_gpu` is not on a common basis across this table, found by Fable 5.2 review — do not
+compare rows against each other.** Forms (a) and (b)'s own `score.py` calls passed `--gpu-count 1`
+(counting the one shared *physical* GPU), while form (c) passed `--gpu-count 3` (counting
+*requested* `nvidia.com/gpu` units: 2 MPS-shared prefill replicas + 1 decode) — not the 2 physical
+GPUs form (c) actually uses (one shared prefill GPU, one separate decode GPU). The `4.0`-ish
+numbers in (a)/(b) and the `1.338` in (c) are therefore not comparable on any single convention,
+and this page's own stated rule (compare only on the same trace, model and SLO) does not hold
+across forms either. Each row's own number is real (the underlying `successful_requests`/
+`joint_attainment_share` values are not affected by this), but no cross-form "(c) is N times worse
+per GPU" conclusion is supported — not re-scored this round to stay inside the real-hardware time
+budget.
 
 ### Proximate cause for vLLM forms (b) and (c), found in round 3 -- NOT yet a full explanation (see the open contradiction below)
 
@@ -89,11 +101,12 @@ by other processes.
 vLLM's own startup check computes its memory budget as `gpu_memory_utilization * TOTAL physical
 device memory` (here, `0.92 * 31.38 GiB ≈ 28.87 GiB`) and refuses to start a single process unless
 that much is free for it alone — the traceback is one process checking its own free share, not a
-check of whether two processes' requests together fit. The `15.72 GiB` it found free is close to,
-but about `0.2 GiB` below, half of `31.38 GiB`; that gap is not accounted for here (plausibly
-rounding or some other process's own footprint, not confirmed). It is also close to
+check of whether two processes' requests together fit. The `15.72 GiB` it found free is close to
+(`0.03 GiB` above) half of `31.38 GiB` (`15.69 GiB`), and close to (`0.2 GiB` below)
 `capacity-pool/README.md`'s own confirmed MPS pinned-memory-limit log line
-(`set_default_device_pinned_mem_limit 0 16311M` ≈ `15.93 GiB`). This is a confirmed, real,
+(`set_default_device_pinned_mem_limit 0 16311M` ≈ `15.93 GiB`) — neither gap is accounted for here
+(plausibly rounding, a slightly different total-device-memory reading, or some other process's own
+footprint, not confirmed). This is a confirmed, real,
 reproducible proximate cause for (b) and (c): a vLLM process under MPS sees its own free share at
 roughly half the physical device, while its own `0.92`-fraction request is sized against the full
 device — a mismatch that fails this specific check regardless of what any other process on the
