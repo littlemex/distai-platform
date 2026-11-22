@@ -68,7 +68,7 @@ app.kubernetes.io/component: {{ .component }}
 {{- if $r.gpuMemoryUtilization -}}
 {{- $explicitPct := int (mulf (float64 $r.gpuMemoryUtilization) 100) -}}
 {{- if gt $explicitPct $ceilingPct -}}
-{{- fail (printf "%s.gpuMemoryUtilization=%s exceeds the safe ceiling (0.%02d) for %s.mps.replicas=%d -- MPS splits this GPU's memory roughly evenly across replicas, but vLLM's own startup memory check sizes its request against the WHOLE physical device, not this engine's own MPS-limited share, so a value above this ceiling fails deterministically on real hardware (confirmed, distai-platform #37, examples/inference/README.md's own MPS investigation)" $role $r.gpuMemoryUtilization $ceilingPct $role (int $mps.replicas)) -}}
+{{- fail (printf "%s.gpuMemoryUtilization=%s exceeds the safe ceiling (0.%02d) for %s.mps.replicas=%d -- MPS splits this GPU's memory roughly evenly across replicas. vLLM's own disagg-pd crashed on real hardware at a desired fraction near 0.92 under a 2-replica MPS split (ceiling 0.45), comfortably above this ceiling (distai-platform #37, examples/inference/README.md's own MPS investigation); this chart refuses a value above that ceiling here instead of finding out via a crash loop" $role $r.gpuMemoryUtilization $ceilingPct $role (int $mps.replicas)) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -112,11 +112,13 @@ app.kubernetes.io/component: {{ .component }}
   Effective --gpu-memory-utilization for one role (call with that role's own
   values, e.g. .Values.prefill). Same shape and rationale as
   ../disagg-pd/templates/_helpers.tpl's own disagg.gpuMemoryUtilization
-  (0.70/replicas default, not the bare 1/replicas MPS enforces, to leave
-  headroom for vLLM's own non-KV-cache memory and this chart's own
-  NixlConnector RDMA buffer registration - both confirmed real, additive
-  overhead on real hardware, #37); kept as a separate copy rather than a
-  shared partial because this chart has no dependency on ../disagg-pd today.
+  (0.70/replicas default, below the bare 1/replicas MPS enforces and below
+  the 0.90/replicas ceiling disagg.validate enforces; see that file's own
+  comment for why the exact margin is not derived from a confirmed memory
+  accounting, only from real-hardware confirmation that this fraction
+  starts and serves a real completion on the shape that otherwise
+  crash-loops, #37); kept as a separate copy rather than a shared partial
+  because this chart has no dependency on ../disagg-pd today.
 */}}
 {{- define "disagg.gpuMemoryUtilization" -}}
 {{- $r := . -}}

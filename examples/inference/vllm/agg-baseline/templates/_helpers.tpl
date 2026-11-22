@@ -46,7 +46,7 @@ app.kubernetes.io/component: aggregated
 {{- if .Values.engine.gpuMemoryUtilization -}}
 {{- $explicitPct := int (mulf (float64 .Values.engine.gpuMemoryUtilization) 100) -}}
 {{- if gt $explicitPct $ceilingPct -}}
-{{- fail (printf "engine.gpuMemoryUtilization=%s exceeds the safe ceiling (0.%02d) for engine.mps.replicas=%d -- MPS splits this GPU's memory roughly evenly across replicas, but vLLM's own startup memory check sizes its request against the WHOLE physical device, not this engine's own MPS-limited share, so a value above this ceiling fails deterministically on real hardware (confirmed, distai-platform #37, examples/inference/README.md's own MPS investigation)" .Values.engine.gpuMemoryUtilization $ceilingPct (int $mps.replicas)) -}}
+{{- fail (printf "engine.gpuMemoryUtilization=%s exceeds the safe ceiling (0.%02d) for engine.mps.replicas=%d -- MPS splits this GPU's memory roughly evenly across replicas. vLLM's own disagg-pd crashed on real hardware at a desired fraction near 0.92 under a 2-replica MPS split (ceiling 0.45), comfortably above this ceiling (distai-platform #37, examples/inference/README.md's own MPS investigation); this chart refuses a value above that ceiling here instead of finding out via a crash loop" .Values.engine.gpuMemoryUtilization $ceilingPct (int $mps.replicas)) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -54,14 +54,16 @@ app.kubernetes.io/component: aggregated
 
 {{/*
   Effective --gpu-memory-utilization (call with .Values.engine). Same shape
-  as ../disagg-pd/templates/_helpers.tpl's own disagg.gpuMemoryUtilization,
-  but this chart has no NixlConnector to stack a second buffer onto (the
-  gpu-only default renders no kv-transfer-config at all - see engine.yaml),
-  so its own default headroom need only cover vLLM's own non-KV-cache
-  memory, not an extra transfer-buffer allocation; kept at the same
-  0.70/replicas formula anyway for one rule a reader of both charts can
-  hold in their head, not because this chart's own real-hardware evidence
-  requires a less conservative number.
+  and same 0.70/replicas default as ../disagg-pd/templates/_helpers.tpl's
+  own disagg.gpuMemoryUtilization. This chart's own default (gpu-only)
+  renders no kv-transfer-config at all (see engine.yaml), unlike disagg-pd's
+  mandatory NixlConnector; whether that difference is why disagg-pd's own
+  un-fixed default crashes under MPS while this chart's own un-fixed default
+  does not is an open question (examples/inference/README.md's own MPS
+  investigation states it as a candidate, not confirmed) - this chart kept
+  the same 0.70/replicas formula as disagg-pd for one rule a reader of both
+  charts can hold in their head, not because this chart's own real-hardware
+  evidence requires a less conservative number.
 */}}
 {{- define "agg.gpuMemoryUtilization" -}}
 {{- $e := . -}}
