@@ -38,7 +38,7 @@ How to measure with them is described in [`_shared/README.md`](_shared/README.md
 already cover the vLLM charts do not cover the SGLang charts yet — a separate, deeper follow-up).
 All five combinations above now work end to end on real hardware.
 
-## MPS (GPU sub-device sharing), round 2: label-design fix and the 3 forms (real hardware, `us-east-1`, `g7.8xlarge`/`g7.48xlarge`, 2026-11-22)
+## MPS (GPU sub-device sharing), rounds 2-4: label-design fix, the 3 forms, and the vLLM memory-utilization fix (real hardware, `us-east-1`, `g7.8xlarge`/`g7.48xlarge`, 2026-11-22)
 
 A prior round confirmed the MPS mechanism itself (`accelerator.sharingLabel`, see
 `gitops/charts/capacity-pool/README.md`) but left the actual label management broken: NVIDIA's
@@ -93,9 +93,9 @@ but no cross-form "(c) is N times worse per GPU" conclusion is supported — not
 round to stay inside the real-hardware time
 budget.
 
-### Proximate cause for vLLM forms (b) and (c), found in round 3 -- NOT yet a full explanation (see the open contradiction below)
+### Proximate cause for vLLM forms (b) and (c), found in round 3, fixed and narrowed in round 4
 
-Forms (b) and (c)'s vLLM crashes show the **same traceback**
+Round 3 found forms (b) and (c)'s vLLM crashes sharing the same traceback
 (`vllm/v1/worker/gpu_worker.py`'s `request_memory`):
 
 ```text
@@ -104,56 +104,82 @@ memory utilization (0.92, 28.87 GiB). Decrease GPU memory utilization or reduce 
 by other processes.
 ```
 
-vLLM's own startup check computes its memory budget as `gpu_memory_utilization * TOTAL physical
-device memory` (here, `0.92 * 31.38 GiB ≈ 28.87 GiB`) and refuses to start a single process unless
-that much is free for it alone — the traceback is one process checking its own free share, not a
-check of whether two processes' requests together fit. The `15.72 GiB` it found free is close to
-(`0.03 GiB` above) half of `31.38 GiB` (`15.69 GiB`), and close to (`0.2 GiB` below)
-`capacity-pool/README.md`'s own confirmed MPS pinned-memory-limit log line
-(`set_default_device_pinned_mem_limit 0 16311M` ≈ `15.93 GiB`) — neither gap is accounted for here
-(plausibly rounding, a slightly different total-device-memory reading, or some other process's own
-footprint, not confirmed). This is a confirmed, real,
-reproducible proximate cause for (b) and (c): a vLLM process under MPS sees its own free share at
-roughly half the physical device, while its own `0.92`-fraction request is sized against the full
-device — a mismatch that fails this specific check regardless of what any other process on the
-same GPU is doing. Where the `0.92` figure itself comes from is not established on this page:
-neither `vllm/agg-baseline` nor `vllm/disagg-pd` sets `gpu_memory_utilization`/
-`--gpu-memory-utilization` anywhere in `values.yaml` or any template (confirmed by inspection), but
-that does not rule out an install-time `--set`, an extra CLI arg, or a difference in the two
-charts' own pinned image — none of which was checked this round.
+and could not explain why form (a) (also two vLLM processes on one `mps-2`-split GPU) succeeded
+under what it assumed was the same mechanism — stated as an open contradiction, no fix proposed.
 
-**This does not explain form (a), and that contradiction is not resolved here, stated plainly
-rather than glossed over.** Form (a)/vLLM also put two vLLM processes on one `mps-2`-split GPU
-(the same per-client memory share the paragraph above says is too small for a `0.92`-fraction
-request) and it succeeded, `RESTARTS=0`, on the same day, same node family. Since the check above
-is per-process, not per-pair, form (a) succeeding means each of its own two replicas individually
-passed a check that (b)/(c)'s replicas individually failed — which means form (a)'s own replicas
-were not actually requesting the `0.92` fraction, or were not bound by the same ~15.7 GiB free
-share, for a reason this round did not identify. Whether that is because
-`vllm/agg-baseline` and `vllm/disagg-pd` end up with a different *effective* memory utilization by
-some path other than an explicit chart value was not tested this round and is not
-claimed — left as an open question for the next round, not resolved by this one. **No fix is
-proposed or applied in this PR** until the discrepancy above is understood — the only claim this
-round makes is the proximate traceback for (b)/(c), not a general "vLLM cannot share an MPS GPU"
-claim the same page's own form (a) result would contradict.
+**Round 4 (real hardware, `us-east-1`, `g7.8xlarge`/`g7.48xlarge`, 2026-11-22) narrows this.**
+Reading form (a)'s own engine log directly (not done in round 3) shows it never risks the
+traceback above at all:
 
-**SGLang HiCache cold/warm retry.** Cold pass confirmed again in both round 2 and round 3
-(`exit-code=0`). The warm pass remains unconfirmed in both rounds: round 2 produced an empty
-`exit-code` (the Job-name-reuse bug this round meant to fix); round 3's own retry (waiting for the
-old Job's Pod to actually disappear, not just the Job object, before reapplying) did not reach the
-warm pass at all — the engine's own rollout timed out before the cold/warm comparison could run,
-on a cluster shared with the other round-3 tests above; not re-investigated further within the
-3-hour real-hardware time budget for this investigation.
+```text
+INFO [gpu_worker.py:1175] Free memory on device (15.72/31.38 GiB) on startup. Desired GPU memory
+utilization is (1.0, 31.38 GiB). Actual usage is 1.21 GiB for consumed memory (weights + non-torch),
+0.52 GiB for peak activation, and 0.25 GiB for CUDAGraph memory. Replace gpu_memory_utilization
+config with `--kv-cache-memory=31403986944` (29.25 GiB) to fit into requested memory, or
+`--kv-cache-memory=14597829744` (13.6 GiB) to fully utilize gpu memory. Current kv cache memory in
+use is 29.64 GiB.
+[kv_cache_utils.py:1168] GPU KV cache size: 1,110,016 tokens, Maximum concurrency for 32,768 tokens
+per request: 33.88x
+```
 
-**Known issues, final status for this investigation:**
+This is an `INFO` line, not an error, and `vllm/agg-baseline` requests the GPU's *default* fraction
+(`1.0` on this pinned image — not `0.92`, a number round 3 never confirmed came from either chart
+and this round shows is not vLLM's effective default here either). vLLM's own memory-sizing is
+elastic on this path: when the free device memory (`15.72 GiB`, MPS's own per-client share) cannot
+cover the *desired* KV-cache size, it clamps the actual KV-cache allocation down to what fits
+*after* the fixed, non-elastic cost (weights + activation + CUDA graph, `1.21 + 0.52 + 0.25 ≈
+1.98 GiB` here) and starts anyway — it only raises the `ValueError` above when even that fixed cost
+does not fit inside the free share. Form (a)'s own fixed cost (`1.98 GiB`) is comfortably under
+`15.72 GiB`, so it was never going to hit the failing branch regardless of the `1.0` fraction it
+requested — the "open contradiction" was never a contradiction once form (a)'s own log is read: it
+simply never exercises the code path that raises.
+
+**The fix applied in this PR (`engine.mps`/`*.mps` + `gpuMemoryUtilization`, see Changes) is
+confirmed working on real hardware for the previously-crashing case.** `disagg-pd`'s same-node
+colocate (form (b)'s corrected shape, `placement.sameNodeMeasurement=true`,
+`enforceAntiAffinity=false`, NIXL over UCX rather than LIBFABRIC this round, to measure on a single
+EFA-less `g7.8xlarge`) with `prefill.mps.enabled=true`/`decode.mps.enabled=true`,
+`mps.replicas: 2` (the chart's own computed default, `0.70/2 = 0.35`) reached `Running`/`Ready` on
+both roles, `RESTARTS=0`, and served a real completion through the proxy
+(`" Paris. It was founded in the 12th century, and it's"`). The same cell's own unmodified
+`disagg-pd` (no `mps.*` set, vLLM's own default fraction, same node) reproduced the original
+`CrashLoopBackOff` (confirmed again, though this round's own log capture missed the crashing
+container's exact traceback — `kubectl logs` without `--previous` caught the live container
+between restarts, a gap in this round's own script, not a different failure mode; the pods'
+`RESTARTS` counter and `CrashLoopBackOff` status are still real, direct evidence of the same
+regression).
+
+**What is still not settled**: *why* `disagg-pd`'s own default run takes the failing branch
+(fixed cost does not fit) while `agg-baseline`'s does not, when neither chart sets an explicit
+fraction and both default to `1.0` on this image, is not nailed down by a log of the exact crash
+this round (the gap above). The most likely candidate, not tested in isolation this round, is that
+`NixlConnector`'s own memory registration for the KV transfer (present in every `disagg-pd`/
+`disagg-pd-llmd` role, absent from `agg-baseline`'s default `gpu-only` tier — see `engines.yaml`'s
+own command script) adds to the *fixed*, non-elastic cost that must fit before vLLM even tries to
+clamp the KV cache — stated as the leading candidate, not confirmed. This does not block the fix
+above: the fix does not depend on diagnosing the exact fixed-cost delta, it simply gives every role
+an explicit, MPS-aware fraction so the elastic KV-cache sizing never has to find out the hard way
+whether the fixed cost fits.
+
+**SGLang HiCache cold/warm, closed in round 4 (first full pass after two rounds that each failed
+for an unrelated infra reason — a Job-name-reuse bug, then an engine rollout timeout on a shared
+cluster).** Run in isolation this round (dedicated namespace, no concurrent test, `g7.8xlarge`
+decode-pool node, `kvCacheTier.mode=local`, `--hicache-size 4`): a cold request and a warm
+request with the identical long, repeated-filler prefix both returned a real completion;
+`TTFT_PROXY_TOTAL_TIME` (curl's own `time_starttransfer`) was `0.058s` cold and `0.038s` warm — a
+`~35%` drop on the same prefix, directionally consistent with a hierarchical-cache hit, from a
+single sample per condition (not a throughput benchmark; repeat with more samples before citing a
+percentage anywhere outside this page).
+
+**Known issues, status after round 4:**
 
 | # | What | Status |
 | --- | --- | --- |
-| 1 | vLLM same-node MPS colocate (form (b)) | Proximate cause found (`--gpu-memory-utilization` vs. MPS share); contradicted by form (a)'s own success, not resolved; no fix proposed |
-| 2 | vLLM 2-node MPS-disagg-over-EFA prefill crash loop (form (c)) | Same proximate cause and same open contradiction as #1 |
-| 3 | SGLang HiCache warm pass | Not reached in round 3 (engine rollout timeout, not investigated further); still open |
-| 4 | EFA byte-counter evidence for form (c) | Diagnostic command bug, not fixed this investigation |
-| 5 | GPU-UUID evidence that MPS clients share one physical GPU in form (c) | Not captured this investigation |
+| 1 | vLLM same-node MPS colocate (form (b)) | **Fixed and confirmed on real hardware** (`engine.mps`/`*.mps` + `gpuMemoryUtilization`, see Changes). The "open contradiction" is narrowed: form (a) never risked the failing branch (round 4's own log reading); the exact fixed-cost delta that makes `disagg-pd`'s own default run fail is not isolated (leading candidate: `NixlConnector`'s own memory registration, not confirmed) |
+| 2 | vLLM 2-node MPS-disagg-over-EFA prefill crash loop (form (c)) | Not re-verified with the fix this round: a fresh `g7.48xlarge` node's own image pull exceeded the Deployment's default `progressDeadlineSeconds` (600s) before the prefill pods left `ContainerCreating`, an unrelated infra timing issue, not re-attempted to stay inside the real-hardware time budget — still open |
+| 3 | SGLang HiCache warm pass | **Closed in round 4** (see above) |
+| 4 | EFA byte-counter evidence for form (c) | Not re-attempted this round (blocked by #2 above for vLLM; SGLang's own symmetric counters were already confirmed in an earlier round, see [#37](https://github.com/littlemex/distai-platform/issues/37#issuecomment-7080618555)) |
+| 5 | GPU-UUID evidence for form (c) | **Closed for SGLang in round 4**: the two prefill replicas got two different physical GPU UUIDs (`GPU-cb86dd16...`/`GPU-f50ed8a5...`) — this topology's two MPS-shared "replicas" land on two of the node's 8 physical GPUs, not one shared GPU; still open for vLLM (blocked by #2) |
 
 ## Conventions
 
