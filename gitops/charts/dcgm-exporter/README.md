@@ -99,17 +99,26 @@ One replica per node, so no `PodDisruptionBudget` applies; the upstream
   against the rendered manifest): until a cell names a real scraper, no
   Pod anywhere in the cluster, including this one's own namespace, can
   reach port 9400.
-- The upstream chart creates a `ClusterRole` and binding
+- Correction (#63, independent review pass): an earlier version of this
+  note said the upstream chart creates a `ClusterRole` and binding
   (`kubernetes.rbac.create: true`, its default) to read pod metadata for
-  metric labels.
+  metric labels. Checked directly against the chart's own `values.yaml`
+  (`helm show values`, version `4.9.0`): no `rbac.create` key, or any
+  `rbac.*` key, exists, and rendering the chart with no override produces
+  no `ClusterRole`/`ClusterRoleBinding`/`Role`/`RoleBinding` at all. This
+  chart grants no RBAC beyond the default `ServiceAccount` it creates;
+  whether the exporter's own pod-to-GPU metric labels need cluster-wide
+  Pod read access is a separate question this correction does not answer,
+  only the claim that a `ClusterRole` is what grants it.
 
 ### Removal checklist
 
 Deleting the cell's marker file removes the `Application`, but
 `addons-optional.ApplicationSet.yaml` sets
 `preserveResourcesOnDeletion: true`, so the `DaemonSet`, `Service`,
-`NetworkPolicy`, RBAC objects and the namespace stay in the cluster,
+`NetworkPolicy`, `ServiceAccount` and the namespace stay in the cluster,
 orphaned. Nothing else needs cleaning up for the platform to keep working.
-To remove them as well, delete the `dcgm-exporter` namespace and the
-chart's `ClusterRole`/`ClusterRoleBinding` by hand after the marker file's
-pull request merges.
+To remove them as well, delete the `dcgm-exporter` namespace by hand
+after the marker file's pull request merges (the namespace delete alone
+takes every namespaced object with it; see the correction above - this
+chart creates no cluster-scoped RBAC object to clean up separately).
