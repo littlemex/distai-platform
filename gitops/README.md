@@ -233,15 +233,33 @@ Real hardware (`p4d.24xlarge`, two nodes, `NET/Libfabric`/GDRDMA
   method on the same node (#19's own alignment measurement: `pcieRoot`
   constraints, 45.8 vs 3.6-4.7 GB/s) is left to a follow-up issue; nothing
   in either add-on's own nodeSelector shape blocks adding it later.
-- Both EFA add-ons run `privileged: true` and `hostNetwork: true` (the
-  pinned chart's own default `securityContext`/pod spec, confirmed by
-  reading its template, not a value either `addon.yaml` sets) -- the same
-  trust level `accel-nvidia-device-plugin`/`accel-neuron-device-plugin`
-  already run at on every matching node, now extended to one more
-  DaemonSet. `kubectl exec` into either release's Pod reaches that node's
-  EFA/InfiniBand device nodes (`/dev/infiniband`) and network namespace,
-  the same operator-only reach this platform's other privileged
-  accelerator advertisers already have; no new capability is introduced.
+- Both EFA add-ons run at a **higher trust level than this platform's
+  existing accelerator advertisers, not the same one** -- checked by
+  reading the pinned chart's own template, not assumed:
+  `accel-nvidia-device-plugin`'s own chart defaults to neither
+  `privileged` nor `hostNetwork` (`devicePlugin.podSecurityContext: {}`,
+  `devicePlugin.enableHostNetwork` commented out/false, confirmed in
+  `nvidia-device-plugin:0.20.2`'s own `values.yaml`/template, and this
+  platform's own `addon.yaml` does not turn either on), while
+  `aws-efa-k8s-device-plugin:v0.5.35`'s template sets `hostNetwork: true`
+  unconditionally (not gated by any value -- there is no key to turn it
+  off without forking the chart) and its default `securityContext` is
+  `privileged: true, allowPrivilegeEscalation: true, runAsUser: 0`, also
+  not gated. This is the chart's own stated requirement for EFA/RDMA
+  device enumeration, not a choice this PR makes, and was confirmed
+  necessary on real hardware (the add-on's own real-machine Test Results
+  show it working as shipped; no safer configuration was found that still
+  enumerated all 4 EFA devices). The risk this combination carries:
+  `hostNetwork: true` means a Pod is not behind the extra network hop the
+  foundation's own IMDSv2 hop-limit-of-1 (#20, Facts checked) is meant to
+  stop -- `kubectl exec` into either release's Pod reaches
+  `http://169.254.169.254` on the node's own network namespace exactly
+  like any other process on that node, which can mean the node's own IAM
+  role (`karpenter-node`) credentials, not only `/dev/infiniband`. `exec`
+  into any `kube-system` DaemonSet is already an admin-only operation
+  under this platform's own RBAC model (no team `AppProject` is ever
+  given `kube-system` as a destination, #22); this add-on does not change
+  who holds that permission, only what it is now worth once held.
 - Both EFA add-ons' pinned image stays at the chart's own
   default Region (`us-west-2`), never overridden per cell: see the
   add-on's own `addon.yaml` comment for why (the platform's own
