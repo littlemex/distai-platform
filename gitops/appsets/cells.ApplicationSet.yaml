@@ -11,6 +11,16 @@
 # added here - adding the glob with no matching step would leave a team's
 # own Application generated but never synced.
 #
+# Open question, not resolved here (#63, filed as #59 item 4): #22
+# Decision 1(c) separately specifies an Argo CD Application per team
+# generated from gitops/teams/<name>/ - a different layout from this
+# file's own cells/<cluster-name>/teams/*.yaml glob (team identity per
+# team directory, vs. per-cell quota wiring per cell). The two may be
+# complementary rather than conflicting, but nothing says so yet; #22's
+# own implementation is what decides whether this glob is renamed,
+# dropped, or kept alongside gitops/teams/<name>/ for a different
+# purpose.
+#
 # See platform.ApplicationSet.yaml for why goTemplate is on and why
 # templatePatch is a Go template either way.
 apiVersion: argoproj.io/v1alpha1

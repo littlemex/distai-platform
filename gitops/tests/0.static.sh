@@ -247,9 +247,19 @@ KUBECONFORM_ARGS=(
   -summary
 )
 
+# The two ApplicationSets and the root Application, plus every *.yaml this
+# script itself rendered into RENDERED_DIR above - a glob, not an
+# enumerate-by-name list of the charts this PR happens to ship (#63, filed
+# as #55 item 2): a hand-typed list here is exactly the same hardcoded-set
+# problem check_gitops_contract.py's own addon_dirs already hit once a
+# sibling branch added its own chart and its own entry here independently
+# (RENDERED_DIR is this script's own dedicated temp directory - nothing
+# else ever writes into it, so the glob cannot pick up anything this
+# script did not itself render).
 kubeconform_targets=("${GITOPS_ROOT}/appsets/platform.ApplicationSet.yaml" "${GITOPS_ROOT}/appsets/cells.ApplicationSet.yaml" "${GITOPS_ROOT}/bootstrap/root-application.yaml")
-[[ -f "${RENDERED_DIR}/capacity-pool.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/capacity-pool.yaml")
-[[ -f "${RENDERED_DIR}/smoke.yaml" ]] && kubeconform_targets+=("${RENDERED_DIR}/smoke.yaml")
+while IFS= read -r -d '' rendered_file; do
+  kubeconform_targets+=("${rendered_file}")
+done < <(find "${RENDERED_DIR}" -maxdepth 1 -name '*.yaml' -print0 | sort -z)
 
 run_check "kubeconform (${#kubeconform_targets[@]} file(s), k8s 1.37.0 + pinned CRD schemas)" \
   "${KUBECONFORM_BIN}" "${KUBECONFORM_ARGS[@]}" "${kubeconform_targets[@]}"
