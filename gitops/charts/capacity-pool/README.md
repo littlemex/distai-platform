@@ -73,6 +73,134 @@ set, `effect` must be `NoSchedule`, `PreferNoSchedule` or `NoExecute`, and
 the two entries must not share the same key and effect; either mistake
 fails the render.
 
+### GPU sub-device sharing (MPS), real-hardware result (2026-11-22)
+
+`accelerator.sharingLabel` is a second, independent label on the NodePool's node
+template, additive to `accelerator.methodLabel` (both can be set at once — two
+separate keys in the same `metadata.labels` map). It exists for GPU sub-device
+sharing opt-in: NVIDIA's own `k8s-device-plugin` chart (the chart behind this
+platform's `accel-nvidia-device-plugin` addon) reads a node label named
+`nvidia.com/device-plugin.config` to pick a named entry from its own
+`config.map`, and splits one physical GPU into `N` MPS replicas when that entry
+has a `sharing.mps` block — `sharingLabel.key = "nvidia.com/device-plugin.config"`,
+`sharingLabel.value` = the chosen config name (for example `mps-2`). A pool that
+never sets this gets no label, so it falls back to the device plugin's own
+`config.default` (whole-GPU, no sharing) — unchanged behavior for every existing
+pool.
+
+**`nvidia.com/mps.capable=true` is `accelerator.mpsLabel`, baked into the
+NodePool's own node template, not a manual `kubectl label` step.** NVIDIA's
+`mps-control-daemon` DaemonSet's own node selector needs this label, separate
+from the `nvidia.com/device-plugin.config` label `sharingLabel` sets. Setting
+it by hand with `kubectl label node` after the node joined does not survive
+this chart's own disruption model: any later edit to the same pool's
+`requirements` (or, as this chart's own `ec2nodeclass.yaml` renders it,
+anything that changes the EC2NodeClass) reads as drift to Karpenter, which
+replaces the node — destroying the hand-applied label before the replacement
+node's own device-plugin Pod could come up and be relabeled. Every
+MPS-opted-in node reached for a test this way showed `nvidia.com/gpu: 0`
+allocatable at the moment of use, because the node had just been replaced and
+the label was gone (confirmed on real hardware, 2026-11-22). `accelerator.mpsLabel`
+closes this by rendering the label in `NodePool.spec.template.metadata.labels`
+instead (the same place `methodLabel`/`sharingLabel`/`distai.dev/efa-attached`
+already render theirs): Karpenter copies `spec.template.metadata.labels` onto
+every node this pool ever launches, including a drift-driven replacement, so
+the label is never lost — nothing to reapply, no window where a replaced node
+is briefly unlabeled.
+
+**Compared with installing NFD/GPU Feature Discovery (chosen: the
+`capacity-pool`-chart label, not NFD/GFD).** NVIDIA's own GPU Operator stack
+normally sets `nvidia.com/mps.capable` (and `nvidia.com/gpu.product`,
+`nvidia.com/gpu.memory`, etc.) automatically via Node Feature Discovery (NFD)
+and the GPU Feature Discovery (GFD) sidecar, reading them off the hardware at
+boot. This platform runs neither (device-plugin selection already uses this
+chart's own `methodLabel`/`sharingLabel`, not NFD-discovered labels, per #19's
+own device-plugin-vs-DRA decision). Installing NFD/GFD only for this one label
+was rejected: it adds a second, independent label-setting mechanism (its own
+DaemonSet, its own upstream release cadence, its own RBAC) for a value this
+platform's own NodePool already knows statically at authoring time — a pool
+author who sets `sharingLabel` to an MPS config name already knows, by
+construction, that the same pool must be MPS-capable; nothing about this label
+needs hardware probing to discover. A static chart value, rendered once at
+`helm install`/`upgrade` time and copied onto every node `spec.template`
+produces, is strictly less moving infrastructure for the same outcome, and
+fails closed the same way every other opt-in field in this chart does — a pool
+that never sets `mpsLabel` renders no label and is never selected by
+`mps-control-daemon`.
+
+**Confirmed on real hardware, pre-`mpsLabel` baseline** (`g7.8xlarge`,
+`us-east-1`, 2026-11-22, manual `kubectl label`): labeling one node
+`nvidia.com/device-plugin.config=mps-2` plus (by hand) `nvidia.com/mps.capable=true`
+made that node advertise `nvidia.com/gpu: 2` instead of `1` in both `Capacity`
+and `Allocatable`, and the real MPS control daemon split the device 50/50
+(`set_default_device_pinned_mem_limit 0 16311M`, `set_default_active_thread_percentage 50`
+in its own log — both numbers are exactly 100%/`replicas` and the device's total
+memory/`replicas`, confirmed from the daemon's own log, not computed by this
+chart). Two `vllm/agg-baseline` replicas (`engine.replicas=2`, no chart change
+needed — each still just requests `nvidia.com/gpu: 1`) both scheduled onto
+that one node/GPU, reached `Running`/`Ready` with `RESTARTS=0`, and both
+served a real completion independently and concurrently.
+
+**`mpsLabel` itself and its drift-survival proof: see
+`examples/inference/README.md`'s own "MPS" section** for the real-hardware
+run (same day) that sets `mpsLabel` instead of hand-labeling, forces a
+Karpenter-driven node replacement on the same pool, and confirms the
+replacement node carries the label with no manual step — the one gap this
+baseline left open.
+
+**Security, reviewed and found incomplete by Fable 5.2 (2026-11-22; recorded as an open
+finding, not resolved here)**: NVIDIA's own `mps-control-daemon` DaemonSet — the
+process that actually performs the split above, deployed automatically by the
+upstream chart whenever any `sharing.mps` config exists, selecting nodes by
+`nvidia.com/mps.capable=true` — renders with `hostPID: true`, `privileged: true`
+containers, and a `hostPath`-backed `/dev/shm` mount (confirmed by rendering the
+upstream chart's own `templates/daemonset-mps-control-daemon.yml`, tag v0.20.2,
+default `mps.enableHostPID: true`). This is NVIDIA's own upstream design, not
+something this platform's `accelerator.sharingLabel`/`mpsLabel` fields add —
+but it means **every MPS-opted-in NodePool already carries a
+host-process-namespace-sharing daemon**, independent of and in addition to the
+separate `hostIPC` question an earlier round of this same investigation raised
+and reverted for the LMCache mp server (see `vllm/disagg-pd/README.md`'s own
+"KV cache tiers" section). Three items this round leaves open, not closed:
+1. This platform has no admission control (Pod Security Admission, Kyverno, or
+   equivalent) rejecting `hostPID`/`privileged`/`hostIPC`/`hostPath` in any
+   namespace today. A future fix must add this gate, not rely on README prose
+   alone.
+2. Nothing in `accelerator.sharingLabel`/`mpsLabel`/this NodePool's own
+   requirements restricts *which team's* Pods can request the shared GPU once
+   a NodePool carries these labels — two mutually-untrusting teams' Pods could
+   both land on one MPS-split GPU unless a separate taint/toleration
+   (`tenancy.teamTaint`, already in this chart) also scopes the pool to one
+   team. MPS's own per-client limits
+   (`CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` and similar) are client-side
+   environment variables, not something this platform enforces against a
+   hostile tenant; a fatal fault from one MPS client can take down every other
+   client sharing that GPU (a cross-tenant denial of service); and GPU memory
+   is not zeroed between tenants by MPS or by this platform. Issue #22's own
+   existing research already states MPS gives weaker isolation than MIG for
+   exactly these reasons — this field's own real deployment shape confirms,
+   rather than changes, that guidance: **treat an MPS-opted-in pool as
+   single-team/mutually-trusting-workloads only**, never as a way to share one
+   GPU across teams that do not trust each other.
+3. The blast radius of a shared host namespace (whether via `hostIPC` or
+   NVIDIA's own `hostPID`) is the WHOLE host namespace, not narrowly "the two
+   Pods that need to talk to each other."
+
+**What this mechanism actually exposes, stated precisely rather than
+overclaimed** (confirmed against the upstream chart's own README, `NVIDIA/k8s-device-plugin`
+tag v0.20.2): the only tunable `sharing.mps.resources[].replicas` gives is the
+replica *count* — compute and memory are always split into **equal** shares
+across however many replicas a config names. There is no separate,
+independently settable `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` or per-client
+memory-limit value in this config schema; an unequal split is not expressible
+through `accelerator.sharingLabel`/`mpsLabel` at all. A minor, non-blocking
+rough edge observed on real hardware: the `mps-control-daemon` DaemonSet's own
+config-watcher *sidecar* container restarts repeatedly after a node relabel
+(`error finding pid: no process found`), while the daemon's own main container
+stays `Running` and healthy throughout and the capacity/split above were both
+confirmed correct regardless — tracked as an upstream oddity, not a defect in
+this chart's own rendering.
+
 ### Quotas
 
 `pool.limits` is the only quota-shaped field this chart renders; the
