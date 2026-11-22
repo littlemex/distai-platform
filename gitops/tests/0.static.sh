@@ -367,7 +367,14 @@ must_fail() {
   return 1
 }
 
-for chart in capacity-pool smoke; do
+# Which charts get fixture-based render checks is derived from
+# tests/fixtures/ itself, not a hand-typed chart list (#63, filed as #55
+# item 3): a hardcoded "capacity-pool smoke" here would need a matching
+# edit on any PR adding tests/fixtures/<new-chart>/, the same hardcoded-
+# set problem check_gitops_contract.py's own addon_dirs already hit once
+# independently.
+mapfile -t fixture_charts < <(find "${FIXTURES_DIR}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+for chart in "${fixture_charts[@]}"; do
   mapfile -t chart_fixtures < <(find "${FIXTURES_DIR}/${chart}" -name '*.yaml' 2>/dev/null | sort)
   if [[ "${#chart_fixtures[@]}" -eq 0 ]]; then
     echo "FAIL no fixtures found under tests/fixtures/${chart}/"
