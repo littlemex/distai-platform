@@ -1,0 +1,14 @@
+apiVersion: v2
+name: sglang-agg-baseline
+description: >-
+  SGLang aggregated serving baseline: one Deployment whose engines run
+  prefill and decode in the same process, with mixed chunked prefill turned
+  on and an explicit chunk size, and no disaggregation. The comparison point
+  for the disagg-pd chart on the same hardware.
+type: application
+version: 0.1.0
+appVersion: "v0.5.23"
+home: https://github.com/littlemex/distai-platform
+sources:
+  - https://github.com/littlemex/distai-platform
+  - https://github.com/sgl-project/sglang

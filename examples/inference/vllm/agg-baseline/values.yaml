@@ -1,0 +1,92 @@
+# One Deployment of vLLM engines, each running prefill and decode itself.
+# vLLM's own scheduler defaults are kept on purpose (chunked prefill on,
+# running decodes scheduled ahead of new prefills): they are the tuned
+# aggregated baseline, so no scheduler flag is set here.
+
+image:
+  repository: vllm/vllm-openai
+  # Same pinned image as the disagg-pd chart, so a comparison changes the
+  # layout only.
+  tag: v0.34.0-efa
+  digest: sha256:c5248ff7ce6296602c730c646e8d53a42bea62bd43d60541c7076ba795ec975a
+  pullPolicy: IfNotPresent
+
+model:
+  # Hugging Face model repository id. No default: the engine refuses to start
+  # (with a message saying so) until it is set.
+  name: ""
+  # Commit or tag of the model repository; pin it for any measurement.
+  revision: ""
+  servedModelName: ""
+  hfTokenSecret:
+    name: ""
+    key: token
+
+accelerator:
+  resourceName: nvidia.com/gpu
+
+engine:
+  replicas: 1
+  # Tensor parallel degree; GPUs this release uses = replicas x gpusPerEngine.
+  gpusPerEngine: 1
+  port: 8000
+  # Nodes the engines may run on. Empty: any node with the accelerator. To
+  # compare with disagg-pd on the same hardware, select the same nodes, for
+  # example {"distai.dev/pd-role": "prefill"}.
+  nodeSelector: {}
+  tolerations: []
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+  extraArgs: []
+  extraEnv: []
+  shmSizeLimit: 16Gi
+  cacheVolume:
+    emptyDir: {}
+  startupTimeoutSeconds: 1800
+  # The vLLM image provides a non-root "vllm" user (UID 2000, GID 0) for
+  # exactly this; its home and cache directories are group-writable.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 2000
+    runAsGroup: 0
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+
+# ClusterIP: reachable only from inside the cluster. vLLM has no
+# authentication of its own here.
+service:
+  type: ClusterIP
+  port: 8000
+
+metrics:
+  # Adds the vllm-metrics=true pod label and the prometheus.io/* annotations
+  # that the "vllm" scrape job in examples/inference/_shared/dashboards/
+  # scrape-configs.yaml selects on. vLLM serves /metrics on the engine port.
+  enabled: true
+
+# Skeleton only (values and rendering, not built or measured on real
+# hardware yet). Same kvCacheTier shape as ../disagg-pd/values.yaml's own
+# (see that chart's comment for what is and is not confirmed about the
+# exact LMCache config keys, the LMCacheMPConnector name, and why local
+# and remote render identically and do not actually select a node-local
+# vs. off-node backend - mpServerEndpoint is one static value rendered
+# into every replica here too) - this chart has no NixlConnector to stack
+# onto, so local/remote set kv-transfer-config to LMCacheMPConnector alone
+# instead of a MultiConnector list. The one shared mp server this does
+# express is this aggregated baseline's own way to show cross-replica
+# prefix reuse, which a bigger single-process cache cannot get once
+# engine.replicas is more than 1.
+kvCacheTier:
+  mode: gpu-only
+  lmcache:
+    # host:port of LMCache's own separate "mp server" process; see
+    # ../disagg-pd/values.yaml's own mpServerEndpoint comment for the
+    # format (no scheme, numeric port) and default port.
+    mpServerEndpoint: ""
+    extraConfig: {}
