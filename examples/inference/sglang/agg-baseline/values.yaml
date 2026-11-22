@@ -81,6 +81,12 @@ service:
   type: ClusterIP
   port: 8000
 
+networkPolicy:
+  # Default deny, name the exception (#63, filed as a private report
+  # "SA2"): see vllm/disagg-pd's own values.yaml comment for the full
+  # reasoning; this chart has the same gap and the same fix.
+  enabled: true
+
 metrics:
   # Adds --enable-metrics, the sglang-metrics=true and component pod labels
   # and the prometheus.io/* annotations that the "sglang" scrape job in

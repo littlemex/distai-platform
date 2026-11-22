@@ -1,0 +1,25 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $fullname := include "agg.fullname" . -}}
+{{- /*
+  #63 (filed as a private report "SA2"): same gap and same fix as
+  vllm/agg-baseline's own networkpolicy.yaml.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "agg.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "agg.selector" . | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: load-replay
+      ports:
+        - port: {{ .Values.service.port }}
+{{- end }}
