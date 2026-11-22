@@ -29,10 +29,11 @@
 # Idempotent: re-running with the same inputs changes nothing; re-running
 # with a different --revision updates the registration Secret's annotation
 # and the root Application's targetRevision together (Decision 1
-# Acceptance Criteria). Re-running after a PR adds a chart registry is
-# required so the `platform` AppProject's sourceRepos picks it up
-# (Decision 6) - this script recomputes sourceRepos from this checkout's
-# own gitops/addons/*/addon.yaml every run, never hand-maintained.
+# Acceptance Criteria). Re-running after a PR adds a chart registry or a
+# new addon namespace is required so the `platform` AppProject's
+# sourceRepos and destinations pick it up (Decision 6) - this script
+# recomputes both from this checkout's own gitops/addons/*/addon.yaml and
+# gitops/addon-catalog/*/addon.yaml every run, never hand-maintained.
 #
 # Safety: aborts before writing anything if the live kubeconfig's server
 # does not match --tf-outputs' cluster_endpoint, or if a cell-registration
@@ -174,6 +175,47 @@ while IFS= read -r repo; do
     - \"${repo}\""
 done <<< "${ADDON_REPOS}"
 
+# destinations.namespace is computed the same way sourceRepos is (Decision
+# 6/7): every namespace: value this checkout's own gitops/addons/*/addon.yaml
+# and gitops/addon-catalog/*/addon.yaml declare, deduplicated, plus this
+# capability's own namespace (the registration Secret, the AppProject and the
+# root Application all live there - Object 1/3 above). A per-cell opt-in file
+# (gitops/cells/<cluster>/addons/*.yaml) is required to repeat its catalog
+# entry's own namespace byte-for-byte (check_addon_catalog_sync.py, #41
+# Decision 3), so it never introduces a namespace outside this set without
+# that check failing first. This closes the independent review findings
+# tracked as #63 (security-axis pass, filed as a private report "SA1"):
+# previously every Application in this AppProject could target *any*
+# namespace in the cluster, which is wider than the role_mappings.ADMIN
+# identity actually needs, since every admin-delivered Application's own
+# namespace is already a declared, reviewed fact in this checkout, not a
+# runtime choice.
+ADDON_NAMESPACES="$( { grep -h '^namespace:' "${REPO_ROOT}"/gitops/addons/*/addon.yaml "${REPO_ROOT}"/gitops/addon-catalog/*/addon.yaml 2>/dev/null || true; } \
+  | sed -E 's/^namespace:[[:space:]]*//; s/^"(.*)"$/\1/' | sort -u)"
+
+DESTINATIONS_YAML="    - name: \"${CLUSTER_NAME}\"
+      namespace: \"${ARGOCD_NAMESPACE}\""
+while IFS= read -r ns; do
+  [[ -n "${ns}" && "${ns}" != "${ARGOCD_NAMESPACE}" ]] || continue
+  DESTINATIONS_YAML="${DESTINATIONS_YAML}
+    - name: \"${CLUSTER_NAME}\"
+      namespace: \"${ns}\""
+done <<< "${ADDON_NAMESPACES}"
+
+# clusterResourceWhitelist/namespaceResourceWhitelist stay "*"/"*" for now,
+# not narrowed to an exact kind list the way destinations/sourceRepos are:
+# several addons wrap an unpinned, third-party upstream chart whose full
+# object set is not read for this script (dcgm-exporter's Chart.yaml
+# dependency, #41 Decision 5 row 2, is the clearest example), so a
+# hand-typed kind list here risks silently blocking a legitimate sync on
+# the next chart version rather than narrowing anything real. Tracked as a
+# follow-up in #49 (upstream/tooling findings): derive this list the same
+# way, from `helm template` of every addon.yaml plus `kubectl
+# api-resources` to tell cluster- from namespace-scoped, run once at
+# bootstrap time against the live cluster. Until that lands, the
+# compensating controls are the destinations list above, the
+# ADMIN-mapping-only convention documented on the argocd variable and in
+# gitops/README.md, and closing #53 (zero-review merge gate).
 kubectl apply -n "${ARGOCD_NAMESPACE}" -f - <<EOF
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
@@ -186,8 +228,7 @@ spec:
   sourceRepos:
 ${SOURCE_REPOS_YAML}
   destinations:
-    - name: "${CLUSTER_NAME}"
-      namespace: "*"
+${DESTINATIONS_YAML}
   clusterResourceWhitelist:
     - group: "*"
       kind: "*"

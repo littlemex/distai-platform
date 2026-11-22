@@ -128,9 +128,20 @@ spec:
           {{- end }}
           {{- end }}
       {{- if .syncOptions }}
+      # templatePatch is applied as a JSON merge patch over the rendered
+      # base template above (goTemplate's own semantics): a present key
+      # replaces the base's list wholesale, it does not append to it. An
+      # addon.yaml that sets its own syncOptions would otherwise silently
+      # lose the base template's CreateNamespace=true (#63/#64) -
+      # CreateNamespace=true is always rendered first here, and an
+      # addon.yaml that also lists it explicitly (as gitops/addons/kueue's
+      # used to, before this fix) is de-duplicated rather than repeated.
       syncPolicy:
         syncOptions:
+        - CreateNamespace=true
         {{- range .syncOptions }}
+        {{- if ne . "CreateNamespace=true" }}
         - {{ . }}
+        {{- end }}
         {{- end }}
       {{- end }}
