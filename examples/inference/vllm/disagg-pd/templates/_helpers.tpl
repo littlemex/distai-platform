@@ -68,7 +68,7 @@ app.kubernetes.io/component: {{ .component }}
 {{- if $r.gpuMemoryUtilization -}}
 {{- $explicitPct := int (mulf (float64 $r.gpuMemoryUtilization) 100) -}}
 {{- if gt $explicitPct $ceilingPct -}}
-{{- fail (printf "%s.gpuMemoryUtilization=%s exceeds the safe ceiling (0.%02d) for %s.mps.replicas=%d -- MPS splits this GPU's memory roughly evenly across replicas, but vLLM's own startup memory check sizes its request against the WHOLE physical device, not this engine's own MPS-limited share, so a value above this ceiling fails deterministically on real hardware (confirmed, distai-platform #37, examples/inference/README.md's own MPS investigation)" $role $r.gpuMemoryUtilization $ceilingPct $role (int $mps.replicas)) -}}
+{{- fail (printf "%s.gpuMemoryUtilization=%s exceeds the safe ceiling (0.%02d) for %s.mps.replicas=%d -- MPS splits this GPU's memory roughly evenly across replicas. vLLM's own disagg-pd crashed on real hardware at a desired fraction near 0.92 under a 2-replica MPS split (ceiling 0.45), comfortably above this ceiling (distai-platform #37, examples/inference/README.md's own MPS investigation); this chart refuses a value above that ceiling here instead of finding out via a crash loop" $role $r.gpuMemoryUtilization $ceilingPct $role (int $mps.replicas)) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -115,14 +115,17 @@ app.kubernetes.io/component: {{ .component }}
   when mps.enabled). Otherwise: "" (vLLM's own built-in default, the flag is
   not rendered at all - this chart's behavior before this field existed) when
   mps.enabled is false; a safe computed fraction when it is true. The
-  fraction is 0.70/replicas, not the bare 1/replicas MPS itself enforces
-  (capacity-pool/README.md's own confirmed pinned-memory-limit log line):
-  vLLM's own startup check sizes its request against the WHOLE physical
-  device while MPS caps this process's own actual free share at
-  roughly 1/replicas of it, and this chart's own NixlConnector registers its
-  own RDMA transfer buffer on top of vLLM's KV-cache budget (both confirmed
-  real, additive overhead on real hardware, #37) - 0.70/replicas leaves
-  headroom for both before vLLM's check sees how much is actually free.
+  fraction is 0.70/replicas, below the bare 1/replicas MPS itself enforces
+  (capacity-pool/README.md's own confirmed pinned-memory-limit log line) and
+  below the ceiling disagg.validate enforces (0.90/replicas). This exact
+  margin is not derived from a confirmed accounting of every byte this
+  chart's own NixlConnector or vLLM's own non-KV-cache memory uses under MPS
+  (examples/inference/README.md's own MPS investigation states this as an
+  open question, not settled) - 0.70/replicas is a real-hardware-confirmed
+  safe value (round 4, #37: this exact fraction started and served a real
+  completion on the same shape that crash-looped at vLLM's own un-fixed
+  default), picked with headroom below the ceiling rather than derived from
+  a full memory-accounting model.
 */}}
 {{- define "disagg.gpuMemoryUtilization" -}}
 {{- $r := . -}}
