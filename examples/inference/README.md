@@ -75,17 +75,19 @@ done.
 | (b) Same-node prefill+decode colocate | vLLM | **Blocked by a real, reproducible defect (proximate cause found in round 3, not fully explained -- see below), not purely a scheduling issue.** Two distinct attempts, two distinct outcomes: the first (missing `enforceAntiAffinity=false`, the chart's own "fault-injection shape" -- its own `placement.enforceAntiAffinity` default renders a required anti-affinity that keeps decode off prefill's node, documented in `vllm/disagg-pd/values.yaml`/`NOTES.txt`) never colocated at all -- `decode` stayed `Pending`, `node=<none>`, for its own 12-minute window. Decode's own required anti-affinity would normally let Karpenter launch a second node instead of leaving it `Pending`, but the `gpu-shared` pool's own `limits: {cpu: "32"}` caps it to exactly one `g7.8xlarge` node (`32` vCPU), so no second node was available within that pool for decode to land on -- exactly the "fault-injection shape" the chart's own values.yaml/NOTES.txt describes for a one-node pool. The corrected retry (`enforceAntiAffinity=false`) did colocate both roles onto one node (`ip-10-0-75-10`), and only then crashed: both containers reached `CrashLoopBackOff`, `successful_requests=0/40`, `failed_requests=40/40` |
 | (b) Same-node prefill+decode colocate | SGLang | Confirmed (with `enforceAntiAffinity=false`): decode, prefill and the router all on the same node (`ip-10-0-100-212`), `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=4.001`, TTFT p50/p90/p99 = 18.2/22.8/146.2 ms |
 | (c) 2-node disaggregated over EFA, MPS-shared prefill | vLLM | **Blocked by the same proximate cause as (b), not fully explained -- see below.** `decode` (separate `g7.8xlarge` node) reached `Running`/`Ready`; both `prefill` replicas (same `g7.48xlarge` MPS-shared node) crash-looped in both round 2 and round 3 |
-| (c) 2-node disaggregated over EFA, MPS-shared prefill | SGLang | Functionally confirmed: `decode` (separate `g7.8xlarge` node) and both `prefill` replicas (same `g7.48xlarge` MPS-shared node) all `Running`/`Ready`, `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=1.338`. **Two things this investigation could not confirm, stated precisely rather than assumed, and not yet closed**: (1) the EFA `hw_counters` diagnostic (`rdma_write_bytes`/`rdma_read_bytes` under `/sys/class/infiniband/*/ports/1/hw_counters/`) returned empty for every pod, before and after load, in round 2 — a diagnostic-command problem, not re-attempted in round 3 to stay inside the 3-hour real-hardware time budget; (2) no GPU UUID was captured for either prefill replica, so whether the two MPS clients actually landed on the SAME physical GPU (true MPS sharing) or on two of the node's 8 physical GPUs (same node, no sharing, still functionally correct) is not distinguished by any check this investigation ran — a real gap in the test's own evidence, found by Fable 5.2 review |
+| (c) 2-node disaggregated over EFA, "MPS-shared" prefill (quoted — round 4 found the two prefill replicas did NOT actually share one physical GPU, see below) | SGLang | Functionally confirmed: `decode` (separate `g7.8xlarge` node) and both `prefill` replicas (same `g7.48xlarge` node) all `Running`/`Ready`, `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=1.338`. At the time this row was written: (1) the EFA `hw_counters` diagnostic returned empty for every pod in round 2, not re-attempted; (2) no GPU UUID was captured, so whether the two "MPS" clients shared one physical GPU or landed on two of the node's 8 physical GPUs was undistinguished. **Round 4 closed (2): the two prefill replicas got two different physical GPU UUIDs** (`GPU-cb86dd16-3984-7a5b-d577-82f2d1f7a509`/`GPU-f50ed8a5-11ec-7261-ea34-f62d869cff02`) — this row is a same-node, 2-of-8-physical-GPUs measurement, not a true single-GPU MPS-sharing measurement; the node's own `mps-2` device-plugin config did not, in this run, place both replicas on one physical device. (1) (EFA byte counters) is still open |
 
 **`goodput_per_gpu` is not established to be on a common basis across this table, found by Fable
 5.2 review — do not compare rows against each other.** Forms (a) and (b)'s own `score.py` calls
 passed `--gpu-count 1` (the one shared *physical* GPU — not in question for these two forms, since
 both roles are confirmed on the same single node). Form (c) passed `--gpu-count 3` (counting
-*requested* `nvidia.com/gpu` units: 2 MPS-shared prefill replicas + 1 decode). Whether `3` matches
-or differs from form (c)'s own *physical* GPU count is itself unresolved by this investigation's
-own evidence (see gap (2) above and Known issue #5): it is `2` if the two prefill replicas shared
-one physical GPU, or `3` if they landed on two separate physical GPUs of the node's 8 — which one
-happened was not captured. The `4.0`-ish numbers in (a)/(b) and the `1.338` in (c) are therefore
+*requested* `nvidia.com/gpu` units: 2 "MPS-shared" prefill replicas + 1 decode). Round 4 (see the
+SGLang row above and Known issue #5) found the two prefill replicas landed on two different
+physical GPUs, so `3` does match this row's own physical GPU count — but that itself means
+`goodput_per_gpu=1.338` for SGLang's own form (c) is not a measurement of true MPS sub-device
+sharing at all (no sharing happened), so it still does not belong next to (a)/(b)'s own numbers,
+which *are* confirmed single-physical-GPU measurements: form (c) used 3 separate physical GPUs,
+(a)/(b) used 1. The `4.0`-ish numbers in (a)/(b) and the `1.338` in (c) are therefore
 not confirmed comparable on any single convention, and this page's own stated rule (compare only
 on the same trace, model and SLO) does not hold across forms either. Each row's own number is real
 (the underlying `successful_requests`/`joint_attainment_share` values are not affected by this),
@@ -93,7 +95,7 @@ but no cross-form "(c) is N times worse per GPU" conclusion is supported — not
 round to stay inside the real-hardware time
 budget.
 
-### Proximate cause for vLLM forms (b) and (c), found in round 3, fixed and narrowed in round 4
+### Proximate cause for vLLM forms (b) and (c), found in round 3; fixed and confirmed for form (b) in round 4, form (c) still open
 
 Round 3 found forms (b) and (c)'s vLLM crashes sharing the same traceback
 (`vllm/v1/worker/gpu_worker.py`'s `request_memory`):
@@ -154,7 +156,16 @@ round's own log capture missed the crashing container's exact traceback — `kub
 evidence of a different failure mode, but not a re-confirmation of the exact `ValueError` either).
 **This A/B pair (same node, same cell, only `mps.*` changed) is the one claim this round makes with
 confidence: setting an explicit, MPS-aware fraction turns a real crash loop into a real, working
-server on real hardware.** Why `disagg-pd`'s own un-fixed default takes a different path than
+server on real hardware, for one request.** This is "starts and answers," not a load test: the
+chart's own `0.70/replicas` default (`0.35` here) was the only fraction tried this round — the
+`0.90/replicas` ceiling's own boundary (`0.45`) was not itself tried, so whether a value right at
+the ceiling also starts cleanly is not confirmed either. Nor does a successful single completion
+rule out the engine running closer to its own real memory limit than `0.35`'s own 35%-of-device
+figure suggests — actual physical memory committed under concurrent load (multiple requests, a
+larger model, or both MPS clients active at once) was not measured this round, and round 4's own
+form (a) finding (immediately below) is a reason for caution here, not reassurance: a vLLM process
+can keep running past what this page's own numbers say should be free. Why `disagg-pd`'s own
+un-fixed default takes a different path than
 `agg-baseline`'s own un-fixed default is left exactly as open as round 3 left it — the leading
 candidate, not confirmed in isolation and not elevated to fact anywhere in this PR's own template
 comments, is that `NixlConnector`'s own memory registration (present in every `disagg-pd`/
@@ -171,9 +182,10 @@ isolation this round (dedicated namespace, no concurrent test, `g7.8xlarge` deco
 identical long, repeated-filler prefix both returned a real completion;
 `TTFT_PROXY_TOTAL_TIME` (curl's own `time_starttransfer`) was `0.058s` cold and `0.038s` warm.
 This drop is consistent with a cache hit, but SGLang's own always-on GPU radix cache (on
-regardless of `kvCacheTier.mode`) or an ordinary first-request warmup effect (CUDA graph capture,
-connection setup) could produce the identical shape without HiCache's own hierarchical tier doing
-anything — this single cold/warm pair, with no HiCache-off control run in the same session, does
+regardless of `kvCacheTier.mode`), an ordinary first-request warmup effect (CUDA graph capture,
+connection setup), or plain trial-to-trial variance (`n=1` per condition, no repeats) could each
+produce the identical shape without HiCache's own hierarchical tier doing anything — this single
+cold/warm pair, with no HiCache-off control run in the same session and no repeated sampling, does
 not distinguish between those explanations. What this round closes is narrower than "HiCache
 improves TTFT": it closes "the cold/warm pass can run end to end without hitting the two
 unrelated bugs the prior rounds hit."
