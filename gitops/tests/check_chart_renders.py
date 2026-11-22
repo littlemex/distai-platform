@@ -206,12 +206,34 @@ def check_capacity_pool(name: str, values: dict, docs: list[dict]) -> None:
           len(got_tolerations) == len(want_taints), f"got {got_tolerations!r}")
 
     method = accelerator.get("methodLabel") or {}
+    want_labels = {}
+    if method:
+        want_labels[method["key"]] = str(method["value"])
+    # distai.dev/efa-attached (Fable 5.2 review round 5): capacity-pool's own signal
+    # that this pool's EC2NodeClass actually attaches an EFA device, read from
+    # pool.networkInterfaces containing an interfaceType: efa-only entry -- not from
+    # whether the list is merely non-empty (a pool can list only the primary
+    # "interface" entry, #50's own CEL validation requires that one but never an
+    # efa-only one) and not from accelerator.methodLabel or the instance type.
+    network_interfaces = pool.get("networkInterfaces") or []
+    has_efa = any(str(ni.get("interfaceType")) == "efa-only" for ni in network_interfaces)
+    if has_efa:
+        want_labels["distai.dev/efa-attached"] = "true"
     if method:
         check(f"{label} NodePool node template carries the method label {method['key']}={method['value']}",
               np_template_labels.get(method["key"]) == str(method["value"]), f"got {np_template_labels!r}")
+    if has_efa:
+        check(f"{label} NodePool node template carries distai.dev/efa-attached=true (pool.networkInterfaces has an efa-only entry)",
+              np_template_labels.get("distai.dev/efa-attached") == "true", f"got {np_template_labels!r}")
     else:
-        check(f"{label} NodePool node template carries no extra labels (no accelerator.methodLabel set)",
+        check(f"{label} NodePool node template carries no distai.dev/efa-attached label (no efa-only entry in pool.networkInterfaces)",
+              "distai.dev/efa-attached" not in np_template_labels, f"got {np_template_labels!r}")
+    if not want_labels:
+        check(f"{label} NodePool node template carries no extra labels (no accelerator.methodLabel, no EFA interface)",
               not np_template_labels, f"got {np_template_labels!r}")
+    else:
+        check(f"{label} NodePool node template carries exactly the expected labels {want_labels}",
+              np_template_labels == want_labels, f"got {np_template_labels!r}")
 
     resource_name = accelerator.get("resourceName")
     if resource_name:
@@ -253,6 +275,7 @@ def check_smoke(name: str, values: dict, docs: list[dict]) -> None:
 EXPECTED_FIXTURES = {
     "capacity-pool": {
         "on-demand-default", "reserved", "flex", "accelerator-tenancy", "taint-no-value",
+        "efa-attached",
         "reserved-no-tags", "unknown-capacity-type", "capacity-type-in-requirements",
         "invalid-instance-match-criteria", "invalid-taint-effect", "duplicate-taint",
         "empty-tag-value", "team-taint-no-value",
