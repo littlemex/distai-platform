@@ -5,7 +5,7 @@ Self-contained references for serving models on an EKS cluster. Each example is 
 | Engine | Example | Description |
 | --- | --- | --- |
 | [`vllm`](vllm/) | [`disagg-pd`](vllm/disagg-pd/) | Prefill/decode disaggregated serving with vLLM's NixlConnector over libfabric/EFA, a prefill-then-decode proxy, a free prefill:decode ratio, and prefill and decode kept on different nodes by default |
-| [`vllm`](vllm/) | [`disagg-pd-llmd`](vllm/disagg-pd-llmd/) | The same prefill and decode engines as `disagg-pd`, routed by the llm-d router instead of the proxy: a Gateway API `HTTPRoute` to an `InferencePool`, llm-d's Endpoint Picker choosing a prefill and a decode pod per request, and a routing sidecar in each decode pod. Not yet run on real hardware (see Status) |
+| [`vllm`](vllm/) | [`disagg-pd-llmd`](vllm/disagg-pd-llmd/) | The same prefill and decode engines as `disagg-pd`, routed by the llm-d router instead of the proxy: a Gateway API `HTTPRoute` to an `InferencePool`, llm-d's Endpoint Picker choosing a prefill and a decode pod per request, and a routing sidecar in each decode pod. Run on real hardware; the request path does not work end to end yet (see Status) |
 | [`vllm`](vllm/) | [`agg-baseline`](vllm/agg-baseline/) | Aggregated vLLM serving with vLLM's default scheduler, the baseline the disaggregated layout is compared against on the same hardware |
 | [`sglang`](sglang/) | [`disagg-pd`](sglang/disagg-pd/) | Prefill/decode disaggregated serving with SGLang's own transfer backends (NIXL over libfabric/EFA by default, or Mooncake), SGLang's own router finding both roles through the Kubernetes API, and the same placement values as the vLLM chart |
 | [`sglang`](sglang/) | [`agg-baseline`](sglang/agg-baseline/) | Aggregated SGLang serving with mixed chunked prefill and an explicit chunk size, the tuned baseline for the SGLang disaggregated layout |
@@ -26,15 +26,14 @@ How to measure with them is described in [`_shared/README.md`](_shared/README.md
 | --- | --- | --- |
 | [`vllm/disagg-pd`](vllm/disagg-pd/) (hand-written proxy) | Yes | Yes (the RFC, [#37](https://github.com/littlemex/distai-platform/issues/37), follow-up issue B) |
 | [`vllm/agg-baseline`](vllm/agg-baseline/) | Yes | Yes (follow-up issue B) |
-| [`vllm/disagg-pd-llmd`](vllm/disagg-pd-llmd/) (llm-d router: Gateway API, `InferencePool`, EPP) | Yes: chart, README and static checks | Partially. The Gateway, `HTTPRoute`, `InferencePool` and EPP all reached a healthy, correctly-resolved state on real hardware (a light-tier two-node cell), and the EPP's own pod datastore and the decode-side sidecar's own allowlist both tracked the real prefill/decode pods correctly; a real end-to-end request through the Gateway still fails (`502`/`500` from the Gateway's own data plane trying to reach the EPP's `ext_proc` endpoint), not yet root-caused past "a TLS/h2 transport mismatch between the Gateway implementation and the EPP" — see [#37](https://github.com/littlemex/distai-platform/issues/37) for the exact evidence |
+| [`vllm/disagg-pd-llmd`](vllm/disagg-pd-llmd/) (llm-d router: Gateway API, `InferencePool`, EPP) | Yes: chart, README and static checks | Partially. The Gateway, `HTTPRoute`, `InferencePool` and EPP all reached a healthy, correctly-resolved state on real hardware (a light-tier two-node cell), and the EPP's own pod datastore and the decode-side sidecar's own allowlist both tracked the real prefill/decode pods correctly; a real end-to-end request through the Gateway still fails with a `500` from the Gateway's own data plane trying to reach the EPP's `ext_proc` endpoint. The data plane's own log line is consistent with a TLS/h2 transport mismatch between the Gateway implementation and the EPP; that is an interpretation of one observed error, not a confirmed root cause — see [#37](https://github.com/littlemex/distai-platform/issues/37) for the exact evidence |
 | [`sglang/disagg-pd`](sglang/disagg-pd/) | Yes | Yes (light-tier two-node cell; see [#37](https://github.com/littlemex/distai-platform/issues/37)) |
 | [`sglang/agg-baseline`](sglang/agg-baseline/) | Yes | Yes (same cell) |
-| [`_shared/dashboards/sglang-pd.json`](_shared/dashboards/sglang-pd.json) | Yes | The scrape path and metric names are confirmed against a real SGLang run (engine `/metrics`, and a minimal in-cluster Prometheus scraping it); the dashboard JSON panels themselves have not been opened against a real Grafana in this round |
+| [`_shared/dashboards/sglang-pd.json`](_shared/dashboards/sglang-pd.json) | Yes | Not yet fed by a real SGLang run in this round: this round's Prometheus check (see `vllm/agg-baseline`'s own Status) scraped a vLLM engine only. SGLang's own `/metrics` was not inspected, and `sglang-pd.json`'s panels were not opened against a real Grafana |
 
 `tests/0.static.sh` covers `vllm/disagg-pd-llmd`; it does not render-check the SGLang charts yet
-(follow-up). The remaining gap above (the llm-d data-plane-to-EPP transport mismatch) is the only
-row not yet confirmed end to end on real hardware; it is a real, reproduced failure, not an
-untested path.
+(follow-up). The llm-d row above is the only one of the five combinations whose request path does
+not work end to end yet; it is a real, reproduced failure, not an untested path.
 
 ## Conventions
 

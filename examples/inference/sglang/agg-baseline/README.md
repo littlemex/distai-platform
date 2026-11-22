@@ -4,7 +4,7 @@ This Helm chart serves one model the ordinary way: each SGLang engine runs prefi
 
 ## Status
 
-**Run on real hardware** (`g7.8xlarge`, light tier, RFC [#37](https://github.com/littlemex/distai-platform/issues/37) follow-up issue C): the engine reached `Running`/`Ready`, served a real OpenAI-compatible completion, and a 40-request open-loop load-replay against `_shared/load-replay`/`score.py` completed with `joint_attainment_share=1.0` and a `goodput_per_gpu` within rounding of the `vllm/agg-baseline` chart's own number on the same cell, same model and the same trace. Its own `/metrics` was also confirmed scraped correctly by a real (minimal, in-cluster) Prometheus. `[`../../tests/0.static.sh`](../../tests/0.static.sh) still does not render-check this chart (follow-up).
+**Run on real hardware** (`g7.8xlarge`, light tier, RFC [#37](https://github.com/littlemex/distai-platform/issues/37) follow-up issue C): the engine reached `Running`/`Ready` and served a real OpenAI-compatible completion (a real generated answer, not an error). A 40-request open-loop load-replay against `_shared/load-replay`/`score.py`, at a fixed, low, non-saturating rate (2 req/s), completed with `successful_requests=40`/`failed_requests=0`, `joint_attainment_share=1.0` and `goodput_per_gpu≈2.02` (that rate over 1 GPU, comfortably under every SLO limit — a smoke result, not a saturation or efficiency measurement). This round's Prometheus check (a minimal, in-cluster instance, confirmed scraping a real, nonzero `vllm:*` metric value) was run against the `vllm/agg-baseline` chart only; this SGLang chart's own `/metrics` was not inspected and is not independently confirmed scraped. [`../../tests/0.static.sh`](../../tests/0.static.sh) still does not render-check this chart (follow-up).
 
 ## The tuned baseline
 
@@ -98,7 +98,7 @@ Run the same load replay and scorer from [`../../_shared/`](../../_shared/) agai
 ## Known issues
 
 - Not yet run on real hardware; see [Status](#status).
-- The SGLang image runs as root by default and has no non-root user of its own. The chart runs it as UID 1000 with all capabilities dropped and `HOME` on the cache volume. That combination has not been started on a GPU node yet; if a library writes outside `HOME` or `/tmp`, the engine fails at start with a permission error naming the path.
+- The SGLang image runs as root by default and has no non-root user of its own. The chart runs it as UID 1000 with all capabilities dropped and `HOME` on the cache volume. **Confirmed on real hardware**: the engine reached `Running`/`Ready` under this security context and served a real completion — this UID/capability combination does not block startup at this chart's defaults. Not independently checked: a workload that writes outside `HOME`/`/tmp`.
 - SGLang's `/health` generates one token when the engine is idle and takes at least one second, so the probes use a 25-second timeout. A probe failure therefore means the engine could not generate, not only that the process is gone.
 - SGLang's OpenAI-compatible server has no authentication in this configuration. The Service is `ClusterIP`; restrict access with a NetworkPolicy if the cluster is shared.
 - With the default `emptyDir` cache, every engine pod downloads the weights at start.

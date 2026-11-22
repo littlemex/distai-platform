@@ -55,6 +55,8 @@ INFERENCE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DISAGG="${INFERENCE_ROOT}/vllm/disagg-pd"
 LLMD="${INFERENCE_ROOT}/vllm/disagg-pd-llmd"
 AGG="${INFERENCE_ROOT}/vllm/agg-baseline"
+SGLANG_DISAGG="${INFERENCE_ROOT}/sglang/disagg-pd"
+SGLANG_AGG="${INFERENCE_ROOT}/sglang/agg-baseline"
 SCORER="${INFERENCE_ROOT}/_shared/scorer"
 LOAD="${INFERENCE_ROOT}/_shared/load-replay"
 DASHBOARD="${INFERENCE_ROOT}/_shared/dashboards/vllm-pd.json"
@@ -111,6 +113,12 @@ required_files=(
   "vllm/agg-baseline/Chart.yaml"
   "vllm/agg-baseline/values.yaml"
   "vllm/agg-baseline/README.md"
+  "sglang/disagg-pd/Chart.yaml"
+  "sglang/disagg-pd/values.yaml"
+  "sglang/disagg-pd/README.md"
+  "sglang/agg-baseline/Chart.yaml"
+  "sglang/agg-baseline/values.yaml"
+  "sglang/agg-baseline/README.md"
   "_shared/scorer/score.py"
   "_shared/scorer/test_score.py"
   "_shared/load-replay/run-load.sh"
@@ -197,7 +205,7 @@ run_check "score.py unit tests (unittest, stdlib only)" \
 
 # ------------------------------------------- 4. helm lint, helm template
 
-for chart in "${DISAGG}" "${AGG}" "${LLMD}"; do
+for chart in "${DISAGG}" "${AGG}" "${LLMD}" "${SGLANG_DISAGG}" "${SGLANG_AGG}"; do
   rel="${chart#"${INFERENCE_ROOT}"/}"
   [[ -f "${chart}/Chart.yaml" ]] || continue
   # A chart with a Chart.lock depends on another chart (disagg-pd-llmd on

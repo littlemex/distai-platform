@@ -167,7 +167,14 @@ spec:
       {{- if $isDecode }}
       {{- if $sc.ssrfProtection }}
       # Token for the sidecar's InferencePool/pod watch (templates/sidecar-rbac.yaml).
+      # automountServiceAccountToken is false here on purpose: the default
+      # projection mounts the token into every container in the Pod,
+      # including the vllm container below, which never calls the
+      # Kubernetes API and does not need it. The token volume is instead
+      # added explicitly (below, under volumes/volumeMounts) and mounted
+      # into the routing-sidecar init container only.
       serviceAccountName: {{ $fullname }}-routing-sidecar
+      automountServiceAccountToken: false
       {{- else }}
       automountServiceAccountToken: false
       {{- end }}
@@ -207,6 +214,10 @@ spec:
               path: /health
               port: http
             periodSeconds: 5
+          volumeMounts:
+            - name: routing-sidecar-token
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
       {{- else }}
       automountServiceAccountToken: false
       {{- end }}
@@ -337,4 +348,29 @@ spec:
             sizeLimit: {{ $.Values.engine.shmSizeLimit }}
         - name: cache
           {{- toYaml $.Values.engine.cacheVolume | nindent 10 }}
+        {{- if and $isDecode $sc.ssrfProtection }}
+        # Mounted only into the routing-sidecar init container above (not
+        # into the vllm container), so the sidecar's own RBAC token
+        # (get/list/watch on Pods and InferencePools, templates/sidecar-rbac.yaml)
+        # never reaches the vllm container, which never calls the
+        # Kubernetes API. Shaped the same way kubelet's own default
+        # projection would be (same mount path), just scoped to one
+        # container instead of every container in the Pod.
+        - name: routing-sidecar-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3607
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+        {{- end }}
 {{- end }}

@@ -887,7 +887,7 @@
       "type": "timeseries",
       "id": 15,
       "title": "EFA RDMA write bytes per node",
-      "description": "rate of node_amazonefa_rdma_write_bytes_total and node_amazonefa_rdma_write_recv_bytes_total per node. A KV transfer that really used the EFA device moves these; a same-host transfer on libfabric's shared-memory path leaves them flat.",
+      "description": "rate of node_amazonefa_rdma_write_bytes_total and node_amazonefa_rdma_write_recv_bytes_total per node. Confirmed on real hardware: these write-side counters stay flat for this chart's own default connector/role (NixlPullConnector, a pull not a push), on both a cross-node and a same-host run -- read rdma_read_bytes / tx_bytes / rx_bytes instead for that default; no panel for those exists in this dashboard yet (examples/inference/vllm/disagg-pd/README.md, Known issues).",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
