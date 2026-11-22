@@ -233,6 +233,15 @@ Real hardware (`p4d.24xlarge`, two nodes, `NET/Libfabric`/GDRDMA
   method on the same node (#19's own alignment measurement: `pcieRoot`
   constraints, 45.8 vs 3.6-4.7 GB/s) is left to a follow-up issue; nothing
   in either add-on's own nodeSelector shape blocks adding it later.
+- Both EFA add-ons run `privileged: true` and `hostNetwork: true` (the
+  pinned chart's own default `securityContext`/pod spec, confirmed by
+  reading its template, not a value either `addon.yaml` sets) -- the same
+  trust level `accel-nvidia-device-plugin`/`accel-neuron-device-plugin`
+  already run at on every matching node, now extended to one more
+  DaemonSet. `kubectl exec` into either release's Pod reaches that node's
+  EFA/InfiniBand device nodes (`/dev/infiniband`) and network namespace,
+  the same operator-only reach this platform's other privileged
+  accelerator advertisers already have; no new capability is introduced.
 - Both EFA add-ons' pinned image stays at the chart's own
   default Region (`us-west-2`), never overridden per cell: see the
   add-on's own `addon.yaml` comment for why (the platform's own
