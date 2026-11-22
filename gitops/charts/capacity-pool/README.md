@@ -135,6 +135,17 @@ count from first `Ready` with no manual `kubectl label` step, then force a
 Karpenter-driven node replacement on the same pool (an unrelated `requirements`
 edit) and confirm the replacement node carries the same labels without
 reapplying anything by hand — the exact failure this field exists to close.
+Checked on a `Running`/`RESTARTS=0` result, not assumed from it (found by
+Fable 5.2 review, 2026-11-22): Karpenter's own scheduling simulation decides
+whether to launch a node from a pending Pod's request using the instance
+type's *physical* resource count, not the device plugin's own future,
+MPS-split count (which only exists once the node is `Ready` and the device
+plugin has reported it) — so `N` pending replicas, each requesting
+`nvidia.com/gpu: 1`, launched close together can in principle land on `N`
+separate single-GPU nodes instead of sharing one MPS-split GPU, and still
+reach `Running`/`Ready` with `RESTARTS=0` without ever exercising MPS at all.
+Every result below states each replica's own `spec.nodeName` explicitly for
+this reason, not just rollout status.
 
 The pre-fix baseline below (`g7.8xlarge`, `us-east-1`, 2026-11-22, manual
 `kubectl label`, before `accelerator.mpsLabel` existed) is already confirmed:
@@ -193,6 +204,19 @@ items this round leaves open, not closed:
    every other process in it, including host daemons and any other Pod that
    also joins that namespace — not narrowly "the two Pods that need to talk to
    each other"; an earlier draft of this note understated that scope.
+4. **`tenancy.teamTaint` is necessary but not sufficient to actually isolate an
+   MPS-opted-in pool to one team, found by Fable 5.2 review, 2026-11-22.** A
+   taint only keeps the OTHER team's *workload* Pods off the node; it does not
+   by itself keep `nvidia-device-plugin`'s own DaemonSets (the device plugin
+   and `mps-control-daemon`) scheduled there, unless that DaemonSet's own
+   `tolerations` already cover the taint's key. This platform's
+   `accel-nvidia-device-plugin` addon tolerates only the chart's own defaults
+   (`CriticalAddonsOnly`, `nvidia.com/gpu:NoSchedule`) — a `teamTaint` using
+   any other key means neither DaemonSet schedules there at all, the device
+   plugin never advertises `nvidia.com/gpu`, and the node is unusable
+   regardless of `mpsLabel`/`sharingLabel`. Pre-existing (the same gap already
+   existed for `accelerator.taint` alone), not introduced by `mpsLabel` —
+   tracked, not fixed, here.
 
 **What this mechanism actually exposes, stated precisely rather than
 overclaimed** (confirmed against the upstream chart's own README, `NVIDIA/k8s-device-plugin`
