@@ -141,12 +141,31 @@ needed — each still just requests `nvidia.com/gpu: 1`) both scheduled onto
 that one node/GPU, reached `Running`/`Ready` with `RESTARTS=0`, and both
 served a real completion independently and concurrently.
 
-**`mpsLabel` itself and its drift-survival proof: see
-`examples/inference/README.md`'s own "MPS" section** for the real-hardware
-run (same day) that sets `mpsLabel` instead of hand-labeling, forces a
-Karpenter-driven node replacement on the same pool, and confirms the
-replacement node carries the label with no manual step — the one gap this
-baseline left open.
+**`mpsLabel` itself and its drift-survival proof are PENDING a separate
+real-hardware run** (in progress, not yet landed as of this commit) that will
+set `mpsLabel` instead of hand-labeling, force a Karpenter-driven node
+replacement on the same pool, and check — not merely that the replacement
+node carries the label (Karpenter always stamps `spec.template.metadata.labels`
+onto every node from a pool, so that alone is close to tautological), but the
+thing that actually failed in the baseline above: that `mps-control-daemon`
+is `Running` on the replacement node, `Allocatable`'s `nvidia.com/gpu` equals
+the configured replica count (not the unsplit physical count), and a real
+workload is served from it, all with no manual step in between. Results will
+be posted to `examples/inference/README.md`'s own "MPS" section and to this
+paragraph once that run lands; until then, treat `mpsLabel`'s drift-survival
+behavior as designed-and-templated, not yet measured.
+
+**Checked on a `Running`/`RESTARTS=0` result, not assumed from it (found by
+Fable 5.2 review, 2026-11-22)**: Karpenter's own scheduling simulation decides
+whether to launch a node from a pending Pod's request using the instance
+type's *physical* resource count, not the device plugin's own future,
+MPS-split count (which only exists once the node is `Ready` and the device
+plugin has reported it) — so `N` pending replicas, each requesting
+`nvidia.com/gpu: 1`, launched close together can in principle land on `N`
+separate single-GPU nodes instead of sharing one MPS-split GPU, and still
+reach `Running`/`Ready` with `RESTARTS=0` without ever exercising MPS at all.
+The pending run's own results must state each replica's own `spec.nodeName`
+explicitly for this reason, not rely on rollout status alone.
 
 **Security, reviewed and found incomplete by Fable 5.2 (2026-11-22; recorded as an open
 finding, not resolved here)**: NVIDIA's own `mps-control-daemon` DaemonSet — the
@@ -185,6 +204,23 @@ and reverted for the LMCache mp server (see `vllm/disagg-pd/README.md`'s own
 3. The blast radius of a shared host namespace (whether via `hostIPC` or
    NVIDIA's own `hostPID`) is the WHOLE host namespace, not narrowly "the two
    Pods that need to talk to each other."
+4. **`tenancy.teamTaint` is necessary but not sufficient to actually isolate an
+   MPS-opted-in pool to one team, found by Fable 5.2 review, 2026-11-22.** A
+   taint only keeps the OTHER team's *workload* Pods off the node; it does not
+   by itself keep `nvidia-device-plugin`'s own DaemonSets (the device plugin
+   and `mps-control-daemon`) scheduled there either, unless that DaemonSet's
+   own `tolerations` already cover the taint's key. This platform's
+   `accel-nvidia-device-plugin` addon tolerates only the chart's own defaults
+   (`CriticalAddonsOnly`, `nvidia.com/gpu:NoSchedule`) — a `teamTaint` using
+   any other key means neither DaemonSet schedules onto that node at all, the
+   device plugin never advertises `nvidia.com/gpu`, and the node is unusable
+   regardless of `mpsLabel`/`sharingLabel`. This is a pre-existing gap (the
+   same interaction already existed for `accelerator.taint` alone, before
+   `sharingLabel`/`mpsLabel` existed), not introduced by this round, but
+   `teamTaint` is not yet a working *tenancy* control for an MPS pool until
+   the addon's own tolerations are made configurable per pool (or `teamTaint`
+   is restricted to keys the addon already tolerates) — tracked, not fixed,
+   here.
 
 **What this mechanism actually exposes, stated precisely rather than
 overclaimed** (confirmed against the upstream chart's own README, `NVIDIA/k8s-device-plugin`
