@@ -16,11 +16,18 @@ metadata:
 {{- end }}
 spec:
   template:
-{{- with (default (dict) .Values.accelerator).methodLabel }}
-{{- if .key }}
+{{- $methodLabel := (default (dict) .Values.accelerator).methodLabel }}
+{{- $sharingLabel := (default (dict) .Values.accelerator).sharingLabel }}
+{{- $hasMethod := and $methodLabel $methodLabel.key }}
+{{- $hasSharing := and $sharingLabel $sharingLabel.key }}
+{{- if or $hasMethod $hasSharing }}
     metadata:
       labels:
-        {{ .key | quote }}: {{ .value | toString | quote }}
+{{- if $hasMethod }}
+        {{ $methodLabel.key | quote }}: {{ $methodLabel.value | toString | quote }}
+{{- end }}
+{{- if $hasSharing }}
+        {{ $sharingLabel.key | quote }}: {{ $sharingLabel.value | toString | quote }}
 {{- end }}
 {{- end }}
     spec:

@@ -102,6 +102,26 @@ reservation:
 #   methodLabel   - a label on the NodePool's node template, for an
 #                   advertiser DaemonSet to select nodes by. Rendered only
 #                   when methodLabel.key is set.
+#   sharingLabel  - a second, independent label on the same node
+#                   template, for GPU sub-device sharing (MPS or
+#                   time-slicing) opt-in. Rendered only when
+#                   sharingLabel.key is set, alongside methodLabel if
+#                   both are set (two separate keys in the same
+#                   metadata.labels map -- this is additive, not a
+#                   replacement for methodLabel, since a pool opts into
+#                   both "which advertiser" and "how that advertiser
+#                   should split one device" independently). The
+#                   verified, intended use (2026-11-22, real hardware):
+#                   NVIDIA's own k8s-device-plugin chart reads a node
+#                   label named nvidia.com/device-plugin.config to pick
+#                   a named entry from its config.map (see this
+#                   platform's accel-nvidia-device-plugin addon) --
+#                   sharingLabel.key = "nvidia.com/device-plugin.config",
+#                   sharingLabel.value = the chosen config name (for
+#                   example "mps-2"). A pool that never sets this gets
+#                   no label and so falls back to the device plugin's
+#                   own config.default (whole-GPU, no sharing) --
+#                   unchanged behavior for every existing pool.
 accelerator:
   resourceName: ""
   taint:
@@ -109,6 +129,9 @@ accelerator:
     value: ""
     effect: ""
   methodLabel:
+    key: ""
+    value: ""
+  sharingLabel:
     key: ""
     value: ""
 
