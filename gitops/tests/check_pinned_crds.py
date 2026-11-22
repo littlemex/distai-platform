@@ -129,6 +129,35 @@ def helm_template_chart(addon_doc, workdir, namespace=None):
     return proc.stdout
 
 
+def helm_template_dir_chart(addon_doc, repo_root, workdir):
+    """Same idea as helm_template_chart, for a local dir:-sourced chart
+    (gitops/addon-catalog/<name>/addon.yaml) instead of a registry one --
+    dcgm-exporter's own wrapper around an upstream `dependencies:` entry
+    is the one that needs this today (#63, filed as "SA3" item 2). `helm
+    dependency build` resolves that dependency into charts/ first, the
+    same step gitops/tests/0.static.sh's own helm lint/template steps
+    already run for this chart."""
+    chart_ref = os.path.join(repo_root, addon_doc["dir"])
+    subprocess.run(["helm", "dependency", "build", chart_ref], capture_output=True, text=True, timeout=120)
+    name = addon_doc.get("addon", os.path.basename(chart_ref))
+    cmd = ["helm", "template", f"{name}-pinned-crd-check", chart_ref]
+    namespace = addon_doc.get("namespace")
+    if namespace:
+        cmd += ["-n", namespace, "--create-namespace"]
+    values = placeholder_values(addon_doc)
+    values_path = None
+    if values:
+        values_path = os.path.join(workdir, f"{name}-values.yaml")
+        with open(values_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(values, f)
+        cmd += ["-f", values_path]
+    proc = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0:
+        print(f"FAIL helm template {addon_doc['dir']} (for securityContext check): {proc.stderr.strip()}")
+        return None
+    return proc.stdout
+
+
 def extract_served_versions(rendered_text):
     """{(group, kind): {served version name, ...}}, one CRD extraction unit."""
     out = {}
@@ -143,6 +172,33 @@ def extract_served_versions(rendered_text):
             out.setdefault((group, kind), set()).update(versions)
     return out
 
+
+# A fixed, named securityContext policy per addon label (#63, independent
+# security-axis review pass, filed as "SA3" item 2 - this table used to be
+# a single hardcoded dict for the two accel-efa-device-plugin-* addons
+# only; dcgm-exporter's own hardening was not mechanically checked at all
+# until this entry was added). Each entry is the exact values dcgm-exporter/
+# addon.yaml or the two EFA addon.yaml files set themselves, kept here
+# (never read back from those same files) for the reason explained above
+# check_security_context_rendered's own call sites.
+SECURITY_CONTEXT_EXPECTATIONS = {
+    "accel-efa-device-plugin-nvidia": {
+        "privileged": False,
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+    },
+    "accel-efa-device-plugin-neuron": {
+        "privileged": False,
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+    },
+    "dcgm-exporter": {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"add": ["SYS_ADMIN"], "drop": ["ALL"]},
+        "runAsNonRoot": False,
+        "runAsUser": 0,
+    },
+}
 
 METHOD_LABEL_RE = re.compile(r"^distai\.dev/[\w-]+-method$")
 
@@ -302,24 +358,18 @@ def main(repo_root, rendered_dir):
             # accel-efa-device-plugin-{nvidia,neuron} (Fable 5.2 review round 2,
             # finding N6): the same "a values override can be silently ignored"
             # failure mode as the method-label check above, for the
-            # securityContext hardening (privileged: false, capabilities drop
-            # ALL) these two add-ons ship instead of the pinned chart's own
-            # privileged default. This is a fixed, named policy -- the expected
-            # values are keyed by addon name below, never read back from
-            # addon.yaml's own values -- on purpose: reading the expectation
-            # from the same file being checked would pass trivially the moment
-            # addon.yaml's own override is weakened or dropped (confirmed by a
-            # deliberately-broken copy during this check's own development: an
-            # earlier, condition-on-addon.yaml's-own-value version of this
-            # check silently skipped a `privileged: true` regression instead
-            # of failing it).
-            efa_hardened_security_context = {
-                "privileged": False,
-                "allowPrivilegeEscalation": False,
-                "capabilities": {"drop": ["ALL"]},
-            }
-            if label in ("accel-efa-device-plugin-nvidia", "accel-efa-device-plugin-neuron"):
-                ok, reason = check_security_context_rendered(rendered, efa_hardened_security_context)
+            # securityContext hardening these add-ons ship instead of the
+            # pinned chart's own default. This is a fixed, named policy per
+            # addon -- SECURITY_CONTEXT_EXPECTATIONS below, never read back
+            # from addon.yaml's own values -- on purpose: reading the
+            # expectation from the same file being checked would pass
+            # trivially the moment addon.yaml's own override is weakened or
+            # dropped (confirmed by a deliberately-broken copy during this
+            # check's own development: an earlier, condition-on-addon.yaml's-
+            # own-value version of this check silently skipped a
+            # `privileged: true` regression instead of failing it).
+            if label in SECURITY_CONTEXT_EXPECTATIONS:
+                ok, reason = check_security_context_rendered(rendered, SECURITY_CONTEXT_EXPECTATIONS[label])
                 if ok:
                     print(f"PASS {label}: the rendered chart's own container(s) carry the hardened securityContext")
                 else:
@@ -346,6 +396,30 @@ def main(repo_root, rendered_dir):
                         "confirmed on real hardware)"
                     )
                     failures += 1
+
+    # Local dir:-sourced addon-catalog charts (dcgm-exporter today, #63
+    # filed as "SA3" item 2): these ship no CRD of their own, so they sit
+    # outside the registry-chart loop above, but a securityContext
+    # expectation in SECURITY_CONTEXT_EXPECTATIONS still applies to them
+    # the same way.
+    catalog_files = sorted(glob.glob(os.path.join(repo_root, "gitops", "addon-catalog", "*", "addon.yaml")))
+    with tempfile.TemporaryDirectory() as catalog_workdir:
+        for addon_path in catalog_files:
+            with open(addon_path, encoding="utf-8") as f:
+                doc = yaml.safe_load(f) or {}
+            label = doc.get("addon", os.path.basename(os.path.dirname(addon_path)))
+            if "dir" not in doc or label not in SECURITY_CONTEXT_EXPECTATIONS:
+                continue
+            rendered = helm_template_dir_chart(doc, repo_root, catalog_workdir)
+            if rendered is None:
+                failures += 1
+                continue
+            ok, reason = check_security_context_rendered(rendered, SECURITY_CONTEXT_EXPECTATIONS[label])
+            if ok:
+                print(f"PASS {label}: the rendered chart's own container(s) carry the hardened securityContext")
+            else:
+                print(f"FAIL {label}: the rendered chart's own container(s) do not carry the hardened securityContext ({reason})")
+                failures += 1
 
     if failures:
         return 1
