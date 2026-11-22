@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib.k8s_mapping import map_job_status, map_kueue_workload_status
 from lib.plan import load_plan, PlanError
-from lib.readonly_exec import run_readonly, DisallowedCommandError
+from lib.readonly_exec import run_readonly, CollectionError, DisallowedCommandError
 from lib.status_model import StatusError, parse_utc
 
 
@@ -76,6 +76,18 @@ def _collect_one(item, manual_status: dict) -> tuple[dict | None, str | None]:
         return None, f"{item.id}: unhandled status_source.kind {src.kind!r}"
     except DisallowedCommandError as e:
         return None, f"{item.id}: refused to run a non-allowlisted command: {e}"
+    except CollectionError as e:
+        # #63, filed as #60 item 3: distinguish a missing object (a plan
+        # item's own timing - "not yet created", a normal outcome) from a
+        # permission denial (this credential's own RBAC does not grant the
+        # read - an operator problem, not the plan's), rather than the same
+        # "CalledProcessError: ... returned non-zero exit status 1." both
+        # read as before.
+        if e.kind == "not_found":
+            return None, f"{item.id}: not found yet ({e.stderr.strip() or 'kubectl reported NotFound'})"
+        if e.kind == "forbidden":
+            return None, f"{item.id}: permission denied - check this credential's own RBAC ({e.stderr.strip() or 'kubectl reported Forbidden'})"
+        return None, f"{item.id}: collection failed: {e}"
     except Exception as e:  # noqa: BLE001 — one item's collection failure must not abort the run
         return None, f"{item.id}: collection failed: {type(e).__name__}: {e}"
 
