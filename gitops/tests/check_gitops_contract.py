@@ -474,7 +474,7 @@ def main(root: str) -> int:
             "chart": "dra-driver-nvidia-gpu",
             "repoURL": "registry.k8s.io/dra-driver-nvidia/charts",
             "version": "0.5.1",
-            "namespace": "dra-driver-nvidia-gpu",
+            "namespace": "nvidia-dra",
             "label": "distai.dev/nvidia-gpu-method",
             "method": "dra",
         },

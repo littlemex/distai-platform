@@ -41,8 +41,18 @@ chart: dra-driver-nvidia-gpu
 repoURL: registry.k8s.io/dra-driver-nvidia/charts
 version: "0.5.1"
 wave: accelerators
-namespace: dra-driver-nvidia-gpu
+namespace: nvidia-dra
 values:
+  # namespaceOverride is a top-level value, not nested under kubeletPlugin
+  # (confirmed with `helm show values`, chart version 0.5.1) -- renames
+  # this chart's own default namespace (and every rendered object's
+  # metadata.namespace) from its upstream default, "dra-driver-nvidia-gpu",
+  # to match this platform's own short-name convention the other three
+  # accelerator advertisers already follow without an override
+  # (accel-nvidia-device-plugin -> nvidia-device-plugin,
+  # accel-neuron-device-plugin -> neuron-device-plugin, accel-neuron-dra ->
+  # neuron-dra via draDriver.namespaceOverride) (#63, filed as #61 item 2).
+  namespaceOverride: nvidia-dra
   gpuResourcesEnabledOverride: true
   kubeletPlugin:
     nodeSelector:
