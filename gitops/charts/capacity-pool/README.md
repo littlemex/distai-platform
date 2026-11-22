@@ -135,8 +135,10 @@ node name) carried both labels with zero manual steps, and `Allocatable`'s
 `nvidia.com/gpu` read `2` on it immediately — the exact failure this field exists
 to close. What is, and is not, independently re-confirmed here: the node's own
 labels and allocatable count were read directly after the replacement; the
-`mps-control-daemon` Pod's own health was NOT re-observed at that same moment (it
-showed `1/2 Ready`, `Error`, 2 restarts, 44s after the replacement). A real
+`mps-control-daemon` Pod's own health was NOT re-observed at that same moment
+(`kubectl get pods` showed `1/2 Ready`, `Error`, 2 restarts, 44s after the
+replacement — Pod-level status; which of its two containers reported `Error`
+was not captured). A real
 workload was served from this same node a few minutes later with `RESTARTS=0`
 (see `examples/inference/README.md`'s own "MPS" section, form (a)), which is
 evidence the daemon had become healthy by then, but that inference stands in
@@ -151,8 +153,11 @@ plugin has reported it) — so `N` pending replicas, each requesting
 `nvidia.com/gpu: 1`, launched close together can in principle land on `N`
 separate single-GPU nodes instead of sharing one MPS-split GPU, and still
 reach `Running`/`Ready` with `RESTARTS=0` without ever exercising MPS at all.
-Every result below states each replica's own `spec.nodeName` explicitly for
-this reason, not just rollout status.
+The real-hardware results below name each replica's own node where that distinction matters most
+(forms (a) and (b), where both roles are meant to land on the SAME node), not just rollout status;
+form (c)'s own rows name instance types instead, because the open question there is a different
+one (same node but possibly different physical GPUs of the 8), not whether Karpenter launched
+extra nodes.
 
 The pre-fix baseline below (`g7.8xlarge`, `us-east-1`, 2026-11-22, manual
 `kubectl label`, before `accelerator.mpsLabel` existed) is already confirmed:
