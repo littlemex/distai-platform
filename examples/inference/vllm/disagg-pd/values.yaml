@@ -210,6 +210,16 @@ metrics:
   # scrape-configs.yaml selects on. vLLM serves /metrics on the engine port.
   enabled: true
 
+networkPolicy:
+  # Default deny, name the exception (#63, filed as a private report
+  # "SA2"): with this off, any Pod in the cluster, in any namespace, can
+  # call an engine's HTTP port or its NIXL side channel directly, skipping
+  # the proxy the README calls the boundary. On by default; the metrics
+  # port (same as engine.port, scraped in-band) is not separately opened
+  # here since no monitoring namespace scrapes it yet (same gap, same
+  # reasoning, as gitops/charts/dcgm-exporter's own default-deny policy).
+  enabled: true
+
 # Skeleton only (values and rendering, not built or measured on real
 # hardware in this chart yet): where the KV cache lives, as three tiers that
 # stack, not three exclusive choices. A disagg-pd release always needs

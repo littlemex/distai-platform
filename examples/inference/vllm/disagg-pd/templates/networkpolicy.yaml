@@ -1,0 +1,71 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $fullname := include "disagg.fullname" . -}}
+{{- /*
+  #63 (filed as a private report "SA2"): engine Pods and the proxy are
+  reachable from any Pod in the cluster, in any namespace, with nothing
+  enforcing the README's own claim that the Service is the boundary.
+  Default deny, name the exception (the same convention gitops/'s own
+  karpenter-netpol/kueue-netpol use): each Deployment gets its own
+  NetworkPolicy opening only the ports this chart's own release actually
+  needs reachable, from only the Pods that actually need to reach them.
+*/}}
+---
+# prefill and decode engines: the HTTP port (engine.port) only from this
+# release's own proxy, and the NIXL side channel (transport.sideChannelPort)
+# only from the PEER role's own Pods -- NixlConnector's prefill<->decode KV
+# pull is the only legitimate caller of that port; neither role calls its
+# own side channel.
+{{- range $role := list "prefill" "decode" }}
+{{- $peer := ternary "decode" "prefill" (eq $role "prefill") }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-{{ $role }}
+  labels:
+    {{- include "disagg.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "disagg.selector" (dict "root" $ "component" "proxy") | nindent 14 }}
+      ports:
+        - port: {{ $.Values.engine.port }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "disagg.selector" (dict "root" $ "component" $peer) | nindent 14 }}
+      ports:
+        - port: {{ $.Values.transport.sideChannelPort }}
+{{- end }}
+---
+# proxy: its own port only from the shared load-replay driver (the only
+# documented client of this chart's own benchmarks, examples/inference/
+# _shared/load-replay/load-job.yaml's own app.kubernetes.io/name label) in
+# this same namespace -- NetworkPolicy's own podSelector is always scoped to
+# the policy's own namespace, so this does not reach into another team's.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-proxy
+  labels:
+    {{- include "disagg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "disagg.selector" (dict "root" $ "component" "proxy") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: load-replay
+      ports:
+        - port: {{ .Values.proxy.port }}
+{{- end }}
