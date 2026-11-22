@@ -141,19 +141,27 @@ needed — each still just requests `nvidia.com/gpu: 1`) both scheduled onto
 that one node/GPU, reached `Running`/`Ready` with `RESTARTS=0`, and both
 served a real completion independently and concurrently.
 
-**`mpsLabel` itself and its drift-survival proof are PENDING a separate
-real-hardware run** (in progress, not yet landed as of this commit) that will
-set `mpsLabel` instead of hand-labeling, force a Karpenter-driven node
-replacement on the same pool, and check — not merely that the replacement
-node carries the label (Karpenter always stamps `spec.template.metadata.labels`
-onto every node from a pool, so that alone is close to tautological), but the
-thing that actually failed in the baseline above: that `mps-control-daemon`
-is `Running` on the replacement node, `Allocatable`'s `nvidia.com/gpu` equals
-the configured replica count (not the unsplit physical count), and a real
-workload is served from it, all with no manual step in between. Results will
-be posted to `examples/inference/README.md`'s own "MPS" section and to this
-paragraph once that run lands; until then, treat `mpsLabel`'s drift-survival
-behavior as designed-and-templated, not yet measured.
+**`mpsLabel` itself and its drift-survival proof, confirmed on real hardware**
+(`g7.8xlarge`, `us-east-1`): forced an actual Karpenter-driven node replacement
+on an MPS-opted-in pool (bumped `pool.rootVolumeSizeGi`, a real EC2NodeClass
+hash change, not a simulated drift). The replacement node (confirmed a
+genuinely different instance by node name) carried both `nvidia.com/mps.capable=true`
+and `nvidia.com/device-plugin.config=mps-2` with zero manual steps, and
+`Allocatable`'s `nvidia.com/gpu` read `2` on it immediately — the acceptance
+bar this field exists to clear, not merely that Karpenter stamped
+`spec.template.metadata.labels` (which it always does, and which alone would
+be close to tautological). What is, and is not, independently re-confirmed
+here: the node's own labels and allocatable count were read directly after
+the replacement; the `mps-control-daemon` Pod's own health was NOT re-observed
+at that same moment (it showed `1/2 Ready`, `Error`, 2 restarts, 44s after the
+replacement — a real, observed state, not the "config-watcher sidecar restarts
+after relabel, main container stays healthy" oddity this section's own
+baseline cites, since no relabel happened here and the Pod itself reported
+`Error`). A real workload was served from this same node a few minutes later
+with `RESTARTS=0` (see `examples/inference/README.md`'s own "MPS" section,
+form (a)), which is evidence the daemon had become healthy by then, but that
+inference stands in place of a direct re-read of the daemon Pod's own status
+at a later timestamp — not yet done.
 
 **Checked on a `Running`/`RESTARTS=0` result, not assumed from it (found by
 Fable 5.2 review, 2026-11-22)**: Karpenter's own scheduling simulation decides
@@ -180,7 +188,7 @@ but it means **every MPS-opted-in NodePool already carries a
 host-process-namespace-sharing daemon**, independent of and in addition to the
 separate `hostIPC` question an earlier round of this same investigation raised
 and reverted for the LMCache mp server (see `vllm/disagg-pd/README.md`'s own
-"KV cache tiers" section). Three items this round leaves open, not closed:
+"KV cache tiers" section). Four items this round leaves open, not closed:
 1. This platform has no admission control (Pod Security Admission, Kyverno, or
    equivalent) rejecting `hostPID`/`privileged`/`hostIPC`/`hostPath` in any
    namespace today. A future fix must add this gate, not rely on README prose
