@@ -18,9 +18,11 @@ spec:
   template:
 {{- $methodLabel := (default (dict) .Values.accelerator).methodLabel }}
 {{- $sharingLabel := (default (dict) .Values.accelerator).sharingLabel }}
+{{- $mpsLabel := (default (dict) .Values.accelerator).mpsLabel }}
 {{- $hasMethod := and $methodLabel $methodLabel.key }}
 {{- $hasSharing := and $sharingLabel $sharingLabel.key }}
-{{- if or $hasMethod $hasSharing }}
+{{- $hasMps := and $mpsLabel $mpsLabel.key }}
+{{- if or $hasMethod $hasSharing $hasMps }}
     metadata:
       labels:
 {{- if $hasMethod }}
@@ -28,6 +30,9 @@ spec:
 {{- end }}
 {{- if $hasSharing }}
         {{ $sharingLabel.key | quote }}: {{ $sharingLabel.value | toString | quote }}
+{{- end }}
+{{- if $hasMps }}
+        {{ $mpsLabel.key | quote }}: {{ $mpsLabel.value | toString | quote }}
 {{- end }}
 {{- end }}
     spec:

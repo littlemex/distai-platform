@@ -88,20 +88,69 @@ never sets this gets no label, so it falls back to the device plugin's own
 `config.default` (whole-GPU, no sharing) — unchanged behavior for every existing
 pool.
 
-**Confirmed on real hardware** (`g7.8xlarge`, `us-east-1`, 2026-11-22): labeling
-one node `nvidia.com/device-plugin.config=mps-2` (plus the chart's own, separately
-required `nvidia.com/mps.capable=true` label — NVIDIA's `mps-control-daemon`
-DaemonSet's own node selector needs both, and this platform runs no NFD/GPU
-Operator to set either automatically) made that node advertise
-`nvidia.com/gpu: 2` instead of `1` in both `Capacity` and `Allocatable`, and the
-real MPS control daemon split the device 50/50
+**`nvidia.com/mps.capable=true` is now `accelerator.mpsLabel`, baked into the
+NodePool's own node template, not a manual `kubectl label` step (fixed
+2026-11-22).** NVIDIA's `mps-control-daemon` DaemonSet's own node selector
+needs this label, separate from the `nvidia.com/device-plugin.config` label
+`sharingLabel` sets. An earlier round hand-applied it with `kubectl label
+node` after the node joined. That does not survive this chart's own disruption
+model: any later edit to the same pool's `requirements` reads as drift to
+Karpenter, which replaces the node — destroying the hand-applied label before
+the replacement node's own device-plugin Pod could come up and be relabeled.
+Every MPS-opted-in node this round actually reached for a test this way showed
+`nvidia.com/gpu: 0` allocatable at the moment of use, because the node had
+just been replaced and the label was gone. `accelerator.mpsLabel` closes this
+by rendering the label in `NodePool.spec.template.metadata.labels` instead (the
+same place `methodLabel`/`sharingLabel` already render theirs): Karpenter
+copies `spec.template.metadata.labels` onto every node this pool ever
+launches, including a drift-driven replacement, so the label is never lost —
+nothing to reapply, no window where a replaced node is briefly unlabeled.
+
+**Compared with installing NFD/GPU Feature Discovery (chosen: the
+`capacity-pool`-chart label, not NFD/GFD).** NVIDIA's own GPU Operator stack
+normally sets `nvidia.com/mps.capable` (and `nvidia.com/gpu.product`,
+`nvidia.com/gpu.memory`, etc.) automatically via Node Feature Discovery (NFD)
+and the GPU Feature Discovery (GFD) sidecar, reading them off the hardware at
+boot. This platform runs neither (device-plugin selection already uses this
+chart's own `methodLabel`/`sharingLabel`, not NFD-discovered labels, per #19's
+own device-plugin-vs-DRA decision). Installing NFD/GFD only for this one label
+was rejected: it adds a second, independent label-setting mechanism (its own
+DaemonSet, its own upstream release cadence, its own RBAC) for a value this
+platform's own NodePool already knows statically at authoring time — a pool
+author who sets `sharingLabel` to an MPS config name already knows, by
+construction, that the same pool must be MPS-capable; nothing about this label
+needs hardware probing to discover. A static chart value, rendered once at
+`helm install`/`upgrade` time and copied onto every node `spec.template`
+produces, is strictly less moving infrastructure for the same outcome, and
+fails closed the same way every other opt-in field in this chart does — a pool
+that never sets `mpsLabel` renders no label and is never selected by
+`mps-control-daemon`.
+
+**[PENDING REAL-HARDWARE VERIFICATION of `accelerator.mpsLabel` — this
+paragraph is filled in with measured values from this round's run, not before
+it finishes]** Plan: set `sharingLabel={key: nvidia.com/device-plugin.config,
+value: mps-N}` and `mpsLabel={key: nvidia.com/mps.capable, value: "true"}` on
+one pool, confirm the resulting node advertises the split `nvidia.com/gpu`
+count from first `Ready` with no manual `kubectl label` step, then force a
+Karpenter-driven node replacement on the same pool (an unrelated `requirements`
+edit) and confirm the replacement node carries the same labels without
+reapplying anything by hand — the exact failure this field exists to close.
+
+The pre-fix baseline below (`g7.8xlarge`, `us-east-1`, 2026-11-22, manual
+`kubectl label`, before `accelerator.mpsLabel` existed) is already confirmed:
+labeling one node `nvidia.com/device-plugin.config=mps-2` plus (by hand)
+`nvidia.com/mps.capable=true` made that node advertise `nvidia.com/gpu: 2`
+instead of `1` in both `Capacity` and `Allocatable`, and the real MPS control
+daemon split the device 50/50
 (`set_default_device_pinned_mem_limit 0 16311M`, `set_default_active_thread_percentage 50`
 in its own log — both numbers are exactly 100%/`replicas` and the device's total
 memory/`replicas`, confirmed from the daemon's own log, not computed by this
 chart). Two `vllm/agg-baseline` replicas (`engine.replicas=2`, no chart change
-needed — each still just requests `nvidia.com/gpu: 1`) both scheduled onto that
-one node/GPU, reached `Running`/`Ready` with `RESTARTS=0`, and both served a
-real completion independently and concurrently.
+needed — each still just requests `nvidia.com/gpu: 1`) both scheduled onto
+that one node/GPU, reached `Running`/`Ready` with `RESTARTS=0`, and both
+served a real completion independently and concurrently. What this round adds
+is `mpsLabel` itself and the drift-survival proof above, not this baseline
+number.
 
 **Security, reviewed and found incomplete by Fable 5.2 (2026-11-22; recorded as an open
 finding, not resolved here)**: NVIDIA's own `mps-control-daemon` DaemonSet — the

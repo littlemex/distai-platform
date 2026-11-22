@@ -122,6 +122,37 @@ reservation:
 #                   no label and so falls back to the device plugin's
 #                   own config.default (whole-GPU, no sharing) --
 #                   unchanged behavior for every existing pool.
+#   mpsLabel      - a third, independent label on the same node
+#                   template, same shape and same reasoning as
+#                   sharingLabel (rendered only when mpsLabel.key is
+#                   set, additive alongside methodLabel/sharingLabel).
+#                   Exists because NVIDIA's mps-control-daemon
+#                   DaemonSet -- the process that actually performs the
+#                   split sharingLabel above opts into -- is itself
+#                   gated by a THIRD label the upstream chart hardcodes
+#                   (nvidia.com/mps.capable=true), separate from the
+#                   device-plugin.config label sharingLabel sets.
+#                   Before this field existed, that label had to be
+#                   kubectl-applied by hand after the node joined,
+#                   which does not survive a Karpenter drift
+#                   replacement: any later edit to this same pool's
+#                   requirements reads as drift, Karpenter replaces the
+#                   node, and the hand-applied label is gone from the
+#                   new one (confirmed on real hardware, 2026-11-22 --
+#                   see this chart's own "GPU sub-device sharing"
+#                   section below). mpsLabel puts the label in the
+#                   NodePool's own node template instead, so every node
+#                   this pool ever launches -- including every
+#                   Karpenter-driven replacement -- carries it from
+#                   birth, with no manual step and nothing to lose on
+#                   drift. mpsLabel.key = "nvidia.com/mps.capable",
+#                   mpsLabel.value = "true" for the pool opting a node
+#                   into MPS; a pool that never sets this gets no label
+#                   and so is never selected by mps-control-daemon's own
+#                   nodeSelector -- unchanged behavior for every
+#                   existing pool, including one that sets sharingLabel
+#                   for time-slicing (not MPS) without also setting
+#                   mpsLabel.
 accelerator:
   resourceName: ""
   taint:
@@ -132,6 +163,9 @@ accelerator:
     key: ""
     value: ""
   sharingLabel:
+    key: ""
+    value: ""
+  mpsLabel:
     key: ""
     value: ""
 
