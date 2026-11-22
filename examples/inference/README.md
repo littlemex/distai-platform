@@ -55,21 +55,24 @@ name) carried both `nvidia.com/mps.capable=true` and `nvidia.com/device-plugin.c
 zero manual steps, and `nvidia.com/gpu` allocatable read `2` on it immediately — the drift no
 longer destroys the label. What is, and is not, independently re-confirmed: the node's own labels
 and allocatable count were read directly after the replacement; the `mps-control-daemon` Pod's own
-health was NOT re-observed at that same moment — it showed `1/2 Ready`, `Error`, 2 restarts, 44s
-after creation, a real, observed state (not the "config-watcher sidecar restarts after relabel,
-main container stays healthy" oddity `capacity-pool/README.md` documents elsewhere, since no
-relabel happened here and the Pod itself reported `Error`, not just a sidecar restart). A real
-workload was served from this same node a few minutes later with `RESTARTS=0` (T0/T1 below), which
-is evidence the daemon had become healthy by then, but that inference stands in place of a direct
-re-read of the daemon Pod's own status at a later timestamp — not yet done.
+health was NOT re-observed at that same moment — `kubectl get pods` showed `1/2 Ready`, `Error`,
+2 restarts, 44s after creation (Pod-level status; which of the Pod's two containers reported
+`Error` was not captured, so whether this is, or is not, the same "config-watcher sidecar restarts
+after relabel, main container stays healthy" oddity `capacity-pool/README.md` documents elsewhere
+is not established either way — no relabel happened here, which argues against it being that exact
+oddity, but a Pod-level `1/2 Ready` is also consistent with one container, sidecar included,
+failing). A real workload was served from this same node a few minutes later with `RESTARTS=0`
+(form (a) below), which is evidence the daemon had become healthy by then, but that inference
+stands in place of a direct re-read of the daemon Pod's own status at a later timestamp — not yet
+done.
 
 **The 3 forms, each tried on both engines.** All cells target this one drift-replaced node/pool pair unless noted.
 
 | Form | Engine | Result |
 | --- | --- | --- |
 | (a) Aggregated, 1 GPU x 2 replicas | vLLM | Confirmed: both replicas on the same node (`ip-10-0-100-212`), `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=3.997`, TTFT p50/p90/p99 = 8.6/11.1/18.9 ms |
-| (a) Aggregated, 1 GPU x 2 replicas | SGLang | Confirmed: both replicas on the same node, `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=4.005`, TTFT p50/p90/p99 = 9.6/66.7/92.8 ms |
-| (b) Same-node prefill+decode colocate | vLLM | **Blocked by a real, reproducible defect (proximate cause found in round 3, not fully explained -- see below), not a scheduling issue.** Both the fault-injection-shape attempt (missing `enforceAntiAffinity=false`) and the corrected retry put prefill+decode on one MPS-shared GPU; in round 3's retry both containers reached `CrashLoopBackOff` with `successful_requests=0/40`, `failed_requests=40/40` |
+| (a) Aggregated, 1 GPU x 2 replicas | SGLang | Confirmed: both replicas on the same node (`ip-10-0-100-212`), `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=4.005`, TTFT p50/p90/p99 = 9.6/66.7/92.8 ms |
+| (b) Same-node prefill+decode colocate | vLLM | **Blocked by a real, reproducible defect (proximate cause found in round 3, not fully explained -- see below), not purely a scheduling issue.** Two distinct attempts, two distinct outcomes: the first (missing `enforceAntiAffinity=false`, the chart's own "fault-injection shape" -- its own `placement.enforceAntiAffinity` default renders a required anti-affinity that keeps decode off prefill's node, documented in `vllm/disagg-pd/values.yaml`/`NOTES.txt`) never colocated at all -- `decode` stayed `Pending`, `node=<none>`, for its own 12-minute window, exactly as that default predicts. The corrected retry (`enforceAntiAffinity=false`) did colocate both roles onto one node (`ip-10-0-75-10`), and only then crashed: both containers reached `CrashLoopBackOff`, `successful_requests=0/40`, `failed_requests=40/40` |
 | (b) Same-node prefill+decode colocate | SGLang | Confirmed (with `enforceAntiAffinity=false`): decode, prefill and the router all on the same node (`ip-10-0-100-212`), `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=4.001`, TTFT p50/p90/p99 = 18.2/22.8/146.2 ms |
 | (c) 2-node disaggregated over EFA, MPS-shared prefill | vLLM | **Blocked by the same proximate cause as (b), not fully explained -- see below.** `decode` (separate `g7.8xlarge` node) reached `Running`/`Ready`; both `prefill` replicas (same `g7.48xlarge` MPS-shared node) crash-looped in both round 2 and round 3 |
 | (c) 2-node disaggregated over EFA, MPS-shared prefill | SGLang | Functionally confirmed: `decode` (separate `g7.8xlarge` node) and both `prefill` replicas (same `g7.48xlarge` MPS-shared node) all `Running`/`Ready`, `RESTARTS=0`, `successful_requests=40/40`, `goodput_per_gpu=1.338`. **Two things this investigation could not confirm, stated precisely rather than assumed, and not yet closed**: (1) the EFA `hw_counters` diagnostic (`rdma_write_bytes`/`rdma_read_bytes` under `/sys/class/infiniband/*/ports/1/hw_counters/`) returned empty for every pod, before and after load, in round 2 — a diagnostic-command problem, not re-attempted in round 3 to stay inside the 3-hour real-hardware time budget; (2) no GPU UUID was captured for either prefill replica, so whether the two MPS clients actually landed on the SAME physical GPU (true MPS sharing) or on two of the node's 8 physical GPUs (same node, no sharing, still functionally correct) is not distinguished by any check this investigation ran — a real gap in the test's own evidence, found by Fable 5.2 review |
@@ -86,28 +89,32 @@ by other processes.
 ```
 
 vLLM's own startup check computes its memory budget as `gpu_memory_utilization * TOTAL physical
-device memory` (here, `0.92 * 31.38 GiB ≈ 28.87 GiB`) and refuses to start unless that much is
-free; the `15.72 GiB` it found free is close to (not exactly) half of `31.38 GiB`, matching
+device memory` (here, `0.92 * 31.38 GiB ≈ 28.87 GiB`) and refuses to start a single process unless
+that much is free for it alone — the traceback is one process checking its own free share, not a
+check of whether two processes' requests together fit. The `15.72 GiB` it found free is close to,
+but about `0.2 GiB` below, half of `31.38 GiB`; that gap is not accounted for here (plausibly
+rounding or some other process's own footprint, not confirmed). It is also close to
 `capacity-pool/README.md`'s own confirmed MPS pinned-memory-limit log line
-(`set_default_device_pinned_mem_limit 0 16311M` ≈ `15.93 GiB`) within the rounding these two
-numbers carry. This is a confirmed, real, reproducible proximate cause for (b) and (c): two vLLM
-processes, each wanting `0.92 * 31.38 GiB` of device memory (confirmed from the traceback itself,
-not derived from any value this platform's own charts set — neither `vllm/agg-baseline` nor
-`vllm/disagg-pd` sets `gpu_memory_utilization`/`--gpu-memory-utilization` anywhere in `values.yaml`
-or any template, confirmed by inspection), cannot both fit inside one MPS-split GPU's own
-per-client memory share.
+(`set_default_device_pinned_mem_limit 0 16311M` ≈ `15.93 GiB`). This is a confirmed, real,
+reproducible proximate cause for (b) and (c): a vLLM process under MPS sees its own free share at
+roughly half the physical device, while its own `0.92`-fraction request is sized against the full
+device — a mismatch that fails this specific check regardless of what any other process on the
+same GPU is doing. Where the `0.92` figure itself comes from is not established on this page:
+neither `vllm/agg-baseline` nor `vllm/disagg-pd` sets `gpu_memory_utilization`/
+`--gpu-memory-utilization` anywhere in `values.yaml` or any template (confirmed by inspection), but
+that does not rule out an install-time `--set`, an extra CLI arg, or a difference in the two
+charts' own pinned image — none of which was checked this round.
 
 **This does not explain form (a), and that contradiction is not resolved here, stated plainly
 rather than glossed over.** Form (a)/vLLM also put two vLLM processes on one `mps-2`-split GPU
-(the same mechanism the paragraph above says should fail) and it succeeded, `RESTARTS=0`, on the
-same day, same node family. On the numbers in this same page, MPS's own enforcement cannot be the
-missing variable: if the daemon's per-client pinning were somehow not enforced at that moment, two
-processes each requesting `28.87 GiB` still could not both start on one `31.38 GiB` device, which
-form (a) did. Form (a) succeeding therefore means each of its two replicas requested roughly half
-the device or less — not the `0.92` fraction (b)/(c) show. Whether that is because
+(the same per-client memory share the paragraph above says is too small for a `0.92`-fraction
+request) and it succeeded, `RESTARTS=0`, on the same day, same node family. Since the check above
+is per-process, not per-pair, form (a) succeeding means each of its own two replicas individually
+passed a check that (b)/(c)'s replicas individually failed — which means form (a)'s own replicas
+were not actually requesting the `0.92` fraction, or were not bound by the same ~15.7 GiB free
+share, for a reason this round did not identify. Whether that is because
 `vllm/agg-baseline` and `vllm/disagg-pd` end up with a different *effective* memory utilization by
-some path other than an explicit chart value (neither chart sets it explicitly, so if they differ
-it is from vLLM's own code, not a value this platform sets) was not tested this round and is not
+some path other than an explicit chart value was not tested this round and is not
 claimed — left as an open question for the next round, not resolved by this one. **No fix is
 proposed or applied in this PR** until the discrepancy above is understood — the only claim this
 round makes is the proximate traceback for (b)/(c), not a general "vLLM cannot share an MPS GPU"
