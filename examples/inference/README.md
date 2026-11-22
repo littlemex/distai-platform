@@ -26,12 +26,15 @@ How to measure with them is described in [`_shared/README.md`](_shared/README.md
 | --- | --- | --- |
 | [`vllm/disagg-pd`](vllm/disagg-pd/) (hand-written proxy) | Yes | Yes (the RFC, [#37](https://github.com/littlemex/distai-platform/issues/37), follow-up issue B) |
 | [`vllm/agg-baseline`](vllm/agg-baseline/) | Yes | Yes (follow-up issue B) |
-| [`vllm/disagg-pd-llmd`](vllm/disagg-pd-llmd/) (llm-d router: Gateway API, `InferencePool`, EPP) | Yes: chart, README and static checks | Not yet. It also needs the Gateway API and Gateway API Inference Extension CRDs and an administrator-provided Gateway (follow-up issue A), which no run has installed yet |
-| [`sglang/disagg-pd`](sglang/disagg-pd/) | Yes: chart, README and static checks (render-time only; `tests/0.static.sh` does not cover it yet) | Not yet (follow-up issue C) |
-| [`sglang/agg-baseline`](sglang/agg-baseline/) | Yes: chart, README and static checks (render-time only; `tests/0.static.sh` does not cover it yet) | Not yet (follow-up issue C) |
-| [`_shared/dashboards/sglang-pd.json`](_shared/dashboards/sglang-pd.json) | Yes | Not yet fed by a real SGLang run |
+| [`vllm/disagg-pd-llmd`](vllm/disagg-pd-llmd/) (llm-d router: Gateway API, `InferencePool`, EPP) | Yes: chart, README and static checks | Partially. The Gateway, `HTTPRoute`, `InferencePool` and EPP all reached a healthy, correctly-resolved state on real hardware (a light-tier two-node cell), and the EPP's own pod datastore and the decode-side sidecar's own allowlist both tracked the real prefill/decode pods correctly; a real end-to-end request through the Gateway still fails (`502`/`500` from the Gateway's own data plane trying to reach the EPP's `ext_proc` endpoint), not yet root-caused past "a TLS/h2 transport mismatch between the Gateway implementation and the EPP" — see [#37](https://github.com/littlemex/distai-platform/issues/37) for the exact evidence |
+| [`sglang/disagg-pd`](sglang/disagg-pd/) | Yes | Yes (light-tier two-node cell; see [#37](https://github.com/littlemex/distai-platform/issues/37)) |
+| [`sglang/agg-baseline`](sglang/agg-baseline/) | Yes | Yes (same cell) |
+| [`_shared/dashboards/sglang-pd.json`](_shared/dashboards/sglang-pd.json) | Yes | The scrape path and metric names are confirmed against a real SGLang run (engine `/metrics`, and a minimal in-cluster Prometheus scraping it); the dashboard JSON panels themselves have not been opened against a real Grafana in this round |
 
-The untested rows above were time-boxed out of the first real-machine round, not found broken. Before any of them is measured on a Capacity Block window or any other paid hardware, run it first on a smaller, cheaper GPU instance to produce a real, if rough, timing, the same way the `vllm/disagg-pd` / `vllm/agg-baseline` dry run already did.
+`tests/0.static.sh` covers `vllm/disagg-pd-llmd`; it does not render-check the SGLang charts yet
+(follow-up). The remaining gap above (the llm-d data-plane-to-EPP transport mismatch) is the only
+row not yet confirmed end to end on real hardware; it is a real, reproduced failure, not an
+untested path.
 
 ## Conventions
 

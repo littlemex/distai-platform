@@ -4,7 +4,7 @@ This Helm chart serves one model the ordinary way: each SGLang engine runs prefi
 
 ## Status
 
-**Built, not yet run on real hardware.** This chart renders and passes `helm lint`, but [`../../tests/0.static.sh`](../../tests/0.static.sh) does not cover it yet, and no engine from it has served a request on a GPU node yet. Treat every behavior described below as what the chart is designed to do, not as an observed result, until the verification round for SGLang (RFC [#37](https://github.com/littlemex/distai-platform/issues/37), follow-up issue C) has run it. Run it first on a small, inexpensive GPU instance before any paid measurement window.
+**Run on real hardware** (`g7.8xlarge`, light tier, RFC [#37](https://github.com/littlemex/distai-platform/issues/37) follow-up issue C): the engine reached `Running`/`Ready`, served a real OpenAI-compatible completion, and a 40-request open-loop load-replay against `_shared/load-replay`/`score.py` completed with `joint_attainment_share=1.0` and a `goodput_per_gpu` within rounding of the `vllm/agg-baseline` chart's own number on the same cell, same model and the same trace. Its own `/metrics` was also confirmed scraped correctly by a real (minimal, in-cluster) Prometheus. `[`../../tests/0.static.sh`](../../tests/0.static.sh) still does not render-check this chart (follow-up).
 
 ## The tuned baseline
 
