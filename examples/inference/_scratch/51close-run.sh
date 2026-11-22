@@ -16,15 +16,16 @@ MODEL_ID="Qwen/Qwen2.5-0.5B-Instruct"
 log() { echo "[$(date -u +%T)] === $* ==="; }
 mark() { echo "MARK:$1"; }
 
+REPO_ROOT="$(pwd)"
+
 cleanup() {
   log "TEARDOWN (trap)"
-  cd /tmp/work/repo/infra/foundation 2>/dev/null || cd /tmp/work/repo/infra/foundation 2>/dev/null || { echo "cannot find infra/foundation to destroy"; mark TEARDOWN_PATH_MISSING; return 0; }
+  cd "$REPO_ROOT/infra/foundation" 2>/dev/null || { echo "cannot find infra/foundation to destroy"; mark TEARDOWN_PATH_MISSING; return 0; }
   terraform destroy -auto-approve 2>&1 | tail -100
   mark TEARDOWN_DONE
 }
 trap cleanup EXIT
 
-mkdir -p /tmp/work && cd /tmp/work
 ADMIN_ROLE_NAME="$(aws sts get-caller-identity --query Arn --output text | cut -d/ -f2)"
 ADMIN_PRINCIPAL_ARN="$(aws iam get-role --role-name "$ADMIN_ROLE_NAME" --query Role.Arn --output text)"
 MY_CIDR="$(curl -fsS https://checkip.amazonaws.com)/32"
@@ -33,10 +34,10 @@ export TF_VAR_endpoint_public_access_cidrs="[\"${MY_CIDR}\"]"
 export TF_VAR_admin_principal_arns="[\"${ADMIN_PRINCIPAL_ARN}\"]"
 
 log "PHASE0: foundation apply"
-cd repo/infra/foundation
+cd "$REPO_ROOT/infra/foundation"
 terraform init -backend-config="bucket=${STATE_BUCKET}" -backend-config="key=distai-platform/${AWS_REGION}/${NAME}/foundation" -backend-config="region=${STATE_REGION}" -backend-config="use_lockfile=true" || { echo FATAL_TF_INIT; exit 1; }
 terraform apply -auto-approve || { echo FATAL_TF_APPLY; exit 1; }
-cd /tmp/work/repo
+cd "$REPO_ROOT"
 aws eks update-kubeconfig --name "$NAME" --region "$AWS_REGION" || { echo FATAL_KUBECONFIG; exit 1; }
 kubectl config current-context
 mark PHASE0_DONE
