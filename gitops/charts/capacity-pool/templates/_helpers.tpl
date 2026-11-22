@@ -55,6 +55,20 @@ so the two can never disagree.
 {{- if not (has $t.effect (list "NoSchedule" "PreferNoSchedule" "NoExecute")) -}}
 {{- fail (printf "%s.effect must be one of NoSchedule, PreferNoSchedule, NoExecute (got %q)" .name (toString $t.effect)) -}}
 {{- end -}}
+{{- /*
+#22 Decision 3 accepts a team-exclusive toleration only with a value
+equal to the team's own label, never a bare "operator: Exists" (#63,
+filed as #56): an empty tenancy.teamTaint.value would otherwise render
+exactly that (the entry below only sets "value" when $t.value is
+truthy), making a "team-exclusive" pool soft - any pod tolerating the
+bare key, from any team, gets in. accelerator.taint has no such rule
+(an accelerator-class toleration without a specific value is the
+intended shape there: any pod requesting the device, from whichever
+team, may use it), so this check is scoped to tenancy.teamTaint only.
+*/}}
+{{- if and (eq .name "tenancy.teamTaint") (not $t.value) -}}
+{{- fail "tenancy.teamTaint.value is required when tenancy.teamTaint.key is set (#22 Decision 3: a team-exclusive taint must name the team, never a bare operator: Exists)" -}}
+{{- end -}}
 {{- $id := printf "%s:%s" $t.key $t.effect -}}
 {{- if hasKey $seen $id -}}
 {{- fail (printf "%s repeats the taint key %q with effect %s already set by %s" .name $t.key $t.effect (get $seen $id)) -}}
