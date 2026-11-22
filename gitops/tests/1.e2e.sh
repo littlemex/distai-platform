@@ -1938,6 +1938,45 @@ SMOKE_CLUSTERQUEUE="$(k get localqueue "${SMOKE_LOCALQUEUE}" -n "${SMOKE_NS}" -o
 [[ -n "${SMOKE_CLUSTERQUEUE}" ]] || fail "LocalQueue ${SMOKE_NS}/${SMOKE_LOCALQUEUE} has no spec.clusterQueue"
 pass "discovered the admin smoke LocalQueue: ${SMOKE_NS}/${SMOKE_LOCALQUEUE} (ClusterQueue ${SMOKE_CLUSTERQUEUE})"
 
+# #63, filed as #56: a Fable 5.2 review of an earlier version of this fix
+# (which only added the accelerator resource to the smoke ClusterQueue's
+# own resourceGroups, never made anything actually request it) found that
+# Kueue applies a ResourceFlavor's own tolerations to every Workload it
+# admits through that flavor, regardless of what the Workload requests --
+# covering a resource in resourceGroups controls admission *against
+# quota*, it does not change what a Workload that never asks for that
+# resource gets charged. So a CPU-only canary on an accelerator-tainted
+# cell (dp-a19-trn-r3, dp-a19-gpu-r3) was still landing on the tainted
+# node for free, and no accelerator request ever reached Kueue's own
+# admission path either way -- #56's own finding, not actually closed by
+# that first attempt. The canary now discovers, from the live
+# ClusterQueue object (never hardcoded, so this also works unchanged on
+# example-cell, which covers no accelerator resource at all), whether its
+# own flavor covers one, and if so requests exactly the nominal quota of
+# it -- the canary itself becomes the first real Kueue-admitted workload
+# that actually asks for the device, closing both halves of #56 at once:
+# it is no longer a free ride, and an accelerator request now reaches
+# Kueue's own quota/admission path.
+mapfile -t smoke_cq_resources < <(k get clusterqueue "${SMOKE_CLUSTERQUEUE}" -o jsonpath='{.spec.resourceGroups[0].resources[*].name}' | tr ' ' '\n' | grep -v '^$')
+CANARY_ACCEL_RESOURCE=""
+CANARY_ACCEL_QUANTITY=""
+for res in "${smoke_cq_resources[@]}"; do
+  case "${res}" in
+    cpu | memory) continue ;;
+    *)
+      CANARY_ACCEL_RESOURCE="${res}"
+      CANARY_ACCEL_QUANTITY="$(k get clusterqueue "${SMOKE_CLUSTERQUEUE}" -o jsonpath="{.spec.resourceGroups[0].resources[?(@.name=='${res}')].nominalQuota}")"
+      ;;
+  esac
+done
+CANARY_EXTRA_RESOURCE_YAML=""
+if [[ -n "${CANARY_ACCEL_RESOURCE}" ]]; then
+  [[ "${CANARY_ACCEL_QUANTITY}" =~ ^[0-9]+$ && "${CANARY_ACCEL_QUANTITY}" -ge 1 ]] \
+    || fail "ClusterQueue ${SMOKE_CLUSTERQUEUE} covers accelerator resource ${CANARY_ACCEL_RESOURCE} with nominalQuota='${CANARY_ACCEL_QUANTITY}' (expected >= 1) -- the canary cannot request a non-positive amount"
+  CANARY_EXTRA_RESOURCE_YAML="              ${CANARY_ACCEL_RESOURCE}: \"${CANARY_ACCEL_QUANTITY}\""
+  pass "ClusterQueue ${SMOKE_CLUSTERQUEUE} covers accelerator resource ${CANARY_ACCEL_RESOURCE} (nominalQuota ${CANARY_ACCEL_QUANTITY}) -- the canary will request it too"
+fi
+
 cat >"${WORK_DIR}/canary.yaml" <<YAML
 apiVersion: batch/v1
 kind: Job
@@ -1960,6 +1999,7 @@ spec:
             requests:
               cpu: 500m
               memory: 256Mi
+${CANARY_EXTRA_RESOURCE_YAML}
 YAML
 k apply -f "${WORK_DIR}/canary.yaml" || fail "kubectl apply the canary Job"
 
