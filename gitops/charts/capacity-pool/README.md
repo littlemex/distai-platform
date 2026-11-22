@@ -73,6 +73,52 @@ set, `effect` must be `NoSchedule`, `PreferNoSchedule` or `NoExecute`, and
 the two entries must not share the same key and effect; either mistake
 fails the render.
 
+### GPU sub-device sharing (MPS), real-hardware result (2026-11-22)
+
+`accelerator.sharingLabel` is a second, independent label on the NodePool's node
+template, additive to `accelerator.methodLabel` (both can be set at once — two
+separate keys in the same `metadata.labels` map). It exists for GPU sub-device
+sharing opt-in: NVIDIA's own `k8s-device-plugin` chart (the chart behind this
+platform's `accel-nvidia-device-plugin` addon) reads a node label named
+`nvidia.com/device-plugin.config` to pick a named entry from its own
+`config.map`, and splits one physical GPU into `N` MPS replicas when that entry
+has a `sharing.mps` block — `sharingLabel.key = "nvidia.com/device-plugin.config"`,
+`sharingLabel.value` = the chosen config name (for example `mps-2`). A pool that
+never sets this gets no label, so it falls back to the device plugin's own
+`config.default` (whole-GPU, no sharing) — unchanged behavior for every existing
+pool.
+
+**Confirmed on real hardware** (`g7.8xlarge`, `us-east-1`, 2026-11-22): labeling
+one node `nvidia.com/device-plugin.config=mps-2` (plus the chart's own, separately
+required `nvidia.com/mps.capable=true` label — NVIDIA's `mps-control-daemon`
+DaemonSet's own node selector needs both, and this platform runs no NFD/GPU
+Operator to set either automatically) made that node advertise
+`nvidia.com/gpu: 2` instead of `1` in both `Capacity` and `Allocatable`, and the
+real MPS control daemon split the device 50/50
+(`set_default_device_pinned_mem_limit 0 16311M`, `set_default_active_thread_percentage 50`
+in its own log — both numbers are exactly 100%/`replicas` and the device's total
+memory/`replicas`, confirmed from the daemon's own log, not computed by this
+chart). Two `vllm/agg-baseline` replicas (`engine.replicas=2`, no chart change
+needed — each still just requests `nvidia.com/gpu: 1`) both scheduled onto that
+one node/GPU, reached `Running`/`Ready` with `RESTARTS=0`, and both served a
+real completion independently and concurrently.
+
+**What this mechanism actually exposes, stated precisely rather than
+overclaimed** (confirmed against the upstream chart's own README, `NVIDIA/k8s-device-plugin`
+tag v0.20.2): the only tunable `sharing.mps.resources[].replicas` gives is the
+replica *count* — compute and memory are always split into **equal** shares
+across however many replicas a config names. There is no separate, independently
+settable `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` or per-client memory-limit value in
+this config schema; an unequal split (for example one client reserved 70% of a
+GPU, a second capped at 30%) is not expressible through
+`accelerator.sharingLabel`/this device-plugin mechanism at all. A minor,
+non-blocking rough edge observed on real hardware: the `mps-control-daemon`
+DaemonSet's own config-watcher *sidecar* container restarts repeatedly after a
+node relabel (`error finding pid: no process found`), while the daemon's own
+main container stays `Running` and healthy throughout and the capacity/split
+above were both confirmed correct regardless — tracked as an upstream
+oddity, not a defect in this chart's own rendering.
+
 ### Quotas
 
 `pool.limits` is the only quota-shaped field this chart renders; the
