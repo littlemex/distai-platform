@@ -103,6 +103,48 @@ needed — each still just requests `nvidia.com/gpu: 1`) both scheduled onto tha
 one node/GPU, reached `Running`/`Ready` with `RESTARTS=0`, and both served a
 real completion independently and concurrently.
 
+**Security, reviewed and found incomplete by Fable 5.2 (2026-11-22; recorded as an open
+finding, not resolved here)**: NVIDIA's own `mps-control-daemon` DaemonSet — the
+process that actually performs the split above, deployed automatically by the
+upstream chart whenever any `sharing.mps` config exists, selecting nodes by
+`nvidia.com/mps.capable=true` — renders with `hostPID: true`, `privileged: true`
+containers, and a `hostPath`-backed `/dev/shm` mount (confirmed by rendering the
+upstream chart's own `templates/daemonset-mps-control-daemon.yml`, tag v0.20.2,
+default `mps.enableHostPID: true`). This is NVIDIA's own upstream design, not
+something this platform's `accelerator.sharingLabel` field adds — but it means
+**every MPS-opted-in NodePool already carries a host-process-namespace-sharing
+daemon, independent of and in addition to** the separate `hostIPC` question an
+earlier round of this same investigation raised and reverted for the LMCache mp
+server (see `vllm/disagg-pd/README.md`'s own "KV cache tiers" section). Three
+items this round leaves open, not closed:
+1. This platform has no admission control (Pod Security Admission, Kyverno, or
+   equivalent) rejecting `hostPID`/`privileged`/`hostIPC`/`hostPath` in any
+   namespace today — confirmed by the fact that an ad-hoc `hostIPC: true` test
+   patch, and this upstream chart's own `hostPID`/`privileged` MPS daemon, both
+   applied with nothing rejecting them. A future fix must add this gate, not
+   rely on README prose alone.
+2. Nothing in `accelerator.sharingLabel`/this NodePool's own requirements
+   restricts *which team's* Pods can request the shared GPU once a NodePool
+   carries this label — two mutually-untrusting teams' Pods could both land on
+   one MPS-split GPU unless a separate taint/toleration (`tenancy.teamTaint`,
+   already in this chart) also scopes the pool to one team. MPS's own
+   per-client limits (`CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` and similar) are
+   client-side environment variables, not something this platform enforces
+   against a hostile tenant; a fatal fault from one MPS client can take down
+   every other client sharing that GPU (a cross-tenant denial of service); and
+   GPU memory is not zeroed between tenants by MPS or by this platform. Issue
+   #22's own existing research already states MPS gives weaker isolation than
+   MIG for exactly these reasons — this field's own real deployment shape
+   confirms, rather than changes, that guidance: **treat an MPS-opted-in pool
+   as single-team/mutually-trusting-workloads only, the same rule #22 already
+   states for time-slicing**, never as a way to share one GPU across teams
+   that do not trust each other.
+3. The blast radius of a shared host namespace (whether via this chart's own
+   `hostIPC` question or NVIDIA's own `hostPID`) is the WHOLE host namespace —
+   every other process in it, including host daemons and any other Pod that
+   also joins that namespace — not narrowly "the two Pods that need to talk to
+   each other"; an earlier draft of this note understated that scope.
+
 **What this mechanism actually exposes, stated precisely rather than
 overclaimed** (confirmed against the upstream chart's own README, `NVIDIA/k8s-device-plugin`
 tag v0.20.2): the only tunable `sharing.mps.resources[].replicas` gives is the
