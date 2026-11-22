@@ -104,12 +104,16 @@ prefill:
   extraEnv: []
   # Set mps.enabled when this role's own nodeSelectorValue targets a pool
   # whose nodes are MPS-split (capacity-pool's own accelerator.sharingLabel,
-  # e.g. "mps-2" -> mps.replicas: 2 here must match). Confirmed on real
-  # hardware (#37): vLLM's own startup memory check sizes its request
-  # against the WHOLE physical device, not this engine's own MPS-limited
-  # share, so leaving gpuMemoryUtilization at vLLM's own default (or any
-  # value above roughly 1/replicas) fails this check deterministically the
-  # moment this role lands on an MPS-split node. gpuMemoryUtilization: ""
+  # e.g. "mps-2" -> mps.replicas: 2 here must match). On real hardware
+  # (#37), this chart's own un-fixed default (gpuMemoryUtilization unset)
+  # crashed repeatedly on an MPS-split node (vLLM's own startup memory
+  # check, a desired fraction near 0.92 against a reported free share of
+  # about half the physical device) -- confirmed for THIS chart, not shown
+  # to be a universal rule every vLLM chart under MPS hits the same way
+  # (../agg-baseline's own un-fixed default did not crash under the same
+  # MPS split; why the two differ is open, see
+  # examples/inference/README.md's own MPS investigation).
+  # gpuMemoryUtilization: ""
   # (default) computes a safe fraction from mps.replicas when mps.enabled is
   # true, and leaves vLLM's own default alone (the flag is not passed at
   # all) when mps.enabled is false, matching this chart's behavior before
