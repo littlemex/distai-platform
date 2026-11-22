@@ -695,6 +695,59 @@ def main():
         check("agg-baseline: no workload is pinned to a prefill/decode role node",
               not any(aroles[r] for r in ROLES))
 
+    # ------------------------------------- MPS-aware gpuMemoryUtilization
+    # Closes PR #51's MPS item 1 (examples/inference/README.md's own "MPS"
+    # section): neither chart ever set --gpu-memory-utilization, so every
+    # engine used vLLM's own built-in default, sized against the WHOLE
+    # physical device; a process's own actual free share under MPS is only
+    # about 1/replicas of that, which crashed disagg-pd's roles
+    # deterministically on real hardware. *.mps.enabled/*.mps.replicas plus
+    # *.gpuMemoryUtilization close this: unset by default (unchanged
+    # behavior, the flag is not rendered), a safe 0.70/replicas fraction
+    # when mps.enabled is true and no explicit value is given, and a
+    # render-time failure if an explicit value exceeds the 0.90/replicas
+    # ceiling MPS makes unreachable.
+    def gpu_mem_util_env(w):
+        out = {}
+        for c in gpu_containers(pod_spec(w)):
+            for e in c.get("env") or []:
+                if e["name"] == "GPU_MEMORY_UTILIZATION":
+                    out[c["name"]] = e.get("value", "<valueFrom>")
+        return out
+
+    def check_mps_gpu_mem_util(chart, name, role_prefix=""):
+        p = (role_prefix + ".") if role_prefix else ""
+        docs, err = R.render(chart)
+        if check(f"{name}: default (mps disabled) renders GPU_MEMORY_UTILIZATION empty", docs is not None, err):
+            vals = set()
+            for w in workloads(docs):
+                vals |= set(gpu_mem_util_env(w).values())
+            check(f"{name}: default GPU_MEMORY_UTILIZATION is empty for every workload", vals == {""}, repr(vals))
+
+        docs, err = R.render(chart, sets=[f"{p}mps.enabled=true", f"{p}mps.replicas=2"])
+        if check(f"{name}: mps.enabled=true, replicas=2, no explicit value: helm template", docs is not None, err):
+            vals = set()
+            for w in workloads(docs):
+                vals |= set(gpu_mem_util_env(w).values())
+            check(f"{name}: mps.enabled=true, replicas=2 computes the safe default 0.35 (0.70/2)", vals == {"0.35"}, repr(vals))
+
+        docs, err = R.render(chart, sets=[f"{p}mps.enabled=true", f"{p}mps.replicas=2", f"{p}gpuMemoryUtilization=0.40"])
+        if check(f"{name}: mps.enabled=true, replicas=2, explicit 0.40 (within the 0.45 ceiling): helm template", docs is not None, err):
+            vals = set()
+            for w in workloads(docs):
+                vals |= set(gpu_mem_util_env(w).values())
+            check(f"{name}: explicit 0.40 is honored as-is", vals == {"0.40"}, repr(vals))
+
+        _, err = R.render(chart, sets=[f"{p}mps.enabled=true", f"{p}mps.replicas=2", f"{p}gpuMemoryUtilization=0.92"])
+        check(f"{name}: mps.enabled=true, replicas=2, explicit 0.92 (above the 0.45 ceiling): helm template fails",
+              err is not None and "exceeds the safe ceiling" in (err or ""), err)
+
+    check_mps_gpu_mem_util(a.agg, "agg-baseline", "engine")
+    check_mps_gpu_mem_util(a.disagg, "disagg-pd prefill", "prefill")
+    check_mps_gpu_mem_util(a.disagg, "disagg-pd decode", "decode")
+    check_mps_gpu_mem_util(a.disagg_llmd, "disagg-pd-llmd prefill", "prefill")
+    check_mps_gpu_mem_util(a.disagg_llmd, "disagg-pd-llmd decode", "decode")
+
     # ------------------------------------------- kvCacheTier (skeleton)
     # local and remote both require kvCacheTier.lmcache.mpServerEndpoint
     # and render identically on the vLLM side (see values.yaml's own
