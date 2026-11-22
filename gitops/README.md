@@ -366,10 +366,17 @@ Real hardware (`p4d.24xlarge`, two nodes, `NET/Libfabric`/GDRDMA
   If the override is ever lost anyway (the chart bumps and renames the
   key, or a future PR removes it without that static check catching it
   first), the chart's own `privileged: true` plus `runAsUser: 0` default
-  returns, which is effectively root on the node -- host devices, the
-  host filesystem, and (via the kubelet socket this chart itself mounts)
-  every co-located Pod's own service account token, not only this one
-  Pod's intended `/dev/infiniband` access.
+  returns, which is effectively root on the node -- `privileged: true`
+  grants the host's own filesystem and device nodes directly (not
+  through the `/var/lib/kubelet/device-plugins` socket this chart
+  mounts for its own, narrower purpose: registering the extended
+  resource with kubelet, nothing else), which on a Kubernetes node
+  includes every co-located Pod's own service account token on disk,
+  not only this one Pod's intended `/dev/infiniband` access (corrected,
+  Fable 5.2 review round 3: an earlier draft of this sentence named the
+  device-plugin socket itself as the path to other Pods' tokens, which
+  it is not -- that socket only carries device-plugin registration
+  traffic).
   The risk the remaining, non-overridable half carries today regardless:
   `hostNetwork: true` means a Pod is not behind the extra network hop the
   foundation's own IMDSv2 hop-limit-of-1 (#20, Facts checked) is meant to
