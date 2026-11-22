@@ -236,7 +236,7 @@ runner/run.sh --ref "${GITOPS_REVISION}" \
 | --- | --- |
 | Every `addon.yaml`/chart file in the Interface table exists and matches the stated shape | `0.static.sh` (`check_gitops_contract.py`, helm lint/template, kubeconform, `check_pinned_crds.py`) |
 | A real `g7`/`g6e`/`g5` node, `pool.capacityType: flex` (spot or on-demand, device-plugin method) runs a Layer 1 `nvidia.com/gpu` pod; `nvidia-smi` reports one GPU | `1.e2e.sh` `check_accel_layer1` on the GPU cell (`GITOPS_RUN_ACCEL_E2E=1`) |
-| A real `trn2.3xlarge` node in `ap-southeast-4`, `pool.capacityType: flex` (spot or on-demand, device-plugin method) runs a Layer 1 `aws.amazon.com/neuron` pod; `neuron-ls` reports one device | `1.e2e.sh` `check_accel_layer1` on the Trainium cell |
+| A real `trn2.3xlarge` node in `ap-southeast-4`, `pool.capacityType: on-demand` (device-plugin method) runs a Layer 1 `aws.amazon.com/neuron` pod; `neuron-ls` reports one device | `1.e2e.sh` `check_accel_layer1` on the Trainium cell |
 | Each method-labeled `NodePool` carries only the one advertiser its label selects | `1.e2e.sh` `check_accel_layer1`'s own node-level DaemonSet/namespace check |
 | The `accelerators` step reaches Healthy+Synced for the device-plugin releases before anything is asserted about them | `1.e2e.sh` `check_accel_layer1`'s own `app_healthy_synced` wait |
 | Both light-tier cells torn down with no leftover instance/ENI/launch template/volume | `1.e2e.sh` steps 15 and 19 (`report_leftovers`, parameterized per cell) |
