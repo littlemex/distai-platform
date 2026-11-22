@@ -77,8 +77,17 @@ def render_addon(path: str, workdir: str, repo_root: str) -> str | None:
         # verbatim, rather than a second copy of its OCI-vs-classic-repo
         # and placeholder-values handling (both already fixed there once,
         # #28 - accel-nvidia-device-plugin/accel-nvidia-dra's classic
-        # Helm repo and "default namespace" guard).
-        rendered = helm_template_chart(doc, workdir)
+        # Helm repo and "default namespace" guard). Pass this addon's own
+        # declared namespace through explicitly (#63): helm_template_chart's
+        # original caller (check_pinned_crds.py) never needed one, since a
+        # CustomResourceDefinition is cluster-scoped, so it left
+        # `.Release.Namespace` unset -- which Helm itself then resolves to
+        # literal "default", not this addon's own namespace. Every
+        # namespaced object a chart like karpenter/kueue renders via
+        # `{{ .Release.Namespace }}` was therefore rendering into "default"
+        # here, a false FAIL this check's own namespace comparison produced
+        # (caught by this file's own first real run, not assumed).
+        rendered = helm_template_chart(doc, workdir, namespace=namespace)
         if rendered is None:
             FAILURES.append(f"FAIL helm template {rel}")
         return rendered

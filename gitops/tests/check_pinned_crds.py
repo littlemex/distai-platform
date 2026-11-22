@@ -69,12 +69,24 @@ def placeholder_values(addon_doc):
     return values
 
 
-def helm_template_chart(addon_doc, workdir):
+def helm_template_chart(addon_doc, workdir, namespace=None):
+    """namespace is optional and defaults to None (Helm's own "default", the
+    same as every call site before this parameter existed): this function's
+    original purpose is CRD extraction, and a CustomResourceDefinition is
+    cluster-scoped, so no caller before check_appproject_whitelist.py (#63)
+    ever needed one. That script reuses this same renderer to also check
+    *namespaced* objects' metadata.namespace against the AppProject's real
+    destinations -- Helm only renders whatever `.Release.Namespace` resolves
+    to into a template, and never knows what addon.yaml's own declared
+    namespace is unless told; passing one through (`--namespace`) is that
+    telling, not a new render path."""
     chart = addon_doc["chart"]
     version = str(addon_doc["version"])
     skip_crds = bool(addon_doc.get("skipCrds"))
     ref = f"oci://{addon_doc['repoURL']}/{chart}"
     cmd = ["helm", "template", f"{chart}-pinned-crd-check", ref, "--version", version]
+    if namespace:
+        cmd += ["--namespace", namespace, "--create-namespace"]
     if skip_crds:
         cmd.append("--skip-crds")
     values = placeholder_values(addon_doc)
