@@ -321,40 +321,89 @@ Real hardware (`p4d.24xlarge`, two nodes, `NET/Libfabric`/GDRDMA
   constraints, 45.8 vs 3.6-4.7 GB/s) is left to a follow-up issue; nothing
   in either add-on's own nodeSelector shape blocks adding it later.
 - Both EFA add-ons run at a **higher trust level than this platform's
-  existing accelerator advertisers, not the same one** -- checked by
-  reading the pinned chart's own template, not assumed:
-  `accel-nvidia-device-plugin`'s own chart defaults to neither
-  `privileged` nor `hostNetwork` (`devicePlugin.podSecurityContext: {}`,
-  `devicePlugin.enableHostNetwork` commented out/false, confirmed in
-  `nvidia-device-plugin:0.20.2`'s own `values.yaml`/template, and this
-  platform's own `addon.yaml` does not turn either on), while
-  `aws-efa-k8s-device-plugin:v0.5.35`'s template sets `hostNetwork: true`
-  unconditionally (not gated by any value -- there is no key to turn it
-  off without forking the chart) and its default `securityContext` is
-  `privileged: true, allowPrivilegeEscalation: true, runAsUser: 0`, also
-  not gated. This is the chart's own stated requirement for EFA/RDMA
-  device enumeration, not a choice this PR makes, and was confirmed
-  necessary on real hardware (the add-on's own real-machine Test Results
-  show it working as shipped; no safer configuration was found that still
-  enumerated all 4 EFA devices). The risk this combination carries:
-  `hostNetwork: true` means a Pod is not behind the extra network hop the
-  foundation's own IMDSv2 hop-limit-of-1 (#20, Facts checked) is meant to
-  stop -- `kubectl exec` into either release's Pod reaches
+  existing device-plugin add-ons** (checked against `accel-nvidia-device
+  -plugin`, the one with the closest role -- not re-checked against the
+  other three, which are not device-plugin DaemonSets with GPU-adjacent
+  device access in the same way): `helm template`-ing
+  `nvidia-device-plugin:0.20.2` with this platform's own pinned values
+  renders the active `nvidia-device-plugin-ctr` container's own
+  `securityContext` as `allowPrivilegeEscalation: false, capabilities:
+  {drop: ["ALL"]}`, and no `hostNetwork` key anywhere in the output
+  (confirmed by rendering the exact chart and values, not by reading
+  `podSecurityContext`, a different, pod-level field that says nothing
+  about the container). `aws-efa-k8s-device-plugin:v0.5.35`'s template
+  sets `hostNetwork: true` with no `{{- if }}` guard at all -- no values
+  key can turn it off without forking the chart, and that is not
+  attempted here. Its `securityContext`, by contrast, **is** read from
+  `.Values.securityContext` (`{{- toYaml .Values.securityContext |
+  nindent 12}}`, confirmed in the template) and so is overridable; the
+  chart's own default for that value is `privileged: true,
+  allowPrivilegeEscalation: true, runAsUser: 0`. Both add-ons override it
+  to `privileged: false, allowPrivilegeEscalation: false, capabilities:
+  {drop: ["ALL"]}` (`runAsUser` stays `0` -- the chart's own image opens
+  `/dev/infiniband` and the kubelet device-plugin socket as root, and no
+  rebuilt image is carried here to change that). This is not a guess: the
+  override was rolled out over the chart's own privileged default on a
+  live `p4d.24xlarge` node and `allocatable.vpc.amazonaws.com/efa` still
+  read `4` before and after, confirmed back to back on the identical node
+  (Fable 5.2 review round 1, finding B1; not yet separately confirmed on
+  a Neuron+EFA node, since EFA device enumeration does not itself depend
+  on the GPU/Neuron driver but no `trn2`-class hardware was available in
+  this PR's own real-machine run).
+  The risk the remaining, non-overridable half carries: `hostNetwork:
+  true` means a Pod is not behind the extra network hop the foundation's
+  own IMDSv2 hop-limit-of-1 (#20, Facts checked) is meant to stop --
+  `kubectl exec` into either release's Pod reaches
   `http://169.254.169.254` on the node's own network namespace exactly
-  like any other process on that node, which can mean the node's own IAM
-  role (`karpenter-node`) credentials, not only `/dev/infiniband`. `exec`
-  into any `kube-system` DaemonSet is already an admin-only operation
-  under this platform's own RBAC model (no team `AppProject` is ever
-  given `kube-system` as a destination, #22); this add-on does not change
-  who holds that permission, only what it is now worth once held.
+  like any other process on that node, which can mean the node's own
+  `karpenter-node` IAM role credentials, even with `privileged: false`.
+  Who can reach this is Kubernetes RBAC and EKS access entries (the
+  foundation's own `admin_principal_arns`, #20), **not** Argo CD
+  `AppProject` destinations -- an earlier draft of this note cited "no
+  team `AppProject` targets `kube-system`" as the control, which is the
+  wrong layer: `AppProject` governs where Argo CD *deploys*, not who
+  holds `pods/exec` once a Pod exists. Editing either add-on's own
+  `values:` is the other way in, and that path is `CODEOWNERS`-gated on
+  `gitops/addons/` (RFC #25 Decision 2) the same way every other core
+  add-on already is -- not a gap this PR
+  opens. This add-on does not change who can reach `kube-system` today;
+  it is a real increase in what that access is worth once held, and is
+  recorded here rather than left for a reader to discover by diffing
+  chart templates themselves.
+- **A privileged, host-network Pod runs on more nodes than have EFA.**
+  Both add-ons select by method label alone (#19 Decision 2's own
+  opt-in), the same as the four existing `accel-*` add-ons; neither
+  additionally requires `pool.networkInterfaces` to be non-empty, because
+  no label records that fact today (`capacity-pool`'s own
+  `accelerator.methodLabel` and `pool.networkInterfaces` are independent
+  fields, #17's own chart). A `g7`/`p4d` pool that opts into
+  `nvidia-gpu-method=device-plugin` without configuring EFA interfaces
+  still gets this one more privileged DaemonSet Pod, reporting `efa=0`
+  rather than erroring (confirmed by this add-on's own
+  `supportedInstanceLabels` default, which matches by instance type
+  regardless of whether that specific pool happens to request interfaces)
+  -- a real, if narrow, widening of this trust level's own footprint
+  beyond nodes that actually need it. The fix (a label `capacity-pool`
+  itself sets only when `pool.networkInterfaces` is non-empty, ANDed into
+  both add-ons' own `nodeSelector`) is `#17`'s chart to add, not this PR's
+  -- recorded here as a named follow-up, not silently accepted.
 - Both EFA add-ons' pinned image stays at the chart's own
   default Region (`us-west-2`), never overridden per cell: see the
   add-on's own `addon.yaml` comment for why (the platform's own
   `valuesFrom` mechanism substitutes a whole parameter value, never
   concatenates one into a larger string, and the registry host embeds the
-  Region in the middle of the string). Confirmed functionally
-  Region-independent (identical digest pulled from three Regions), so
-  this is a deferred optimization, not a defect.
+  Region in the middle of the string). The identical-digest check across
+  three Regions (`us-west-2`, `us-east-1`, `ap-northeast-1`) only shows
+  the *content* is Region-independent; it says nothing about whether a
+  given cell's own network path can reach `us-west-2`'s ECR endpoint.
+  This PR's own real-machine run pulled it successfully from
+  `ap-northeast-1` because `infra/foundation`'s default cell has a NAT
+  gateway (internet egress); a cell built with ECR reachable only through
+  Regional VPC endpoints and no NAT would not reach a different Region's
+  endpoint and would see `ImagePullBackOff` on every node this add-on
+  matches. Every cell's own EFA advertisement depends on `us-west-2`
+  reachability at each node's cold start until a per-Region override
+  exists -- a known condition, not only a deferred optimization.
 - `platform.ApplicationSet.yaml` and `cells.ApplicationSet.yaml`'s
   `goTemplate: true` plus `templatePatch` mechanism (Decision 2) is this
   PR's own construction, not a primary-sourced example from Argo CD's

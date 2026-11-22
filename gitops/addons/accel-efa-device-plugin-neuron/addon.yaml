@@ -5,8 +5,14 @@
 # distai.dev/neuron-method=device-plugin instead (for example
 # trn2.48xlarge, which carries both EFA and multiple Neuron devices).
 #
-# Chart source, version and pinned image digest: identical to
-# accel-efa-device-plugin-nvidia/addon.yaml; not repeated here.
+# Chart source, version, pinned image digest and the securityContext
+# override: identical to accel-efa-device-plugin-nvidia/addon.yaml; not
+# repeated here. The real-hardware confirmation that the override does not
+# break EFA enumeration (Fable 5.2 review round 1, finding B1) was run
+# against a p4d.24xlarge (NVIDIA) node only -- EFA device enumeration does
+# not depend on the GPU/Neuron driver, but this release's own positive path
+# (a real trn2 node) has not been separately confirmed on real hardware in
+# this PR (see gitops/README.md's "Known limits").
 #
 # The EFA DRA driver (aws-dranet) is out of scope for both
 # accel-efa-device-plugin-* releases: see gitops/README.md's "Known
@@ -23,3 +29,10 @@ values:
     tag: "v0.5.22-eksbuild.9@sha256:a392d84ff82b23580fd92d0a6c770136c56d4a6ee979a47d1bf4e379a7171647"
   nodeSelector:
     distai.dev/neuron-method: device-plugin
+  securityContext:
+    privileged: false
+    allowPrivilegeEscalation: false
+    runAsNonRoot: false
+    runAsUser: 0
+    capabilities:
+      drop: ["ALL"]
