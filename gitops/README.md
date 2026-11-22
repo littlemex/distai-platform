@@ -444,9 +444,14 @@ in this PR's own Test Results.
   this PR would otherwise have introduced on pools that work today.
   The fix: `gitops/charts/capacity-pool`'s own `templates/nodepool.yaml`
   now renders `distai.dev/efa-attached: "true"` on a NodePool's node
-  template whenever `pool.networkInterfaces` is non-empty (never
-  derived from the method label or the instance type, both of which a
-  pool can carry without ever requesting an EFA interface), and both
+  template only when at least one `pool.networkInterfaces` entry has
+  `interfaceType: efa-only` (#63, filed as #59 - stated here too loosely
+  before: a pool whose `networkInterfaces` lists only the primary
+  `interface` entry, required by Karpenter's own CEL validation whenever
+  the list is non-empty at all, is non-empty but attaches zero EFA
+  devices, so "non-empty" alone was not the actual signal; never
+  derived from the method label or the instance type either, both of
+  which a pool can carry without ever requesting an EFA interface), and both
   `accel-efa-device-plugin-*` releases AND it into their own
   `nodeSelector` alongside the vendor method label. Confirmed by `helm
   template`: neither existing fixture renders the new label (since
