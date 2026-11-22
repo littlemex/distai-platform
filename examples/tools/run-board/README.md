@@ -96,7 +96,12 @@ open /tmp/run-board-sample.html
 ## Using it for real
 
 Collecting live status needs a `kubectl` context pointed at your cluster — a
-`get`/`list`-only `ClusterRole` is enough, see "Security" below. Re-run both
+namespaced `Role` with `get` on `batch/jobs` and `workloads.kueue.x-k8s.io`,
+scoped to the plan's own namespace(s), is enough; see "Security" below (#63,
+filed as #60 - an earlier version of this README recommended a cluster-wide,
+`list`-capable `ClusterRole`, wider than the code actually calls, which would
+let one team read every other team's Jobs and Workloads on a shared cluster).
+Re-run both
 commands whenever you want a fresh snapshot; neither watches anything
 continuously or refreshes itself.
 
@@ -115,9 +120,18 @@ are meant to be committed.
 
 - `collect_status.py` can only run `kubectl get ...`; any other argv raises
   before a subprocess is ever started (`tests/test_readonly_exec.py` proves
-  this without needing a real cluster). The real guarantee is still your
-  credentials: give it a `kubectl` context bound to a `get`/`list`-only
-  `ClusterRole`, so that even a bug in this tool cannot mutate anything.
+  this without needing a real cluster). The guard checks the verb, not the
+  specific call: it accepts any argv whose first two words are `kubectl
+  get`, so a future call site is not stopped from reading more than this
+  tool's own two calls need (`kubectl get secrets -A`, `--raw <path>`, and
+  so on) - today's two call sites (`batch/jobs`, `workloads.kueue.x-k8s.io`,
+  each for one named object in one namespace) never reach that. The real
+  guarantee is still your credentials: give it a `kubectl` context bound to
+  a namespaced `Role` granting `get` on exactly `batch/jobs` and
+  `workloads.kueue.x-k8s.io` in the plan's own namespace(s) - not a
+  cluster-wide `ClusterRole` (#63, filed as #60) - so that even a bug in
+  this tool, or a future call site added without updating this guard,
+  cannot read another team's namespace on a shared cluster.
 - Names and namespaces from `plan.yaml` are validated as a plain lowercase
   alphanumeric-and-hyphen token (no dots — stricter than a full DNS-1123
   subdomain, which does allow them; this project's own Job and Workload
