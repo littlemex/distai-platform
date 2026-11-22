@@ -1,0 +1,65 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $fullname := include "disagg.fullname" . -}}
+{{- /*
+  #63 (filed as a private report "SA2"): same gap and same convention as
+  vllm/disagg-pd's own networkpolicy.yaml. The router discovers engines
+  through the Kubernetes API, not a Service, but it still makes the
+  actual HTTP calls directly to each engine Pod -- the engine's own
+  ingress rule names the router the same way vllm/disagg-pd names its
+  proxy.
+*/}}
+---
+# prefill and decode engines: the HTTP port (engine.port) only from this
+# release's own router, and the bootstrap port (transport.bootstrapPort,
+# SGLang's own PD handshake) only from the PEER role's own Pods.
+{{- range $role := list "prefill" "decode" }}
+{{- $peer := ternary "decode" "prefill" (eq $role "prefill") }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-{{ $role }}
+  labels:
+    {{- include "disagg.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "disagg.selector" (dict "root" $ "component" "router") | nindent 14 }}
+      ports:
+        - port: {{ $.Values.engine.port }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "disagg.selector" (dict "root" $ "component" $peer) | nindent 14 }}
+      ports:
+        - port: {{ $.Values.transport.bootstrapPort }}
+{{- end }}
+---
+# router: its own port only from the shared load-replay driver, same
+# convention as vllm/disagg-pd's own proxy rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-router
+  labels:
+    {{- include "disagg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "disagg.selector" (dict "root" $ "component" "router") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: load-replay
+      ports:
+        - port: {{ .Values.router.port }}
+{{- end }}

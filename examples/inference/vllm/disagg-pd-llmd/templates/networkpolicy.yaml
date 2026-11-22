@@ -1,0 +1,38 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $fullname := include "disagg.fullname" . -}}
+{{- /*
+  #63 (filed as a private report "SA2"): unlike vllm/disagg-pd, this
+  chart cannot ship a complete, correct default-on policy on its own --
+  see networkPolicy.enabled's own values.yaml comment for why
+  (the real caller on the engine's HTTP port is the Gateway
+  implementation's own data-plane Pod, an administrator-installed,
+  implementation-specific thing this chart does not own or render).
+  Enabling this only adds the one rule this chart CAN state precisely
+  (the NIXL side channel between the peer roles); it does not open the
+  engine HTTP port at all, so an operator who enables this must also add
+  their own NetworkPolicy (or widen this one) for their Gateway's own
+  data-plane ingress, or Gateway traffic stops reaching the engines.
+*/}}
+{{- range $role := list "prefill" "decode" }}
+{{- $peer := ternary "decode" "prefill" (eq $role "prefill") }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-{{ $role }}
+  labels:
+    {{- include "disagg.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "disagg.selector" (dict "root" $ "component" $peer) | nindent 14 }}
+      ports:
+        - port: {{ $.Values.transport.sideChannelPort }}
+{{- end }}
+{{- end }}

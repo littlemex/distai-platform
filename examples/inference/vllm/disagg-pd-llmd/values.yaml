@@ -373,6 +373,24 @@ llmdRouter:
           # metrics port is reachable only inside the cluster (ClusterIP).
           enabled: false
 
+networkPolicy:
+  # Default off, unlike vllm/disagg-pd's own networkPolicy.enabled: true
+  # (#63, filed as a private report "SA2"). The real caller on the engine
+  # HTTP port is the Gateway implementation's own data-plane Pod -- an
+  # administrator-installed, implementation-specific thing (NGINX Gateway
+  # Fabric, or another Gateway API implementation) this chart deliberately
+  # does not render or own (see this chart's own README's "Prerequisites").
+  # A generic podSelector/namespaceSelector naming "the Gateway's data
+  # plane" would have to guess at labels this chart has no way to confirm
+  # for every implementation, and a wrong guess would silently block real
+  # traffic rather than protect anything. Enabling this only adds the one
+  # rule this chart CAN state precisely (the NIXL side channel between the
+  # peer roles); the engine HTTP port is NOT opened by this policy at any
+  # setting, so enabling it without also adding a matching NetworkPolicy
+  # for the installed Gateway's own data-plane Pods stops all traffic,
+  # including legitimate requests.
+  enabled: false
+
 metrics:
   # Adds the vllm-metrics=true pod label and the prometheus.io/* annotations
   # that the "vllm" scrape job in examples/inference/_shared/dashboards/

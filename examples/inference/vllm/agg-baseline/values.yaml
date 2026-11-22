@@ -92,6 +92,13 @@ metrics:
   # scrape-configs.yaml selects on. vLLM serves /metrics on the engine port.
   enabled: true
 
+networkPolicy:
+  # Default deny, name the exception (#63, filed as a private report
+  # "SA2"): see vllm/disagg-pd's own values.yaml comment for the full
+  # reasoning; this chart has the same gap (no NetworkPolicy ships) and
+  # the same fix.
+  enabled: true
+
 # Skeleton only (values and rendering, not built or measured on real
 # hardware yet). Same kvCacheTier shape as ../disagg-pd/values.yaml's own
 # (see that chart's comment for what is and is not confirmed about the
