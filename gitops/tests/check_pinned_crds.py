@@ -101,20 +101,20 @@ def helm_template_chart(addon_doc, workdir, namespace=None):
     else:
         ref = f"oci://{repo_url}/{chart}"
         cmd = ["helm", "template", f"{chart}-pinned-crd-check", ref, "--version", version]
+    # Both NVIDIA charts (accel-nvidia-device-plugin, accel-nvidia-dra)
+    # template a validation guard refusing the implicit "default"
+    # namespace ("Running in the 'default' namespace is not recommended"),
+    # found running this script for #28 -- the render fails outright
+    # without a namespace, not merely mislabels one. Combined with #63's
+    # own need (an addon's namespaced objects must carry their *real*
+    # namespace, not Helm's "default" fallback, for check_appproject_
+    # whitelist.py's own comparison), both callers below now pass this
+    # addon's own namespace: field through as the `namespace` parameter,
+    # rather than this function re-deriving it a second way.
     if namespace:
         cmd += ["--namespace", namespace, "--create-namespace"]
     if skip_crds:
         cmd.append("--skip-crds")
-    # Both NVIDIA charts (accel-nvidia-device-plugin, accel-nvidia-dra)
-    # template a validation guard refusing the implicit "default"
-    # namespace ("Running in the 'default' namespace is not recommended"),
-    # found running this script for #28. Every addon.yaml already names
-    # its own real namespace (the Application's own destination); passing
-    # it here avoids relying on --set allowDefaultNamespace=true, a flag
-    # Argo CD's own generated Application never sets either.
-    namespace = addon_doc.get("namespace")
-    if namespace:
-        cmd += ["--namespace", namespace]
     values = placeholder_values(addon_doc)
     values_path = None
     if values:
@@ -222,7 +222,7 @@ def main(repo_root, rendered_dir):
                 # future one might, and it is simply out of this script's
                 # scope (its CRDs, if any, would be checked in tree).
                 continue
-            rendered = helm_template_chart(doc, workdir)
+            rendered = helm_template_chart(doc, workdir, namespace=doc.get("namespace"))
             if rendered is None:
                 failures += 1
                 continue
