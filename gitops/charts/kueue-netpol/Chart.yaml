@@ -1,0 +1,15 @@
+apiVersion: v2
+name: kueue-netpol
+description: >-
+  NetworkPolicy for Kueue's own controller-manager Pod (#63, independent
+  security-axis review pass, filed as "SA4"). Not a wrapper around any
+  upstream chart: Kueue's own Helm chart (gitops/addons/kueue) ships no
+  NetworkPolicy template at this pinned version (0.20.6), confirmed by
+  pulling and inspecting the chart's own templates/ directory, 2026-11-23.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+home: https://github.com/littlemex/distai-platform
+sources:
+  - https://github.com/littlemex/distai-platform
+  - https://github.com/kubernetes-sigs/kueue

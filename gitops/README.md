@@ -104,6 +104,54 @@ branch ruleset requires no review and no passing check today, so the one
 human checkpoint on the path from "a commit lands" to "it runs with this
 access" does not yet exist either).
 
+## NetworkPolicy defaults
+
+Every cell already enforces `NetworkPolicy` (`infra/foundation`'s VPC CNI
+`enableNetworkPolicy: "true"`), but enforcement with no policy objects is
+not segmentation: with nothing shipped, any Pod anywhere can reach any
+other Pod. An independent security-axis review pass (#63, filed as a
+private report "SA4") found exactly that true of `karpenter`/`kueue` -
+the only NetworkPolicy enforcement this platform turned on, with no
+policy object anywhere to make it mean anything.
+
+The policy going forward: **default deny, name the exception**. An
+add-on that exposes a network port ships `networkPolicy.enabled: true`
+(or, if its own chart has no such toggle, a small companion `dir:`-based
+`Application` of its own - `kueue-netpol`, `karpenter-netpol`) with no
+peer allowed in by default; a cell (or a later PR, once a real consumer
+exists) adds exactly the peer that component needs, never a blanket
+`namespaceSelector: {}`/`podSelector: {}` "every pod" default.
+
+`karpenter-netpol` and `kueue-netpol` (this PR) follow the one pattern
+researched for this exact problem: kube-apiserver's calls to a webhook
+or aggregated-API port, and kubelet's own health-probe calls, cannot be
+matched by a `podSelector`/`namespaceSelector` the way an ordinary Pod
+can - the control plane and a node's own kubelet are not addressable
+that way under VPC CNI. Rather than invent a workaround, both charts
+copy the one already-shipped, already-documented answer to this problem:
+upstream Kueue's own Kustomize `NetworkPolicy` component
+(`kubernetes-sigs/kueue`, `config/components/networkpolicy/
+manager-ingress.yaml`) scopes exactly these ports by port number alone,
+with no `from:` peer at all, and says why in its own comment ("the
+apiserver runs on the host network, so its source address cannot be
+expressed as a pod or namespace selector"). Both charts open only the
+ports this platform's own pinned chart versions actually need reachable
+(Kueue 0.20.6: webhook `9443`, visibility API `8082`, probe `8081`;
+Karpenter 1.15.2: probe `8081` only - this version ships no webhook
+server at all, confirmed by rendering it) and deny everything else,
+including each one's own metrics port, which nothing in a cell scrapes
+yet.
+
+What this still does not cover: a true network-level restriction on
+*which* caller reaches those ports (only that the port itself, not the
+whole Pod, is reachable) needs the EKS cluster security group, not
+NetworkPolicy - AWS's own documented mechanism for control-plane-to-pod
+traffic (`docs.aws.amazon.com/eks/latest/userguide/sec-group-reqs.html`);
+NetworkPolicy's own peer selectors cannot express "the control plane" at
+all. RFC #22's own admin-owned default-deny baseline (Decision 6) is the
+longer-term, cell-wide mechanism this per-add-on convention is a
+stand-in for until it ships.
+
 ## Ordering
 
 Argo CD's own kind-ordering (CRDs before CRs) handles ordering **inside**

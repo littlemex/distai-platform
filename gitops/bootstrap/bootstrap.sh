@@ -202,20 +202,19 @@ while IFS= read -r ns; do
       namespace: \"${ns}\""
 done <<< "${ADDON_NAMESPACES}"
 
-# clusterResourceWhitelist/namespaceResourceWhitelist stay "*"/"*" for now,
-# not narrowed to an exact kind list the way destinations/sourceRepos are:
-# several addons wrap an unpinned, third-party upstream chart whose full
-# object set is not read for this script (dcgm-exporter's Chart.yaml
-# dependency, #41 Decision 5 row 2, is the clearest example), so a
-# hand-typed kind list here risks silently blocking a legitimate sync on
-# the next chart version rather than narrowing anything real. Tracked as a
-# follow-up in #49 (upstream/tooling findings): derive this list the same
-# way, from `helm template` of every addon.yaml plus `kubectl
-# api-resources` to tell cluster- from namespace-scoped, run once at
-# bootstrap time against the live cluster. Until that lands, the
-# compensating controls are the destinations list above, the
-# ADMIN-mapping-only convention documented on the argocd variable and in
-# gitops/README.md, and closing #53 (zero-review merge gate).
+# clusterResourceWhitelist/namespaceResourceWhitelist are no longer "*"/"*"
+# (#63, filed as "SA1" item 1): appproject-whitelist.yaml, next to this
+# script, is the one hand-maintained, reviewed list of every (group, kind)
+# pair this checkout's own addons actually render, derived by `helm
+# template`-ing every one of them - never a dynamic render at bootstrap
+# time itself (a wrong OCI credential, a transient registry outage, or a
+# values key this script's own inputs cannot supply would then fail
+# bootstrap outright over a permissions list, not narrow anything real).
+# gitops/tests/check_appproject_whitelist.py performs the same
+# render-and-collect pass as a static check, so a PR adding an addon that
+# renders a kind missing from that file fails in CI, not at apply time.
+APPPROJECT_WHITELIST="$(cat "${SCRIPT_DIR}/appproject-whitelist.yaml")"
+
 kubectl apply -n "${ARGOCD_NAMESPACE}" -f - <<EOF
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
@@ -229,12 +228,7 @@ spec:
 ${SOURCE_REPOS_YAML}
   destinations:
 ${DESTINATIONS_YAML}
-  clusterResourceWhitelist:
-    - group: "*"
-      kind: "*"
-  namespaceResourceWhitelist:
-    - group: "*"
-      kind: "*"
+$(printf '%s\n' "${APPPROJECT_WHITELIST}" | grep -v '^#' | sed '/^[[:space:]]*$/d' | sed 's/^/  /')
 EOF
 
 # --- Object 3: the root Application -----------------------------------------

@@ -1,0 +1,50 @@
+# Default-deny, name-the-exception (#63, filed as "SA4"; gitops/README.md's
+# own "NetworkPolicy defaults" section). Before this chart, nothing
+# restricted traffic to Kueue's controller-manager Pod at all - any Pod in
+# any namespace could reach every port it listens on, including the
+# webhook port that decides what Kueue admits.
+#
+# Port-only rules, no `from:` selector, for the three ports kube-apiserver
+# and the node's own kubelet reach directly: this is not a compromise
+# invented here, it is upstream Kueue's own documented and shipped design
+# (kubernetes-sigs/kueue, config/components/networkpolicy/manager-ingress.yaml,
+# commit 063ee9f) - "kube-apiserver reaches the admission webhooks on 9443
+# and the aggregated visibility API on 8082. On most distributions the
+# apiserver runs on the host network, so its source address cannot be
+# expressed as a pod or namespace selector; these rules are scoped by port
+# rather than by peer." The health-probe port (8081) is the same shape for
+# the same reason: probe traffic originates from the node itself, which a
+# NetworkPolicy peer selector also cannot match.
+#
+# Deliberately NOT opened: port 8443 (the auth_proxy-fronted metrics
+# endpoint). No Prometheus Operator CRDs or scraper exist in a cell yet
+# (the same state dcgm-exporter's own NetworkPolicy documents) - matches
+# that chart's own "deny until a real consumer exists" precedent, not a
+# narrower policy than upstream's own distribution ships (upstream's own
+# Kustomize component also port-scopes it, rather than denying it
+# outright, because it assumes a scraper always exists in some namespace;
+# this platform does not yet have one, so denying it costs nothing today
+# and narrows a real port in the meantime).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kueue-controller-manager
+  namespace: {{ required "namespace is required" .Values.namespace | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml (required "podSelector is required" .Values.podSelector) | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    # kube-apiserver -> the admission webhook server.
+    - ports:
+        - protocol: TCP
+          port: 9443
+    # kube-apiserver -> the aggregated visibility API.
+    - ports:
+        - protocol: TCP
+          port: 8082
+    # kubelet (this Pod's own node) -> the liveness/readiness probe.
+    - ports:
+        - protocol: TCP
+          port: 8081
