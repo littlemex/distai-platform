@@ -15,7 +15,7 @@ the tier model on top: a fourth core add-on (`optional-pool`), the
 `gitops/cells/<cell>/addons/`, and a third ApplicationSet,
 `addons-optional.ApplicationSet.yaml`, with `dcgm-exporter` as the first
 platform-optional entry. Two static checks (`check_addon_tiers.py`,
-`check_addon_catalog_sync.py`) and `1.e2e.sh` step 15 cover it.
+`check_addon_catalog_sync.py`) and `1.e2e.sh` step 14b cover it.
 
 | Script | What it checks | Needs AWS | Duration |
 | --- | --- | --- | --- |
@@ -67,7 +67,7 @@ Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
   branches (one per-run cell fixture if `NAME` needs one, `pristine-both-broken`
   and `pristine-kueue-broken` for the pristine first-bootstrap stages,
   `break-crds`, `break-kueue`, `remove-kueue`, and one of
-  `no-dcgm-exporter`/`add-dcgm-exporter` for step 15); `2.upgrade.sh` pushes up
+  `no-dcgm-exporter`/`add-dcgm-exporter` for step 14b); `2.upgrade.sh` pushes up
   to two (the cell fixture, `upgrade-match`). Every one of them lives under
   `refs/heads/e2e/<run-id>/*` (a guard function refuses pushing or
   deleting anything outside that namespace), to exercise the ordering,
@@ -160,12 +160,12 @@ For `2.upgrade.sh` instead, additionally export `UPGRADE_TO_KARPENTER_VERSION` (
 | Cross-`Application` ordering evidenced by breaking `crds` and `kueue`, not asserted from documentation | `1.e2e.sh` step 3c stages A-C (this cell's own first-ever bootstrap, pristinely proving capacity fails to create NEW objects while either chart is broken) and step 12 (breaking each chart on an already-converged cell, reverted and recovery confirmed) |
 | `karpenter-crd`/`karpenter` report no shared CRD | `1.e2e.sh` step 9 (`status.resources` kind=CustomResourceDefinition lists compared) |
 | `kueue`/`karpenter` Healthy before any `NodePool`-launched node exists; smoke canary admitted and a node launches | `1.e2e.sh` steps 9 and 11 |
-| Removing one `addon.yaml` orphans nothing; deleting the three bootstrap objects orphans `NodePool`/`EC2NodeClass`/the instance; re-running bootstrap.sh re-adopts without duplicating; destroy still terminates the instance | `1.e2e.sh` steps 13, 14 and 16 (creationTimestamp/instance-state comparisons) |
+| Removing one `addon.yaml` orphans nothing; deleting the three bootstrap objects orphans `NodePool`/`EC2NodeClass`/the instance; re-running bootstrap.sh re-adopts without duplicating; destroy still terminates the instance | `1.e2e.sh` steps 13, 14 and 15 (creationTimestamp/instance-state comparisons) |
 | Upgrade e2e's version-pair check catches a mismatch; a matched bump passes no-replacement and canary-stays-Running | `2.upgrade.sh` experiments A and B |
 | Issue #41: every `gitops/addons/` entry is `tier: core`, every catalog entry `platform-optional` or `workload`, directory name equals `addon`, no name in both directories | `0.static.sh` (`check_addon_tiers.py`) |
 | Issue #41: markers match their catalog entry (stem/`addon`/`fromCatalog`, cell-wide uniqueness, `dir`/`namespace`/`skipCrds`, tier, wave, `dependsOn`, `overridableKeys`) | `0.static.sh` (`check_addon_catalog_sync.py`) |
 | Issue #41: `optional-pool` delivered to every cell as an untainted, on-demand pool | `1.e2e.sh` step 10 |
-| Issue #41 Decision 4: add-then-remove cycle of a catalog entry on a real cell -- no `Application` without the marker, `Healthy`/`Synced` with it, removal orphans the resources; the component's pods land only where its own `nodeSelector` says | `1.e2e.sh` step 15 (`dcgm-exporter`, a disposable GPU `NodePool` test fixture, DaemonSet/Namespace UID comparisons) |
+| Issue #41 Decision 4: add-then-remove cycle of a catalog entry on a real cell -- no `Application` without the marker, `Healthy`/`Synced` with it, removal orphans the resources; the component's pods land only where its own `nodeSelector` says | `1.e2e.sh` step 14b (`dcgm-exporter`, a disposable GPU `NodePool` test fixture, DaemonSet/Namespace UID comparisons) |
 | CRD-schema-diff check not claimed met | `2.upgrade.sh`'s final `INFO` line states this explicitly; no assertion claims it |
 | Every claim about upstream versions/capability behavior backed by a primary source or an "unconfirmed" marker | Enforced by this README and the scripts' own comments pointing at the issue's facts comment, not re-derived here |
 
@@ -371,7 +371,7 @@ silently:
   the Secret even exists) can catch it. A single run exercises both,
   independently, by forging a different field each time rather than by
   pointing at a second cluster.
-- **Step 15 (issue #41) starts by removing the `dcgm-exporter` marker,
+- **Step 14b (issue #41) starts by removing the `dcgm-exporter` marker,
   not by adding it.** Step 0 copies `gitops/cells/example-cell/` verbatim,
   and `example-cell` ships `addons/dcgm-exporter.yaml`, so the cell has had
   a synced `dcgm-exporter` `Application` since its first bootstrap. Step
@@ -381,11 +381,11 @@ silently:
   than re-adoption, then restores the marker. If `GITOPS_REVISION`'s own
   `gitops/cells/${NAME}/` has no marker, it adds `example-cell`'s on a
   disposable branch (`add-dcgm-exporter`) instead.
-- **Step 15's GPU `NodePool`/`EC2NodeClass` is a test fixture, not part of
+- **Step 14b's GPU `NodePool`/`EC2NodeClass` is a test fixture, not part of
   the platform.** It is applied with `kubectl`, named `e2e-gpu-<hash of the
   run id>`, limited to one small NVIDIA instance (`g5`/`g6`/`g6e`, spot or
   on-demand, `limits.cpu: "8"`), copies role/AMI/discovery from the live
-  `capacity-pool` `EC2NodeClass`, and is deleted at the end of step 15 and
+  `capacity-pool` `EC2NodeClass`, and is deleted at the end of step 14b and
   by `cleanup()` on failure. A pause Pod pinned to it triggers the node
   launch, since Karpenter does not launch nodes for DaemonSet pods. The
   `dcgm-exporter` `Application` is expected `Healthy`, not only `Synced`,
