@@ -195,6 +195,43 @@ def check_method_label_rendered(label, rendered_text, key, value):
     return None if not found_any_daemonset else False
 
 
+def container_security_contexts(ds_spec):
+    """Every container's own rendered securityContext in a DaemonSet's pod
+    template (init and regular; a dropped-privilege override on one and not
+    the other would otherwise go unnoticed)."""
+    pod_spec = (ds_spec.get("template") or {}).get("spec") or {}
+    containers = list(pod_spec.get("initContainers") or []) + list(pod_spec.get("containers") or [])
+    return [(c.get("name", "?"), c.get("securityContext") or {}) for c in containers]
+
+
+def check_security_context_rendered(rendered_text, expected):
+    """accel-efa-device-plugin-{nvidia,neuron} (Fable 5.2 review round 2, finding
+    N6): an addon.yaml's own `values.securityContext` override is, like a method
+    label, a real Helm value that is silently ignored if the key or nesting is
+    wrong -- the same failure mode #19/#28's own review already found once for
+    `nodeSelector`. This asserts the *exact pinned chart's* own rendered
+    DaemonSet actually carries the override on every one of its containers, not
+    merely that `addon.yaml` declares it. Returns (True, "") or (False, reason).
+    No DaemonSet in the chart's output at all is reported as a reason, not a
+    silent pass -- that would otherwise look identical to "override lost"."""
+    found_any_daemonset = False
+    mismatches = []
+    for doc in yaml.safe_load_all(rendered_text):
+        if not doc or doc.get("kind") != "DaemonSet":
+            continue
+        found_any_daemonset = True
+        for name, actual in container_security_contexts(doc.get("spec") or {}):
+            for key, want in expected.items():
+                got = actual.get(key)
+                if got != want:
+                    mismatches.append(f"container {name!r}: {key}={got!r}, expected {want!r}")
+    if not found_any_daemonset:
+        return False, "the rendered chart has no DaemonSet at all to carry a securityContext"
+    if mismatches:
+        return False, "; ".join(mismatches)
+    return True, ""
+
+
 def main(repo_root, rendered_dir):
     failures = 0
     served = {}
@@ -249,6 +286,33 @@ def main(repo_root, rendered_dir):
                     else:
                         print(f"FAIL {label}: the rendered chart has no DaemonSet at all to carry {mkey}={mvalue}")
                         failures += 1
+
+            # accel-efa-device-plugin-{nvidia,neuron} (Fable 5.2 review round 2,
+            # finding N6): the same "a values override can be silently ignored"
+            # failure mode as the method-label check above, for the
+            # securityContext hardening (privileged: false, capabilities drop
+            # ALL) these two add-ons ship instead of the pinned chart's own
+            # privileged default. This is a fixed, named policy -- the expected
+            # values are keyed by addon name below, never read back from
+            # addon.yaml's own values -- on purpose: reading the expectation
+            # from the same file being checked would pass trivially the moment
+            # addon.yaml's own override is weakened or dropped (confirmed by a
+            # deliberately-broken copy during this check's own development: an
+            # earlier, condition-on-addon.yaml's-own-value version of this
+            # check silently skipped a `privileged: true` regression instead
+            # of failing it).
+            efa_hardened_security_context = {
+                "privileged": False,
+                "allowPrivilegeEscalation": False,
+                "capabilities": {"drop": ["ALL"]},
+            }
+            if label in ("accel-efa-device-plugin-nvidia", "accel-efa-device-plugin-neuron"):
+                ok, reason = check_security_context_rendered(rendered, efa_hardened_security_context)
+                if ok:
+                    print(f"PASS {label}: the rendered chart's own container(s) carry the hardened securityContext")
+                else:
+                    print(f"FAIL {label}: the rendered chart's own container(s) do not carry the hardened securityContext ({reason})")
+                    failures += 1
 
     if failures:
         return 1

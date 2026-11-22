@@ -262,11 +262,31 @@ Real hardware (`p4d.24xlarge`, two nodes, `NET/Libfabric`/GDRDMA
   (Fable 5.2 review round 1, finding B1; not yet separately confirmed on
   a Neuron+EFA node, since EFA device enumeration does not itself depend
   on the GPU/Neuron driver but no `trn2`-class hardware was available in
-  this PR's own real-machine run).
-  The risk the remaining, non-overridable half carries: `hostNetwork:
-  true` means a Pod is not behind the extra network hop the foundation's
-  own IMDSv2 hop-limit-of-1 (#20, Facts checked) is meant to stop --
-  `kubectl exec` into either release's Pod reaches
+  this PR's own real-machine run). `gitops/tests/check_pinned_crds.py`
+  now asserts this exact override reaches the exact pinned chart's own
+  rendered container, keyed by addon name rather than read back from
+  `addon.yaml`'s own values -- confirmed, with a deliberately-broken copy
+  during this check's own development, to actually fail if the override
+  is weakened or dropped (Fable 5.2 review round 2, finding N6). The
+  reduced-privilege confirmation above was on Amazon Linux 2023, the
+  only AMI family `gitops/charts/capacity-pool` uses today
+  (`values.yaml`'s own `amiFamily: AL2023`, no Bottlerocket pool exists
+  in this platform) -- a SELinux-enforcing host (Bottlerocket's own
+  default) could plausibly deny an unprivileged container the kubelet
+  device-plugin socket's `hostPath` differently than AL2023 does (Fable
+  5.2 review round 2, finding N7); not a gap in this PR until this
+  platform actually has a Bottlerocket pool to check it against.
+  If the override is ever lost anyway (the chart bumps and renames the
+  key, or a future PR removes it without that static check catching it
+  first), the chart's own `privileged: true` plus `runAsUser: 0` default
+  returns, which is effectively root on the node -- host devices, the
+  host filesystem, and (via the kubelet socket this chart itself mounts)
+  every co-located Pod's own service account token, not only this one
+  Pod's intended `/dev/infiniband` access.
+  The risk the remaining, non-overridable half carries today regardless:
+  `hostNetwork: true` means a Pod is not behind the extra network hop the
+  foundation's own IMDSv2 hop-limit-of-1 (#20, Facts checked) is meant to
+  stop -- `kubectl exec` into either release's Pod reaches
   `http://169.254.169.254` on the node's own network namespace exactly
   like any other process on that node, which can mean the node's own
   `karpenter-node` IAM role credentials, even with `privileged: false`.
@@ -276,30 +296,53 @@ Real hardware (`p4d.24xlarge`, two nodes, `NET/Libfabric`/GDRDMA
   team `AppProject` targets `kube-system`" as the control, which is the
   wrong layer: `AppProject` governs where Argo CD *deploys*, not who
   holds `pods/exec` once a Pod exists. Editing either add-on's own
-  `values:` is the other way in, and that path is `CODEOWNERS`-gated on
-  `gitops/addons/` (RFC #25 Decision 2) the same way every other core
-  add-on already is -- not a gap this PR
-  opens. This add-on does not change who can reach `kube-system` today;
-  it is a real increase in what that access is worth once held, and is
-  recorded here rather than left for a reader to discover by diffing
-  chart templates themselves.
-- **A privileged, host-network Pod runs on more nodes than have EFA.**
-  Both add-ons select by method label alone (#19 Decision 2's own
-  opt-in), the same as the four existing `accel-*` add-ons; neither
-  additionally requires `pool.networkInterfaces` to be non-empty, because
-  no label records that fact today (`capacity-pool`'s own
-  `accelerator.methodLabel` and `pool.networkInterfaces` are independent
-  fields, #17's own chart). A `g7`/`p4d` pool that opts into
-  `nvidia-gpu-method=device-plugin` without configuring EFA interfaces
-  still gets this one more privileged DaemonSet Pod, reporting `efa=0`
-  rather than erroring (confirmed by this add-on's own
-  `supportedInstanceLabels` default, which matches by instance type
-  regardless of whether that specific pool happens to request interfaces)
-  -- a real, if narrow, widening of this trust level's own footprint
-  beyond nodes that actually need it. The fix (a label `capacity-pool`
-  itself sets only when `pool.networkInterfaces` is non-empty, ANDed into
-  both add-ons' own `nodeSelector`) is `#17`'s chart to add, not this PR's
-  -- recorded here as a named follow-up, not silently accepted.
+  `values:` is the other way in; checked directly against the live
+  repository rather than assumed, 2026-11-22: a ruleset on `main`
+  (`protect-main`) requires every change to go through a pull request
+  (no direct push, no force-push, no deletion), but that ruleset's own
+  `require_code_owner_review` is `false` and `required_approving_review_
+  count` is `0` -- `.github/CODEOWNERS`' own comment ("Enforcement comes
+  from the branch ruleset on main, not from this file") is **not**
+  currently true: a PR against this file can be merged with zero
+  reviews. This is a real, repo-wide gap (not scoped to this PR, and not
+  one this PR's own `gh`-token permissions -- Contents/Issues/Pull
+  requests only, no Administration -- can fix), named here rather than
+  assumed closed because an earlier draft of this note cited it as a
+  control.
+  This add-on does not change who can reach `kube-system` today; it is a
+  real increase in what that access is worth once held, and is recorded
+  here rather than left for a reader to discover by diffing chart
+  templates themselves.
+- **A root, host-network Pod runs on more nodes than have EFA, and
+  whether it merely reports zero or crash-loops there is not yet
+  confirmed on real hardware.** Both add-ons select by method label
+  alone (#19 Decision 2's own opt-in), the same as the four existing
+  `accel-*` add-ons; neither additionally requires
+  `pool.networkInterfaces` to be non-empty, because no label records
+  that fact today (`capacity-pool`'s own `accelerator.methodLabel` and
+  `pool.networkInterfaces` are independent fields, #17's own chart). A
+  `g7`/`p4d` pool that opts into `nvidia-gpu-method=device-plugin`
+  without configuring EFA interfaces still gets this one more Pod
+  (`runAsUser: 0`, `hostNetwork: true` -- not `privileged`, now that
+  Fable 5.2 review round 1's finding B1 is fixed), matching by instance
+  type regardless of whether that specific pool happens to request
+  interfaces -- a real, if narrow, widening of this trust level's own
+  footprint beyond nodes that actually need it. Three real-machine
+  attempts to confirm the Pod's own behaviour there (`Running` reporting
+  `efa=0`, versus a crash loop) each hit EC2 capacity errors before a
+  node with this add-on's Pod on it could be checked (`g6e.12xlarge` and
+  `g5.12xlarge`, both `InsufficientCapacity`/`UnfulfillableCapacity` in
+  `ap-northeast-1` at the time, confirmed read-only afterward: both
+  instance types are offered in every AZ this platform's foundation
+  uses and both have a published on-demand price, so this was not the
+  same pricing-data gap `trn2.3xlarge` has -- just no capacity at the
+  time) -- stopped after three failed attempts rather than retried
+  further, so this remains an open question, not a confirmed "reports
+  zero" claim. The fix for the footprint itself (a label `capacity-pool`
+  itself sets only when `pool.networkInterfaces` is non-empty, ANDed
+  into both add-ons' own `nodeSelector`) is `#17`'s chart to add, not
+  this PR's -- recorded here as a named follow-up, not silently
+  accepted.
 - Both EFA add-ons' pinned image stays at the chart's own
   default Region (`us-west-2`), never overridden per cell: see the
   add-on's own `addon.yaml` comment for why (the platform's own
