@@ -1,0 +1,18 @@
+# Static-check input (0.static.sh): pool.networkInterfaces has an interfaceType:
+# efa-only entry but accelerator.methodLabel is unset -- exercises the
+# `or $hasMethodLabel $hasEfa` branch with only the EFA half true (Fable 5.2 review
+# round 6's own minor gap: a regression that nested the EFA label inside the
+# $hasMethodLabel block would still pass every other fixture, since all of them that
+# set an efa-only entry also set a method label). distai.dev/efa-attached must still be
+# present; no method label key should be.
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: efa-no-method-pool
+  networkInterfaces:
+    - networkCardIndex: 0
+      deviceIndex: 0
+      interfaceType: interface
+    - networkCardIndex: 0
+      deviceIndex: 1
+      interfaceType: efa-only

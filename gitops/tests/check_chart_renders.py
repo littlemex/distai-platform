@@ -275,7 +275,7 @@ def check_smoke(name: str, values: dict, docs: list[dict]) -> None:
 EXPECTED_FIXTURES = {
     "capacity-pool": {
         "on-demand-default", "reserved", "flex", "accelerator-tenancy", "taint-no-value",
-        "efa-attached",
+        "efa-attached", "primary-interface-only", "efa-attached-no-method-label",
         "reserved-no-tags", "unknown-capacity-type", "capacity-type-in-requirements",
         "invalid-instance-match-criteria", "invalid-taint-effect", "duplicate-taint",
         "empty-tag-value", "team-taint-no-value",
