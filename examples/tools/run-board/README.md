@@ -116,22 +116,64 @@ also gitignored by this directory — never commit a real `status.json` or
 rendered board from a real cluster; only the sample fixtures under `sample/`
 are meant to be committed.
 
+`--manual-status`'s own file is a flat JSON object keyed by the `key` a
+`plan.yaml` item's `status_source: {kind: manual, key: ...}` names, each
+value an object with `state` (any string; `unknown`/`pending`/`running`/
+`done`/`failed` are the ones `render_board.py` styles specially, anything
+else renders as plain text), and optional `actual_start`/`actual_end`
+(UTC ISO-8601, used to compute lateness the same way a Job's own
+`status.startTime`/completion would), `updated_at` and `note` (free text,
+shown on hover) (#63, filed as #60 item 5 - this was documented only in
+`collect_status.py`'s own docstring until now).
+
+`collect_status.py`'s exit codes: `0` on a normal run, **even when some
+plan items failed to collect** (reported in `status.json`'s own
+`collection_errors` list and printed to stderr, not a reason to fail the
+whole run - a single mistyped name or not-yet-created object should not
+stop the board from rendering for every other item); `2` for a malformed
+plan file or an invalid `--block-start` (checked before anything is
+written, so a rejected run never leaves a half-formed `status.json`
+behind).
+
+Tests: `tests/run_tests.sh`, run on the distai-platform EC2 runner (never
+on a developer Mac) - `runner/run.sh --ref <branch or main> -- bash
+examples/tools/run-board/tests/run_tests.sh`. No AWS credentials, no
+cluster access, no network beyond resolving two pinned Python packages;
+every test patches `collect_status.run_readonly` or `subprocess.run`
+directly rather than calling a real `kubectl`.
+
+Scope note (#63, filed as #60 item 4): [#47](https://github.com/littlemex/distai-platform/issues/47)'s
+own Additional Context specifies a wrapper allowlisting both `kubectl get`
+and `aws ec2 describe-*`; this tool ships the `kubectl get` half only,
+deliberately (see `collect_status.py`'s own docstring and
+`lib/readonly_exec.py`'s module docstring for why an unused AWS branch is
+a liability, not a feature) - the narrower scope was not previously
+recorded on #47 itself.
+
 ## Security
 
-- `collect_status.py` can only run `kubectl get ...`; any other argv raises
-  before a subprocess is ever started (`tests/test_readonly_exec.py` proves
-  this without needing a real cluster). The guard checks the verb, not the
-  specific call: it accepts any argv whose first two words are `kubectl
-  get`, so a future call site is not stopped from reading more than this
-  tool's own two calls need (`kubectl get secrets -A`, `--raw <path>`, and
-  so on) - today's two call sites (`batch/jobs`, `workloads.kueue.x-k8s.io`,
-  each for one named object in one namespace) never reach that. The real
+- `collect_status.py` can only run `kubectl get <resource> <name> -n
+  <namespace> -o json`, `<resource>` one of `job`/`workloads.kueue.x-k8s.io`,
+  with no `-A`/`--all-namespaces`, `--as*`, `--raw`, `--kubeconfig`,
+  `--context`, `--cluster` or `--server` flag; any other argv raises before
+  a subprocess is ever started (`tests/test_readonly_exec.py` proves this
+  without needing a real cluster). An earlier version of this guard checked
+  only the verb (any argv whose first two words were `kubectl get`), so
+  `kubectl get secrets -A -o json`, `--raw <path>` or `--as=<user>` all
+  passed through, even though neither of today's two call sites reaches
+  any of them (#63, filed as #60 item 2) - a future call site added without
+  updating this guard is what the narrower shape now stops. The real
   guarantee is still your credentials: give it a `kubectl` context bound to
   a namespaced `Role` granting `get` on exactly `batch/jobs` and
   `workloads.kueue.x-k8s.io` in the plan's own namespace(s) - not a
-  cluster-wide `ClusterRole` (#63, filed as #60) - so that even a bug in
-  this tool, or a future call site added without updating this guard,
-  cannot read another team's namespace on a shared cluster.
+  cluster-wide `ClusterRole` - so that even a bug in this tool cannot read
+  another team's namespace on a shared cluster.
+- A `kubectl get` that fails is reported as `not found yet` (the object
+  does not exist - a plan item's own timing, not a problem) or `permission
+  denied - check this credential's own RBAC` (an operator problem), read
+  from kubectl's own `NotFound`/`Forbidden` stderr wording, instead of the
+  same generic `collection failed: CalledProcessError: ...` for both (#63,
+  filed as #60 item 3).
 - Names and namespaces from `plan.yaml` are validated as a plain lowercase
   alphanumeric-and-hyphen token (no dots — stricter than a full DNS-1123
   subdomain, which does allow them; this project's own Job and Workload

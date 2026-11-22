@@ -56,6 +56,29 @@ def test_job_kind_collection_failure_becomes_a_reported_error_not_a_crash():
     assert "boom" in error
 
 
+def test_job_kind_not_found_is_reported_distinctly_from_forbidden():
+    # #63, filed as #60 item 3: before this, both read as the same
+    # generic "collection failed: CalledProcessError: ...".
+    from lib.readonly_exec import CollectionError
+
+    item = _item("job", namespace="ns", name="n")
+    with mock.patch.object(
+        collect_status, "run_readonly",
+        side_effect=CollectionError("not_found", 'Error from server (NotFound): jobs.batch "n" not found'),
+    ):
+        entry, error = collect_status._collect_one(item, {})
+    assert entry is None
+    assert "not found yet" in error
+
+    with mock.patch.object(
+        collect_status, "run_readonly",
+        side_effect=CollectionError("forbidden", 'Error from server (Forbidden): jobs.batch is forbidden'),
+    ):
+        entry, error = collect_status._collect_one(item, {})
+    assert entry is None
+    assert "permission denied" in error
+
+
 def test_kueue_workload_kind_calls_readonly_exec_with_safe_argv():
     item = _item("kueue_workload", namespace="ns", name="n")
     fake = json.dumps({"status": {"conditions": []}})
