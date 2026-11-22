@@ -45,6 +45,25 @@ engine:
   cacheVolume:
     emptyDir: {}
   startupTimeoutSeconds: 1800
+  # Set when this release's replicas land on an MPS-split GPU
+  # (capacity-pool's own accelerator.sharingLabel, e.g. "mps-2" ->
+  # mps.replicas: 2 here must match). Confirmed on real hardware (#37):
+  # vLLM's own startup memory check sizes its request against the WHOLE
+  # physical device, not this engine's own MPS-limited share, so leaving
+  # gpuMemoryUtilization at vLLM's own default (or any value above roughly
+  # 1/replicas) fails this check deterministically once a replica lands on
+  # an MPS-split node. gpuMemoryUtilization: "" (default) computes a safe
+  # fraction from mps.replicas when mps.enabled is true, and leaves vLLM's
+  # own default alone (the flag is not passed at all) when mps.enabled is
+  # false, matching this chart's behavior before this field existed. An
+  # explicit gpuMemoryUtilization is always honored, but rendering fails if
+  # it exceeds the safe ceiling mps.replicas implies -- see
+  # examples/inference/README.md's own MPS investigation for the
+  # real-hardware numbers this ceiling is based on.
+  mps:
+    enabled: false
+    replicas: 2
+  gpuMemoryUtilization: ""
   # The vLLM image provides a non-root "vllm" user (UID 2000, GID 0) for
   # exactly this; its home and cache directories are group-writable.
   podSecurityContext:
