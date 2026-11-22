@@ -110,6 +110,16 @@ prefill:
       memory: 32Gi
   extraArgs: []
   extraEnv: []
+  # Same shape, same rationale and the same real-hardware basis as
+  # ../disagg-pd/values.yaml's own prefill.mps/prefill.gpuMemoryUtilization
+  # (see that chart's own comment): set when this role's own
+  # nodeSelectorValue targets an MPS-split pool (capacity-pool's own
+  # accelerator.sharingLabel), with mps.replicas matching that pool's own
+  # split count.
+  mps:
+    enabled: false
+    replicas: 2
+  gpuMemoryUtilization: ""
 
 decode:
   replicas: 1
@@ -123,6 +133,10 @@ decode:
       memory: 32Gi
   extraArgs: []
   extraEnv: []
+  mps:
+    enabled: false
+    replicas: 2
+  gpuMemoryUtilization: ""
 
 engine:
   # Port every engine pod serves the OpenAI API on, and the InferencePool's

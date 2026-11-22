@@ -102,6 +102,25 @@ prefill:
       memory: 32Gi
   extraArgs: []
   extraEnv: []
+  # Set mps.enabled when this role's own nodeSelectorValue targets a pool
+  # whose nodes are MPS-split (capacity-pool's own accelerator.sharingLabel,
+  # e.g. "mps-2" -> mps.replicas: 2 here must match). Confirmed on real
+  # hardware (#37): vLLM's own startup memory check sizes its request
+  # against the WHOLE physical device, not this engine's own MPS-limited
+  # share, so leaving gpuMemoryUtilization at vLLM's own default (or any
+  # value above roughly 1/replicas) fails this check deterministically the
+  # moment this role lands on an MPS-split node. gpuMemoryUtilization: ""
+  # (default) computes a safe fraction from mps.replicas when mps.enabled is
+  # true, and leaves vLLM's own default alone (the flag is not passed at
+  # all) when mps.enabled is false, matching this chart's behavior before
+  # this field existed. An explicit gpuMemoryUtilization is always honored,
+  # but rendering fails if it exceeds the safe ceiling this role's own
+  # mps.replicas implies -- see examples/inference/README.md's own MPS
+  # investigation for the real-hardware numbers this ceiling is based on.
+  mps:
+    enabled: false
+    replicas: 2
+  gpuMemoryUtilization: ""
 
 decode:
   replicas: 1
@@ -115,6 +134,15 @@ decode:
       memory: 32Gi
   extraArgs: []
   extraEnv: []
+  # Same shape as prefill.mps/prefill.gpuMemoryUtilization above, set
+  # independently: in every real-hardware run this investigation tried,
+  # only prefill's own pool was MPS-split, but the two roles' nodeSelector
+  # values can point at any pool, so this is not assumed to always be the
+  # case.
+  mps:
+    enabled: false
+    replicas: 2
+  gpuMemoryUtilization: ""
 
 engine:
   port: 8000
