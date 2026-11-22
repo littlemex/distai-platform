@@ -255,3 +255,48 @@ step by hand, as with the smoke chart's `clusterQueue.resourceFlavor`.
     This chart renders either `capacityType` value; whether a given
     instance type has a usable on-demand path at all is outside this
     chart's own control.
+
+## Confirmed on real hardware
+
+- **2026-11-22, `p4d.24xlarge` x2, `pool.networkInterfaces` multi-card EFA array (case 3: every
+  card EFA-capable, same shape as `p5.48xlarge`/`p5e.48xlarge`/`p5en.48xlarge` -- see
+  [#50](https://github.com/littlemex/distai-platform/issues/50)).** Run as a stand-in for the
+  upcoming `p5en.48xlarge` x2 Capacity Block, on `spot` capacity, a disposable foundation cell in
+  `ap-northeast-1`, to find chart/admission defects before the real block (`helm template` alone
+  cannot catch an admission-webhook rejection -- the same lesson the foundation layer's own real run
+  already drew for `node.kubernetes.io/instance-type`). `pool.requirements` used
+  `node.kubernetes.io/instance-type` (never `karpenter.k8s.aws/instance-type`, which Karpenter's own
+  admission webhook rejects) with a single value; `pool.networkInterfaces` was the 5-entry array
+  `{0,0,interface}`, `{0,1,efa-only}`, `{1,1,efa-only}`, `{2,1,efa-only}`, `{3,1,efa-only}`
+  (`p4d.24xlarge` has 4 network cards, all 4 EFA-capable).
+  - `helm upgrade --install` against a real cluster rendered a valid `EC2NodeClass`/`NodePool`/
+    `ResourceFlavor`; both reached `Ready: True`.
+  - A pending workload (2 Pods, one per host, 8x `nvidia.com/gpu` and 4x `vpc.amazonaws.com/efa`
+    each) triggered two real `NodeClaim`s, both `Launched: True` within under a minute, both real
+    `p4d.24xlarge` Spot instances.
+  - `aws ec2 describe-instances` on a launched instance confirmed all 5 interfaces `in-use` at the
+    exact `NetworkCardIndex`/`DeviceIndex` requested (plus the usual extra pod-networking ENI the
+    VPC CNI attaches after boot, unrelated to this array).
+  - On the real node: `lspci` listed 4 `Elastic Fabric Adapter (EFA)` devices; `ls
+    /sys/class/infiniband` listed exactly 4 `rdmap*` devices; the `efa` kernel module was loaded.
+    `nvidia.com/gpu` allocatable was `8` on both nodes with no extra add-on
+    (`accel-nvidia-device-plugin` alone was enough).
+  - `vpc.amazonaws.com/efa` allocatable required a separate `aws-efa-k8s-device-plugin` DaemonSet
+    (this chart's own `networkInterfaces` field only asks EC2 to attach the hardware; nothing in
+    this repository yet advertises it as a Kubernetes extended resource). Mounting only
+    `/var/lib/kubelet/device-plugins` was not enough -- the plugin logged "No devices found" and
+    exited clean (`Completed`, not `CrashLoopBackOff`, which reads as a quiet success at a glance).
+    It also needs `/sys` and `/dev` mounted into the container and `securityContext.privileged:
+    true`; with all three, it found all 4 devices on both nodes and `vpc.amazonaws.com/efa`
+    allocatable read `4`.
+  - A real 2-node, 16-GPU `all_reduce_perf` (OpenMPI, `FI_PROVIDER=efa`) completed end to end over
+    `NET/Libfabric/.../GDRDMA` (confirmed in the NCCL log -- not a sockets fallback), 0 out-of-bounds
+    values, ~76.7 GB/s bus bandwidth at a 2 GiB message size.
+  - `fi_info -p efa 2>&1 | grep -c "^provider: efa"` printed 12, not 4, on this libfabric build
+    (`version: 206.0` lists each physical device under both the `efa-direct` and classic `efa`
+    fabrics, 3 provider lines per device) -- a reminder that this specific one-liner is
+    libfabric-version-dependent; `ls /sys/class/infiniband | wc -l` (or counting unique `domain:`
+    names with the `-rdm`/`-dgrm` suffix stripped) is the version-independent check.
+  - Dedicated GPU, EFA-aware teardown was not exercised beyond this run's own terminate +
+    `terraform destroy` + an independent AWS-API leftover sweep (zero instances, ENIs, volumes,
+    launch templates or placement groups left under this run's own tags/prefix afterward).
