@@ -292,6 +292,24 @@ def container_security_contexts(ds_spec):
     return [(c.get("name", "?"), c.get("securityContext") or {}) for c in containers]
 
 
+# Keys whose documented Kubernetes default genuinely IS false/no-
+# enforcement, so a container that never sets the key at all is making
+# the same real-world claim as one that sets it to false explicitly
+# (#63, Fable 5.2 review round 2 of a sibling branch): "privileged"
+# defaults to false; "runAsNonRoot" unset means no non-root requirement
+# is enforced, the same practical effect as an explicit false. Anything
+# NOT in this set -- most importantly allowPrivilegeEscalation, whose
+# own Kubernetes default when unset is to ALLOW escalation (no
+# no_new_privs), the opposite of what a False expectation here means --
+# must still match exactly; an earlier version of this tolerance keyed
+# only on the expected value (want is False), which also silently
+# weakened the allowPrivilegeEscalation check for the two EFA addons and
+# for dcgm-exporter alike, the same "regression passes silently" failure
+# mode this whole function exists to catch, found by review before it
+# shipped.
+ABSENT_MEANS_FALSE = {"privileged", "runAsNonRoot"}
+
+
 def check_security_context_rendered(rendered_text, expected):
     """accel-efa-device-plugin-{nvidia,neuron} (Fable 5.2 review round 2, finding
     N6): an addon.yaml's own `values.securityContext` override is, like a method
@@ -311,21 +329,13 @@ def check_security_context_rendered(rendered_text, expected):
         for name, actual in container_security_contexts(doc.get("spec") or {}):
             for key, want in expected.items():
                 got = actual.get(key)
-                # A boolean expectation of False matches both a rendered
-                # "false" and a key the chart's own template never sets at
-                # all (confirmed: dcgm-exporter's own pinned chart renders
-                # no "privileged" key whatsoever, not a literal "false") --
-                # Kubernetes' own documented default for every boolean
-                # SecurityContext field this script checks is False, so
-                # "absent" and "false" are the same fact on the cluster,
-                # and comparing got != want directly would report a false
-                # mismatch for every container that simply never sets a
-                # True-by-default-elsewhere field to its own correct,
-                # unset-is-fine value. A True expectation, or any
-                # non-boolean expectation (capabilities, runAsUser), still
-                # requires an exact match -- only a False expectation
-                # tolerates the key being absent.
-                if want is False and got is None:
+                # Only the keys in ABSENT_MEANS_FALSE tolerate the
+                # chart's own template never setting them at all
+                # (confirmed: dcgm-exporter's own pinned chart renders no
+                # "privileged" key whatsoever, not a literal "false").
+                # Every other key, including allowPrivilegeEscalation,
+                # still requires an exact match.
+                if key in ABSENT_MEANS_FALSE and want is False and got is None:
                     continue
                 if got != want:
                     mismatches.append(f"container {name!r}: {key}={got!r}, expected {want!r}")
@@ -342,18 +352,20 @@ def main(repo_root, rendered_dir):
     # Every addon.yaml label this run actually found (registry or catalog,
     # regardless of whether it carries a securityContext expectation),
     # versus every label whose SECURITY_CONTEXT_EXPECTATIONS entry was
-    # actually exercised below (Fable 5.2 review of a sibling branch,
-    # #63): a label present in SECURITY_CONTEXT_EXPECTATIONS but absent
-    # from both loops below never runs check_security_context_rendered()
-    # at all, and the "if label in SECURITY_CONTEXT_EXPECTATIONS" guards
-    # make that a silent no-op, not a failure -- the exact "a check never
-    # actually ran" risk this whole file exists to catch for method
-    # labels and securityContext alike. Comparing the two sets at the end
-    # turns a renamed/misspelled addon or catalog entry into a FAIL
-    # instead of an unnoticed gap. A key legitimately absent from this
-    # checkout entirely (a sibling branch's own addon not yet merged in)
-    # is not a failure -- only a label this run DID see, that should have
-    # been checked and was not, is.
+    # actually exercised below (#63): a label this run DID find, that is
+    # also in SECURITY_CONTEXT_EXPECTATIONS, but whose own entry skipped
+    # check_security_context_rendered() for some other reason (a catalog
+    # entry with no "dir" key, for example) is a shape this expectation
+    # table assumed cannot happen -- comparing the two sets below turns
+    # that into a FAIL instead of a silent no-op, the exact "a check
+    # never actually ran" risk this whole file exists to catch. This
+    # does NOT catch the addon or catalog entry's own `addon:` field (or
+    # its directory name) being renamed or mistyped: a typo changes
+    # which string labels_seen holds too, so the expected label vanishes
+    # from both sets at once and the comparison sees nothing to flag --
+    # indistinguishable, from this script's own point of view, from a
+    # sibling branch's addon that legitimately does not exist in this
+    # checkout yet, which must not fail.
     labels_seen = set()
     security_context_checked = set()
     addon_files = sorted(glob.glob(os.path.join(repo_root, "gitops", "addons", "*", "addon.yaml")))
@@ -483,9 +495,10 @@ def main(repo_root, rendered_dir):
         print(
             f"FAIL SECURITY_CONTEXT_EXPECTATIONS has {len(unchecked)} label(s) this run found as an addon.yaml/"
             f"addon-catalog entry but never actually ran check_security_context_rendered() for: {sorted(unchecked)} "
-            "-- a rename, a typo, or a label moved out of the dir:-only/chart-having shape this function expects "
-            "would silently drop the check this way; a label this run never saw at all (a sibling branch's own "
-            "addon not yet merged into this checkout) is not in this set and does not fail"
+            "-- found with a shape (no 'dir' key, for example) the expectation table assumes cannot happen for "
+            "this label; a label this run never saw at all under any name (a sibling branch's own addon not yet "
+            "merged into this checkout, or this same label after a rename/typo this check cannot tell apart from "
+            "that) is not in this set and does not fail"
         )
         failures += 1
 
