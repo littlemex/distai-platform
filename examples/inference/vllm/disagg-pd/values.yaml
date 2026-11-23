@@ -239,6 +239,14 @@ networkPolicy:
   # today), which means metrics are NOT reachable while networkPolicy
   # is enabled until this is set -- stated here rather than assumed
   # harmless, since this chart's own default already claims the opposite.
+  #
+  # NetworkPolicy's own ports[] matches at L4 (port number), not the
+  # HTTP path -- opening engine.port for a peer opens the whole engine
+  # API to it, not only /metrics, the same way the proxy's own ingress
+  # rule above does. Scope the peer as narrowly as the real collector's
+  # own Pods allow (a podSelector naming the collector specifically,
+  # not only a namespaceSelector for its whole namespace) if anything
+  # else also runs in that namespace.
   metricsScrapeFrom: []
 
 # Skeleton only (values and rendering, not built or measured on real
