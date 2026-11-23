@@ -363,8 +363,11 @@ def check_disagg_chart(R, chart, name):
         for r in ROLES:
             for w in roles[r]:
                 strategy = (w.get("spec") or {}).get("strategy")
-                check(f"default: {name_of(w)} ({r}) has no strategy override (RollingUpdate, Kubernetes' own default)",
-                      strategy is None, repr(strategy))
+                check(f"default: {name_of(w)} ({r}) sets strategy.type=Recreate "
+                      "(any role's own dedicated pool is commonly sized to fit exactly one node, "
+                      "so a RollingUpdate surge pod has nowhere to land -- confirmed on real "
+                      "hardware, g7.8xlarge x2, 2026-11-23, outside sameNodeMeasurement too)",
+                      strategy == {"type": "Recreate"}, repr(strategy))
 
     # ----------------------------------- role key has a values override
     key_paths = find_paths(values, ROLE_KEY)
