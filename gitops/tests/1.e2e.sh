@@ -1003,7 +1003,21 @@ for app in "${APP_KARPENTER_CRD}" "${APP_KARPENTER}" "${APP_KUEUE}" "${APP_SMOKE
   app_exists_app="${app}"
   app_exists_check() { app_exists "${app_exists_app}"; }
   wait_until 60 5 "Application ${app} exists" app_exists_check \
-    || fail "Application ${app} does not exist -- the cells/platform ApplicationSet never generated it"
+    || {
+      # TEMPORARY diagnostic dump -- not part of this PR's fix, removed
+      # once the root cause of this timeout is found.
+      echo "=== DIAG: k get applicationset -n ${ARGOCD_NS} -o wide ===" >&2
+      k get applicationset -n "${ARGOCD_NS}" -o wide 2>&1 >&2
+      echo "=== DIAG: k get applicationset platform -n ${ARGOCD_NS} -o yaml ===" >&2
+      k get applicationset platform -n "${ARGOCD_NS}" -o yaml 2>&1 >&2
+      echo "=== DIAG: k get application -n ${ARGOCD_NS} ===" >&2
+      k get application -n "${ARGOCD_NS}" 2>&1 >&2
+      echo "=== DIAG: applicationset-controller logs ===" >&2
+      k -n "${ARGOCD_NS}" logs -l app.kubernetes.io/name=argocd-applicationset-controller --tail=300 2>&1 >&2
+      echo "=== DIAG: repo-server logs ===" >&2
+      k -n "${ARGOCD_NS}" logs -l app.kubernetes.io/name=argocd-repo-server --tail=200 2>&1 >&2
+      fail "Application ${app} does not exist -- the cells/platform ApplicationSet never generated it"
+    }
 done
 pass "discovered generated Applications, each confirmed to exist: ${APP_KARPENTER_CRD}, ${APP_KARPENTER}, ${APP_KUEUE}, ${APP_CAPACITY_POOL}, ${APP_SMOKE}"
 
