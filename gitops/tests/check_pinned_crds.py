@@ -177,10 +177,16 @@ def extract_served_versions(rendered_text):
 # security-axis review pass, filed as "SA3" item 2 - this table used to be
 # a single hardcoded dict for the two accel-efa-device-plugin-* addons
 # only; dcgm-exporter's own hardening was not mechanically checked at all
-# until this entry was added). Each entry is the exact values dcgm-exporter/
-# addon.yaml or the two EFA addon.yaml files set themselves, kept here
-# (never read back from those same files) for the reason explained above
-# check_security_context_rendered's own call sites.
+# until this entry was added). For accel-efa-device-plugin-{nvidia,neuron}
+# (gitops/addons/<name>/addon.yaml), each entry is the exact
+# values.securityContext override that file sets. dcgm-exporter has no
+# such override of its own (gitops/addon-catalog/dcgm-exporter/addon.yaml
+# names no values.securityContext key at all) -- its entry is instead the
+# pinned upstream chart's own rendered default (gitops/charts/dcgm-
+# exporter, confirmed by rendering it), kept here the same way and for the
+# same reason as the other two: never read back from the file being
+# checked, for the reason explained above check_security_context_rendered's
+# own call sites.
 SECURITY_CONTEXT_EXPECTATIONS = {
     "accel-efa-device-plugin-nvidia": {
         "privileged": False,
@@ -193,6 +199,20 @@ SECURITY_CONTEXT_EXPECTATIONS = {
         "capabilities": {"drop": ["ALL"]},
     },
     "dcgm-exporter": {
+        # SYS_ADMIN and root (runAsUser: 0) are what the upstream chart's
+        # own default needs to read GPU profiling metrics (DCGM's perf
+        # counters require it); privileged: False keeps that to exactly
+        # the one capability, not the whole-device-passthrough grant
+        # "privileged" would add. Added after a Fable 5.2 review of a
+        # sibling branch found this entry missing the privileged: False
+        # key every other entry here has -- check_security_context_
+        # rendered() only compares keys present in this dict, so a
+        # privileged: true regression on this one container would pass
+        # silently, the exact failure mode this whole check exists to
+        # catch (confirmed: the rendered container's own securityContext
+        # carries no "privileged" key at all today, i.e. the implicit
+        # Kubernetes default, False).
+        "privileged": False,
         "allowPrivilegeEscalation": False,
         "capabilities": {"add": ["SYS_ADMIN"], "drop": ["ALL"]},
         "runAsNonRoot": False,
@@ -303,6 +323,23 @@ def check_security_context_rendered(rendered_text, expected):
 def main(repo_root, rendered_dir):
     failures = 0
     served = {}
+    # Every addon.yaml label this run actually found (registry or catalog,
+    # regardless of whether it carries a securityContext expectation),
+    # versus every label whose SECURITY_CONTEXT_EXPECTATIONS entry was
+    # actually exercised below (Fable 5.2 review of a sibling branch,
+    # #63): a label present in SECURITY_CONTEXT_EXPECTATIONS but absent
+    # from both loops below never runs check_security_context_rendered()
+    # at all, and the "if label in SECURITY_CONTEXT_EXPECTATIONS" guards
+    # make that a silent no-op, not a failure -- the exact "a check never
+    # actually ran" risk this whole file exists to catch for method
+    # labels and securityContext alike. Comparing the two sets at the end
+    # turns a renamed/misspelled addon or catalog entry into a FAIL
+    # instead of an unnoticed gap. A key legitimately absent from this
+    # checkout entirely (a sibling branch's own addon not yet merged in)
+    # is not a failure -- only a label this run DID see, that should have
+    # been checked and was not, is.
+    labels_seen = set()
+    security_context_checked = set()
     addon_files = sorted(glob.glob(os.path.join(repo_root, "gitops", "addons", "*", "addon.yaml")))
     with tempfile.TemporaryDirectory() as workdir:
         for addon_path in addon_files:
@@ -323,6 +360,7 @@ def main(repo_root, rendered_dir):
             for key, versions in crds.items():
                 served.setdefault(key, set()).update(versions)
             label = doc.get("addon", chart)
+            labels_seen.add(label)
             skip_crds = bool(doc.get("skipCrds"))
             suffix = " (skipCrds: its own crds/-folder CRDs are not applied)" if skip_crds else ""
             print(f"INFO {label} ({chart}:{doc['version']}) ships {len(crds)} CustomResourceDefinition kind(s){suffix}")
@@ -369,6 +407,7 @@ def main(repo_root, rendered_dir):
             # own-value version of this check silently skipped a
             # `privileged: true` regression instead of failing it).
             if label in SECURITY_CONTEXT_EXPECTATIONS:
+                security_context_checked.add(label)
                 ok, reason = check_security_context_rendered(rendered, SECURITY_CONTEXT_EXPECTATIONS[label])
                 if ok:
                     print(f"PASS {label}: the rendered chart's own container(s) carry the hardened securityContext")
@@ -408,18 +447,31 @@ def main(repo_root, rendered_dir):
             with open(addon_path, encoding="utf-8") as f:
                 doc = yaml.safe_load(f) or {}
             label = doc.get("addon", os.path.basename(os.path.dirname(addon_path)))
+            labels_seen.add(label)
             if "dir" not in doc or label not in SECURITY_CONTEXT_EXPECTATIONS:
                 continue
             rendered = helm_template_dir_chart(doc, repo_root, catalog_workdir)
             if rendered is None:
                 failures += 1
                 continue
+            security_context_checked.add(label)
             ok, reason = check_security_context_rendered(rendered, SECURITY_CONTEXT_EXPECTATIONS[label])
             if ok:
                 print(f"PASS {label}: the rendered chart's own container(s) carry the hardened securityContext")
             else:
                 print(f"FAIL {label}: the rendered chart's own container(s) do not carry the hardened securityContext ({reason})")
                 failures += 1
+
+    unchecked = (set(SECURITY_CONTEXT_EXPECTATIONS) & labels_seen) - security_context_checked
+    if unchecked:
+        print(
+            f"FAIL SECURITY_CONTEXT_EXPECTATIONS has {len(unchecked)} label(s) this run found as an addon.yaml/"
+            f"addon-catalog entry but never actually ran check_security_context_rendered() for: {sorted(unchecked)} "
+            "-- a rename, a typo, or a label moved out of the dir:-only/chart-having shape this function expects "
+            "would silently drop the check this way; a label this run never saw at all (a sibling branch's own "
+            "addon not yet merged into this checkout) is not in this set and does not fail"
+        )
+        failures += 1
 
     if failures:
         return 1
