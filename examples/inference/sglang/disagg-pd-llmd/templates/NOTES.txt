@@ -2,7 +2,7 @@
 {{- $hr := .Values.llmdRouter.httpRoute -}}
 {{- $gwns := default .Release.Namespace $hr.inferenceGatewayNamespace -}}
 Routing: Gateway {{ $gwns }}/{{ $hr.inferenceGatewayName }} -> HTTPRoute {{ .Release.Namespace }}/{{ .Release.Name }} -> InferencePool {{ .Release.Namespace }}/{{ include "disagg.inferencePoolName" . }} (EPP {{ .Release.Namespace }}/{{ printf "%s" (.Release.Name | lower | trim | trunc 40) }}-epp, failureMode {{ .Values.llmdRouter.router.inferencePool.failureMode }})
-  -> decode pod's routing sidecar (:{{ .Values.engine.port }}) -> bootstrap_host/port/room injected into both the prefill pod the EPP picked and SGLang decode (:{{ .Values.routingSidecar.enginePort }}), called concurrently -> the two engines run their own NIXL handshake
+  -> decode pod's routing sidecar (:{{ .Values.engine.port }}) -> bootstrap_host/port/room injected into both the prefill pod the EPP picked and SGLang decode (:{{ .Values.routingSidecar.enginePort }}), called concurrently -> the two engines run their own {{ if eq .Values.transport.backend "MOONCAKE" }}Mooncake{{ else }}NIXL{{ end }} handshake
 
 Endpoint (cluster-internal): the address of Gateway {{ $gwns }}/{{ $hr.inferenceGatewayName }}, which this chart does not create:
   kubectl get gateway {{ $hr.inferenceGatewayName }} -n {{ $gwns }} -o jsonpath='{.status.addresses[0].value}'

@@ -73,8 +73,8 @@ app.kubernetes.io/component: {{ .component }}
 {{- if and (eq $t.backend "MOONCAKE") (not (has $t.mooncakeProtocol (list "efa" "tcp"))) -}}
 {{- fail (printf "transport.mooncakeProtocol must be efa or tcp, got %q" $t.mooncakeProtocol) -}}
 {{- end -}}
-{{- if and (eq $t.backend "MOONCAKE") $t.forceEfaSameNode -}}
-{{- fail "transport.forceEfaSameNode is only defined for transport.backend=NIXL with sglangNixlBackend=LIBFABRIC: whether Mooncake's EFA transport honors the same libfabric variable is unconfirmed (RFC #37, Decision 6)" -}}
+{{- if and $t.forceEfaSameNode (not (and (eq $t.backend "NIXL") (eq $t.sglangNixlBackend "LIBFABRIC"))) -}}
+{{- fail "transport.forceEfaSameNode is only defined for transport.backend=NIXL with sglangNixlBackend=LIBFABRIC (the only combination that sets FI_EFA_ENABLE_SHM_TRANSFER at all): with backend=MOONCAKE, whether Mooncake's EFA transport honors the same libfabric variable is unconfirmed (RFC #37, Decision 6); with sglangNixlBackend=UCX, no FI_EFA_* env is rendered at all, so the flag would silently do nothing rather than force anything onto EFA" -}}
 {{- end -}}
 {{- if and $t.forceEfaSameNode (not .Values.placement.sameNodeMeasurement) -}}
 {{- fail "transport.forceEfaSameNode=true only makes sense with placement.sameNodeMeasurement=true; a cross-node run already uses the EFA device path" -}}
