@@ -51,6 +51,11 @@ metadata:
     app.kubernetes.io/component: {{ $role }}
 spec:
   replicas: {{ $r.replicas }}
+  # See the vllm/disagg-pd chart's own engines.yaml for why this is set
+  # explicitly (engine.startupTimeoutSeconds already bounds the
+  # startupProbe's own budget to the same number of seconds as the default
+  # progressDeadlineSeconds, 600s).
+  progressDeadlineSeconds: {{ add (int $.Values.engine.startupTimeoutSeconds) 300 }}
   {{- /*
     sameNodeMeasurement packs both roles onto one Karpenter-capped node with
     no spare GPU/EFA capacity (placement.sharedPoolValue, limits sized to
