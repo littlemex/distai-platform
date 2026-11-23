@@ -311,6 +311,22 @@ def check_security_context_rendered(rendered_text, expected):
         for name, actual in container_security_contexts(doc.get("spec") or {}):
             for key, want in expected.items():
                 got = actual.get(key)
+                # A boolean expectation of False matches both a rendered
+                # "false" and a key the chart's own template never sets at
+                # all (confirmed: dcgm-exporter's own pinned chart renders
+                # no "privileged" key whatsoever, not a literal "false") --
+                # Kubernetes' own documented default for every boolean
+                # SecurityContext field this script checks is False, so
+                # "absent" and "false" are the same fact on the cluster,
+                # and comparing got != want directly would report a false
+                # mismatch for every container that simply never sets a
+                # True-by-default-elsewhere field to its own correct,
+                # unset-is-fine value. A True expectation, or any
+                # non-boolean expectation (capabilities, runAsUser), still
+                # requires an exact match -- only a False expectation
+                # tolerates the key being absent.
+                if want is False and got is None:
+                    continue
                 if got != want:
                     mismatches.append(f"container {name!r}: {key}={got!r}, expected {want!r}")
     if not found_any_daemonset:
