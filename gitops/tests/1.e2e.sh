@@ -1961,11 +1961,15 @@ if [[ -f "${DCGM_CLONE}/${DCGM_MARKER_REL}" ]]; then
   # key the day a real cell's own ${DCGM_MARKER_REL} starts setting one
   # (gitops/charts/dcgm-exporter/README.md's own overridableKeys
   # mechanism this override itself exercises) -- caught here instead of
-  # discovered as a flaky "Application never generated" failure later
-  # (Fable 5.2 round 1, STOP reason 2).
+  # discovered as a flaky "Application never generated" failure later.
+  # The leading blank line in the heredoc below is not cosmetic: if the
+  # marker's own last line has no trailing newline, this is what keeps
+  # "values:" from being appended onto the end of that line instead of
+  # starting its own.
   grep -q '^values:' "${DCGM_CLONE}/${DCGM_MARKER_REL}" \
     && fail "${DCGM_MARKER_REL} at ${GITOPS_REVISION} already has a top-level values: key -- this test's blind append would duplicate it; merge the allowedPeers entry into the existing block instead"
   cat >>"${DCGM_CLONE}/${DCGM_MARKER_REL}" <<VALUES
+
 values:
   dcgm-exporter:
     networkPolicy:
@@ -1996,14 +2000,15 @@ else
   # is correctly scoped to DCGM_NS alone (a NetworkPolicy peer with only
   # a podSelector matches within the policy's own namespace), which is
   # also where this scrape Pod is created, below. Guarded the same way
-  # as the other branch's append, even though DCGM_EXAMPLE_MARKER_REL is
-  # a known, checked-in file with no values: key today -- a future edit
-  # to that one file (it is this platform's own worked example, not a
-  # disposable fixture) would otherwise silently duplicate the key here
-  # too (Fable 5.2 round 1, STOP reason 2).
+  # as the other branch's append (same leading-blank-line reasoning too),
+  # even though DCGM_EXAMPLE_MARKER_REL is a known, checked-in file with
+  # no values: key today -- a future edit to that one file (it is this
+  # platform's own worked example, not a disposable fixture) would
+  # otherwise silently duplicate the key here too.
   grep -q '^values:' "${DCGM_MARKER_COPY}" \
     && fail "${DCGM_EXAMPLE_MARKER_REL} already has a top-level values: key -- this test's blind append would duplicate it; merge the allowedPeers entry into the existing block instead"
   cat >>"${DCGM_MARKER_COPY}" <<VALUES
+
 values:
   dcgm-exporter:
     networkPolicy:
