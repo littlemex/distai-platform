@@ -59,11 +59,17 @@ metadata:
 spec:
   replicas: {{ $r.replicas }}
   # Kubernetes marks the rollout ProgressDeadlineExceeded once this many
-  # seconds pass with no pod turning Available (default 600s), independently
-  # of the probes' own budget. engine.startupTimeoutSeconds already bounds
-  # the startupProbe's own periodSeconds(10) x failureThreshold budget to
-  # that same number of seconds, so the deadline needs margin above it.
-  progressDeadlineSeconds: {{ add (int $.Values.engine.startupTimeoutSeconds) 300 }}
+  # seconds pass with no pod turning Available, independently of the
+  # probes' own budget. The default is 600s; this chart's own Known
+  # issues #2 (README) hit that class of failure on real hardware: on a
+  # fresh g7.48xlarge node, a slow image pull alone exceeded 600s before
+  # any probe even started (this margin covers the startupProbe's own
+  # budget, not necessarily a slow pull on top of it - still open there).
+  # The startupProbe here is budgeted to run for
+  # engine.startupTimeoutSeconds (1800s by default, well above the 600s
+  # default deadline). `max 600` never shortens the Kubernetes default,
+  # even for a release with a very small startupTimeoutSeconds.
+  progressDeadlineSeconds: {{ max 600 (add (int $.Values.engine.startupTimeoutSeconds) 300) }}
   {{- /*
     sameNodeMeasurement packs both roles onto one Karpenter-capped node with
     no spare GPU/EFA capacity (placement.sharedPoolValue, limits sized to

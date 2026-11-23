@@ -12,11 +12,13 @@ metadata:
 spec:
   replicas: {{ $e.replicas }}
   # See the vLLM agg-baseline chart's own engine.yaml for why this is set
-  # explicitly (startupTimeoutSeconds already bounds the startupProbe's own
-  # budget to the same number of seconds as the default
-  # progressDeadlineSeconds, 600s, so a real cold start can exceed the
-  # deadline with the probes still passing on time).
-  progressDeadlineSeconds: {{ add (int $e.startupTimeoutSeconds) 300 }}
+  # explicitly: the Kubernetes default (600s) is well below the
+  # startupProbe's own budget (engine.startupTimeoutSeconds, 1800s by
+  # default), so a real cold start can exceed the default deadline with
+  # the probes still passing on time. `max 600` never shortens the
+  # Kubernetes default, even for a release with a very small
+  # startupTimeoutSeconds.
+  progressDeadlineSeconds: {{ max 600 (add (int $e.startupTimeoutSeconds) 300) }}
   selector:
     matchLabels:
       {{- include "agg.selector" . | nindent 6 }}
