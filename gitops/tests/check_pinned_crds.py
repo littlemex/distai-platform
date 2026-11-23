@@ -210,11 +210,15 @@ def check_security_context_rendered(rendered_text, expected):
 # Addon label -> expected securityContext (#63, filed as "SA3" item 2).
 # dcgm-exporter's own entry has no values.securityContext override of its
 # own (gitops/addon-catalog/dcgm-exporter/addon.yaml sets no such key) --
-# this is the pinned upstream chart's own rendered default instead,
-# confirmed by rendering it, kept here rather than read back from that
-# chart for the same reason explained above check_security_context_
-# rendered's own call sites. privileged: False is included deliberately
-# (Fable 5.2 review of a sibling branch, #63): check_security_context_
+# this is what gitops/charts/dcgm-exporter (the in-tree wrapper chart,
+# pulling the real dcgm-exporter chart in as a Helm dependency) renders
+# by default with no override applied, confirmed by rendering it, kept
+# here rather than read back from that chart for the same reason
+# explained above check_security_context_rendered's own call sites. A
+# dependency version bump can change this default with nothing else in
+# a diff to catch it -- a known risk of relying on an upstream default
+# rather than an explicit override, not fixed here. privileged: False
+# is included deliberately (#63): check_security_context_
 # rendered() only compares keys present here, so leaving this key out
 # would let a privileged: true regression on this container pass
 # silently -- confirmed the rendered container carries no "privileged"
