@@ -992,9 +992,18 @@ wait_until 300 10 "a capacity-pool Application exists" discover_capacity_pool_ap
 # same as on one that exists but has no sync status yet, so a "never
 # reaches Synced" check alone would also pass on an Application the
 # ApplicationSet never generated at all -- confirmed as a real gap, not
-# a hypothetical one.
+# a hypothetical one. Waited for, not checked once: the capacity-pool
+# Application just above needed wait_until's own retry window to
+# appear (the ApplicationSet controller's own generation is not
+# instantaneous with the root Application's first sync), and a one-shot
+# app_exists() immediately after that wait consumed part of the same
+# propagation window found this same race for karpenter-crd/karpenter/
+# kueue/smoke on a real run -- not a hypothetical flake, reproduced.
 for app in "${APP_KARPENTER_CRD}" "${APP_KARPENTER}" "${APP_KUEUE}" "${APP_SMOKE}"; do
-  app_exists "${app}" || fail "Application ${app} does not exist -- the cells/platform ApplicationSet never generated it"
+  app_exists_app="${app}"
+  app_exists_check() { app_exists "${app_exists_app}"; }
+  wait_until 60 5 "Application ${app} exists" app_exists_check \
+    || fail "Application ${app} does not exist -- the cells/platform ApplicationSet never generated it"
 done
 pass "discovered generated Applications, each confirmed to exist: ${APP_KARPENTER_CRD}, ${APP_KARPENTER}, ${APP_KUEUE}, ${APP_CAPACITY_POOL}, ${APP_SMOKE}"
 
