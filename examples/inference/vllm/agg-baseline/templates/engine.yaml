@@ -19,6 +19,14 @@ metadata:
     {{- include "agg.labels" . | nindent 4 }}
 spec:
   replicas: {{ $e.replicas }}
+  # Kubernetes marks the rollout ProgressDeadlineExceeded once this many
+  # seconds pass with no pod turning Available, independently of the probes'
+  # own budget (default 600s - confirmed as a real, reachable failure on
+  # this chart: README's Known issues #2, a slow image pull alone exceeded
+  # it). startupTimeoutSeconds already bounds the startupProbe's own
+  # periodSeconds(10) x failureThreshold budget to that same number of
+  # seconds, so the deadline needs margin above it, not equality with it.
+  progressDeadlineSeconds: {{ add (int $e.startupTimeoutSeconds) 300 }}
   selector:
     matchLabels:
       {{- include "agg.selector" . | nindent 6 }}

@@ -39,6 +39,11 @@ metadata:
     app.kubernetes.io/component: {{ $role }}
 spec:
   replicas: {{ $r.replicas }}
+  # See vllm/disagg-pd's own engines.yaml for why this is set explicitly
+  # (engine.startupTimeoutSeconds already bounds the startupProbe's own
+  # budget to the same number of seconds as the default
+  # progressDeadlineSeconds, 600s).
+  progressDeadlineSeconds: {{ add (int $.Values.engine.startupTimeoutSeconds) 300 }}
   {{- /*
     Same reason as the vLLM chart (confirmed there on real hardware,
     g7.48xlarge, 2026-11-20): the shared pool of sameNodeMeasurement has no
