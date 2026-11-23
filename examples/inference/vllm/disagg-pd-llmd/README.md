@@ -88,31 +88,19 @@ kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api-in
 kubectl get crd httproutes.gateway.networking.k8s.io inferencepools.inference.networking.k8s.io
 ```
 
-The Gateway implementation is the cluster administrator's choice. The ones the Gateway API Inference Extension `v1.6.2` lists as conformant are Istio, agentgateway and NGINX Gateway Fabric ([`site-src/implementations/gateways.md`](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/v1.6.2/site-src/implementations/gateways.md)); llm-d's own [gateway recipes](https://github.com/llm-d/llm-d/tree/v1.0.0/guides/recipes/gateway) create a `Gateway` named `llm-d-inference-gateway` for each of them. How the Gateway's own proxy is exposed (a cluster-internal Service or a load balancer, and whether that load balancer is internet-facing) is decided by the implementation and the `Gateway` object, not by this chart; keep it cluster-internal, as the load replay runs inside the cluster anyway. **Confirmed on real hardware**: NGINX Gateway Fabric's own per-`Gateway` data-plane Service defaults to `type: LoadBalancer` (a real, internet-facing AWS load balancer was provisioned the moment the `Gateway` object was created, with no authentication in front of it) unless the administrator's own `NginxProxy` policy (`spec.kubernetes.service.type`) is set to `ClusterIP` — this is not a default this chart controls or can override, since the chart renders only the `Gateway`/`HTTPRoute`/`InferencePool`/EPP objects, not the Gateway implementation's own install. Set it explicitly before creating any `Gateway` against NGINX Gateway Fabric. **The clean way to do this (confirmed on real hardware to never create a `LoadBalancer` Service, not even transiently)**: create the `NginxProxy` object first, then the `GatewayClass` with `spec.parametersRef` pointing at it, and only then the `Gateway` object — in that order, every `Gateway` created against that `GatewayClass` gets `ClusterIP` from the moment it exists, with nothing to patch or react to afterward:
+The Gateway implementation is the cluster administrator's choice. The ones the Gateway API Inference Extension `v1.6.2` lists as conformant are Istio, agentgateway and NGINX Gateway Fabric ([`site-src/implementations/gateways.md`](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/v1.6.2/site-src/implementations/gateways.md)); llm-d's own [gateway recipes](https://github.com/llm-d/llm-d/tree/v1.0.0/guides/recipes/gateway) create a `Gateway` named `llm-d-inference-gateway` for each of them. How the Gateway's own proxy is exposed (a cluster-internal Service or a load balancer, and whether that load balancer is internet-facing) is decided by the implementation and the `Gateway` object, not by this chart; keep it cluster-internal, as the load replay runs inside the cluster anyway. **Confirmed on real hardware**: NGINX Gateway Fabric's own per-`Gateway` data-plane Service defaults to `type: LoadBalancer` (a real, internet-facing AWS load balancer was provisioned the moment the `Gateway` object was created, with no authentication in front of it) unless this is set to `ClusterIP` — this is not a default this chart controls or can override, since the chart renders only the `Gateway`/`HTTPRoute`/`InferencePool`/EPP objects, not the Gateway implementation's own install.
 
-```yaml
-apiVersion: gateway.nginx.org/v1alpha2
-kind: NginxProxy
-metadata:
-  name: llmd-gateway-proxy-config
-  namespace: gateway-system
-spec:
-  kubernetes:
-    service:
-      type: ClusterIP
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: GatewayClass
-metadata:
-  name: nginx
-spec:
-  controllerName: gateway.nginx.org/nginx-gateway-controller
-  parametersRef:
-    group: gateway.nginx.org
-    kind: NginxProxy
-    name: llmd-gateway-proxy-config
-    namespace: gateway-system
+**The clean way to do this**: NGINX Gateway Fabric's own chart (`oci://ghcr.io/nginx/charts/nginx-gateway-fabric`, pinned `2.9.0` here) takes the data-plane Service type directly as its own `nginx.service.type` value, defaulting to `LoadBalancer`; set it to `ClusterIP` at install time, in the same `helm install` that creates the chart's own `GatewayClass` (named `nginx` by `nginxGateway.gatewayClassName`, that chart's own value, not something this chart or an administrator creates separately):
+
+```bash
+helm install ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric --version 2.9.0 \
+  --create-namespace --namespace nginx-gateway \
+  --set nginxGateway.gwAPIInferenceExtension.enable=true \
+  --set nginx.service.type=ClusterIP \
+  --wait
 ```
+
+A `GatewayClass` with the same name applied separately on top of the chart's own (the earlier approach this README used) works -- `kubectl apply` silently takes ownership of the field with one warning, no error, and the result still never created a `LoadBalancer` Service in testing -- but it leaves the object drifted from Helm's own tracking, untested against a later `helm upgrade ngf` (which could be expected to reset it back). The chart's own `nginx.service.type` value avoids that drift entirely and needs no separate `NginxProxy`/`GatewayClass` object at all.
 
 ## Deploy
 
