@@ -1957,6 +1957,14 @@ if [[ -f "${DCGM_CLONE}/${DCGM_MARKER_REL}" ]]; then
   ADD_DCGM_REVISION="e2e/${RUN_ID}/add-dcgm-exporter-scrape-allow"
   checkout_revision_as "${DCGM_CLONE}" "add-dcgm-exporter-scrape-allow" "${GITOPS_REVISION}" \
     || fail "git checkout (add-dcgm-exporter-scrape-allow)"
+  # A blind append would silently become a duplicate top-level `values:`
+  # key the day a real cell's own ${DCGM_MARKER_REL} starts setting one
+  # (gitops/charts/dcgm-exporter/README.md's own overridableKeys
+  # mechanism this override itself exercises) -- caught here instead of
+  # discovered as a flaky "Application never generated" failure later
+  # (Fable 5.2 round 1, STOP reason 2).
+  grep -q '^values:' "${DCGM_CLONE}/${DCGM_MARKER_REL}" \
+    && fail "${DCGM_MARKER_REL} at ${GITOPS_REVISION} already has a top-level values: key -- this test's blind append would duplicate it; merge the allowedPeers entry into the existing block instead"
   cat >>"${DCGM_CLONE}/${DCGM_MARKER_REL}" <<VALUES
 values:
   dcgm-exporter:
@@ -1987,7 +1995,14 @@ else
   # happening to let it through. podSelector only (no namespaceSelector)
   # is correctly scoped to DCGM_NS alone (a NetworkPolicy peer with only
   # a podSelector matches within the policy's own namespace), which is
-  # also where this scrape Pod is created, below.
+  # also where this scrape Pod is created, below. Guarded the same way
+  # as the other branch's append, even though DCGM_EXAMPLE_MARKER_REL is
+  # a known, checked-in file with no values: key today -- a future edit
+  # to that one file (it is this platform's own worked example, not a
+  # disposable fixture) would otherwise silently duplicate the key here
+  # too (Fable 5.2 round 1, STOP reason 2).
+  grep -q '^values:' "${DCGM_MARKER_COPY}" \
+    && fail "${DCGM_EXAMPLE_MARKER_REL} already has a top-level values: key -- this test's blind append would duplicate it; merge the allowedPeers entry into the existing block instead"
   cat >>"${DCGM_MARKER_COPY}" <<VALUES
 values:
   dcgm-exporter:
