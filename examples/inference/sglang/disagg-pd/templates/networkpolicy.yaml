@@ -40,6 +40,12 @@ spec:
               {{- include "disagg.selector" (dict "root" $ "component" $peer) | nindent 14 }}
       ports:
         - port: {{ $.Values.transport.bootstrapPort }}
+    {{- if and $.Values.metrics.enabled $.Values.networkPolicy.metricsScrapeFrom }}
+    - from:
+        {{- toYaml $.Values.networkPolicy.metricsScrapeFrom | nindent 8 }}
+      ports:
+        - port: {{ $.Values.engine.port }}
+    {{- end }}
 {{- end }}
 ---
 # router: its own port only from the shared load-replay driver, same

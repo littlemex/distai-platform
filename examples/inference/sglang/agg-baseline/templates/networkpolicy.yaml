@@ -21,5 +21,14 @@ spec:
             matchLabels:
               app.kubernetes.io/name: load-replay
       ports:
-        - port: {{ .Values.service.port }}
+        # engine.port, not service.port -- see vllm/agg-baseline's own
+        # networkpolicy.yaml comment for why (a NetworkPolicy's own
+        # ports[] matches the Pod's containerPort, never the Service's).
+        - port: {{ .Values.engine.port }}
+    {{- if and .Values.metrics.enabled .Values.networkPolicy.metricsScrapeFrom }}
+    - from:
+        {{- toYaml .Values.networkPolicy.metricsScrapeFrom | nindent 8 }}
+      ports:
+        - port: {{ .Values.engine.port }}
+    {{- end }}
 {{- end }}

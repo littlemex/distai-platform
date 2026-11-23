@@ -214,11 +214,32 @@ networkPolicy:
   # Default deny, name the exception (#63, filed as a private report
   # "SA2"): with this off, any Pod in the cluster, in any namespace, can
   # call an engine's HTTP port or its NIXL side channel directly, skipping
-  # the proxy the README calls the boundary. On by default; the metrics
-  # port (same as engine.port, scraped in-band) is not separately opened
-  # here since no monitoring namespace scrapes it yet (same gap, same
-  # reasoning, as gitops/charts/dcgm-exporter's own default-deny policy).
+  # the proxy the README calls the boundary. On by default.
   enabled: true
+  # metrics.enabled's own scrape is on the SAME port as engine.port
+  # (vLLM serves /metrics there) -- unlike gitops/charts/dcgm-exporter
+  # (where nothing scrapes it yet), this chart's own default already
+  # ships the prometheus.io/* annotations and a matching scrape job
+  # (examples/inference/_shared/dashboards/scrape-configs.yaml) that
+  # discovers Pods cluster-wide via the Kubernetes API and connects
+  # straight to the Pod IP, from whatever namespace that collector
+  # itself runs in -- not necessarily this release's own namespace or
+  # this chart's own proxy/load-replay selectors above (found by a
+  # Fable 5.2 review: enabling networkPolicy with no further
+  # configuration silently stops that collector's scrapes, a benchmark
+  # chart going dark with no error anywhere). Set this to the
+  # NetworkPolicy ingress peer(s) (namespaceSelector/podSelector, same
+  # shape as a real NetworkPolicy's own spec.ingress[].from list) your
+  # own collector's Pods match, for example:
+  #   metricsScrapeFrom:
+  #     - namespaceSelector:
+  #         matchLabels:
+  #           kubernetes.io/metadata.name: monitoring
+  # Left empty by default (no collector is deployed by this platform
+  # today), which means metrics are NOT reachable while networkPolicy
+  # is enabled until this is set -- stated here rather than assumed
+  # harmless, since this chart's own default already claims the opposite.
+  metricsScrapeFrom: []
 
 # Skeleton only (values and rendering, not built or measured on real
 # hardware in this chart yet): where the KV cache lives, as three tiers that
