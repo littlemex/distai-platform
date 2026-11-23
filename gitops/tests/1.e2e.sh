@@ -1938,8 +1938,13 @@ git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${DCGM_CLONE}" || fai
 checkout_revision_as "${DCGM_CLONE}" "dcgm-exporter-probe" "${GITOPS_REVISION}" || fail "git checkout (dcgm-exporter)"
 if [[ -f "${DCGM_CLONE}/${DCGM_MARKER_REL}" ]]; then
   cp "${DCGM_CLONE}/${DCGM_MARKER_REL}" "${DCGM_MARKER_COPY}"
+  # Read by step 14b-f below: whether restoring GITOPS_REVISION (the
+  # shared branch, always restored verbatim -- the override below never
+  # lands there) is also "restoring the add step" depends on whether the
+  # marker already lived in GITOPS_REVISION, not on whether ADD_DCGM_REVISION
+  # happens to be a disposable branch (it always is now, see below).
+  DCGM_MARKER_PREEXISTED=1
   NO_DCGM_REVISION="e2e/${RUN_ID}/no-dcgm-exporter"
-  ADD_DCGM_REVISION="${GITOPS_REVISION}"
   git -C "${DCGM_CLONE}" checkout --quiet -B "${NO_DCGM_REVISION}" || fail "git checkout (no-dcgm-exporter)"
   git -C "${DCGM_CLONE}" rm --quiet "${DCGM_MARKER_REL}" || fail "git rm ${DCGM_MARKER_REL}"
   git -C "${DCGM_CLONE}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
@@ -1947,7 +1952,33 @@ if [[ -f "${DCGM_CLONE}/${DCGM_MARKER_REL}" ]]; then
     || fail "git commit (no-dcgm-exporter)"
   push_disposable_branch "${DCGM_CLONE}" "${NO_DCGM_REVISION}" || fail "git push (no-dcgm-exporter)"
   BROKEN_BRANCHES+=("${NO_DCGM_REVISION}")
+  # ADD_DCGM_REVISION must still grant step 14b-d's own scrape Pod an
+  # allowedPeers entry (same reasoning as the no-marker branch below) --
+  # it cannot simply be GITOPS_REVISION itself, since that is the real,
+  # shared branch and this override is disposable/test-only. A fresh
+  # branch off GITOPS_REVISION (not off NO_DCGM_REVISION above, which has
+  # the marker removed) restores the marker's original content, then
+  # layers the override on top.
+  ADD_DCGM_REVISION="e2e/${RUN_ID}/add-dcgm-exporter-scrape-allow"
+  checkout_revision_as "${DCGM_CLONE}" "add-dcgm-exporter-scrape-allow" "${GITOPS_REVISION}" \
+    || fail "git checkout (add-dcgm-exporter-scrape-allow)"
+  cat >>"${DCGM_CLONE}/${DCGM_MARKER_REL}" <<VALUES
+values:
+  dcgm-exporter:
+    networkPolicy:
+      allowedPeers:
+        - podSelector:
+            matchLabels:
+              ${TEST_TAG_KEY}: "${RUN_ID}"
+VALUES
+  git -C "${DCGM_CLONE}" add "${DCGM_MARKER_REL}" || fail "git add ${DCGM_MARKER_REL} (scrape-allow)"
+  git -C "${DCGM_CLONE}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
+    commit --quiet -m "test: grant step 14b-d's scrape Pod an allowedPeers entry in ${DCGM_MARKER_REL} (never merged)" \
+    || fail "git commit (add-dcgm-exporter-scrape-allow)"
+  push_disposable_branch "${DCGM_CLONE}" "${ADD_DCGM_REVISION}" || fail "git push (add-dcgm-exporter-scrape-allow)"
+  BROKEN_BRANCHES+=("${ADD_DCGM_REVISION}")
 else
+  DCGM_MARKER_PREEXISTED=0
   [[ -f "${DCGM_CLONE}/${DCGM_EXAMPLE_MARKER_REL}" ]] \
     || fail "neither ${DCGM_MARKER_REL} nor ${DCGM_EXAMPLE_MARKER_REL} exists at ${GITOPS_REVISION}"
   cp "${DCGM_CLONE}/${DCGM_EXAMPLE_MARKER_REL}" "${DCGM_MARKER_COPY}"
@@ -2416,7 +2447,14 @@ pass "removing ${DCGM_MARKER_REL} removed ${APP_DCGM} and orphaned DaemonSet ${D
 
 # ---- 14b-f. restore GITOPS_REVISION, delete the GPU test fixture
 run_bootstrap --revision "${GITOPS_REVISION}" || fail "bootstrap.sh (restoring --revision ${GITOPS_REVISION} after step 14b)"
-if [[ "${ADD_DCGM_REVISION}" == "${GITOPS_REVISION}" ]]; then
+# DCGM_MARKER_PREEXISTED, not "${ADD_DCGM_REVISION}" == "${GITOPS_REVISION}":
+# ADD_DCGM_REVISION is always a disposable branch now (it also carries
+# step 14b-d's own scrape-allow override, which GITOPS_REVISION itself
+# never gets), so that string comparison can no longer tell this apart --
+# whether restoring GITOPS_REVISION re-adopts the same DaemonSet still
+# depends only on whether the marker already lived there before 14b-a
+# removed it.
+if [[ "${DCGM_MARKER_PREEXISTED}" == "1" ]]; then
   wait_until 600 15 "dcgm-exporter Application reappears and reaches Synced" app_synced "${APP_DCGM}" \
     || fail "${APP_DCGM} did not reappear and reach Synced after restoring --revision ${GITOPS_REVISION}"
   [[ "$(k get daemonset "${DCGM_DS}" -n "${DCGM_NS}" -o jsonpath='{.metadata.uid}' 2>/dev/null)" == "${DCGM_DS_UID}" ]] \
