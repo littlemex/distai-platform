@@ -24,6 +24,16 @@
 */}}
 {{- $isDecode := eq $role "decode" }}
 {{- $sglangPort := ternary (int $sc.enginePort) (int $.Values.engine.port) $isDecode }}
+{{- /*
+  Confirmed on real hardware (g7.8xlarge, 2026-11-23): naming both the
+  sidecar's own port and this container's own port "http" on the decode
+  pod made probe-by-name resolve to the sidecar's port instead of SGLang's
+  -- the same collision ../../vllm/disagg-pd-llmd's own engines.yaml
+  already avoids with this exact ternary (there, $vllmPortName), which this
+  chart had dropped by mistake. "http" on prefill (no sidecar there to
+  collide with), "engine" on decode.
+*/}}
+{{- $sglangPortName := ternary "engine" "http" $isDecode }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -248,9 +258,9 @@ spec:
             - name: SGLANG_DISAGG_STAGING_BUFFER
               value: "1"
             - name: SGLANG_DISAGG_STAGING_BUFFER_SIZE_MB
-              value: "64"
+              value: {{ $.Values.engine.stagingBufferSizeMb | quote }}
             - name: SGLANG_DISAGG_STAGING_POOL_SIZE_MB
-              value: "4096"
+              value: {{ $.Values.engine.stagingPoolSizeMb | quote }}
             # The image runs as root by default and has no home for another
             # user; keep HOME (and with it the JIT and compile caches) on
             # the writable cache volume -- same as ../disagg-pd.
@@ -269,7 +279,7 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           ports:
-            - name: http
+            - name: {{ $sglangPortName }}
               containerPort: {{ $sglangPort }}
             {{- if eq $role "prefill" }}
             - name: bootstrap
@@ -297,20 +307,20 @@ spec:
           startupProbe:
             httpGet:
               path: /health
-              port: http
+              port: {{ $sglangPortName }}
             periodSeconds: 10
             timeoutSeconds: 25
             failureThreshold: {{ div (int $.Values.engine.startupTimeoutSeconds) 10 }}
           readinessProbe:
             httpGet:
               path: /health
-              port: http
+              port: {{ $sglangPortName }}
             periodSeconds: 10
             timeoutSeconds: 25
           livenessProbe:
             httpGet:
               path: /health
-              port: http
+              port: {{ $sglangPortName }}
             periodSeconds: 30
             timeoutSeconds: 25
             failureThreshold: 5

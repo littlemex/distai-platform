@@ -91,6 +91,10 @@ prefill:
     requests:
       cpu: "4"
       memory: 32Gi
+  # --mem-fraction-static. Empty (default): SGLang's own automatic sizing,
+  # unchanged behavior. See decode.memFractionStatic below for why this
+  # may need to be set explicitly on a small GPU.
+  memFractionStatic: ""
   extraArgs: []
   extraEnv: []
 
@@ -104,6 +108,25 @@ decode:
     requests:
       cpu: "4"
       memory: 32Gi
+  # --mem-fraction-static. Empty (default): SGLang's own automatic sizing,
+  # which does not know about the fixed-size NIXL staging pool this chart
+  # always reserves (SGLANG_DISAGG_STAGING_POOL_SIZE_MB, 4096 by default --
+  # see engine.stagingPoolSizeMb below). Confirmed on real hardware
+  # (g7.8xlarge, 31.4GiB, 2026-11-23): SGLang's own automatic sizing left
+  # only about 2.2GiB free, and decode crash-looped on startup
+  # (torch.OutOfMemoryError, "Tried to allocate 4.00 GiB ... 2.21 GiB is
+  # free", raised from the NIXL connector's own staging-buffer allocator)
+  # -- prefill does not allocate this pool and came up fine unmodified.
+  # 0.75 (leaving about 7.85GiB free, comfortably above the 4096MB pool)
+  # is confirmed working on that same hardware and model; left unset by
+  # default rather than baked in, since the right value scales with GPU
+  # memory and engine.stagingPoolSizeMb, neither of which this chart can
+  # see at render time (Helm renders client-side, the same reason
+  # ../../vllm/disagg-pd-llmd's own gpuMemoryUtilization is a value, not an
+  # auto-detected one). Set this whenever decode.efaDevices/gpusPerEngine
+  # or a smaller GPU make the default allocation collide with the staging
+  # pool -- see the README's Known issues for the exact error to watch for.
+  memFractionStatic: ""
   # For example ["--disaggregation-decode-enable-radix-cache"]; see
   # ../disagg-pd/values.yaml's own decode.extraArgs comment.
   extraArgs: []
@@ -116,6 +139,15 @@ engine:
   # this port is the routing sidecar instead, with SGLang behind it on
   # routingSidecar.enginePort.
   port: 8000
+  # SGLANG_DISAGG_STAGING_BUFFER_SIZE_MB / SGLANG_DISAGG_STAGING_POOL_SIZE_MB,
+  # rendered on both roles (llm-d v1.0.0's own guide default: "required for
+  # heterogeneous TP for non-MLA models" -- see templates/engines.yaml's own
+  # comment). stagingPoolSizeMb is the one decode.memFractionStatic above
+  # has to leave room for; raising it without lowering
+  # decode.memFractionStatic reproduces the OOM that value's own comment
+  # describes.
+  stagingBufferSizeMb: 64
+  stagingPoolSizeMb: 4096
   # Shared memory for tensor-parallel workers (/dev/shm, memory-backed).
   shmSizeLimit: 16Gi
   # Model download cache, HOME and the compile caches. emptyDir re-downloads
