@@ -211,6 +211,11 @@ networkPolicy:
   # "SA2"): see vllm/disagg-pd's own values.yaml comment for the full
   # reasoning; this chart has the same gap and the same fix.
   enabled: true
+  # See vllm/disagg-pd's own values.yaml comment for the full reasoning:
+  # metrics.enabled's own scrape is on the same port this policy
+  # otherwise restricts, so a real collector needs this set, or its
+  # scrapes stop with networkPolicy.enabled on.
+  metricsScrapeFrom: []
 
 metrics:
   # Adds --enable-metrics, the sglang-metrics=true and component pod labels

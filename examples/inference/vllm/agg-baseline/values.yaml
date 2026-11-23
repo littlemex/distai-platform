@@ -98,6 +98,13 @@ networkPolicy:
   # reasoning; this chart has the same gap (no NetworkPolicy ships) and
   # the same fix.
   enabled: true
+  # See vllm/disagg-pd's own values.yaml comment for the full reasoning:
+  # metrics.enabled's own scrape is on the same port this policy
+  # otherwise restricts to load-replay alone, so a real collector
+  # (cluster-wide Pod discovery, not necessarily this release's own
+  # namespace or selectors) needs this set, or its scrapes stop with
+  # networkPolicy.enabled on.
+  metricsScrapeFrom: []
 
 # Skeleton only (values and rendering, not built or measured on real
 # hardware yet). Same kvCacheTier shape as ../disagg-pd/values.yaml's own
