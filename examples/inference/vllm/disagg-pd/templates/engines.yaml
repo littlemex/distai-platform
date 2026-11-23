@@ -66,9 +66,11 @@ spec:
   # g7.48xlarge node, a slow image pull alone exceeded 600s before any
   # probe even started (this margin covers the startupProbe's own budget,
   # not necessarily a slow pull on top of it - still open there, and only
-  # matters to tooling that gates on `kubectl rollout status`/`helm
-  # --wait`; Kubernetes itself keeps pulling and starting the pods either
-  # way). The startupProbe here is budgeted to run for
+  # matters to tooling that gates on `kubectl rollout status`'s own exit
+  # code (Kubernetes itself keeps pulling and starting the pods either
+  # way; `helm install/upgrade --wait` is bounded by Helm's own separate
+  # `--timeout`, not by this field, and needs that flag raised on its
+  # own if used here). The startupProbe here is budgeted to run for
   # engine.startupTimeoutSeconds (1800s by default, well above the 600s
   # default deadline). `max 600` never shortens the Kubernetes default,
   # even for a release with a very small startupTimeoutSeconds.
