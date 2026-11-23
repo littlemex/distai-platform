@@ -50,11 +50,16 @@ spec:
     g7.48xlarge, 2026-11-20): the shared pool of sameNodeMeasurement has no
     spare GPU/EFA for a RollingUpdate surge pod, so a later `helm upgrade`
     would hang. Recreate frees the node first.
+
+    Confirmed again on real hardware (g7.8xlarge x2, 2026-11-23, sibling
+    chart sglang/disagg-pd-llmd, outside sameNodeMeasurement): the same
+    deadlock happens whenever a role's own dedicated pool is sized to fit
+    exactly one node -- this chart's own README's shape, not only the
+    shared-pool case. Recreate is rendered unconditionally for both roles
+    for this reason.
   */}}
-  {{- if $.Values.placement.sameNodeMeasurement }}
   strategy:
     type: Recreate
-  {{- end }}
   selector:
     matchLabels:
       {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 6 }}
