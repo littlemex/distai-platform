@@ -57,6 +57,7 @@ LLMD="${INFERENCE_ROOT}/vllm/disagg-pd-llmd"
 AGG="${INFERENCE_ROOT}/vllm/agg-baseline"
 SGLANG_DISAGG="${INFERENCE_ROOT}/sglang/disagg-pd"
 SGLANG_AGG="${INFERENCE_ROOT}/sglang/agg-baseline"
+SGLANG_LLMD="${INFERENCE_ROOT}/sglang/disagg-pd-llmd"
 SCORER="${INFERENCE_ROOT}/_shared/scorer"
 LOAD="${INFERENCE_ROOT}/_shared/load-replay"
 DASHBOARD="${INFERENCE_ROOT}/_shared/dashboards/vllm-pd.json"
@@ -119,6 +120,10 @@ required_files=(
   "sglang/agg-baseline/Chart.yaml"
   "sglang/agg-baseline/values.yaml"
   "sglang/agg-baseline/README.md"
+  "sglang/disagg-pd-llmd/Chart.yaml"
+  "sglang/disagg-pd-llmd/Chart.lock"
+  "sglang/disagg-pd-llmd/values.yaml"
+  "sglang/disagg-pd-llmd/README.md"
   "_shared/scorer/score.py"
   "_shared/scorer/test_score.py"
   "_shared/load-replay/run-load.sh"
@@ -205,7 +210,7 @@ run_check "score.py unit tests (unittest, stdlib only)" \
 
 # ------------------------------------------- 4. helm lint, helm template
 
-for chart in "${DISAGG}" "${AGG}" "${LLMD}" "${SGLANG_DISAGG}" "${SGLANG_AGG}"; do
+for chart in "${DISAGG}" "${AGG}" "${LLMD}" "${SGLANG_DISAGG}" "${SGLANG_AGG}" "${SGLANG_LLMD}"; do
   rel="${chart#"${INFERENCE_ROOT}"/}"
   [[ -f "${chart}/Chart.yaml" ]] || continue
   # A chart with a Chart.lock depends on another chart (disagg-pd-llmd on
@@ -244,6 +249,34 @@ if [[ -f "${LLMD}/Chart.yaml" ]]; then
       --set model.name=contract-test-model --set routingSidecar.ssrfProtection=false \
       > '${WORK_DIR}/llmd-ssrf-false.yaml' && \
       '${UV}' run --no-project -q --with 'pyyaml==${PYTHON_YAML_VERSION}' '${PYTHON}' - '${WORK_DIR}/llmd-ssrf-false.yaml' <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+bad = []
+for d in docs:
+    if d.get('kind') != 'Deployment':
+        continue
+    spec = d['spec']['template']['spec']
+    names = {v['name'] for v in spec.get('volumes', [])}
+    for c in spec.get('containers', []) + spec.get('initContainers', []):
+        for vm in c.get('volumeMounts', []):
+            if vm['name'] not in names:
+                bad.append(f\"{d['metadata']['name']}/{c['name']} mounts {vm['name']!r}, not in volumes {sorted(names)}\")
+if bad:
+    print('\\n'.join(bad))
+    sys.exit(1)
+PY"
+fi
+
+# Same check, same reason, on sglang/disagg-pd-llmd: it has the same
+# ssrfProtection-gated volumeMount/volume pair as vllm/disagg-pd-llmd
+# (templates/engines.yaml), so the same render-default-only blind spot
+# applies to it.
+if [[ -f "${SGLANG_LLMD}/Chart.yaml" ]]; then
+  run_check "helm template sglang/disagg-pd-llmd (routingSidecar.ssrfProtection=false): no dangling volumeMount" \
+    bash -c "'${HELM}' template contract-test '${SGLANG_LLMD}' --namespace contract-test \
+      --set model.name=contract-test-model --set routingSidecar.ssrfProtection=false \
+      > '${WORK_DIR}/sglang-llmd-ssrf-false.yaml' && \
+      '${UV}' run --no-project -q --with 'pyyaml==${PYTHON_YAML_VERSION}' '${PYTHON}' - '${WORK_DIR}/sglang-llmd-ssrf-false.yaml' <<'PY'
 import sys, yaml
 docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
 bad = []
