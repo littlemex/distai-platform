@@ -1951,6 +1951,26 @@ else
   [[ -f "${DCGM_CLONE}/${DCGM_EXAMPLE_MARKER_REL}" ]] \
     || fail "neither ${DCGM_MARKER_REL} nor ${DCGM_EXAMPLE_MARKER_REL} exists at ${GITOPS_REVISION}"
   cp "${DCGM_CLONE}/${DCGM_EXAMPLE_MARKER_REL}" "${DCGM_MARKER_COPY}"
+  # #63/"SA4"'s networkPolicy.allowedPeers default-denies everything
+  # (dcgm-exporter/values.yaml, "no monitoring namespace or scraper
+  # exists yet in this repository"). Step 14b-d's own throwaway scrape
+  # Pod below is exactly the kind of in-cluster consumer that comment
+  # describes, so it must name itself the same way any real cell's
+  # scraper would -- gitops/charts/dcgm-exporter/README.md's own
+  # "overridableKeys" row -- rather than relying on a deny-all policy
+  # happening to let it through. podSelector only (no namespaceSelector)
+  # is correctly scoped to DCGM_NS alone (a NetworkPolicy peer with only
+  # a podSelector matches within the policy's own namespace), which is
+  # also where this scrape Pod is created, below.
+  cat >>"${DCGM_MARKER_COPY}" <<VALUES
+values:
+  dcgm-exporter:
+    networkPolicy:
+      allowedPeers:
+        - podSelector:
+            matchLabels:
+              ${TEST_TAG_KEY}: "${RUN_ID}"
+VALUES
   NO_DCGM_REVISION="${GITOPS_REVISION}"
   ADD_DCGM_REVISION="e2e/${RUN_ID}/add-dcgm-exporter"
   git -C "${DCGM_CLONE}" checkout --quiet -B "${ADD_DCGM_REVISION}" || fail "git checkout (add-dcgm-exporter)"
