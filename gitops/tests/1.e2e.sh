@@ -997,8 +997,17 @@ wait_until 300 10 "a capacity-pool Application exists" discover_capacity_pool_ap
 # appear (the ApplicationSet controller's own generation is not
 # instantaneous with the root Application's first sync), and a one-shot
 # app_exists() immediately after that wait consumed part of the same
-# propagation window found this same race for karpenter-crd/karpenter/
-# kueue/smoke on a real run -- not a hypothetical flake, reproduced.
+# propagation window -- a real, if rare, race in principle. What this
+# wait_until actually caught on a real run was not that race: it was
+# platform.ApplicationSet.yaml's templatePatch failing to parse entirely
+# (a missing {{- end }}, fixed separately), which made the first app in
+# this loop time out the same way a slow propagation would, but
+# permanently -- no amount of retrying inside this wait_until could have
+# passed. Kept as wait_until anyway, since the propagation race above is
+# still real and still needs it; a parse error should instead be caught
+# earlier and explicitly, which gitops/tests/0.static.sh and
+# check_pinned_crds.py's own rendering do not currently check for this
+# manifest's own templatePatch field (left as a gap, not fixed here).
 for app in "${APP_KARPENTER_CRD}" "${APP_KARPENTER}" "${APP_KUEUE}" "${APP_SMOKE}"; do
   app_exists_app="${app}"
   app_exists_check() { app_exists "${app_exists_app}"; }
