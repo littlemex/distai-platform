@@ -186,8 +186,20 @@ def check_security_context_rendered(rendered_text, expected):
 
 
 # Addon label -> expected securityContext (#63, filed as "SA3" item 2).
+# dcgm-exporter's own entry has no values.securityContext override of its
+# own (gitops/addon-catalog/dcgm-exporter/addon.yaml sets no such key) --
+# this is the pinned upstream chart's own rendered default instead,
+# confirmed by rendering it, kept here rather than read back from that
+# chart for the same reason explained above check_security_context_
+# rendered's own call sites. privileged: False is included deliberately
+# (Fable 5.2 review of a sibling branch, #63): check_security_context_
+# rendered() only compares keys present here, so leaving this key out
+# would let a privileged: true regression on this container pass
+# silently -- confirmed the rendered container carries no "privileged"
+# key today (the implicit Kubernetes default, False) before adding it.
 SECURITY_CONTEXT_EXPECTATIONS = {
     "dcgm-exporter": {
+        "privileged": False,
         "allowPrivilegeEscalation": False,
         "capabilities": {"add": ["SYS_ADMIN"], "drop": ["ALL"]},
         "runAsNonRoot": False,
@@ -199,6 +211,14 @@ SECURITY_CONTEXT_EXPECTATIONS = {
 def main(repo_root, rendered_dir):
     failures = 0
     served = {}
+    # Every addon.yaml/addon-catalog label this run actually found, versus
+    # every label whose SECURITY_CONTEXT_EXPECTATIONS entry was actually
+    # exercised below (Fable 5.2 review, #63): the "if label in
+    # SECURITY_CONTEXT_EXPECTATIONS" guard below makes a renamed or
+    # misspelled label a silent no-op rather than a failure. A label this
+    # run never saw at all (not this checkout's own) is not a failure.
+    labels_seen = set()
+    security_context_checked = set()
     addon_files = sorted(glob.glob(os.path.join(repo_root, "gitops", "addons", "*", "addon.yaml")))
     with tempfile.TemporaryDirectory() as workdir:
         for addon_path in addon_files:
@@ -219,6 +239,7 @@ def main(repo_root, rendered_dir):
             for key, versions in crds.items():
                 served.setdefault(key, set()).update(versions)
             label = doc.get("addon", chart)
+            labels_seen.add(label)
             skip_crds = bool(doc.get("skipCrds"))
             suffix = " (skipCrds: its own crds/-folder CRDs are not applied)" if skip_crds else ""
             print(f"INFO {label} ({chart}:{doc['version']}) ships {len(crds)} CustomResourceDefinition kind(s){suffix}")
@@ -233,12 +254,14 @@ def main(repo_root, rendered_dir):
             with open(addon_path, encoding="utf-8") as f:
                 doc = yaml.safe_load(f) or {}
             label = doc.get("addon", os.path.basename(os.path.dirname(addon_path)))
+            labels_seen.add(label)
             if "dir" not in doc or label not in SECURITY_CONTEXT_EXPECTATIONS:
                 continue
             rendered = helm_template_dir_chart(doc, repo_root, catalog_workdir)
             if rendered is None:
                 failures += 1
                 continue
+            security_context_checked.add(label)
             ok, reason = check_security_context_rendered(rendered, SECURITY_CONTEXT_EXPECTATIONS[label])
             if ok:
                 print(f"PASS {label}: the rendered chart's own container(s) carry the hardened securityContext")
