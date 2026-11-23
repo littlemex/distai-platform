@@ -60,6 +60,17 @@ app.kubernetes.io/component: {{ .component }}
 {{- $args = append $args "--enable-metrics" -}}
 {{- end -}}
 {{- $r := index $v .role -}}
+{{- /*
+  Real-hardware finding (g7.8xlarge, 2026-11-23): SGLang's own automatic
+  --mem-fraction-static sizing does not reserve room for
+  engine.stagingPoolSizeMb, and decode can OOM at startup on a small GPU --
+  see decode.memFractionStatic's own values.yaml comment for the full
+  story and the confirmed-working value. Empty (default): omit the flag,
+  SGLang's own default, unchanged behavior.
+*/}}
+{{- if $r.memFractionStatic -}}
+{{- $args = concat $args (list "--mem-fraction-static" (toString $r.memFractionStatic)) -}}
+{{- end -}}
 {{- $args = concat $args $r.extraArgs -}}
 {{- $args | toJson -}}
 {{- end -}}
