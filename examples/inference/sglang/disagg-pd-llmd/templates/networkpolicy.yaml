@@ -3,11 +3,14 @@
 {{- /*
   Same reasoning as ../../vllm/disagg-pd-llmd's own networkpolicy.yaml: the
   real caller on the engine HTTP port is the Gateway implementation's own
-  data-plane Pod, which this chart does not render or own, so the only rule
-  this chart can state precisely is the KV transfer side channel between
-  the peer roles (here: SGLang's NIXL port 5600, plus prefill's own
-  bootstrap port, which decode's SGLang process -- not the sidecar --
-  connects to directly for the handshake).
+  data-plane Pod, which this chart does not render or own. Two rules this
+  chart CAN state precisely, both between the peer roles: SGLang's own
+  NIXL port 5600 and prefill's own bootstrap port (decode's SGLang process
+  -- not the sidecar -- connects to both directly for the handshake), and
+  (unlike the vLLM chart, which has no equivalent) the decode pod's own
+  routing sidecar calling prefill's engine.port (8000) to deliver the
+  bootstrap-injected request -- the podSelector below matches the whole
+  decode Pod, sidecar container included, so this one rule covers it.
 */}}
 {{- range $role := list "prefill" "decode" }}
 {{- $peer := ternary "decode" "prefill" (eq $role "prefill") }}
@@ -33,6 +36,7 @@ spec:
         - port: 5600
         {{- if eq $role "prefill" }}
         - port: {{ $.Values.transport.bootstrapPort }}
+        - port: {{ $.Values.engine.port }}
         {{- end }}
 {{- end }}
 {{- end }}

@@ -304,6 +304,13 @@ llmdRouter:
         prometheus.io/port: "9090"
         prometheus.io/path: /metrics
     inferencePool:
+      # FailClose (default): see ../../vllm/disagg-pd-llmd's own comment.
+      # FailOpen is a sharper risk here than for vLLM: "a decode worker has
+      # no local-prefill path" (llm-d v1.0.0's own pd-disaggregation guide,
+      # modelserver/gpu/sglang) means a request the Gateway sends to an
+      # arbitrary pool member under FailOpen, with no bootstrap fields set,
+      # cannot fall back to a local prefill the way a differently-designed
+      # engine might -- it is a broken request, not degraded service.
       failureMode: FailClose
     modelServers:
       # llm-d-router v1.0.0's own supported value for SGLang
