@@ -20,13 +20,17 @@ metadata:
 spec:
   replicas: {{ $e.replicas }}
   # Kubernetes marks the rollout ProgressDeadlineExceeded once this many
-  # seconds pass with no pod turning Available, independently of the probes'
-  # own budget (default 600s - confirmed as a real, reachable failure on
-  # this chart: README's Known issues #2, a slow image pull alone exceeded
-  # it). startupTimeoutSeconds already bounds the startupProbe's own
-  # periodSeconds(10) x failureThreshold budget to that same number of
-  # seconds, so the deadline needs margin above it, not equality with it.
-  progressDeadlineSeconds: {{ add (int $e.startupTimeoutSeconds) 300 }}
+  # seconds pass with no pod turning Available, independently of the
+  # probes' own budget. The default is 600s; this repo already hit that
+  # class of failure on a different chart's Deployment (vllm/disagg-pd's
+  # 2-node MPS-over-EFA prefill case, README's Known issues #2: a slow
+  # image pull alone exceeded it, before any probe even started). The
+  # startupProbe here is budgeted to run for engine.startupTimeoutSeconds
+  # (1800s by default, not 600s), so the 600s default deadline is already
+  # below that probe budget; `max 600` keeps this at or above the
+  # Kubernetes default even if a release sets a very small
+  # startupTimeoutSeconds, rather than silently shortening it.
+  progressDeadlineSeconds: {{ max 600 (add (int $e.startupTimeoutSeconds) 300) }}
   selector:
     matchLabels:
       {{- include "agg.selector" . | nindent 6 }}

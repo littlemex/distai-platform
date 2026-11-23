@@ -39,11 +39,12 @@ metadata:
     app.kubernetes.io/component: {{ $role }}
 spec:
   replicas: {{ $r.replicas }}
-  # See vllm/disagg-pd's own engines.yaml for why this is set explicitly
-  # (engine.startupTimeoutSeconds already bounds the startupProbe's own
-  # budget to the same number of seconds as the default
-  # progressDeadlineSeconds, 600s).
-  progressDeadlineSeconds: {{ add (int $.Values.engine.startupTimeoutSeconds) 300 }}
+  # See vllm/disagg-pd's own engines.yaml for why this is set explicitly:
+  # the Kubernetes default (600s) is well below this chart's own
+  # startupProbe budget (engine.startupTimeoutSeconds, 1800s by default).
+  # `max 600` never shortens the Kubernetes default, even for a release
+  # with a very small startupTimeoutSeconds.
+  progressDeadlineSeconds: {{ max 600 (add (int $.Values.engine.startupTimeoutSeconds) 300) }}
   {{- /*
     Same reason as the vLLM chart (confirmed there on real hardware,
     g7.48xlarge, 2026-11-20): the shared pool of sameNodeMeasurement has no
