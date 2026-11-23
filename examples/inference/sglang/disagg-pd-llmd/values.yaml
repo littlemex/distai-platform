@@ -1,0 +1,347 @@
+# Same engines, placement and transport as ../disagg-pd (the keys from
+# image through engine below mean exactly what they mean there, and render
+# the same nodeSelector, affinity, resources and KV transfer configuration);
+# only the routing differs. Instead of that chart's own router
+# (sgl-model-gateway), requests reach the engines through a Gateway API
+# HTTPRoute, an InferencePool and llm-d's Endpoint Picker (EPP), configured
+# under llmdRouter below, and a routing sidecar in every decode pod
+# (routingSidecar below) runs the prefill call the EPP chose and injects
+# SGLang's own bootstrap_host/bootstrap_port/bootstrap_room fields, which
+# SGLang's prefill and decode engines use to run their own NIXL handshake
+# directly (unlike vLLM's two-step call-then-read flow, both roles are
+# called concurrently; see routingSidecar's own comment below). Defaults are
+# the safe shape: prefill and decode on different nodes, KV transfer over
+# NIXL's libfabric backend on EFA, nothing exposed outside the cluster, and
+# a request that cannot be routed fails instead of reaching an engine the
+# EPP did not pick. Value names follow ../../vllm/disagg-pd-llmd/values.yaml
+# wherever the two engines share a concept; transport.* differs because
+# SGLang's own transfer backends differ (RFC #37, Decision 6), the same
+# divergence as ../disagg-pd's own values.yaml.
+
+image:
+  repository: lmsysorg/sglang
+  # Same image, same tag and digest as ../disagg-pd: the -efa variant
+  # carries the AWS EFA userspace (libfabric), NIXL with its LIBFABRIC
+  # plugin, the EFA build of Mooncake, and (unused by this chart)
+  # sgl-model-gateway in the same image.
+  tag: v0.5.23-efa
+  digest: sha256:644f315d1d48ade2f95d76c2a8a802541a027e7e56af289b17bd5d1fdf4c8fe7
+  pullPolicy: IfNotPresent
+
+model:
+  # Hugging Face model repository id. No default: the engines refuse to
+  # start (with a message saying so) until it is set.
+  name: ""
+  # Commit or tag of the model repository; empty means the default branch.
+  # Pin it for any measurement, so two runs serve the same weights.
+  revision: ""
+  # Name clients send as "model"; empty means model.name.
+  servedModelName: ""
+  # Secret holding a Hugging Face token, for gated models. Empty: no token.
+  hfTokenSecret:
+    name: ""
+    key: token
+
+# Extended resource the accelerator device plugin advertises.
+accelerator:
+  resourceName: nvidia.com/gpu
+
+# Identical to ../../vllm/disagg-pd-llmd/values.yaml's own placement block:
+# the same values, the same rendering, the same reasons (RFC #37, Decision
+# 3). See that file for the full explanation of each value.
+placement:
+  nodeSelectorKey: distai.dev/pd-role
+  sameNodeMeasurement: false
+  sharedPoolValue: shared
+  enforceAntiAffinity: true
+  tolerations: []
+
+# Identical to ../disagg-pd/values.yaml's own transport block (SGLang's own
+# transfer backends, not vLLM's NixlConnector naming): see that file for the
+# full explanation of each value.
+transport:
+  backend: NIXL
+  sglangNixlBackend: LIBFABRIC
+  mooncakeProtocol: efa
+  forceEfaSameNode: false
+  efaResourceName: vpc.amazonaws.com/efa
+  # Prefill's bootstrap server port (--disaggregation-bootstrap-port).
+  # Unlike ../disagg-pd (where sgl-model-gateway learns this from the
+  # prefill pods' sglang.ai/bootstrap-port annotation automatically), the
+  # llm-d routing sidecar has no Kubernetes watch for it: it reads a fixed
+  # port from its own SGLANG_BOOTSTRAP_PORT environment variable
+  # (llm-d-router v1.0.0, pkg/sidecar/proxy/connector_sglang.go, default
+  # 8998 if unset). This value is rendered onto both the prefill engine's
+  # own --disaggregation-bootstrap-port flag and the decode pod's sidecar
+  # env, so the two always agree.
+  bootstrapPort: 8998
+
+# One engine is one SGLang server process with gpusPerEngine GPUs
+# (--tp-size). Total GPUs = prefill.replicas x prefill.gpusPerEngine +
+# decode.replicas x decode.gpusPerEngine; the ratio is free.
+prefill:
+  replicas: 1
+  gpusPerEngine: 1
+  # EFA devices per engine pod. Required by every EFA transport
+  # (NIXL+LIBFABRIC, MOONCAKE+efa).
+  efaDevices: 1
+  nodeSelectorValue: prefill
+  extraNodeSelector: {}
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+  extraArgs: []
+  extraEnv: []
+
+decode:
+  replicas: 1
+  gpusPerEngine: 1
+  efaDevices: 1
+  nodeSelectorValue: decode
+  extraNodeSelector: {}
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+  # For example ["--disaggregation-decode-enable-radix-cache"]; see
+  # ../disagg-pd/values.yaml's own decode.extraArgs comment.
+  extraArgs: []
+  extraEnv: []
+
+engine:
+  # Port a prefill pod's SGLang listens on directly, and the InferencePool's
+  # target port (llmdRouter.router.modelServers.targetPorts must list
+  # exactly this port; the chart fails to render otherwise). On a decode pod
+  # this port is the routing sidecar instead, with SGLang behind it on
+  # routingSidecar.enginePort.
+  port: 8000
+  # Shared memory for tensor-parallel workers (/dev/shm, memory-backed).
+  shmSizeLimit: 16Gi
+  # Model download cache, HOME and the compile caches. emptyDir re-downloads
+  # on every pod start; replace with a persistent volume source to keep the
+  # weights across restarts.
+  cacheVolume:
+    emptyDir: {}
+  # Model download and load time allowed before the engine is restarted.
+  startupTimeoutSeconds: 1800
+  # The SGLang image has no non-root user of its own (../disagg-pd's own
+  # values.yaml comment); run it as an arbitrary non-root UID instead, with
+  # HOME and every cache under the writable /cache volume.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+
+# llm-d's routing sidecar, run in every decode pod as a native sidecar (an
+# init container with restartPolicy: Always) on engine.port. For each
+# request the EPP has already chosen a decode pod (the request lands on
+# this sidecar) and a prefill pod (named in the x-llm-d-prefiller-host-port
+# header the EPP adds). Unlike ../../vllm/disagg-pd-llmd's own sidecar
+# (which calls prefill, waits for its kv_transfer_params, then calls
+# decode), SGLang's own connector (llm-d-router v1.0.0,
+# pkg/sidecar/proxy/connector_sglang.go) calls both engines concurrently:
+# it generates one bootstrap_room id, injects
+# bootstrap_host=<prefill pod ip>, bootstrap_port=bootstrapPort and that
+# room id into both the prefill and the decode request bodies, and sends
+# both at once -- SGLang's own prefill and decode engines then run the NIXL
+# handshake between themselves directly, keyed by the room id, with no
+# further involvement from the sidecar. "Must use always-disagg-pd-decider:
+# a decode worker has no local-prefill path" (llm-d v1.0.0's own
+# pd-disaggregation guide, modelserver/gpu/sglang) -- the same rule
+# ../../vllm/disagg-pd-llmd's EPP config already uses, so llmdRouter.router.epp
+# below needs no SGLang-specific profile logic, only the connector differs.
+routingSidecar:
+  image:
+    repository: ghcr.io/llm-d/llm-d-router-disagg-sidecar
+    # Same image, same release, same digest as the vLLM chart: one binary,
+    # --kv-connector picks the protocol (sglang here, not nixlv2).
+    tag: v1.0.0
+    digest: sha256:83cdf20199485329baca89b69d78f695735855ed93412aeaeec325d2374ced04
+    pullPolicy: IfNotPresent
+  # Port the decode pod's SGLang listens on, behind the sidecar (matches
+  # llm-d's own guide, modelserver/gpu/sglang/base/disaggregatedset.yaml,
+  # where the decode role's modelserver container also listens on 8200
+  # behind a sidecar on 8000).
+  enginePort: 8200
+  # The sidecar's KV protocol: constants.KVConnectorSGLang ("sglang") in
+  # llm-d-router v1.0.0, which runs connector_sglang.go's concurrent-call,
+  # bootstrap-injecting flow instead of nixlv2's sequential call-then-read
+  # flow.
+  kvConnector: sglang
+  # Rendered as the sidecar's SGLANG_BOOTSTRAP_PORT environment variable
+  # (connector_sglang.go's own default is 8998 if this is unset; stated
+  # explicitly here instead, and kept equal to transport.bootstrapPort by
+  # this chart, not by the sidecar's own default matching it by chance).
+  bootstrapPort: 8998
+  # Same meaning as the vLLM chart's own value: true (default) only sends a
+  # prefill request to a pod that is a member of this release's own
+  # InferencePool.
+  ssrfProtection: true
+  # Port of the sidecar's own Prometheus /metrics endpoint
+  # (llm_d_disagg_sidecar_* counters). 0 disables it.
+  metricsPort: 9100
+  # zap log level of the sidecar. "info" logs errors and retries only; "4"
+  # (logr V(4)) also logs the bootstrap fields it injected for every
+  # request -- see the README, "Confirm the EPP split each request".
+  logLevel: info
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+    limits:
+      memory: 1Gi
+  # The image runs as UID/GID 65532, not the SGLang image's UID 1000, so it
+  # sets its own user here, overriding engine.podSecurityContext for this
+  # container only (same reasoning as the vLLM chart's own comment).
+  containerSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+
+# llm-d's router chart, configured here under its own keys -- same
+# dependency, same version and the same objects it renders as
+# ../../vllm/disagg-pd-llmd's own llmdRouter (see that file's own comment
+# for the full list). Upstream reference for every key below:
+# https://github.com/llm-d/llm-d-router/blob/v1.0.0/config/charts/routerlib/values.yaml
+llmdRouter:
+  provider:
+    name: none
+  httpRoute:
+    create: true
+    inferenceGatewayName: llm-d-inference-gateway
+    inferenceGatewayNamespace: ""
+    requestTimeout: "300s"
+  router:
+    epp:
+      replicas: 1
+      image:
+        registry: ghcr.io/llm-d
+        repository: llm-d-router-endpoint-picker
+        tag: v1.0.0@sha256:024188e998f516879f68532016ca24fabca00afbdcc2af9a61b17634e197df2c
+        pullPolicy: IfNotPresent
+      flags:
+        v: 3
+      pluginsConfigFile: pd-config.yaml
+      # A Helm values.yaml file is plain YAML data -- Helm never templates
+      # it (unlike templates/*.yaml) -- so this cannot be assembled from a
+      # boolean toggle the way a template could. It is a plain string
+      # value instead, switched the same way any other Helm value is
+      # switched: by overriding it wholesale with `--set-file` or a `-f`
+      # values file. The default below is the load-aware, no-affinity
+      # configuration (identical plugin list to
+      # ../../vllm/disagg-pd-llmd's own current pd-config.yaml; "Must use
+      # always-disagg-pd-decider: a decode worker has no local-prefill
+      # path" -- llm-d v1.0.0's own pd-disaggregation guide,
+      # modelserver/gpu/sglang -- applies to SGLang the same way vLLM's
+      # chart already uses it). The README's "Switching routing behavior"
+      # section has two ready-made alternates: one adding
+      # prefix-cache-affinity-filter (requires a measured
+      # peakPrefillThroughput -- calibrate with llm-d v1.0.0's own
+      # guides/recipes/router/calibration/calibrate.sh before using it;
+      # an unmeasured value is not a neutral default, see
+      # ../../vllm/disagg-pd-llmd's own README, "Upstream components"),
+      # and one with both scorers removed (a load-blind baseline: with no
+      # scorer, max-score-picker has nothing to rank candidates by and
+      # picks one roughly arbitrarily).
+      pluginsCustomConfig:
+        pd-config.yaml: |
+          apiVersion: llm-d.ai/v1
+          kind: EndpointPickerConfig
+          plugins:
+          - type: always-disagg-pd-decider
+          - type: disagg-profile-handler
+            parameters:
+              deciders:
+                prefill: always-disagg-pd-decider
+          - type: prefill-filter
+          - type: decode-filter
+          - type: approx-prefix-cache-producer
+          - type: inflight-load-producer
+          - type: token-load-scorer
+          - type: active-request-scorer
+          - type: max-score-picker
+          schedulingProfiles:
+          - name: prefill
+            plugins:
+            - pluginRef: prefill-filter
+            - pluginRef: token-load-scorer
+            - pluginRef: max-score-picker
+          - name: decode
+            plugins:
+            - pluginRef: decode-filter
+            - pluginRef: active-request-scorer
+            - pluginRef: max-score-picker
+      resources:
+        requests:
+          cpu: "4"
+          memory: 8Gi
+        limits:
+          memory: 16Gi
+      podSecurityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      podAnnotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: /metrics
+    inferencePool:
+      failureMode: FailClose
+    modelServers:
+      # llm-d-router v1.0.0's own supported value for SGLang
+      # (config/charts/routerlib/values.yaml: "vllm, sglang,
+      # triton-tensorrt-llm, trtllm-serve, triton").
+      type: sglang
+      protocol: http
+      targetPorts:
+        - number: 8000
+      # Give a second release in the same namespace a different value, or
+      # both pools select both releases' pods.
+      matchLabels:
+        distai.dev/llm-d-pool: sglang-disagg-pd-llmd
+    monitoring:
+      prometheus:
+        enabled: false
+        auth:
+          enabled: false
+
+networkPolicy:
+  # Same default, same reason as ../../vllm/disagg-pd-llmd's own
+  # networkPolicy.enabled: the real caller on the engine HTTP port is the
+  # Gateway implementation's own data-plane Pod, which this chart does not
+  # render or own. See that chart's own values.yaml comment for the full
+  # reasoning.
+  enabled: false
+
+metrics:
+  # Adds the sglang-metrics=true pod label, the component label and the
+  # prometheus.io/* annotations that the "sglang" scrape job in
+  # examples/inference/_shared/dashboards/scrape-configs.yaml selects on.
+  # On a decode pod the annotation names routingSidecar.enginePort, so the
+  # scrape reaches SGLang directly rather than through the sidecar.
+  enabled: true
+
+# Skeleton only -- same status as ../disagg-pd's own kvCacheTier (not built
+# or measured on real hardware). Kept here only so a future chart matching
+# ../../vllm/disagg-pd-llmd's own kvCacheTier shape has a place to land;
+# this chart does not render anything from it today.
+kvCacheTier:
+  mode: gpu-only
