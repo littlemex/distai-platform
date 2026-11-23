@@ -181,12 +181,16 @@ def extract_served_versions(rendered_text):
 # (gitops/addons/<name>/addon.yaml), each entry is the exact
 # values.securityContext override that file sets. dcgm-exporter has no
 # such override of its own (gitops/addon-catalog/dcgm-exporter/addon.yaml
-# names no values.securityContext key at all) -- its entry is instead the
-# pinned upstream chart's own rendered default (gitops/charts/dcgm-
-# exporter, confirmed by rendering it), kept here the same way and for the
-# same reason as the other two: never read back from the file being
-# checked, for the reason explained above check_security_context_rendered's
-# own call sites.
+# names no values.securityContext key at all) -- its entry is instead
+# what gitops/charts/dcgm-exporter (the in-tree wrapper chart, pulling
+# the real dcgm-exporter chart in as a Helm dependency) renders by
+# default with no override applied, confirmed by rendering it, kept
+# here the same way and for the same reason as the other two: never
+# read back from the file being checked, for the reason explained above
+# check_security_context_rendered's own call sites. A version bump to
+# that dependency can change this default with no diff anywhere this
+# script reads from -- a known risk of relying on an upstream default
+# rather than an explicit override, not something fixed here.
 SECURITY_CONTEXT_EXPECTATIONS = {
     "accel-efa-device-plugin-nvidia": {
         "privileged": False,
