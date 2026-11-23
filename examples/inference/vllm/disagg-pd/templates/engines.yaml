@@ -87,13 +87,16 @@ spec:
     toggle via `helm upgrade` hung forever until the old ReplicaSet was
     scaled to 0 by hand). Recreate accepts a short gap instead: the old pod
     is deleted (freeing the node's GPU/EFA) before the new one is created.
-    Outside this mode there is no capacity cap to deadlock against, so the
-    default RollingUpdate stays in place.
+    Confirmed on real hardware again (g7.8xlarge x2, 2026-11-23, sibling
+    chart sglang/disagg-pd-llmd, outside sameNodeMeasurement): the same
+    deadlock happens whenever a role's own dedicated pool is sized to fit
+    exactly one node (limits.cpu set to that instance type's own vCPU
+    count) -- this chart's own README's shape, not only the shared-pool
+    case. Recreate is rendered unconditionally for both roles for this
+    reason.
   */}}
-  {{- if $.Values.placement.sameNodeMeasurement }}
   strategy:
     type: Recreate
-  {{- end }}
   selector:
     matchLabels:
       {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 6 }}

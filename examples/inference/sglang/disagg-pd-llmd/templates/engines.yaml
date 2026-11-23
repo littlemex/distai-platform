@@ -49,10 +49,25 @@ spec:
   # own startupProbe budget (engine.startupTimeoutSeconds, 1800s by
   # default).
   progressDeadlineSeconds: {{ max 600 (add (int $.Values.engine.startupTimeoutSeconds) 300) }}
-  {{- if $.Values.placement.sameNodeMeasurement }}
+  {{- /*
+    Confirmed on real hardware (g7.8xlarge x2, 2026-11-23): this is not
+    only a sameNodeMeasurement concern. Each role's own capacity-pool is
+    commonly sized to fit exactly one node (limits.cpu set to that
+    instance type's own vCPU count, the shape this chart's own README and
+    every real round so far uses), so a RollingUpdate on either
+    Deployment -- not just the shared-pool case -- deadlocks the same way
+    the vLLM chart's own comment already described for sameNodeMeasurement:
+    Kubernetes tries to schedule a surge pod before deleting the old one,
+    the pool has no spare GPU/EFA for it, and the old pod (crash-looping or
+    not) keeps holding them. Observed directly: a `helm upgrade` that only
+    changed decode.extraArgs left the new decode pod Pending for 35
+    minutes while the old pod kept the GPU. Recreate always accepts a
+    short gap instead (the old pod is deleted, freeing the node, before
+    the new one is created) -- rendered unconditionally for both roles
+    rather than only under sameNodeMeasurement.
+  */}}
   strategy:
     type: Recreate
-  {{- end }}
   selector:
     matchLabels:
       {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 6 }}
