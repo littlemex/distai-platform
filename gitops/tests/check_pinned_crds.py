@@ -156,6 +156,20 @@ def container_security_contexts(ds_spec):
     return [(c.get("name", "?"), c.get("securityContext") or {}) for c in containers]
 
 
+# Keys whose documented Kubernetes default genuinely IS false/no-
+# enforcement (#63, Fable 5.2 review round 2 of a sibling branch):
+# "privileged" defaults to false; "runAsNonRoot" unset means no non-root
+# requirement is enforced, the same practical effect as an explicit
+# false. Anything NOT in this set -- most importantly
+# allowPrivilegeEscalation, whose own Kubernetes default when unset is
+# to ALLOW escalation, the opposite of what a False expectation here
+# means -- must still match exactly; keying this tolerance only on the
+# expected value (want is False) would also silently weaken the
+# allowPrivilegeEscalation check, the same "regression passes silently"
+# failure mode this whole function exists to catch.
+ABSENT_MEANS_FALSE = {"privileged", "runAsNonRoot"}
+
+
 def check_security_context_rendered(rendered_text, expected):
     """A fixed, named securityContext policy, checked against the exact
     pinned chart's own rendered output (#63, filed as "SA3" item 2) -
@@ -176,16 +190,13 @@ def check_security_context_rendered(rendered_text, expected):
         for name, actual in container_security_contexts(doc.get("spec") or {}):
             for key, want in expected.items():
                 got = actual.get(key)
-                # A False expectation also matches the key being absent
-                # entirely (dcgm-exporter's own pinned chart renders no
-                # "privileged" key at all, not a literal "privileged:
-                # false" - confirmed by rendering it): Kubernetes' own
-                # documented default for every boolean SecurityContext
-                # field this check compares is False, so "absent" and
-                # "false" are the same fact on the cluster. A True
-                # expectation, or any non-boolean one, still requires an
-                # exact match.
-                if want is False and got is None:
+                # Only the keys in ABSENT_MEANS_FALSE tolerate the
+                # chart's own template never setting them at all
+                # (confirmed: dcgm-exporter's own pinned chart renders no
+                # "privileged" key whatsoever, not a literal "false").
+                # Every other key, including allowPrivilegeEscalation,
+                # still requires an exact match.
+                if key in ABSENT_MEANS_FALSE and want is False and got is None:
                     continue
                 if got != want:
                     mismatches.append(f"container {name!r}: {key}={got!r}, expected {want!r}")
@@ -224,10 +235,12 @@ def main(repo_root, rendered_dir):
     served = {}
     # Every addon.yaml/addon-catalog label this run actually found, versus
     # every label whose SECURITY_CONTEXT_EXPECTATIONS entry was actually
-    # exercised below (Fable 5.2 review, #63): the "if label in
-    # SECURITY_CONTEXT_EXPECTATIONS" guard below makes a renamed or
-    # misspelled label a silent no-op rather than a failure. A label this
-    # run never saw at all (not this checkout's own) is not a failure.
+    # exercised below (#63): a label this run DID find, that is also in
+    # SECURITY_CONTEXT_EXPECTATIONS, but whose own entry skips
+    # check_security_context_rendered() for some other reason, is a
+    # silent no-op the comparison below turns into a failure instead.
+    # This does not catch the label itself being renamed or mistyped --
+    # see the comparison's own comment further down for why.
     labels_seen = set()
     security_context_checked = set()
     addon_files = sorted(glob.glob(os.path.join(repo_root, "gitops", "addons", "*", "addon.yaml")))
@@ -279,6 +292,29 @@ def main(repo_root, rendered_dir):
             else:
                 print(f"FAIL {label}: the rendered chart's own container(s) do not carry the hardened securityContext ({reason})")
                 failures += 1
+
+    # A label this run DID find, that is also in SECURITY_CONTEXT_EXPECTATIONS,
+    # but whose own entry skipped check_security_context_rendered() for
+    # some other reason (a catalog entry with no "dir" key, for example)
+    # is a shape this expectation table assumed cannot happen -- comparing
+    # the two sets below turns that into a FAIL instead of a silent no-op
+    # (#63). This does NOT catch the addon/catalog entry's own `addon:`
+    # field (or directory name) being renamed or mistyped: a typo changes
+    # which string labels_seen holds too, so the expected label vanishes
+    # from both sets at once, indistinguishable from a sibling branch's
+    # addon that legitimately does not exist in this checkout yet, which
+    # must not fail.
+    unchecked = (set(SECURITY_CONTEXT_EXPECTATIONS) & labels_seen) - security_context_checked
+    if unchecked:
+        print(
+            f"FAIL SECURITY_CONTEXT_EXPECTATIONS has {len(unchecked)} label(s) this run found as an addon.yaml/"
+            f"addon-catalog entry but never actually ran check_security_context_rendered() for: {sorted(unchecked)} "
+            "-- found with a shape (no 'dir' key, for example) the expectation table assumes cannot happen for "
+            "this label; a label this run never saw at all under any name (a sibling branch's own addon not yet "
+            "merged into this checkout, or this same label after a rename/typo this check cannot tell apart from "
+            "that) is not in this set and does not fail"
+        )
+        failures += 1
 
     if failures:
         return 1
