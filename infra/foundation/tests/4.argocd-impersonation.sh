@@ -82,6 +82,12 @@ IDC_REGION="${IDC_REGION:-${AWS_REGION}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${ROOT}/../.." && pwd)"
+# Pinned to the exact commit this checkout is at, never "HEAD" (Argo CD's
+# own meaning of "HEAD" is the remote's default branch, main -- not this
+# checkout's own ref; this script's fixtures live only on the branch this
+# PR is on, so "HEAD" fails every sync with "app path does not exist",
+# confirmed on this script's own third real e2e attempt).
+REVISION="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 WORK_DIR="${E2E_WORK_DIR:-$(mktemp -d)}"
 mkdir -p "${WORK_DIR}"
 TFVARS="${WORK_DIR}/e2e.tfvars.json"
@@ -350,7 +356,7 @@ spec:
   project: ${TEAM}
   source:
     repoURL: https://github.com/littlemex/distai-platform.git
-    targetRevision: HEAD
+    targetRevision: ${REVISION}
     path: infra/foundation/tests/fixtures/tenancy-argocd-impersonation/team-rbac-probe
   destination:
     name: "${CLUSTER}"
@@ -383,7 +389,7 @@ spec:
   project: ${TEAM}
   source:
     repoURL: https://github.com/littlemex/distai-platform.git
-    targetRevision: HEAD
+    targetRevision: ${REVISION}
     path: infra/foundation/tests/fixtures/tenancy-argocd-impersonation/team-rbac-probe
   destination:
     name: "${CLUSTER}"
@@ -415,7 +421,7 @@ spec:
   project: ${TEAM}
   source:
     repoURL: https://github.com/littlemex/distai-platform.git
-    targetRevision: HEAD
+    targetRevision: ${REVISION}
     path: infra/foundation/tests/fixtures/tenancy-argocd-impersonation/clusterrole-probe
   destination:
     name: "${CLUSTER}"
