@@ -42,14 +42,19 @@ app.kubernetes.io/component: {{ .component }}
 {{- if not (has $t.kvLoadFailurePolicy (list "fail" "recompute")) -}}
 {{- fail (printf "transport.kvLoadFailurePolicy must be fail or recompute, got %q" $t.kvLoadFailurePolicy) -}}
 {{- end -}}
-{{- $ucxParts := splitList "-" $t.ucx.tcpPortRange -}}
-{{- if ne (len $ucxParts) 2 -}}
-{{- fail (printf "transport.ucx.tcpPortRange must be \"<first>-<last>\", got %q" $t.ucx.tcpPortRange) -}}
+{{- if eq $t.backend "UCX" -}}
+{{- if not (regexMatch "^[1-9][0-9]{0,4}-[1-9][0-9]{0,4}$" $t.ucx.tcpPortRange) -}}
+{{- fail (printf "transport.ucx.tcpPortRange must be \"<first>-<last>\" with plain decimal digits only (no leading zero -- sprig's int() reinterprets a leading 0 as octal), got %q" $t.ucx.tcpPortRange) -}}
 {{- end -}}
-{{- $ucxFirst := int (index $ucxParts 0) -}}
-{{- $ucxLast := int (index $ucxParts 1) -}}
+{{- $ucxParts := splitList "-" $t.ucx.tcpPortRange -}}
+{{- $ucxFirst := atoi (index $ucxParts 0) -}}
+{{- $ucxLast := atoi (index $ucxParts 1) -}}
 {{- if or (lt $ucxFirst 1) (gt $ucxLast 65535) (ge $ucxFirst $ucxLast) -}}
 {{- fail (printf "transport.ucx.tcpPortRange=%q must satisfy 1 <= first < last <= 65535" $t.ucx.tcpPortRange) -}}
+{{- end -}}
+{{- if gt (sub (add $ucxLast 1) $ucxFirst) 4096 -}}
+{{- fail (printf "transport.ucx.tcpPortRange=%q spans more than 4096 ports -- keep this narrow (never something like 1024-65535)" $t.ucx.tcpPortRange) -}}
+{{- end -}}
 {{- end -}}
 {{- if not .Values.placement.nodeSelectorKey -}}
 {{- fail "placement.nodeSelectorKey must not be empty" -}}

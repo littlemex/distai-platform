@@ -96,10 +96,10 @@ transport:
   # Only read with backend=NIXL, sglangNixlBackend=UCX -- the same
   # NIXL+UCX backend the vLLM charts use, so the same gap applies here:
   # NIXL's UCX backend builds its UCX worker config with ucp_config_read()
-  # using prefix "NIXL" (ai-dynamo/nixl's src/plugins/ucx/config.cpp),
+  # using prefix "NIXL" (ai-dynamo/nixl @52df750's src/plugins/ucx/config.cpp),
   # which falls back to the plain UCX_<X> variable this chart sets below
   # when NIXL_UCX_<X> is unset. UCX_TCP_PORT_RANGE ("<first>-<last>",
-  # openucx/ucx's src/uct/tcp/tcp_iface.c PORT_RANGE entry) fixes the TCP
+  # openucx/ucx @bcf0a63's src/uct/tcp/tcp_iface.c PORT_RANGE entry) fixes the TCP
   # port UCX's own TCP transport listens on for the actual KV connection,
   # instead of an unpredictable OS-picked ephemeral port a default-deny
   # NetworkPolicy can never name in advance. See

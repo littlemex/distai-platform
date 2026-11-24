@@ -153,13 +153,14 @@ LIBFABRIC this round, to measure on a single EFA-less `g7.8xlarge`) with
 `prefill.mps.enabled=true`/`decode.mps.enabled=true`, `mps.replicas: 2` (the chart's own computed
 default, `0.70/2 = 0.35`) reached `Running`/`Ready` on both roles, `RESTARTS=0`, and served a real
 completion through the proxy (`" Paris. It was founded in the 12th century, and it's"`). **A later
-round (see `vllm/disagg-pd/README.md`'s own "Known issues" entry for `transport.backend=UCX`)
-found every request fails HTTP 500 under this same `transport.backend=UCX` combination, once a
-NetworkPolicy actually enforces the chart's own default-deny policy** -- this round's own cell is
-not established to have had that enforcement active (not recorded either way at the time), which
-would reconcile the two results, but that is not confirmed; this paragraph's own claim (the
-`mps.*` A/B pair) still stands on its own, since neither cell's NetworkPolicy state changed
-between its two halves. The same
+round found every request failed HTTP 500 under this same `transport.backend=UCX` combination,
+once a NetworkPolicy actually enforces the chart's own default-deny policy -- fixed and confirmed
+on real hardware, see `vllm/disagg-pd/README.md`'s own "Known issues" entry for
+`transport.backend=UCX` for the exact log and the fix.** Whether this round's own cell had that
+enforcement active is not recorded either way, so whether it would have hit the same failure is
+not established; this paragraph's own claim (the `mps.*` A/B pair, both halves run back to back
+in the same cell with no change to the cluster's own NetworkPolicy enforcement in between) still
+stands on its own regardless. The same
 cell's own unmodified `disagg-pd` (no `mps.*` set, vLLM's own default fraction, same node)
 reproduced the original `CrashLoopBackOff` (confirmed again by `RESTARTS`/pod status, though this
 round's own log capture missed the crashing container's exact traceback — `kubectl logs` without

@@ -87,25 +87,28 @@ transport:
   extraConnectorConfig: {}
   # Only read with backend=UCX. NIXL's own UCX backend builds its UCX worker
   # config by calling UCX's ucp_config_read() with the prefix "NIXL"
-  # (confirmed against ai-dynamo/nixl's src/plugins/ucx/config.cpp), which
-  # is UCX's own standard precedence: NIXL_UCX_<X> first, falling back to
-  # the plain UCX_<X> this chart sets below. UCX_TCP_PORT_RANGE
-  # ("<first>-<last>", confirmed against openucx/ucx's own
+  # (confirmed against ai-dynamo/nixl @52df750, src/plugins/ucx/config.cpp),
+  # which is UCX's own standard precedence: NIXL_UCX_<X> first, falling
+  # back to the plain UCX_<X> this chart sets below. UCX_TCP_PORT_RANGE
+  # ("<first>-<last>", confirmed against openucx/ucx @bcf0a63's own
   # src/uct/tcp/tcp_iface.c PORT_RANGE config entry) fixes the TCP port
   # UCX's own TCP transport listens on for the actual KV connection -- with
   # this at its default of "0" (any ephemeral port the OS picks,
   # net.ipv4.ip_local_port_range, 32768-60999 on this image's base OS), a
-  # default-deny NetworkPolicy can never name that port in advance (#63's
-  # own networkpolicy.yaml, "Known issues" below, found this blocks every
-  # request end to end on real hardware). Rendered as an ingress port range
-  # (port/endPort) on the peer role's NetworkPolicy, from the peer role
-  # only -- never widened to 1024-65535. A real range (not a single port)
-  # on purpose: UCX only retries bind() on EADDRINUSE when first != last
-  # (tcp_iface.c), and a Pod with prefill.gpusPerEngine (or decode's) above
-  # 1 opens one UCX worker per GPU rank in the same Pod network namespace,
-  # so more than one port can be needed inside one Pod. Picked below the
-  # kernel's own default ephemeral floor (32768) so the OS never hands this
-  # same block to an unrelated outbound connection from the same Pod.
+  # default-deny NetworkPolicy can never name that port in advance (found
+  # on real hardware -- see this chart's own README, "Known issues", for
+  # the exact log). Rendered as an ingress port range (port/endPort) on the
+  # peer role's NetworkPolicy, from the peer role only -- disagg.validate
+  # (_helpers.tpl) rejects any range wider than 4096 ports, so this can
+  # never become 1024-65535. A real range (not a single port) on purpose:
+  # tcp_iface.c's own uct_tcp_iface_server_init only retries bind() on
+  # EADDRINUSE when first < last (or when both are unset, 0); a single
+  # fixed, nonzero port (first == last) never retries. A Pod with
+  # prefill.gpusPerEngine (or decode's) above 1 opens one UCX worker per
+  # GPU rank in the same Pod network namespace, so more than one port can
+  # be needed inside one Pod. Picked below the kernel's own default
+  # ephemeral floor (32768) so the OS never hands this same block to an
+  # unrelated outbound connection from the same Pod.
   ucx:
     tcpPortRange: "20000-20063"
 

@@ -47,14 +47,19 @@ true
 {{- if not (has $t.mooncakeProtocol (list "efa" "tcp")) -}}
 {{- fail (printf "transport.mooncakeProtocol must be efa or tcp, got %q" $t.mooncakeProtocol) -}}
 {{- end -}}
-{{- $ucxParts := splitList "-" $t.ucx.tcpPortRange -}}
-{{- if ne (len $ucxParts) 2 -}}
-{{- fail (printf "transport.ucx.tcpPortRange must be \"<first>-<last>\", got %q" $t.ucx.tcpPortRange) -}}
+{{- if and (eq $t.backend "NIXL") (eq $t.sglangNixlBackend "UCX") -}}
+{{- if not (regexMatch "^[1-9][0-9]{0,4}-[1-9][0-9]{0,4}$" $t.ucx.tcpPortRange) -}}
+{{- fail (printf "transport.ucx.tcpPortRange must be \"<first>-<last>\" with plain decimal digits only (no leading zero -- sprig's int() reinterprets a leading 0 as octal), got %q" $t.ucx.tcpPortRange) -}}
 {{- end -}}
-{{- $ucxFirst := int (index $ucxParts 0) -}}
-{{- $ucxLast := int (index $ucxParts 1) -}}
+{{- $ucxParts := splitList "-" $t.ucx.tcpPortRange -}}
+{{- $ucxFirst := atoi (index $ucxParts 0) -}}
+{{- $ucxLast := atoi (index $ucxParts 1) -}}
 {{- if or (lt $ucxFirst 1) (gt $ucxLast 65535) (ge $ucxFirst $ucxLast) -}}
 {{- fail (printf "transport.ucx.tcpPortRange=%q must satisfy 1 <= first < last <= 65535" $t.ucx.tcpPortRange) -}}
+{{- end -}}
+{{- if gt (sub (add $ucxLast 1) $ucxFirst) 4096 -}}
+{{- fail (printf "transport.ucx.tcpPortRange=%q spans more than 4096 ports -- keep this narrow (never something like 1024-65535)" $t.ucx.tcpPortRange) -}}
+{{- end -}}
 {{- end -}}
 {{- if and $t.forceEfaSameNode (eq $t.backend "MOONCAKE") -}}
 {{- fail "transport.forceEfaSameNode=true is not defined for transport.backend=MOONCAKE: whether Mooncake's EFA transport honors FI_EFA_ENABLE_SHM_TRANSFER is unconfirmed (RFC #37, Decision 6)" -}}

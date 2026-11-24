@@ -1,4 +1,5 @@
 {{- if .Values.networkPolicy.enabled }}
+{{- include "disagg.validate" . -}}
 {{- $fullname := include "disagg.fullname" . -}}
 {{- /*
   #63 (filed as a private report "SA2"): same gap and same convention as
@@ -48,8 +49,8 @@ spec:
       ports:
         - port: {{ $.Values.transport.bootstrapPort }}
         {{- if $nixlUcx }}
-        - port: {{ index $ucxParts 0 | int }}
-          endPort: {{ index $ucxParts 1 | int }}
+        - port: {{ index $ucxParts 0 | atoi }}
+          endPort: {{ index $ucxParts 1 | atoi }}
         {{- end }}
     {{- if and $.Values.metrics.enabled $.Values.networkPolicy.metricsScrapeFrom }}
     - from:

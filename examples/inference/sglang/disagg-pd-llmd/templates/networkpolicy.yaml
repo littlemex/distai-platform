@@ -1,4 +1,5 @@
 {{- if .Values.networkPolicy.enabled }}
+{{- include "disagg.validate" . -}}
 {{- $fullname := include "disagg.fullname" . -}}
 {{- /*
   Same reasoning as ../../vllm/disagg-pd-llmd's own networkpolicy.yaml: the
@@ -46,8 +47,8 @@ spec:
         - port: {{ $.Values.engine.port }}
         {{- end }}
         {{- if $nixlUcx }}
-        - port: {{ index $ucxParts 0 | int }}
-          endPort: {{ index $ucxParts 1 | int }}
+        - port: {{ index $ucxParts 0 | atoi }}
+          endPort: {{ index $ucxParts 1 | atoi }}
         {{- end }}
 {{- end }}
 {{- end }}
