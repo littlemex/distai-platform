@@ -164,30 +164,47 @@ SERVICE_ACCOUNT="${TEAM}-deployer"
 
 echo "onboarding team '${TEAM}' on cluster ${CLUSTER_NAME} (namespace ${TEAM}, ServiceAccount ${SERVICE_ACCOUNT})" >&2
 
-# --- 1. enable Argo CD sync impersonation, cluster-wide, once -------------
-# argocd-cm is a plain ConfigMap (not itself an Argo CD CRD), so
-# `kubectl patch --type merge` either adds the key or leaves an existing
-# "true" alone; it is never flipped back to unset by this script, and
-# re-running it is always a no-op once set. This is a cluster-wide
-# switch, not a per-team one -- Argo CD does not have a per-AppProject
-# version of this flag (confirmed against the upstream argocd-cm keys
-# documented at
-# https://argo-cd.readthedocs.io/en/stable/operator-manual/argocd-cm.yaml);
-# every AppProject that does not itself set `destinationServiceAccounts`
-# is unaffected (Argo CD only impersonates a sync when the project's own
-# field names a ServiceAccount for that destination -- the `platform`
-# AppProject (gitops/bootstrap/bootstrap.sh) sets none, so admin syncs
-# keep running as the capability's own cluster-admin identity exactly as
-# before).
-IMPERSONATION_ALREADY_ON="$(kubectl get configmap argocd-cm -n "${ARGOCD_NAMESPACE}" \
-  -o jsonpath='{.data.application\.sync\.impersonation\.enabled}' 2>/dev/null || true)"
-if [[ "${IMPERSONATION_ALREADY_ON}" == "true" ]]; then
-  echo "argocd-cm already has application.sync.impersonation.enabled: \"true\"" >&2
+# --- 1. enable Argo CD sync impersonation, cluster-wide, once (best-effort) -
+# On a self-hosted Argo CD install, argocd-cm is a plain ConfigMap in the
+# same cluster the controller runs in, and `kubectl patch --type merge`
+# either adds this key or leaves an existing "true" alone. The EKS
+# **managed** Argo CD capability is not that: AWS's own `create-capability`
+# API documentation states the capability's own infrastructure (the
+# application-controller, repo-server, and therefore argocd-cm itself)
+# runs "outside of your cluster" -- confirmed on a real capability
+# (infra/foundation/tests/4.argocd-impersonation.sh's own first real run):
+# the only ConfigMap present in the capability's namespace was the
+# built-in kube-root-ca.crt; no argocd-cm, argocd-rbac-cm or argocd-secret
+# exists for a customer to read or patch. The `aws eks create-capability`/
+# `update-eks-capability-configuration` APIs' own `argoCd` configuration
+# object (checked against `aws eks create-capability help`) has exactly
+# four fields -- namespace, awsIdc, rbacRoleMappings, networkAccess -- and
+# none of them is an impersonation switch either.
+#
+# This step is therefore best-effort, not a hard requirement: it attempts
+# the patch (in case a future capability version, or a self-hosted
+# install this script is also pointed at, does expose argocd-cm), and
+# continues with a clear, loud warning instead of failing outright when
+# the ConfigMap genuinely does not exist -- because whether sync
+# impersonation actually engages on the managed capability without this
+# flag ever being set by a customer is exactly the open question
+# infra/foundation/tests/4.argocd-impersonation.sh's own differential
+# check (narrow the team's Role, force a resync, see whether it is
+# impersonation-enforced) is designed to answer; failing here would
+# make that check impossible to ever run.
+if kubectl get configmap argocd-cm -n "${ARGOCD_NAMESPACE}" >/dev/null 2>&1; then
+  IMPERSONATION_ALREADY_ON="$(kubectl get configmap argocd-cm -n "${ARGOCD_NAMESPACE}" \
+    -o jsonpath='{.data.application\.sync\.impersonation\.enabled}' 2>/dev/null || true)"
+  if [[ "${IMPERSONATION_ALREADY_ON}" == "true" ]]; then
+    echo "argocd-cm already has application.sync.impersonation.enabled: \"true\"" >&2
+  else
+    kubectl patch configmap argocd-cm -n "${ARGOCD_NAMESPACE}" --type merge \
+      -p '{"data":{"application.sync.impersonation.enabled":"true"}}' \
+      || { echo "kubectl patch configmap argocd-cm (impersonation flag)" >&2; exit 1; }
+    echo "set argocd-cm application.sync.impersonation.enabled: \"true\"" >&2
+  fi
 else
-  kubectl patch configmap argocd-cm -n "${ARGOCD_NAMESPACE}" --type merge \
-    -p '{"data":{"application.sync.impersonation.enabled":"true"}}' \
-    || { echo "kubectl patch configmap argocd-cm (impersonation flag)" >&2; exit 1; }
-  echo "set argocd-cm application.sync.impersonation.enabled: \"true\"" >&2
+  echo "WARNING: no argocd-cm ConfigMap exists in namespace ${ARGOCD_NAMESPACE} -- this looks like the EKS managed Argo CD capability, whose own control plane (and therefore argocd-cm) runs outside this cluster and is not customer-reachable; continuing WITHOUT being able to confirm this cluster-wide flag is set. Whether destinationServiceAccounts below actually impersonates without it is unconfirmed by this script alone." >&2
 fi
 
 # --- 2. the team's own Namespace ------------------------------------------

@@ -299,15 +299,30 @@ bash "${REPO_ROOT}/gitops/bootstrap/team-onboard.sh" \
   || fail "gitops/bootstrap/team-onboard.sh --team ${TEAM}"
 pass "gitops/bootstrap/team-onboard.sh onboarded team ${TEAM}"
 
-IMPERSONATION_FLAG="$(kubectl get configmap argocd-cm -n "${ARGOCD_NAMESPACE}" \
-  -o jsonpath='{.data.application\.sync\.impersonation\.enabled}')"
-[[ "${IMPERSONATION_FLAG}" == "true" ]] \
-  || fail "argocd-cm's application.sync.impersonation.enabled is '${IMPERSONATION_FLAG}', expected true after team-onboard.sh"
+# No argocd-cm exists on the EKS managed Argo CD capability (confirmed on
+# this script's own first real run: the capability's namespace held only
+# the built-in kube-root-ca.crt ConfigMap, and `aws eks create-capability
+# help`'s own argoCd configuration object has no impersonation field
+# either) -- so this script cannot read back a cluster-wide flag the way
+# it would on a self-hosted install. This is a fact about the platform,
+# recorded here rather than asserted away: whether sync impersonation is
+# actually engaged without that flag ever being set by a customer is
+# exactly what checks 1-5 below determine empirically, not something
+# this script can confirm by reading a ConfigMap first.
+if kubectl get configmap argocd-cm -n "${ARGOCD_NAMESPACE}" >/dev/null 2>&1; then
+  IMPERSONATION_FLAG="$(kubectl get configmap argocd-cm -n "${ARGOCD_NAMESPACE}" \
+    -o jsonpath='{.data.application\.sync\.impersonation\.enabled}')"
+  [[ "${IMPERSONATION_FLAG}" == "true" ]] \
+    || fail "argocd-cm exists and its application.sync.impersonation.enabled is '${IMPERSONATION_FLAG}', expected true after team-onboard.sh"
+  pass "argocd-cm exists in ${ARGOCD_NAMESPACE} and application.sync.impersonation.enabled is true"
+else
+  info "no argocd-cm ConfigMap in ${ARGOCD_NAMESPACE} (the managed capability's own control plane runs outside this cluster, confirmed by 'aws eks create-capability help'); proceeding without it, relying on checks 1-5 below to show empirically whether destinationServiceAccounts impersonates anyway"
+fi
 SA_IN_PROJECT="$(kubectl get appproject "${TEAM}" -n "${ARGOCD_NAMESPACE}" \
   -o jsonpath="{.spec.destinationServiceAccounts[?(@.namespace=='${TEAM}')].defaultServiceAccount}")"
 [[ "${SA_IN_PROJECT}" == "${TEAM}-deployer" ]] \
   || fail "AppProject ${TEAM}'s own destinationServiceAccounts does not name ${TEAM}-deployer for namespace ${TEAM} (got '${SA_IN_PROJECT}')"
-pass "AppProject ${TEAM} (read back): destinationServiceAccounts -> ${TEAM}-deployer for namespace ${TEAM}, impersonation enabled cluster-wide"
+pass "AppProject ${TEAM} (read back): destinationServiceAccounts -> ${TEAM}-deployer for namespace ${TEAM}"
 
 trigger_sync() {
   local app="$1"
