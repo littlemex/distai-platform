@@ -20,8 +20,9 @@ AWS credentials, no cluster), for every chart and for BOTH the prefill and the d
      NIXL+LIBFABRIC, and separately MOONCAKE) -- no engine container carries
      UCX_TCP_PORT_RANGE, and no rendered NetworkPolicy contains an endPort field at all.
      This fix adds a port range only for NIXL's UCX backend: LIBFABRIC's own KV bytes move
-     over the EFA userspace, bypassing the kernel's TCP/IP stack entirely (confirmed on real
-     hardware), so there is nothing for a NetworkPolicy port range to open there. MOONCAKE
+     over the EFA userspace, bypassing the kernel's TCP/IP stack entirely (see each chart's
+     own README for the real-hardware evidence that is based on), so there is nothing for a
+     NetworkPolicy port range to open there. MOONCAKE
      never goes through NIXL's UCX backend at all (so this fix correctly adds no range for
      it either), but whether MOONCAKE's own mooncakeProtocol=tcp has an equivalent
      dynamic-port gap of its own was not examined by this fix (see each sglang chart's
@@ -48,6 +49,7 @@ import yaml
 
 ROLES = ("prefill", "decode")
 PEER = {"prefill": "decode", "decode": "prefill"}
+HELM_RELEASE_NAME = "ucx-netpolicy-test"  # the release name every helm_template() call uses
 
 failures = []
 
@@ -61,30 +63,32 @@ def check(label, ok, detail=""):
     return ok
 
 
-def helm_template(helm, chart, sets, force_string=False):
-    """Plain --set by default (needed so booleans like networkPolicy.enabled=false, and
-    Helm's own structural null syntax like transport.ucx=null, parse as the type they look
-    like, not as a string). force_string=True uses --set-string instead -- needed only when
-    deliberately testing a value that LOOKS like another type (a bare numeric string such as
-    "20000" for transport.ucx.tcpPortRange): Helm's strvals parser would otherwise coerce it
-    to an int64, and the chart's own regexMatch-based validation would then fail on a generic
-    "wrong type for value; expected string; got int64" instead of this chart's own message
-    (confirmed: Helm v3.22.1, read the exact stderr on the runner). Every *valid* range this
-    script passes contains a dash, which strvals never parses as a number/bool/null anyway,
-    so plain --set is correct and sufficient for everything except that one deliberately
-    ambiguous negative case."""
-    cmd = [helm, "template", "ucx-netpolicy-test", chart, "--namespace", "ucx-netpolicy-test"]
-    flag = "--set-string" if force_string else "--set"
+def helm_template(helm, chart, sets=(), string_sets=()):
+    """sets uses plain --set (needed so booleans like networkPolicy.enabled=false, and Helm's
+    own structural null syntax like transport.ucx=null, parse as the type they look like, not
+    as a string). string_sets uses --set-string -- needed only for a value that deliberately
+    LOOKS like another type (a bare numeric string such as "20000" for
+    transport.ucx.tcpPortRange): Helm's strvals parser would otherwise coerce it to an int64,
+    and the chart's own regexMatch-based validation would then fail on a generic "wrong type
+    for value; expected string; got int64" instead of this chart's own message (confirmed:
+    Helm v3.22.1, read the exact stderr on the runner). Every *valid* range this script passes
+    contains a dash, which strvals never parses as a number/bool/null anyway, so plain --set
+    is correct for everything else -- keeping string_sets separate from sets (rather than one
+    shared force_string flag covering a whole call) means a boolean override passed alongside
+    a forced-string value can never be accidentally forced to a string too."""
+    cmd = [helm, "template", HELM_RELEASE_NAME, chart, "--namespace", HELM_RELEASE_NAME]
     for s in sets:
-        cmd += [flag, s]
+        cmd += ["--set", s]
+    for s in string_sets:
+        cmd += ["--set-string", s]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         return None, proc.stderr.strip()
     return [d for d in yaml.safe_load_all(proc.stdout) if isinstance(d, dict)], ""
 
 
-def helm_template_fails(helm, chart, sets, force_string=False):
-    docs, err = helm_template(helm, chart, sets, force_string=force_string)
+def helm_template_fails(helm, chart, sets=(), string_sets=()):
+    docs, err = helm_template(helm, chart, sets, string_sets)
     return docs is None, err
 
 
@@ -148,8 +152,9 @@ def ingress_rules_from_peer(np, peer_role):
     """Ingress rules of one NetworkPolicy whose "from" is scoped to exactly the peer role:
     every from-entry has a podSelector as its ONLY key (no sibling namespaceSelector, which
     would widen the match to every namespace, and no ipBlock), with matchLabels naming both
-    app.kubernetes.io/component == peer_role and app.kubernetes.io/instance (not empty, not
-    the same role, not an unrelated component, not every namespace)."""
+    app.kubernetes.io/component == peer_role and app.kubernetes.io/instance == this test's
+    own release name (not empty, not the same role, not an unrelated component, not every
+    namespace, not some other release's instance label)."""
     out = []
     for rule in ((np.get("spec") or {}).get("ingress") or []):
         froms = rule.get("from") or []
@@ -161,7 +166,7 @@ def ingress_rules_from_peer(np, peer_role):
             and isinstance(f["podSelector"], dict)
             and set(f["podSelector"].keys()) == {"matchLabels"}
             and (f["podSelector"]["matchLabels"] or {}).get("app.kubernetes.io/component") == peer_role
-            and (f["podSelector"]["matchLabels"] or {}).get("app.kubernetes.io/instance")
+            and (f["podSelector"]["matchLabels"] or {}).get("app.kubernetes.io/instance") == HELM_RELEASE_NAME
             for f in froms
         ):
             out.append(rule)
@@ -253,7 +258,7 @@ def check_chart(helm, name, chart, ucx_sets, default_sets, extra_default_cases=(
         for role in ROLES:
             present, vals = env_var_present(libdocs, role, "UCX_TCP_PORT_RANGE")
             check(f"{name}: {case_label} transport renders no UCX_TCP_PORT_RANGE on {role} "
-                  "({role}'s own workload must actually be found, not merely absent from the check)",
+                  f"({role}'s own workload must actually be found, not merely absent from the check)",
                   present is False, repr((present, vals)))
 
     # ---- 2. UCX selected: both roles' own env var and own NetworkPolicy carry the range,
@@ -312,31 +317,49 @@ def check_chart(helm, name, chart, ucx_sets, default_sets, extra_default_cases=(
                   "(the env var does not depend on networkPolicy.enabled)",
                   present is True and vals == {port_range}, repr(vals))
 
-    # ---- 3. malformed / out-of-bounds values fail to render under the UCX combination,
-    # specifically on this chart's own validation message (not some unrelated type error).
-    bad_values = ["20000", "a-b", "020000-020063", "20063-20000", "20000-20000",
-                  "0-10", "1-70000", "20000-30000"]
-    for bad in bad_values:
-        fails, err = helm_template_fails(helm, chart, ucx_sets + [f"transport.ucx.tcpPortRange={bad}"],
-                                          force_string=True)
-        check(f"{name}: transport.ucx.tcpPortRange={bad!r} makes helm template fail "
-              "on this chart's own tcpPortRange validation message",
-              fails and "tcpPortRange" in (err or ""), err or "rendered without error")
+    # ---- 3. malformed / out-of-bounds values fail to render under the UCX combination, on
+    # the SPECIFIC validation message each case is meant to trigger (not merely "something
+    # failed", and not a generic Go template type error that happens to also mention
+    # "tcpPortRange" as the name of the expression it was evaluating).
+    FORMAT_MSG = 'must be "<first>-<last>" with plain decimal digits only'
+    BOUNDS_MSG = "must satisfy 1 <= first < last <= 65535"
+    WIDTH_MSG = "spans more than 4096 ports"
+    bad_values = [
+        ("20000", FORMAT_MSG),           # no dash
+        ("a-b", FORMAT_MSG),             # non-numeric
+        ("020000-020063", FORMAT_MSG),   # leading zero
+        ("20063-20000", BOUNDS_MSG),     # reversed
+        ("20000-20000", BOUNDS_MSG),     # equal
+        ("0-10", BOUNDS_MSG),            # first < 1
+        ("65000-66000", BOUNDS_MSG),     # last > 65535, width (1001) well under the cap --
+                                          # isolates the upper bound from the width cap
+        ("1-70000", BOUNDS_MSG),         # both the bound and the width are violated; the
+                                          # bounds check runs first in disagg.validate, so
+                                          # this is still expected to report BOUNDS_MSG
+        ("20000-30000", WIDTH_MSG),      # in bounds, but 10001 ports wide
+    ]
+    for bad, expected_msg in bad_values:
+        fails, err = helm_template_fails(helm, chart, ucx_sets,
+                                          string_sets=[f"transport.ucx.tcpPortRange={bad}"])
+        check(f"{name}: transport.ucx.tcpPortRange={bad!r} fails on {expected_msg!r}",
+              fails and expected_msg in (err or ""), err or "rendered without error")
 
     # ---- 4. a non-UCX render with transport.ucx entirely absent (simulating helm upgrade
     # --reuse-values from a pre-fix release, where the old stored config has no "ucx" key at
     # all and the chart's own default never gets a chance to fill it in) must still succeed,
-    # and must not render any UCX_TCP_PORT_RANGE or endPort.
-    nodocs, err = helm_template(helm, chart, default_sets + ["networkPolicy.enabled=true",
-                                                               "transport.ucx=null"])
-    if check(f"{name}: default transport with transport.ucx entirely absent (simulated "
-             "--reuse-values from a pre-fix release) still renders", nodocs is not None, err):
-        check(f"{name}: transport.ucx absent + default transport renders no endPort anywhere",
-              not has_end_port_anywhere(nodocs))
-        for role in ROLES:
-            present, vals = env_var_present(nodocs, role, "UCX_TCP_PORT_RANGE")
-            check(f"{name}: transport.ucx absent + default transport renders no UCX_TCP_PORT_RANGE on {role}",
-                  present is False, repr((present, vals)))
+    # and must not render any UCX_TCP_PORT_RANGE or endPort. Checked for every non-UCX case
+    # this chart has (not only its own pinned default -- MOONCAKE too, for the sglang charts).
+    for case_label, sets in (("default", default_sets),) + tuple(extra_default_cases):
+        nodocs, err = helm_template(helm, chart, sets + ["networkPolicy.enabled=true",
+                                                          "transport.ucx=null"])
+        if check(f"{name}: {case_label} transport with transport.ucx entirely absent (simulated "
+                 "--reuse-values from a pre-fix release) still renders", nodocs is not None, err):
+            check(f"{name}: transport.ucx absent + {case_label} transport renders no endPort anywhere",
+                  not has_end_port_anywhere(nodocs))
+            for role in ROLES:
+                present, vals = env_var_present(nodocs, role, "UCX_TCP_PORT_RANGE")
+                check(f"{name}: transport.ucx absent + {case_label} transport renders no UCX_TCP_PORT_RANGE on {role}",
+                      present is False, repr((present, vals)))
 
 
 def main():
