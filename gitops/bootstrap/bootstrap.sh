@@ -190,8 +190,8 @@ done <<< "${ADDON_REPOS}"
 # identity actually needs, since every admin-delivered Application's own
 # namespace is already a declared, reviewed fact in this checkout, not a
 # runtime choice.
-# Also scans gitops/cells/*/{capacity-pool,smoke}/*.yaml (#63, a Fable
-# 5.2 review of an earlier version of this fix found that cells.
+# Also scans gitops/cells/*/{capacity-pool,smoke}/*.yaml (#63, a
+# review of an earlier version of this fix found that cells.
 # ApplicationSet.yaml's own per-cell parameter files - which use this same
 # AppProject - declare namespaces (distai-smoke, every capacity-pool
 # pool's own namespace) this grep did not scan at all, since it looked
@@ -200,7 +200,7 @@ ADDON_NAMESPACES="$( { grep -h '^namespace:' "${REPO_ROOT}"/gitops/addons/*/addo
   | sed -E 's/^namespace:[[:space:]]*//; s/^"(.*)"$/\1/' | sort -u)"
 
 # kube-system is always included, not only when some addon.yaml happens to
-# declare it as its own primary namespace (#63: the same Fable 5.2 review
+# declare it as its own primary namespace (#63: the same review
 # found that Karpenter's and Kueue's own pinned charts each render a
 # second RBAC object - a leader-election Role/RoleBinding - directly into
 # kube-system regardless of either chart's own configured namespace,

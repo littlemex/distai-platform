@@ -81,7 +81,7 @@ clusterResourceWhitelist:
     # instance of any of them.
 
 # Namespace-scoped kinds every addon's own rendered output actually uses,
-# plus one kind no addon renders: ApplicationSet (#63, a Fable 5.2 review
+# plus one kind no addon renders: ApplicationSet (#63, a review
 # found this missing). gitops/bootstrap/root-application.yaml (Object 3
 # below) is an Application, project: platform, whose own Git source is
 # gitops/appsets/ - the two literal ApplicationSet manifests there
