@@ -4,15 +4,17 @@
 # workload (the exact shape issue #57 found in
 # examples/inference/vllm/disagg-pd-llmd/templates/sidecar-rbac.yaml: a
 # ServiceAccount plus a same-namespace Role/RoleBinding for a sidecar).
-# No metadata.namespace is set on purpose: the test applies this same,
-# unmodified fixture through two different Applications with two
-# different destination.namespace values (team-a, where the team
-# AppProject permits it, and team-b, where it does not), so the
-# Application's own destination -- not a value baked into the manifest --
-# is what decides where these objects are allowed to land. A production
-# chart would set metadata.namespace explicitly once rendered
-# per-release (the #57 item 2 fix); this fixture stays unrendered so one
-# file can be reused unmodified for both the allowed and the denied case.
+#
+# Used for the "a team project refuses this" check: gitops/bootstrap/team-onboard.sh's
+# own AppProject deliberately does NOT whitelist Role/RoleBinding
+# (#22 Decision 10 H11's original deny, restored after this test's own
+# real-hardware finding that Argo CD sync impersonation is not actually
+# engaged on the EKS managed Argo CD capability -- see
+# infra/foundation/tests/4.argocd-impersonation.sh's own header). A chart
+# shipping this exact shape is therefore expected to be refused by a
+# team's own project today; plain-workload-probe/manifests.yaml (no
+# RBAC) is the fixture used for the checks where a self-service sync is
+# expected to succeed.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

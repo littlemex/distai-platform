@@ -1,46 +1,79 @@
 #!/usr/bin/env bash
-# Real-hardware check that Argo CD sync impersonation actually runs on the
-# EKS managed Argo CD capability -- issue #22 Decision 10 H11, issue #57
-# item 1, closing the one thing an earlier real-hardware probe (recorded as
-# comments on #56/#57 and a fact update to #22) left open: that probe
-# confirmed the live AppProject CRD's own OpenAPI schema declares
-# spec.destinationServiceAccounts and the value round-trips unchanged on a
-# real `kubectl apply`, but it built foundation + the capability only, with
-# no delivered Application, so it never attempted one real impersonated
-# sync. This script does.
+# Real-hardware check of whether Argo CD sync impersonation actually runs
+# on the EKS managed Argo CD capability -- issue #22 Decision 10 H11,
+# issue #57 item 1, closing the one thing an earlier real-hardware probe
+# (recorded as comments on #56/#57 and a fact update to #22) left open:
+# that probe confirmed the live AppProject CRD's own OpenAPI schema
+# declares spec.destinationServiceAccounts and the value round-trips
+# unchanged on a real `kubectl apply`, but it built foundation + the
+# capability only, with no delivered Application, so it never attempted
+# one real impersonated sync. This script does, and the confirmed answer
+# (checks 1-6 below, real hardware, 2026-11-25) is: **no, it does not**.
+# destinationServiceAccounts is accepted by the AppProject CRD's own
+# schema but has no observed effect, because there is no
+# customer-reachable way to set `application.sync.impersonation.enabled`
+# (a documented upstream prerequisite for the feature) on this managed
+# capability -- its own namespace holds no argocd-cm at all (checks
+# below), and `aws eks create-capability help`'s own `argoCd`
+# configuration object (namespace, awsIdc, rbacRoleMappings,
+# networkAccess) has no such field either. Filed to the upstream tracking
+# issue (#49). #22 Decision 10 H11 Option A ("same-namespace
+# Role/RoleBinding on team projects, synced through a per-team identity")
+# is therefore NOT adopted by this PR; gitops/bootstrap/team-onboard.sh's
+# own AppProject keeps H11's original deny (no Role/RoleBinding in its
+# namespaceResourceWhitelist), which checks 1b and 6 below both exercise.
 #
-# What this proves, each against the real API server (not a dry run):
-#   1. a team's own Application, in a team AppProject whose
-#      destinationServiceAccounts names that team's own ServiceAccount,
-#      syncs a chart shipping its own namespaced Role/RoleBinding into the
-#      team's own namespace -- the exact #57 item 1 scenario
-#      (examples/inference/vllm/disagg-pd-llmd's sidecar RBAC), self-service,
-#      with no admin pre-creating that Role/RoleBinding by hand.
-#   2. the SAME, unmodified manifest, synced through the SAME team project
-#      but aimed at a different namespace, is refused -- by the AppProject's
-#      own destinations list, before the API server is even asked.
+# What this checks, each against the real API server (not a dry run):
+#   1. a team's own Application, in its own team AppProject, self-syncs
+#      an ordinary, non-RBAC workload chart (ServiceAccount+ConfigMap)
+#      into its own namespace with no admin pre-creating it -- ordinary
+#      self-service still works once Role/RoleBinding are excluded.
+#   1b. the SAME team project refuses a chart shipping its own namespaced
+#      Role/RoleBinding -- the exact #57 item 1 scenario
+#      (examples/inference/vllm/disagg-pd-llmd's sidecar RBAC) -- because
+#      gitops/bootstrap/team-onboard.sh's own AppProject does not
+#      whitelist those two kinds (H11's original deny).
+#   2. the SAME non-RBAC manifest as check 1, synced through the SAME
+#      team project but aimed at a different namespace, is refused by
+#      the AppProject's own destinations list, before the API server is
+#      even asked. Argo CD's own project-level policy, independent of
+#      which identity performs the sync.
 #   3. a bare cluster-scoped object (ClusterRole), synced through the same
 #      team project, is refused by the project's own empty
-#      clusterResourceWhitelist.
+#      clusterResourceWhitelist. Also Argo CD's own project-level policy,
+#      independent of sync identity.
 #   4. the team's own ServiceAccount, asked directly (kubectl --as, no Argo
 #      CD involved) to create a Role granting a permission it does not
 #      itself hold (secrets, which gitops/bootstrap/team-onboard.sh's own
 #      Role never grants), is refused by the Kubernetes API server's own
-#      RBAC escalation check -- the mechanism, not an Argo CD list, that
-#      keeps a team from using namespaced RBAC to grant itself more than it
-#      started with.
-#   5. (the differential proof that impersonation is actually engaged, not
-#      merely configured): removing one verb from the team's own
-#      ServiceAccount's Role, then forcing a resync of the already-synced
-#      Application from (1), makes that same sync FAIL with a message
-#      naming the team's own ServiceAccount -- which is only possible if
-#      Argo CD is really performing this sync as that ServiceAccount and
-#      not as its own cluster-admin controller identity (which would never
-#      be refused by anything this script's own Role controls). Restoring
-#      the verb and resyncing again returns the Application to Synced,
-#      closing the loop the same way infra/foundation/tests/3.tenancy-primitive.sh's
-#      own Kueue quota check does (delete the holder, confirm the effect
-#      flips, not just that it was once true).
+#      RBAC escalation check. This proves the escalation check works on
+#      this identity when IT is the one making the request directly -- it
+#      says nothing about whether Argo CD's own sync ever acts as this
+#      identity (that is check 6, next).
+#   6. (the differential check that actually distinguishes impersonated
+#      from non-impersonated sync, and the reason checks 1b/H11's deny
+#      are kept rather than relaxed): removing a permission from the
+#      team's own ServiceAccount's Role, then forcing a resync of the
+#      already-Synced Application from check 1, still SUCCEEDS --
+#      proving Argo CD performed that sync (and check 1's own sync) with
+#      its own capability-wide identity throughout, never impersonating
+#      the team's ServiceAccount. Checks 2-4 alone would have been
+#      consistent with real self-service tenancy; this check is what
+#      shows they were not evidence of it.
+#
+# A further implication, reasoned from check 6 but not independently
+# exploited in this script (recorded as a risk this script's own H11
+# deny closes, not a demonstrated exploit it leaves open): had
+# Role/RoleBinding been left in a team AppProject's
+# namespaceResourceWhitelist on the premise that impersonation would
+# constrain them (checks 1b/6 show it would not), a team's own chart
+# could have shipped a RoleBinding to any existing ClusterRole (including
+# a highly privileged one) or a Role granting broad permissions, and
+# Argo CD's own unconstrained identity would have applied it with no
+# RBAC-escalation check against the team at all (that check only fires
+# against the actual API caller, which checks 1-6 show is never the team
+# here). gitops/bootstrap/team-onboard.sh carries this warning verbatim
+# in its own header.
 #
 # This script builds only infra/foundation with var.argocd set (the
 # managed Argo CD capability) -- no Karpenter, no Kueue, no accelerator
@@ -129,7 +162,7 @@ cleanup() {
       info "cleanup: the test did not reach a successful destroy; cleaning up"
       if kubectl get nodes >/dev/null 2>&1; then
         local argons; argons="$(tf_out argocd_namespace 2>/dev/null || echo argocd)"
-        kubectl delete application team-a-chart team-a-cross-ns team-a-clusterrole -n "${argons}" --ignore-not-found --wait=false >/dev/null 2>&1
+        kubectl delete application team-a-chart team-a-rbac-probe team-a-cross-ns team-a-clusterrole -n "${argons}" --ignore-not-found --wait=false >/dev/null 2>&1
         kubectl delete appproject "${TEAM}" -n "${argons}" --ignore-not-found --wait=false >/dev/null 2>&1
         kubectl delete namespace "${TEAM}" "${OTHER_NS}" --ignore-not-found --wait=false >/dev/null 2>&1
       fi
@@ -357,7 +390,7 @@ spec:
   source:
     repoURL: https://github.com/littlemex/distai-platform.git
     targetRevision: ${REVISION}
-    path: infra/foundation/tests/fixtures/tenancy-argocd-impersonation/team-rbac-probe
+    path: infra/foundation/tests/fixtures/tenancy-argocd-impersonation/plain-workload-probe
   destination:
     name: "${CLUSTER}"
     namespace: ${TEAM}
@@ -368,11 +401,50 @@ wait_until 180 5 "team-a-chart's first sync operation to finish" op_done \
   || fail "team-a-chart's first sync did not finish within 180s (phase: $(operation_phase team-a-chart))"
 [[ "$(operation_phase team-a-chart)" == "Succeeded" ]] \
   || fail "team-a-chart's first sync did not Succeed (phase $(operation_phase team-a-chart), message: $(operation_message team-a-chart))"
+kubectl get serviceaccount probe-sidecar -n "${TEAM}" >/dev/null 2>&1 \
+  || fail "ServiceAccount probe-sidecar was not actually created in ${TEAM} despite a Succeeded sync"
+kubectl get configmap probe-config -n "${TEAM}" >/dev/null 2>&1 \
+  || fail "ConfigMap probe-config was not actually created in ${TEAM} despite a Succeeded sync"
+pass "CHECK 1/6: team-a-chart (project ${TEAM}) self-synced an ordinary, non-RBAC workload chart (ServiceAccount+ConfigMap) into its own namespace ${TEAM} with no admin pre-creating it"
+
+# ------------------------------------------------ 4a2. a team project denies
+# ------------------------------------------------      a chart shipping its
+# ------------------------------------------------      own namespaced RBAC
+# ------------------------------------------------      (H11's original deny,
+# ------------------------------------------------      restored -- Option A
+# ------------------------------------------------      is not adopted)
+
+kubectl apply -n "${ARGOCD_NAMESPACE}" -f - <<EOF || fail "kubectl apply Application team-a-rbac-probe"
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: team-a-rbac-probe
+  namespace: ${ARGOCD_NAMESPACE}
+spec:
+  project: ${TEAM}
+  source:
+    repoURL: https://github.com/littlemex/distai-platform.git
+    targetRevision: ${REVISION}
+    path: infra/foundation/tests/fixtures/tenancy-argocd-impersonation/team-rbac-probe
+  destination:
+    name: "${CLUSTER}"
+    namespace: ${TEAM}
+EOF
+rbac_probe_blocked() {
+  local cond
+  cond="$(kubectl get application team-a-rbac-probe -n "${ARGOCD_NAMESPACE}" \
+    -o jsonpath='{.status.conditions[*].message}{.status.operationState.message}' 2>/dev/null)"
+  [[ "${cond}" == *"not permitted in project"* || "${cond}" == *"is not permitted"* ]]
+}
+trigger_sync team-a-rbac-probe >/dev/null 2>&1 || true
+wait_until 120 5 "team-a-rbac-probe refused (Role/RoleBinding not permitted in project)" rbac_probe_blocked \
+  || fail "team-a-rbac-probe was not refused: conditions=$(kubectl get application team-a-rbac-probe -n "${ARGOCD_NAMESPACE}" -o jsonpath='{.status.conditions}') operationState=$(operation_message team-a-rbac-probe)"
 kubectl get role probe-sidecar-role -n "${TEAM}" >/dev/null 2>&1 \
-  || fail "Role probe-sidecar-role was not actually created in ${TEAM} despite a Succeeded sync"
+  && fail "Role probe-sidecar-role was actually created in ${TEAM} despite the AppProject's own namespaceResourceWhitelist refusal" || true
 kubectl get rolebinding probe-sidecar-binding -n "${TEAM}" >/dev/null 2>&1 \
-  || fail "RoleBinding probe-sidecar-binding was not actually created in ${TEAM} despite a Succeeded sync"
-pass "CHECK 1/4: team-a-chart (project ${TEAM}) synced its own Role/RoleBinding/ServiceAccount/ConfigMap into its own namespace ${TEAM} -- #57 item 1's exact scenario, self-service, no admin pre-creating this chart's RBAC"
+  && fail "RoleBinding probe-sidecar-binding was actually created in ${TEAM} despite the AppProject's own namespaceResourceWhitelist refusal" || true
+pass "CHECK 1b/6: a chart shipping its own namespaced Role/RoleBinding (#57 item 1's exact scenario) was refused by the same team project ${TEAM} -- gitops/bootstrap/team-onboard.sh's own AppProject does not whitelist Role/RoleBinding (H11's original deny, restored, since sync impersonation is confirmed not engaged -- check 5 below); no Role/RoleBinding was created"
+kubectl delete application team-a-rbac-probe -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 
 # ------------------------------------------------- 4b. a team project denies
 # -------------------------------------------------     a destination
@@ -390,7 +462,7 @@ spec:
   source:
     repoURL: https://github.com/littlemex/distai-platform.git
     targetRevision: ${REVISION}
-    path: infra/foundation/tests/fixtures/tenancy-argocd-impersonation/team-rbac-probe
+    path: infra/foundation/tests/fixtures/tenancy-argocd-impersonation/plain-workload-probe
   destination:
     name: "${CLUSTER}"
     namespace: ${OTHER_NS}
@@ -405,7 +477,7 @@ wait_until 120 5 "team-a-cross-ns's own InvalidSpecError (destination not permit
   || fail "team-a-cross-ns was not refused for its destination namespace ${OTHER_NS}: $(kubectl get application team-a-cross-ns -n "${ARGOCD_NAMESPACE}" -o jsonpath='{.status.conditions}')"
 kubectl get configmap probe-config -n "${OTHER_NS}" >/dev/null 2>&1 \
   && fail "ConfigMap probe-config was actually created in ${OTHER_NS} despite the AppProject's own destination refusal" || true
-pass "CHECK 2/4: the SAME manifest, same team project ${TEAM}, aimed at ${OTHER_NS} instead of its own ${TEAM}, was refused by the AppProject's own destinations list before anything was written to ${OTHER_NS}"
+pass "CHECK 2/6: the same non-RBAC manifest, same team project ${TEAM}, aimed at ${OTHER_NS} instead of its own ${TEAM}, was refused by the AppProject's own destinations list before anything was written to ${OTHER_NS}"
 kubectl delete application team-a-cross-ns -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 
 # ------------------------------------------------- 4c. a team project denies
@@ -438,7 +510,7 @@ wait_until 120 5 "team-a-clusterrole refused (ClusterRole not permitted in proje
   || fail "team-a-clusterrole was not refused: conditions=$(kubectl get application team-a-clusterrole -n "${ARGOCD_NAMESPACE}" -o jsonpath='{.status.conditions}') operationState=$(operation_message team-a-clusterrole)"
 kubectl get clusterrole tenancy-probe-clusterrole-should-be-rejected >/dev/null 2>&1 \
   && fail "ClusterRole tenancy-probe-clusterrole-should-be-rejected was actually created despite the AppProject's own empty clusterResourceWhitelist" || true
-pass "CHECK 3/4: a bare ClusterRole, synced through the same team project ${TEAM}, was refused by the AppProject's own empty clusterResourceWhitelist; no ClusterRole was created"
+pass "CHECK 3/6: a bare ClusterRole, synced through the same team project ${TEAM}, was refused by the AppProject's own empty clusterResourceWhitelist; no ClusterRole was created"
 kubectl delete application team-a-clusterrole -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 
 # ------------------------------------------------- 4d. the team's own
@@ -459,23 +531,47 @@ ESCALATE_ERR="$(kubectl create role escalate-attempt -n "${TEAM}" \
   || fail "the escalation refusal did not name ${DEPLOYER} as the subject: ${ESCALATE_ERR}"
 kubectl get role escalate-attempt -n "${TEAM}" >/dev/null 2>&1 \
   && fail "Role escalate-attempt was actually created in ${TEAM} despite the refusal" || true
-pass "CHECK 4/4: ${DEPLOYER}, asked to create a Role granting 'secrets' (a resource its own Role does not itself hold), was refused by the Kubernetes API server's own RBAC escalation check, naming ${DEPLOYER} in the refusal; no such Role was created"
+pass "CHECK 4/6: ${DEPLOYER}, asked to create a Role granting 'secrets' (a resource its own Role does not itself hold), was refused by the Kubernetes API server's own RBAC escalation check, naming ${DEPLOYER} in the refusal; no such Role was created"
 
 # ------------------------------------------------- 5. the differential
-# -------------------------------------------------    proof: impersonation
-# -------------------------------------------------    is really engaged
+# -------------------------------------------------    check: is
+# -------------------------------------------------    impersonation
+# -------------------------------------------------    actually engaged?
 
 # Removes "configmaps" from team-a-deployer-role entirely (not merely one
 # verb), then deletes the live ConfigMap probe-config out from under
 # Argo CD (drift) and forces a resync of the SAME, already-Synced
-# Application from 4a. If Argo CD were still syncing as its own
-# cluster-admin controller identity -- i.e. if destinationServiceAccounts
-# were configured but not actually honored -- this resync would succeed
-# regardless of what team-a-deployer-role says, since that Role governs
-# nothing about the controller's own identity. A sync that now fails,
-# and fails specifically with a Forbidden naming ${DEPLOYER}, is only
-# explained by Argo CD actually impersonating that ServiceAccount for
-# this sync.
+# Application from 4a. If Argo CD is really syncing AS the team's own
+# ServiceAccount (destinationServiceAccounts actually honored), this
+# resync must now fail with a Forbidden naming that ServiceAccount. If
+# Argo CD is still syncing as its own capability-wide controller
+# identity -- i.e. destinationServiceAccounts is accepted by the
+# AppProject CRD's own schema (confirmed separately, #22 Decision 10
+# H11's own fact update) but not actually acted on -- this resync
+# succeeds regardless of what team-a-deployer-role says, since that Role
+# governs nothing about the controller's own identity.
+#
+# RESULT, confirmed on real hardware (this script's own eighth real e2e
+# attempt, 2026-11-25, after six earlier attempts each fixing one
+# genuine bug in this script itself -- team-onboard.sh's own prior
+# steps, checks 1-4 above, all PASSed first): the resync SUCCEEDED.
+# Impersonation is NOT engaged. This is consistent with -- and now
+# explains -- the other real fact already on record for this issue: the
+# EKS managed Argo CD capability has no customer-reachable argocd-cm
+# (checks above, this script's own earlier attempts), and
+# `application.sync.impersonation.enabled` is a documented prerequisite
+# for destinationServiceAccounts to do anything at all
+# (https://argo-cd.readthedocs.io/en/stable/operator-manual/argocd-cm.yaml);
+# with no way for a customer to set that flag, the field accepted by the
+# AppProject CRD's own schema has no observed effect. Filed to the
+# upstream tracking issue (#49): the capability advertises a CRD field
+# whose precondition it gives customers no way to satisfy.
+#
+# This asserts the CONFIRMED CURRENT behavior (Succeeded), not the
+# originally hoped-for one, so this test stays green until the platform
+# changes -- if a future AWS update makes argocd-cm reachable, or
+# impersonation default-on, this assertion starts failing loudly, which
+# is the signal to revisit #22 Decision 10 H11 Option A.
 kubectl get role "${TEAM}-deployer-role" -n "${TEAM}" -o json \
   | jq 'del(.rules[] | select(.resources == ["serviceaccounts","configmaps","pods","services"])) | .rules += [{"apiGroups":[""],"resources":["serviceaccounts","pods","services"],"verbs":["get","list","watch","create","update","patch","delete"]}]' \
   > "${WORK_DIR}/role-no-configmaps.json" || fail "jq: build role-no-configmaps.json"
@@ -483,7 +579,7 @@ kubectl apply -f "${WORK_DIR}/role-no-configmaps.json" || fail "kubectl apply ro
 CAN_I_CONFIGMAPS_AFTER="$(kubectl auth can-i create configmaps -n "${TEAM}" --as="${DEPLOYER}" || true)"
 [[ "${CAN_I_CONFIGMAPS_AFTER}" == "no" ]] \
   || fail "after narrowing ${TEAM}-deployer-role, can-i create configmaps --as=${DEPLOYER} still says '${CAN_I_CONFIGMAPS_AFTER}' -- the Role edit did not take effect"
-pass "narrowed ${TEAM}-deployer-role to remove 'configmaps' (confirmed by kubectl auth can-i, not assumed from the apply's own exit code)"
+pass "narrowed ${TEAM}-deployer-role to remove 'configmaps' (confirmed by kubectl auth can-i, not assumed from the apply's own exit code); ${DEPLOYER} itself can no longer create a ConfigMap in ${TEAM} directly"
 
 kubectl delete configmap probe-config -n "${TEAM}" --wait=true --timeout=30s \
   || fail "kubectl delete configmap probe-config -n ${TEAM}"
@@ -492,17 +588,16 @@ wait_until 180 5 "team-a-chart's second sync operation to finish" op_done \
   || fail "team-a-chart's second sync did not finish within 180s (phase: $(operation_phase team-a-chart))"
 SECOND_PHASE="$(operation_phase team-a-chart)"
 SECOND_MESSAGE="$(operation_message team-a-chart)"
-[[ "${SECOND_PHASE}" == "Failed" || "${SECOND_PHASE}" == "Error" ]] \
-  || fail "team-a-chart's second sync was ${SECOND_PHASE}, expected Failed/Error once ${DEPLOYER} lost 'configmaps' -- impersonation does not appear to be engaged (the sync still behaves as if run by a privileged identity)"
-LOWER_MESSAGE="$(printf '%s' "${SECOND_MESSAGE}" | tr '[:upper:]' '[:lower:]')"
-[[ "${LOWER_MESSAGE}" == *"forbidden"* ]] \
-  || fail "team-a-chart's second sync failed (${SECOND_PHASE}) but its own message does not mention 'forbidden': ${SECOND_MESSAGE}"
-[[ "${SECOND_MESSAGE}" == *"${DEPLOYER}"* ]] \
-  || fail "team-a-chart's second sync failed with 'forbidden' but does not name ${DEPLOYER} as the identity refused: ${SECOND_MESSAGE}"
-pass "CHECK 5/5 (differential proof): after removing only 'configmaps' from ${DEPLOYER}'s own Role, the SAME Application's resync FAILED with a Forbidden naming ${DEPLOYER} ('${SECOND_MESSAGE}') -- Argo CD is really performing this sync as the team's own ServiceAccount, not its own cluster-admin controller identity"
+[[ "${SECOND_PHASE}" == "Succeeded" ]] \
+  || fail "team-a-chart's second sync was ${SECOND_PHASE} (message: ${SECOND_MESSAGE}), expected Succeeded -- this would mean impersonation IS now engaged (a change from the confirmed 2026-11-25 behavior this test documents); if so, update this assertion and revisit #22 Decision 10 H11 Option A, do not just make this check pass again"
+kubectl get configmap probe-config -n "${TEAM}" >/dev/null 2>&1 \
+  || fail "ConfigMap probe-config was not recreated in ${TEAM} despite a Succeeded second sync"
+pass "CHECK 6/6 (differential check, confirmed finding): even after ${DEPLOYER} itself lost the 'configmaps' permission, the SAME Application's resync still Succeeded and recreated probe-config -- sync impersonation is NOT actually engaged on this capability (tracked at #49; #22 Decision 10 H11 Option A is not viable as of 2026-11-25). Argo CD performed this sync with its own capability-wide identity throughout, not team-a-deployer's"
 
-# Restore and confirm the SAME Application returns to Synced -- the
-# flip-back half of the proof (3.tenancy-primitive.sh's own pattern).
+# Restore team-a-deployer-role to its original rules regardless (leaves
+# the cell in the same state checks 1-4 left it in, for a clean
+# teardown -- not itself a check, since check 5 already showed this
+# Role's own content does not currently affect Argo CD's own sync).
 kubectl apply -f - <<EOF || fail "kubectl apply role-with-configmaps.yaml (restore configmaps permission)"
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -529,14 +624,7 @@ rules:
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 EOF
-trigger_sync team-a-chart || fail "trigger team-a-chart's third sync (after restoring the Role)"
-wait_until 180 5 "team-a-chart's third sync operation to finish" op_done \
-  || fail "team-a-chart's third sync did not finish within 180s (phase: $(operation_phase team-a-chart))"
-[[ "$(operation_phase team-a-chart)" == "Succeeded" ]] \
-  || fail "team-a-chart's third sync did not Succeed after restoring 'configmaps' to ${DEPLOYER}'s own Role (phase $(operation_phase team-a-chart), message: $(operation_message team-a-chart))"
-kubectl get configmap probe-config -n "${TEAM}" >/dev/null 2>&1 \
-  || fail "ConfigMap probe-config was not recreated in ${TEAM} after the Role was restored and resynced"
-pass "restoring 'configmaps' to ${DEPLOYER}'s own Role and resyncing the SAME Application returned it to Succeeded and recreated probe-config -- confirms the earlier failure was caused by that Role, not an unrelated defect"
+pass "restored ${TEAM}-deployer-role to its original rules before teardown"
 
 # ------------------------------------------------------- 6. teardown
 
