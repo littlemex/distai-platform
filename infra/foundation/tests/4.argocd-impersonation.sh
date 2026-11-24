@@ -399,7 +399,7 @@ cross_ns_blocked() {
   local cond
   cond="$(kubectl get application team-a-cross-ns -n "${ARGOCD_NAMESPACE}" \
     -o jsonpath='{.status.conditions[*].message}' 2>/dev/null)"
-  [[ "${cond}" == *"not permitted in project"* ]]
+  [[ "${cond}" == *"do not match any of the allowed destinations"* || "${cond}" == *"not permitted in project"* ]]
 }
 wait_until 120 5 "team-a-cross-ns's own InvalidSpecError (destination not permitted in project)" cross_ns_blocked \
   || fail "team-a-cross-ns was not refused for its destination namespace ${OTHER_NS}: $(kubectl get application team-a-cross-ns -n "${ARGOCD_NAMESPACE}" -o jsonpath='{.status.conditions}')"
