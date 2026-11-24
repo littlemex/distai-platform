@@ -225,7 +225,7 @@ networkPolicy:
   # straight to the Pod IP, from whatever namespace that collector
   # itself runs in -- not necessarily this release's own namespace or
   # this chart's own proxy/load-replay selectors above (found by a
-  # Fable 5.2 review: enabling networkPolicy with no further
+  # review: enabling networkPolicy with no further
   # configuration silently stops that collector's scrapes, a benchmark
   # chart going dark with no error anywhere). Set this to the
   # NetworkPolicy ingress peer(s) (namespaceSelector/podSelector, same

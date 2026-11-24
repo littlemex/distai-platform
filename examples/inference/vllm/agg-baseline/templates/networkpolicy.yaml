@@ -26,7 +26,7 @@ spec:
       ports:
         # engine.port, not service.port: a NetworkPolicy's own ports[]
         # matches the Pod's own containerPort, never the Service's port
-        # (Fable 5.2 review) -- today the two happen to share the same
+        # (confirmed by review) -- today the two happen to share the same
         # default value (8000), but the Service's targetPort: http (not
         # a literal copy of engine.port) means they are free to diverge,
         # and this rule would then silently protect the wrong port.

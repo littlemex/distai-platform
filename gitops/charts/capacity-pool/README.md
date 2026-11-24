@@ -171,7 +171,7 @@ inference stands in place of a direct re-read of the daemon Pod's own status
 at a later timestamp — not yet done.
 
 **Checked on a `Running`/`RESTARTS=0` result, not assumed from it (found by
-Fable 5.2 review, 2026-11-22)**: Karpenter's own scheduling simulation decides
+a review, 2026-11-22)**: Karpenter's own scheduling simulation decides
 whether to launch a node from a pending Pod's request using the instance
 type's *physical* resource count, not the device plugin's own future,
 MPS-split count (which only exists once the node is `Ready` and the device
@@ -186,7 +186,7 @@ name instance types, not node identity, because the open question there is a dif
 node but possibly different physical GPUs of the 8 — see that section's own stated gap), not
 whether Karpenter launched extra nodes.
 
-**Security, reviewed and found incomplete by Fable 5.2 (2026-11-22; recorded as an open
+**Security, reviewed and found incomplete (2026-11-22; recorded as an open
 finding, not resolved here)**: NVIDIA's own `mps-control-daemon` DaemonSet — the
 process that actually performs the split above, deployed automatically by the
 upstream chart whenever any `sharing.mps` config exists, selecting nodes by
@@ -224,7 +224,7 @@ and reverted for the LMCache mp server (see `vllm/disagg-pd/README.md`'s own
    NVIDIA's own `hostPID`) is the WHOLE host namespace, not narrowly "the two
    Pods that need to talk to each other."
 4. **`tenancy.teamTaint` is necessary but not sufficient to actually isolate an
-   MPS-opted-in pool to one team, found by Fable 5.2 review, 2026-11-22.** A
+   MPS-opted-in pool to one team, found by review, 2026-11-22.** A
    taint only keeps the OTHER team's *workload* Pods off the node; it does not
    by itself keep `nvidia-device-plugin`'s own DaemonSets (the device plugin
    and `mps-control-daemon`) scheduled there either, unless that DaemonSet's

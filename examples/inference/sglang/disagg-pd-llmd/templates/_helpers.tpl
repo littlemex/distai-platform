@@ -49,7 +49,7 @@ app.kubernetes.io/component: {{ .component }}
 {{- $args = concat $args (list "--disaggregation-bootstrap-port" (toString $v.transport.bootstrapPort)) -}}
 {{- end -}}
 {{- /*
-  Fable 5.2 review round 3 (non-blocking, confirmed real): metrics.enabled
+  Review round 3 (non-blocking, confirmed real): metrics.enabled
   rendered the scrape labels/annotations but never passed this flag, so
   SGLang would not have served /metrics at all -- ../disagg-pd's own
   disagg.engineArgs already sets it this way; this chart had dropped it by
