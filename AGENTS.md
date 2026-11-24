@@ -218,9 +218,8 @@ that holds AWS credentials.
 
 ## 7. Reviews
 
-Reviewers apply the review packs of the maintainer's
-[review-html skill](https://github.com/littlemex/explainers/blob/6766d86d12f2dfbfdc35971dac8b95a0428b25da/skills/review-html.html)
-(pinned commit; the packs are written in Japanese) that match the change:
+Reviewers apply the review packs that match the change, chosen from the
+table below:
 
 | Change | Packs |
 | --- | --- |
