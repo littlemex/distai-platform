@@ -661,6 +661,8 @@ kind: Role
 metadata:
   name: ${TEAM}-deployer-role
   namespace: ${TEAM}
+  labels:
+    distai.dev/managed-by: team-onboard
 rules:
   - apiGroups: [""]
     resources: ["serviceaccounts", "configmaps", "pods", "services"]

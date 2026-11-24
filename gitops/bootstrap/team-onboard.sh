@@ -279,18 +279,32 @@ EOF
 # kubectl, outside GitOps, exactly like every other repository that
 # treats "sync impersonation can create it" and "GitOps may create it"
 # as two separate questions).
+# The distai.dev/managed-by: team-onboard label on the Role/RoleBinding
+# below is what gitops/bootstrap/team-rbac-guard.yaml's own
+# matchConditions exempts from its rbac.authorization.k8s.io-permission
+# rule -- this Role is admin-created (this script, kubectl apply,
+# step 3), never synced in by a team's own chart through Argo CD, so
+# the rule that stops a TEAM's chart from granting itself RBAC-managing
+# power does not need to (and, confirmed on real hardware, inadvertently
+# did: this script's own ninth real e2e attempt FAILed here before this
+# label/exemption existed) also block the admin's own setup of this
+# identity's roles/rolebindings verbs.
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: ${SERVICE_ACCOUNT}
   namespace: ${TEAM}
+  labels:
+    distai.dev/managed-by: team-onboard
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: ${SERVICE_ACCOUNT}-role
   namespace: ${TEAM}
+  labels:
+    distai.dev/managed-by: team-onboard
 rules:
   - apiGroups: [""]
     resources: ["serviceaccounts", "configmaps", "pods", "services"]
@@ -316,6 +330,8 @@ kind: RoleBinding
 metadata:
   name: ${SERVICE_ACCOUNT}-binding
   namespace: ${TEAM}
+  labels:
+    distai.dev/managed-by: team-onboard
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

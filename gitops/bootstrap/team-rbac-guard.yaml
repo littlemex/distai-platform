@@ -65,6 +65,25 @@ metadata:
   name: team-rbac-guard
 spec:
   failurePolicy: Fail
+  # Exempts gitops/bootstrap/team-onboard.sh's own admin-created identity
+  # Role/RoleBinding/ServiceAccount (labeled distai.dev/managed-by:
+  # team-onboard by that script itself) from this policy's own
+  # validations below. Without this, the policy also denies
+  # team-onboard.sh's own step 3 Role, which legitimately needs
+  # roles/rolebindings verbs (granted to this script's own
+  # ServiceAccount, never to a team's chart) -- confirmed on real
+  # hardware: this script's own tenth real e2e attempt FAILed exactly
+  # this way before this matchConditions block existed. Team-authored
+  # content synced through Argo CD never carries this label (Argo CD
+  # does not add it, and no fixture in this repository sets it), so
+  # this exemption cannot be used by a team to bypass the policy for
+  # its own chart's Role/RoleBinding.
+  matchConditions:
+    - name: "exclude-team-onboard-managed"
+      expression: >-
+        !has(object.metadata.labels) ||
+        !('distai.dev/managed-by' in object.metadata.labels) ||
+        object.metadata.labels['distai.dev/managed-by'] != 'team-onboard'
   matchConstraints:
     namespaceSelector:
       matchExpressions:
