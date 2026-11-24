@@ -2306,11 +2306,11 @@ pass "all six issue #27 Applications are Healthy+Synced, and the cell's own ${AP
 # Acceptance criterion a, evidenced by each object's own spec on the
 # cluster, not by `helm template` (0.static.sh does that part).
 
-want_set="$(printf '%s\n' "${NODEPOOL}" "${POOLS_27[@]}" | sort)"
+want_set="$(printf '%s\n' "${NODEPOOL}" "${OPTIONAL_NODEPOOL}" "${POOLS_27[@]}" | sort)"
 [[ "$(list_names nodepools)" == "${want_set}" ]] \
-  || fail "NodePools are not exactly {${NODEPOOL} ${POOLS_27[*]}}: $(list_names nodepools | tr '\n' ' ')"
-[[ "$(list_names ec2nodeclasses)" == "$(printf '%s\n' "${NODECLASS}" "${POOLS_27[@]}" | sort)" ]] \
-  || fail "EC2NodeClasses are not exactly {${NODECLASS} ${POOLS_27[*]}}: $(list_names ec2nodeclasses | tr '\n' ' ')"
+  || fail "NodePools are not exactly {${NODEPOOL} ${OPTIONAL_NODEPOOL} ${POOLS_27[*]}}: $(list_names nodepools | tr '\n' ' ')"
+[[ "$(list_names ec2nodeclasses)" == "$(printf '%s\n' "${NODECLASS}" "${OPTIONAL_NODECLASS}" "${POOLS_27[@]}" | sort)" ]] \
+  || fail "EC2NodeClasses are not exactly {${NODECLASS} ${OPTIONAL_NODECLASS} ${POOLS_27[*]}}: $(list_names ec2nodeclasses | tr '\n' ' ')"
 [[ "$(list_names resourceflavors)" == "$(printf '%s\n' "${RESOURCEFLAVOR}" "${POOLS_27[@]}" | sort)" ]] \
   || fail "ResourceFlavors are not exactly {${RESOURCEFLAVOR} ${POOLS_27[*]}}: $(list_names resourceflavors | tr '\n' ' ')"
 pass "one NodePool, EC2NodeClass and ResourceFlavor per pool: ${POOLS_27[*]} (plus the cell's own ${NODEPOOL})"
