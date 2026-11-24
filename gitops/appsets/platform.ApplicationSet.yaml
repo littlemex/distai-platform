@@ -154,7 +154,7 @@ spec:
       #
       # The dir branch also carries the chart branch's own skipCrds/
       # values/valuesFrom (#55 item 6: #28's own accel-device-classes
-      # needs none of them, so every {{- if }} guard below renders
+      # needs none of them, so every if-guard below renders
       # nothing for it; optional-pool's clusterName/nodeRole are
       # cell-specific valuesFrom entries, the same contract capacity-pool/
       # smoke already use, and do need this block).

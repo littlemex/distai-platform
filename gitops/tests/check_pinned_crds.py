@@ -287,34 +287,6 @@ def check_method_label_rendered(label, rendered_text, key, value):
     return None if not found_any_daemonset else False
 
 
-def helm_template_dir_chart(addon_doc, repo_root, workdir):
-    """Same idea as helm_template_chart, for a local dir:-sourced chart
-    (gitops/addon-catalog/<name>/addon.yaml) instead of a registry one --
-    dcgm-exporter's own wrapper around an upstream `dependencies:` entry
-    is the one that needs this (#63, independent security-axis review
-    pass, filed as "SA3" item 2). `helm dependency build` resolves that
-    dependency into charts/ first, the same step gitops/tests/0.static.sh's
-    own helm lint/template steps already run for this chart."""
-    chart_ref = os.path.join(repo_root, addon_doc["dir"])
-    subprocess.run(["helm", "dependency", "build", chart_ref], capture_output=True, text=True, timeout=120)
-    name = addon_doc.get("addon", os.path.basename(chart_ref))
-    cmd = ["helm", "template", f"{name}-pinned-crd-check", chart_ref]
-    namespace = addon_doc.get("namespace")
-    if namespace:
-        cmd += ["-n", namespace, "--create-namespace"]
-    values = placeholder_values(addon_doc)
-    values_path = None
-    if values:
-        values_path = os.path.join(workdir, f"{name}-values.yaml")
-        with open(values_path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(values, f)
-        cmd += ["-f", values_path]
-    proc = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True, timeout=300)
-    if proc.returncode != 0:
-        print(f"FAIL helm template {addon_doc['dir']} (for securityContext check): {proc.stderr.strip()}")
-        return None
-    return proc.stdout
-
 
 def container_security_contexts(ds_spec):
     """Every container's own rendered securityContext in a DaemonSet's pod
