@@ -302,6 +302,15 @@ metadata:
   namespace: ${ARGOCD_NAMESPACE}
 spec:
   description: "Team ${TEAM}'s own self-service project (RFC #22 Decision 10 H11, Option A)."
+  # Required (same as the platform AppProject, gitops/bootstrap/bootstrap.sh's
+  # own Object 2): without an explicit sourceNamespaces entry naming the
+  # capability's own namespace, Argo CD refuses every Application here
+  # with "is not permitted to use project ${TEAM}" even though the
+  # Application lives in that very namespace (confirmed on real
+  # hardware -- this script's own second real e2e attempt FAILed on
+  # exactly this before this field was added).
+  sourceNamespaces:
+    - "${ARGOCD_NAMESPACE}"
   sourceRepos:${SOURCE_REPOS_YAML}
   destinations:
     - name: "${CLUSTER_NAME}"
