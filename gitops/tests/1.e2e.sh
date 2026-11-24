@@ -2563,7 +2563,8 @@ rsv_instance_terminated() {
 }
 wait_until 600 15 "reserved instance ${RSV_INSTANCE_ID} terminated" rsv_instance_terminated \
   || fail "instance ${RSV_INSTANCE_ID} was not terminated after deleting NodePool ${POOL_RSV}"
-[[ "$(list_names nodepools)" == "${NODEPOOL}" && "$(list_names ec2nodeclasses)" == "${NODECLASS}" \
+[[ "$(list_names nodepools)" == "$(printf '%s\n' "${NODEPOOL}" "${OPTIONAL_NODEPOOL}" | sort)" \
+  && "$(list_names ec2nodeclasses)" == "$(printf '%s\n' "${NODECLASS}" "${OPTIONAL_NODECLASS}" | sort)" \
   && "$(list_names resourceflavors)" == "${RESOURCEFLAVOR}" ]] \
   || fail "the cell is not back to its own pool only: NodePools [$(list_names nodepools | tr '\n' ' ')], EC2NodeClasses [$(list_names ec2nodeclasses | tr '\n' ' ')], ResourceFlavors [$(list_names resourceflavors | tr '\n' ' ')]"
 [[ "$(k get localqueues -A --no-headers 2>/dev/null | wc -l | tr -d ' ')" -eq 1 ]] \
