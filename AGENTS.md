@@ -83,14 +83,14 @@ plays two roles on the same issue, so that tests are not shaped around the
 implementation and the review is not anchored on the author's reasoning.
 The same model may back several sessions.
 
-| Role | Default model | Reads | Produces | Branch |
+| Role | Default session | Reads | Produces | Branch |
 | --- | --- | --- | --- | --- |
 | Maintainer | human, `@littlemex` | issue, pull request | agreement on the plan, the go-ahead to verify, the merge | — |
 | Orchestrator | main AI session | everything | the issue, member briefs, the pull request, status labels, the merge of the test branch into the implementation branch | — |
-| Implementer | Opus 5.5 | this file, README, the issue | the change | `<type>/<issue>-<slug>` |
-| Test author | Opus 5.5 | this file, README, the issue (not the implementation) | tests and checks derived from the acceptance criteria | `test/<issue>-<slug>` |
-| Reviewer | Fable 5.2 | this file, README, the issue, the diff, the review packs in section 7 | findings ranked by severity, each with a concrete failure scenario | — |
-| Verifier | Opus 5.5 | this file, README, the issue, the pull request | an end-to-end run on the test cluster, pasted under `## Test Results` | — |
+| Implementer | an agent session | this file, README, the issue | the change | `<type>/<issue>-<slug>` |
+| Test author | a separate agent session | this file, README, the issue (not the implementation) | tests and checks derived from the acceptance criteria | `test/<issue>-<slug>` |
+| Reviewer | a review session | this file, README, the issue, the diff, the review packs in section 7 | findings ranked by severity, each with a concrete failure scenario | — |
+| Verifier | a separate agent session | this file, README, the issue, the pull request | an end-to-end run on the test cluster, pasted under `## Test Results` | — |
 
 `<type>` is one of `feat`, `fix`, `docs`, `ci`, `refactor`, `chore`.
 
