@@ -447,7 +447,7 @@ kubectl delete application team-a-clusterrole -n "${ARGOCD_NAMESPACE}" --wait=fa
 # -------------------------------------------------     its own privileges
 
 DEPLOYER="system:serviceaccount:${TEAM}:${TEAM}-deployer"
-CAN_I_SECRETS="$(kubectl auth can-i create secrets -n "${TEAM}" --as="${DEPLOYER}")"
+CAN_I_SECRETS="$(kubectl auth can-i create secrets -n "${TEAM}" --as="${DEPLOYER}" || true)"
 [[ "${CAN_I_SECRETS}" == "no" ]] \
   || fail "kubectl auth can-i create secrets --as=${DEPLOYER} returned '${CAN_I_SECRETS}', expected no (team-onboard.sh's own Role never grants secrets)"
 ESCALATE_ERR="$(kubectl create role escalate-attempt -n "${TEAM}" \
@@ -480,7 +480,7 @@ kubectl get role "${TEAM}-deployer-role" -n "${TEAM}" -o json \
   | jq 'del(.rules[] | select(.resources == ["serviceaccounts","configmaps","pods","services"])) | .rules += [{"apiGroups":[""],"resources":["serviceaccounts","pods","services"],"verbs":["get","list","watch","create","update","patch","delete"]}]' \
   > "${WORK_DIR}/role-no-configmaps.json" || fail "jq: build role-no-configmaps.json"
 kubectl apply -f "${WORK_DIR}/role-no-configmaps.json" || fail "kubectl apply role-no-configmaps.json (remove configmaps permission)"
-CAN_I_CONFIGMAPS_AFTER="$(kubectl auth can-i create configmaps -n "${TEAM}" --as="${DEPLOYER}")"
+CAN_I_CONFIGMAPS_AFTER="$(kubectl auth can-i create configmaps -n "${TEAM}" --as="${DEPLOYER}" || true)"
 [[ "${CAN_I_CONFIGMAPS_AFTER}" == "no" ]] \
   || fail "after narrowing ${TEAM}-deployer-role, can-i create configmaps --as=${DEPLOYER} still says '${CAN_I_CONFIGMAPS_AFTER}' -- the Role edit did not take effect"
 pass "narrowed ${TEAM}-deployer-role to remove 'configmaps' (confirmed by kubectl auth can-i, not assumed from the apply's own exit code)"
