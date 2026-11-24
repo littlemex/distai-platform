@@ -45,10 +45,10 @@ app.kubernetes.io/component: {{ .component }}
 {{- if eq $t.backend "UCX" -}}
 {{- /* dig + toString: transport.ucx.tcpPortRange directly would panic with a raw
   "nil pointer evaluating interface {}.tcpPortRange" if transport.ucx is absent entirely
-  (helm upgrade --reuse-values from a pre-fix release that has no "ucx" key at all), and
+  (helm upgrade --reuse-values from a release whose stored values have no "ucx" key), and
   would fail with a generic Go-template type error ("wrong type for value; expected
-  string; got int64") instead of this chart's own message if a values file left the value
-  unquoted. dig returns "" for either a missing "ucx" key or a missing "tcpPortRange" key
+  string; got ...") instead of this chart's own message if the value is a bare number
+  (for example 20000, which arrives as float64 from a values file or int64 from --set). dig returns "" for either a missing "ucx" key or a missing "tcpPortRange" key
   instead of panicking; toString coerces an accidental int64/float64 back to a string so
   regexMatch below always gets a string to work with either way. */ -}}
 {{- $ucxRange := toString (dig "ucx" "tcpPortRange" "" $t) -}}
