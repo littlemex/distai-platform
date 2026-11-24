@@ -157,7 +157,7 @@ def container_security_contexts(ds_spec):
 
 
 # Keys whose documented Kubernetes default genuinely IS false/no-
-# enforcement (#63, Fable 5.2 review round 2 of a sibling branch):
+# enforcement (#63, review round 2 of a sibling branch):
 # "privileged" defaults to false; "runAsNonRoot" unset means no non-root
 # requirement is enforced, the same practical effect as an explicit
 # false. Anything NOT in this set -- most importantly
