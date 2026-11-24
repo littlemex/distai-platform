@@ -351,7 +351,7 @@ in this PR's own Test Results.
   override was rolled out over the chart's own privileged default on a
   live `p4d.24xlarge` node and `allocatable.vpc.amazonaws.com/efa` still
   read `4` before and after, confirmed back to back on the identical node
-  (Fable 5.2 review round 1, finding B1; not yet separately confirmed on
+  (review round 1, finding B1; not yet separately confirmed on
   a Neuron+EFA node, since EFA device enumeration does not itself depend
   on the GPU/Neuron driver but no `trn2`-class hardware was available in
   this PR's own real-machine run). `gitops/tests/check_pinned_crds.py`
@@ -359,14 +359,14 @@ in this PR's own Test Results.
   rendered container, keyed by addon name rather than read back from
   `addon.yaml`'s own values -- confirmed, with a deliberately-broken copy
   during this check's own development, to actually fail if the override
-  is weakened or dropped (Fable 5.2 review round 2, finding N6). The
+  is weakened or dropped (review round 2, finding N6). The
   reduced-privilege confirmation above was on Amazon Linux 2023, the
   only AMI family `gitops/charts/capacity-pool` uses today
   (`values.yaml`'s own `amiFamily: AL2023`, no Bottlerocket pool exists
   in this platform) -- a SELinux-enforcing host (Bottlerocket's own
   default) could plausibly deny an unprivileged container the kubelet
-  device-plugin socket's `hostPath` differently than AL2023 does (Fable
-  5.2 review round 2, finding N7); not a gap in this PR until this
+  device-plugin socket's `hostPath` differently than AL2023 does (review
+  round 2, finding N7); not a gap in this PR until this
   platform actually has a Bottlerocket pool to check it against.
   If the override is ever lost anyway (the chart bumps and renames the
   key, or a future PR removes it without that static check catching it
@@ -378,7 +378,7 @@ in this PR's own Test Results.
   resource with kubelet, nothing else), which on a Kubernetes node
   includes every co-located Pod's own service account token on disk,
   not only this one Pod's intended `/dev/infiniband` access (corrected,
-  Fable 5.2 review round 3: an earlier draft of this sentence named the
+  review round 3: an earlier draft of this sentence named the
   device-plugin socket itself as the path to other Pods' tokens, which
   it is not -- that socket only carries device-plugin registration
   traffic).

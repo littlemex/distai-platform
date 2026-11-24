@@ -207,7 +207,7 @@ SECURITY_CONTEXT_EXPECTATIONS = {
         # own default needs to read GPU profiling metrics (DCGM's perf
         # counters require it); privileged: False keeps that to exactly
         # the one capability, not the whole-device-passthrough grant
-        # "privileged" would add. Added after a Fable 5.2 review of a
+        # "privileged" would add. Added after a review of a
         # sibling branch found this entry missing the privileged: False
         # key every other entry here has -- check_security_context_
         # rendered() only compares keys present in this dict, so a
@@ -299,7 +299,7 @@ def container_security_contexts(ds_spec):
 # Keys whose documented Kubernetes default genuinely IS false/no-
 # enforcement, so a container that never sets the key at all is making
 # the same real-world claim as one that sets it to false explicitly
-# (#63, Fable 5.2 review round 2 of a sibling branch): "privileged"
+# (#63, review round 2 of a sibling branch): "privileged"
 # defaults to false; "runAsNonRoot" unset means no non-root requirement
 # is enforced, the same practical effect as an explicit false. Anything
 # NOT in this set -- most importantly allowPrivilegeEscalation, whose
@@ -315,7 +315,7 @@ ABSENT_MEANS_FALSE = {"privileged", "runAsNonRoot"}
 
 
 def check_security_context_rendered(rendered_text, expected):
-    """accel-efa-device-plugin-{nvidia,neuron} (Fable 5.2 review round 2, finding
+    """accel-efa-device-plugin-{nvidia,neuron} (review round 2, finding
     N6): an addon.yaml's own `values.securityContext` override is, like a method
     label, a real Helm value that is silently ignored if the key or nesting is
     wrong -- the same failure mode #19/#28's own review already found once for
@@ -425,7 +425,7 @@ def main(repo_root, rendered_dir):
                         print(f"FAIL {label}: the rendered chart has no DaemonSet at all to carry {mkey}={mvalue}")
                         failures += 1
 
-            # accel-efa-device-plugin-{nvidia,neuron} (Fable 5.2 review round 2,
+            # accel-efa-device-plugin-{nvidia,neuron} (review round 2,
             # finding N6): the same "a values override can be silently ignored"
             # failure mode as the method-label check above, for the
             # securityContext hardening these add-ons ship instead of the
@@ -447,7 +447,7 @@ def main(repo_root, rendered_dir):
                     print(f"FAIL {label}: the rendered chart's own container(s) do not carry the hardened securityContext ({reason})")
                     failures += 1
 
-                # Fable 5.2 review round 4: a method label alone is not enough --
+                # Review round 4: a method label alone is not enough --
                 # confirmed on real hardware that this chart's own Pod crash-loops
                 # on an EFA-capable instance type with zero physical EFA interfaces,
                 # which a method-labeled pool can have (gitops/cells/dp-a19-gpu-r3,

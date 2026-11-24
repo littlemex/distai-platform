@@ -1,6 +1,6 @@
 # Static-check input (0.static.sh): pool.networkInterfaces has an interfaceType:
 # efa-only entry but accelerator.methodLabel is unset -- exercises the
-# `or $hasMethodLabel $hasEfa` branch with only the EFA half true (Fable 5.2 review
+# `or $hasMethodLabel $hasEfa` branch with only the EFA half true (review
 # round 6's own minor gap: a regression that nested the EFA label inside the
 # $hasMethodLabel block would still pass every other fixture, since all of them that
 # set an efa-only entry also set a method label). distai.dev/efa-attached must still be

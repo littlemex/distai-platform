@@ -15,7 +15,7 @@
 # Chart source, version, pinned image digest and the securityContext
 # override: identical to accel-efa-device-plugin-nvidia/addon.yaml; not
 # repeated here. The real-hardware confirmation that the override does not
-# break EFA enumeration (Fable 5.2 review round 1, finding B1) was run
+# break EFA enumeration (review round 1, finding B1) was run
 # against a p4d.24xlarge (NVIDIA) node only -- EFA device enumeration does
 # not depend on the GPU/Neuron driver, but this release's own positive path
 # (a real trn2 node) has not been separately confirmed on real hardware in

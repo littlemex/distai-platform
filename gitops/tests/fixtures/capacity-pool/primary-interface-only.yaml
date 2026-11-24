@@ -1,7 +1,7 @@
 # Static-check input (0.static.sh): pool.networkInterfaces is non-empty (Karpenter's own
 # CEL validation requires this one primary interface entry whenever the list is used at
 # all) but carries no interfaceType: efa-only entry -- the one input where "non-empty"
-# and "has an EFA device" actually disagree (Fable 5.2 review round 6). Confirms
+# and "has an EFA device" actually disagree (review round 6). Confirms
 # distai.dev/efa-attached stays absent here; a template that regressed to
 # `len(pool.networkInterfaces) > 0` would wrongly set it and this fixture would fail.
 clusterName: static-check-cluster

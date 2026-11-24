@@ -209,7 +209,7 @@ def check_capacity_pool(name: str, values: dict, docs: list[dict]) -> None:
     want_labels = {}
     if method:
         want_labels[method["key"]] = str(method["value"])
-    # distai.dev/efa-attached (Fable 5.2 review round 5): capacity-pool's own signal
+    # distai.dev/efa-attached (review round 5): capacity-pool's own signal
     # that this pool's EC2NodeClass actually attaches an EFA device, read from
     # pool.networkInterfaces containing an interfaceType: efa-only entry -- not from
     # whether the list is merely non-empty (a pool can list only the primary
