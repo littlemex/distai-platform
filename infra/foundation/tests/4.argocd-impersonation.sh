@@ -325,7 +325,7 @@ spec:
   source:
     repoURL: https://github.com/littlemex/distai-platform.git
     targetRevision: HEAD
-    path: gitops/tests/fixtures/tenancy-argocd-impersonation/team-rbac-probe
+    path: infra/foundation/tests/fixtures/tenancy-argocd-impersonation/team-rbac-probe
   destination:
     name: "${CLUSTER}"
     namespace: ${TEAM}
@@ -358,7 +358,7 @@ spec:
   source:
     repoURL: https://github.com/littlemex/distai-platform.git
     targetRevision: HEAD
-    path: gitops/tests/fixtures/tenancy-argocd-impersonation/team-rbac-probe
+    path: infra/foundation/tests/fixtures/tenancy-argocd-impersonation/team-rbac-probe
   destination:
     name: "${CLUSTER}"
     namespace: ${OTHER_NS}
@@ -390,7 +390,7 @@ spec:
   source:
     repoURL: https://github.com/littlemex/distai-platform.git
     targetRevision: HEAD
-    path: gitops/tests/fixtures/tenancy-argocd-impersonation/clusterrole-probe
+    path: infra/foundation/tests/fixtures/tenancy-argocd-impersonation/clusterrole-probe
   destination:
     name: "${CLUSTER}"
     namespace: ${TEAM}
