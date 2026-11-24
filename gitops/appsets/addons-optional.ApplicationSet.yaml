@@ -1,0 +1,125 @@
+# RFC #41 Decision 3/4. One Application per
+# gitops/cells/<cluster-name>/addons/<addon>.yaml marker file naming a
+# gitops/addon-catalog/<name>/addon.yaml catalog entry (fromCatalog) --
+# the identical Matrix(Cluster generator, Git file generator) selected-join
+# cells.ApplicationSet.yaml already uses for capacity-pool/smoke, in its
+# own object rather than a new glob on that one (RFC #41 Decision 3's own
+# "Adopt": RollingSync's per-ApplicationSet-object scope must not couple a
+# platform-optional component's health to cells.ApplicationSet.yaml's own
+# capacity step, or to a future teams step, for every other cell).
+#
+# fromCatalog is read only by gitops/tests/check_addon_catalog_sync.py (a
+# static CI script, never an ApplicationSet selector or template field) --
+# it is a real key on every marker file this generator matches, but
+# nothing below ever references {{ .fromCatalog }}.
+#
+# base template.spec.source.path is unconditional ("{{ .dir }}", no
+# {{- if .dir }}/{{- else }} branch): RFC #41 Decision 3 requires every
+# platform-optional marker to be dir-only, never an upstream chart/repoURL/
+# version directly -- the same reason cells.ApplicationSet.yaml's own base
+# template needs no such branch either.
+#
+# RollingSync's four steps (optional-1..optional-4) are kept, not omitted,
+# for the same forward-compatibility reason platform.ApplicationSet.yaml's
+# own header comment already states (RFC #25): confirmed on a real
+# cluster that the managed Argo CD capability does not honor
+# strategy.type: RollingSync as of RFC #25's own PR (gitops/tests/1.e2e.sh
+# reads that ApplicationSet's own status.applicationStatus directly) --
+# every generated Application instead syncs independently with
+# automated.selfHeal, and a dependent pair (a future catalog entry's own
+# dependsOn) converges by retry, not by step ordering, exactly like
+# platform.ApplicationSet.yaml's crds->controllers chain already does.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: addons-optional
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=zero"]
+  generators:
+    - matrix:
+        generators:
+          - clusters:
+              selector:
+                matchLabels:
+                  argocd.argoproj.io/secret-type: cluster
+          - git:
+              repoURL: https://github.com/littlemex/distai-platform.git
+              revision: '{{ index .metadata.annotations "distai.dev.annotations/revision" }}'
+              files:
+                - path: "gitops/cells/{{ .name }}/addons/*.yaml"
+  # RFC #25 Decision 8, RFC #41 Decision 4: a marker file removed, or a
+  # cell briefly unmatched, orphans that component's resources instead of
+  # deleting them -- the same reason platform.ApplicationSet.yaml and
+  # cells.ApplicationSet.yaml both set this.
+  syncPolicy:
+    preserveResourcesOnDeletion: true
+  strategy:
+    type: RollingSync
+    rollingSync:
+      steps:
+        - matchExpressions:
+            - key: distai.dev/wave
+              operator: In
+              values: ["optional-1"]
+        - matchExpressions:
+            - key: distai.dev/wave
+              operator: In
+              values: ["optional-2"]
+        - matchExpressions:
+            - key: distai.dev/wave
+              operator: In
+              values: ["optional-3"]
+        - matchExpressions:
+            - key: distai.dev/wave
+              operator: In
+              values: ["optional-4"]
+  template:
+    metadata:
+      name: "{{ .name }}-{{ .addon }}"
+      labels:
+        distai.dev/wave: "{{ .wave }}"
+        distai.dev/cell: "{{ .name }}"
+    spec:
+      project: platform
+      source:
+        repoURL: https://github.com/littlemex/distai-platform.git
+        targetRevision: '{{ index .metadata.annotations "distai.dev.annotations/revision" }}'
+        path: "{{ .dir }}"
+      destination:
+        name: "{{ .name }}"
+        namespace: "{{ .namespace }}"
+      syncPolicy:
+        automated:
+          selfHeal: true
+          prune: true
+        retry:
+          limit: 20
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 5m
+        syncOptions:
+          - CreateNamespace=true
+  templatePatch: |
+    spec:
+      source:
+        helm:
+          {{- if .skipCrds }}
+          skipCrds: true
+          {{- end }}
+          {{- if .values }}
+          valuesObject:
+            {{- toYaml .values | nindent 12 }}
+          {{- end }}
+          {{- if .valuesFrom }}
+          parameters:
+          {{- range .valuesFrom }}
+          - name: {{ .helmKey }}
+            {{- if .param }}
+            value: "{{ index $ .param }}"
+            {{- else }}
+            value: "{{ index $.metadata.annotations .annotationKey }}"
+            {{- end }}
+          {{- end }}
+          {{- end }}

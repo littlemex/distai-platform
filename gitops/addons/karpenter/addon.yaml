@@ -29,6 +29,8 @@
 # match, and vice versa (RFC #25 Decision 6) - checked mechanically by the
 # upgrade e2e's version-pair check, not by anything in this file.
 addon: karpenter
+# RFC #41 Decision 1: delivered unconditionally to every cell, no opt-out.
+tier: core
 chart: karpenter
 repoURL: public.ecr.aws/karpenter
 version: "1.15.2"

@@ -287,6 +287,35 @@ def check_method_label_rendered(label, rendered_text, key, value):
     return None if not found_any_daemonset else False
 
 
+def helm_template_dir_chart(addon_doc, repo_root, workdir):
+    """Same idea as helm_template_chart, for a local dir:-sourced chart
+    (gitops/addon-catalog/<name>/addon.yaml) instead of a registry one --
+    dcgm-exporter's own wrapper around an upstream `dependencies:` entry
+    is the one that needs this (#63, independent security-axis review
+    pass, filed as "SA3" item 2). `helm dependency build` resolves that
+    dependency into charts/ first, the same step gitops/tests/0.static.sh's
+    own helm lint/template steps already run for this chart."""
+    chart_ref = os.path.join(repo_root, addon_doc["dir"])
+    subprocess.run(["helm", "dependency", "build", chart_ref], capture_output=True, text=True, timeout=120)
+    name = addon_doc.get("addon", os.path.basename(chart_ref))
+    cmd = ["helm", "template", f"{name}-pinned-crd-check", chart_ref]
+    namespace = addon_doc.get("namespace")
+    if namespace:
+        cmd += ["-n", namespace, "--create-namespace"]
+    values = placeholder_values(addon_doc)
+    values_path = None
+    if values:
+        values_path = os.path.join(workdir, f"{name}-values.yaml")
+        with open(values_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(values, f)
+        cmd += ["-f", values_path]
+    proc = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0:
+        print(f"FAIL helm template {addon_doc['dir']} (for securityContext check): {proc.stderr.strip()}")
+        return None
+    return proc.stdout
+
+
 def container_security_contexts(ds_spec):
     """Every container's own rendered securityContext in a DaemonSet's pod
     template (init and regular; a dropped-privilege override on one and not
@@ -315,15 +344,25 @@ ABSENT_MEANS_FALSE = {"privileged", "runAsNonRoot"}
 
 
 def check_security_context_rendered(rendered_text, expected):
-    """accel-efa-device-plugin-{nvidia,neuron} (Fable 5.2 review round 2, finding
-    N6): an addon.yaml's own `values.securityContext` override is, like a method
-    label, a real Helm value that is silently ignored if the key or nesting is
-    wrong -- the same failure mode #19/#28's own review already found once for
-    `nodeSelector`. This asserts the *exact pinned chart's* own rendered
-    DaemonSet actually carries the override on every one of its containers, not
-    merely that `addon.yaml` declares it. Returns (True, "") or (False, reason).
-    No DaemonSet in the chart's output at all is reported as a reason, not a
-    silent pass -- that would otherwise look identical to "override lost"."""
+    """Checked against the exact pinned chart's own rendered output, for
+    two kinds of entry in SECURITY_CONTEXT_EXPECTATIONS:
+    accel-efa-device-plugin-{nvidia,neuron} (Fable 5.2 review round 2,
+    finding N6), whose addon.yaml's own `values.securityContext` override
+    is, like a method label, a real Helm value that is silently ignored
+    if the key or nesting is wrong -- the same failure mode #19/#28's own
+    review already found once for `nodeSelector`; and dcgm-exporter (#63,
+    filed as "SA3" item 2), whose own hardening (allowPrivilegeEscalation:
+    false, capabilities add SYS_ADMIN/drop ALL, runAsNonRoot: false,
+    runAsUser: 0) is kept here rather than read back from addon.yaml's own
+    values on purpose, since that file sets no override of its own --
+    reading the expectation from the same file being checked would pass
+    trivially the moment that file's own override is weakened or dropped.
+    This asserts the *exact pinned chart's* own rendered DaemonSet
+    actually carries the override on every one of its containers, not
+    merely that `addon.yaml` declares it. Returns (True, "") or (False,
+    reason). No DaemonSet in the chart's output at all is reported as a
+    reason, not a silent pass -- that would otherwise look identical to
+    "override lost"."""
     found_any_daemonset = False
     mismatches = []
     for doc in yaml.safe_load_all(rendered_text):
@@ -353,18 +392,18 @@ def check_security_context_rendered(rendered_text, expected):
 def main(repo_root, rendered_dir):
     failures = 0
     served = {}
-    # Every addon.yaml label this run actually found (registry or catalog,
-    # regardless of whether it carries a securityContext expectation),
-    # versus every label whose SECURITY_CONTEXT_EXPECTATIONS entry was
-    # actually exercised below (#63): a label this run DID find, that is
-    # also in SECURITY_CONTEXT_EXPECTATIONS, but whose own entry skipped
-    # check_security_context_rendered() for some other reason (a catalog
-    # entry with no "dir" key, for example) is a shape this expectation
-    # table assumed cannot happen -- comparing the two sets below turns
-    # that into a FAIL instead of a silent no-op, the exact "a check
-    # never actually ran" risk this whole file exists to catch. This
-    # does NOT catch the addon or catalog entry's own `addon:` field (or
-    # its directory name) being renamed or mistyped: a typo changes
+    # Every addon.yaml/addon-catalog label this run actually found (either
+    # loop below, regardless of whether it carries a securityContext
+    # expectation), versus every label whose SECURITY_CONTEXT_EXPECTATIONS
+    # entry was actually exercised below (#63): a label this run DID find,
+    # that is also in SECURITY_CONTEXT_EXPECTATIONS, but whose own entry
+    # skipped check_security_context_rendered() for some other reason (a
+    # catalog entry with no "dir" key, for example) is a shape this
+    # expectation table assumed cannot happen -- comparing the two sets
+    # below turns that into a FAIL instead of a silent no-op, the exact
+    # "a check never actually ran" risk this whole file exists to catch.
+    # This does NOT catch the addon or catalog entry's own `addon:` field
+    # (or its directory name) being renamed or mistyped: a typo changes
     # which string labels_seen holds too, so the expected label vanishes
     # from both sets at once and the comparison sees nothing to flag --
     # indistinguishable, from this script's own point of view, from a

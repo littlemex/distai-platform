@@ -1,0 +1,70 @@
+# clusterName/nodeRole: same contract as gitops/charts/capacity-pool
+# (RFC #25 Decision 2) -- no default is safe, both are cell-specific and
+# come from gitops/addons/optional-pool/addon.yaml's own valuesFrom.
+clusterName: ""
+nodeRole: ""
+
+# RFC #41 Decision 4 Finding 1, option (b) (recommended there, NOT YET
+# a maintainer decision -- see gitops/addons/optional-pool/addon.yaml's
+# own header comment and issue #41's own comments). This value is set
+# once in that one addon.yaml for the whole platform, not per cell (this
+# chart's own values.yaml carries no cell-specific switch) -- flipping
+# it to false renders nothing on every cell at once, the Finding's
+# option (a) instead (extend CriticalAddonsOnly tolerations on the
+# system node group case by case as new platform-optional components
+# are catalogued -- no chart exists for that option, since it needs no
+# chart of its own, only a toleration added to each future component's
+# own values).
+enabled: true
+
+pool:
+  # Shared by the NodePool and its EC2NodeClass. Must not collide with any
+  # capacity-pool pool.name in the same cell (both charts create
+  # cluster-scoped NodePool/EC2NodeClass objects by this name).
+  # "optional-pool", not the chart's own directory-derived short form
+  # ("optional") this value used to carry (#63, filed as #58): the
+  # rendered object's own name is what gitops/README.md's "Adding a
+  # cell" table already calls it, and what `kubectl get nodepool` should
+  # actually find.
+  name: optional-pool
+
+  # The one capacity type this pool launches - always "on-demand" (an
+  # admin component should not be evicted by a Spot interruption), but
+  # the same field name and the same validation as gitops/charts/
+  # capacity-pool's own pool.capacityType (#63, filed as #58 Option A),
+  # not a chart-specific shortcut. See templates/_helpers.tpl.
+  capacityType: on-demand
+
+  # Deliberately small and fixed: this pool exists for admin-delivered
+  # platform-optional component pods only (Decision 1's own definition),
+  # never team/workload capacity (gitops/charts/capacity-pool's own job).
+  limits:
+    cpu: "8"
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 60s
+
+  # Every other scheduling requirement. Must not contain
+  # karpenter.sh/capacity-type (the render fails if it does): capacityType
+  # above is the only place the capacity type is declared - the same
+  # nesting and the same rule as gitops/charts/capacity-pool's own
+  # pool.requirements, not a top-level requirements: key of this chart's
+  # own (#63, filed as #58 Option A: the two charts used to disagree on
+  # where this list lives).
+  requirements:
+    - key: kubernetes.io/arch
+      operator: In
+      values: ["amd64"]
+    - key: karpenter.k8s.aws/instance-category
+      operator: In
+      values: ["c", "m", "r"]
+    - key: karpenter.k8s.aws/instance-generation
+      operator: Gt
+      values: ["5"]
+
+# Pinned, not "latest", and identical to gitops/charts/capacity-pool's own
+# pin (see that chart's values.yaml for where al2023@v20261112 was
+# confirmed) -- a reviewed diff bumps both together.
+amiFamily: AL2023
+amiSelectorTerms:
+  - alias: al2023@v20261112

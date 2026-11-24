@@ -108,14 +108,14 @@ def main(root: str) -> int:
     # Every directory under addons/ has exactly one addon.yaml, and that
     # file is independently structurally valid (checked below via
     # check_addon_yaml). An earlier version of this check asserted an
-    # exact, hand-typed set of directory names instead; this PR (#28,
-    # adding five accelerator-step add-ons) and #41 each extended their
-    # own copy of that literal for their own addons, so the merged tree's
-    # real addon count matched neither copy and the check failed
-    # regardless of which PR landed second (#63, filed as #55). This
-    # directory-shape check is derived from the filesystem, like
-    # sourceRepos already is in bootstrap.sh, and needs no further edit
-    # as addons/ grows; the three addon.yaml files RFC #25's own
+    # exact, hand-typed set of directory names instead; #28 (adding five
+    # accelerator-step add-ons) and #41 (adding optional-pool) each
+    # extended their own copy of that literal for their own addons, so
+    # the merged tree's real addon count matched neither copy and the
+    # check failed regardless of which PR landed second (#63, filed as
+    # #55). This directory-shape check is derived from the filesystem,
+    # like sourceRepos already is in bootstrap.sh, and needs no further
+    # edit as addons/ grows; the three addon.yaml files RFC #25's own
     # Decisions discuss by name are still checked explicitly below,
     # independent of this generic shape check.
     addon_dirs = sorted(
@@ -374,6 +374,10 @@ def main(root: str) -> int:
 
     check_applicationset(os.path.join(gitops, "appsets/platform.ApplicationSet.yaml"), {"crds", "controllers", "accelerators"})
     check_applicationset(os.path.join(gitops, "appsets/cells.ApplicationSet.yaml"), {"capacity"})
+    check_applicationset(
+        os.path.join(gitops, "appsets/addons-optional.ApplicationSet.yaml"),
+        {"optional-1", "optional-2", "optional-3", "optional-4"},
+    )
 
     # #28 Interface: "rollingSync.steps gains one step matching
     # distai.dev/wave In [accelerators], after controllers". The set check

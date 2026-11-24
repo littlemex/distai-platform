@@ -1,0 +1,13 @@
+apiVersion: v2
+name: optional-pool
+description: >-
+  One admin-owned, untainted, on-demand CPU Karpenter NodePool and its
+  EC2NodeClass, created in every cell, as the place platform-optional
+  component pods land instead of the system node group or a team's own
+  capacity pool (RFC #41 Decision 4 Finding 1, option (b)).
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+home: https://github.com/littlemex/distai-platform
+sources:
+  - https://github.com/littlemex/distai-platform

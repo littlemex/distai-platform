@@ -1,0 +1,117 @@
+dcgm-exporter:
+  # Pinned by digest (#63, independent security-axis review pass, filed
+  # as "SA3"): the chart's own default leaves image.tag empty and falls
+  # back to .Chart.AppVersion (4.9.0, a mutable tag any re-push can move),
+  # unlike the EFA add-ons, which already pin their own image by digest.
+  # Digest confirmed against the registry's own v2 manifest API,
+  # 2026-11-22 (nvcr.io/v2/nvidia/k8s/dcgm-exporter/manifests/4.9.0,
+  # docker-content-digest response header) -- Helm's image.tag accepts a
+  # "tag@digest" value and renders it verbatim (confirmed on a real
+  # render: image: "nvcr.io/nvidia/k8s/dcgm-exporter:4.9.0@sha256:...");
+  # there is no separate digest field this chart's own values.yaml
+  # exposes.
+  #   nvcr.io/nvidia/k8s/dcgm-exporter:4.9.0
+  #   sha256:2490e1dfb5baaee6765ef2841813af7d978bb459a566c22c326a8fc27c64eea9
+  image:
+    tag: "4.9.0@sha256:2490e1dfb5baaee6765ef2841813af7d978bb459a566c22c326a8fc27c64eea9"
+
+  # Embedded DCGM (config.sources.dcgm.hostengine left unset -- no change
+  # needed, the upstream chart has no values.yaml key for this, only a
+  # config.yaml comment) plus hostNetwork: false and a ClusterIP Service
+  # on port 9400 together avoid the EKS Node Monitoring Agent's
+  # dcgm-server hostPort 5555 conflict distributed-ai's observability.tf
+  # documents for the GPU Operator's bundled, host-network DCGM DaemonSet
+  # (RFC #41 Facts checked). hostNetwork is set explicitly here, not left
+  # to the upstream chart's own default (RFC #41 Decision 5 row 2: "baking
+  # in whatever this platform's own required defaults are") -- a future
+  # version bump that silently flips the upstream default would otherwise
+  # reintroduce the conflict with no diff in this repository to catch it.
+  hostNetwork: false
+
+  # Also pinned explicitly, for the same reason as hostNetwork and image
+  # above (#63/"SA3"): these are the upstream chart's own 4.9.0 defaults
+  # (confirmed by rendering the chart with no override), copied here so a
+  # future version bump that silently changes either needs a reviewed
+  # diff in this repository before it takes effect. hostPID: false and
+  # dropping every capability except the one this component's whole
+  # purpose needs (see README "Security notes" for why SYS_ADMIN, not
+  # runAsNonRoot, is the capability this component cannot drop) are the
+  # two settings DA-50 (review-html pack) asks a privileged helper Pod to
+  # pin explicitly, not inherit.
+  hostPID: false
+  podSecurityContext: {}
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      add: ["SYS_ADMIN"]
+      drop: ["ALL"]
+    runAsNonRoot: false
+    runAsUser: 0
+
+  # Also set explicitly rather than left to the upstream default, for the
+  # same reason as hostNetwork above: these are the upstream chart's own
+  # 4.9.0 defaults, copied here so a future version bump changing them
+  # needs a reviewed diff in this repository before it takes effect.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+      ephemeral-storage: 100Mi
+    limits:
+      cpu: 200m
+      memory: 512Mi
+
+  # RFC #41's own monitoring-components comment: this cell has no
+  # Prometheus Operator CRDs yet (no `prometheus` catalog entry on this
+  # PR), so a ServiceMonitor object here would dangle with no controller
+  # to read it. Metrics are exposed on the plain ClusterIP Service (port
+  # 9400) only; wire scraping up once the `prometheus` catalog entry
+  # ships.
+  serviceMonitor:
+    enabled: false
+
+  # GPU nodes only, including a tainted one (#33's own acceptance
+  # criterion: "a wildcard toleration so it lands on every GPU node
+  # including tainted ones"). karpenter.k8s.aws/instance-gpu-manufacturer
+  # is a Karpenter-for-AWS well-known label, populated automatically from
+  # each EC2 instance type's own spec -- no device-plugin/DRA advertiser
+  # (RFC #19's accel-* charts, not merged into this repository yet) or GPU
+  # Operator/NFD label needed. This is also why dcgm-exporter needs no
+  # capacity-pool of its own: it schedules onto whatever GPU NodePool a
+  # cell already has, team-owned or admin-owned -- never onto optional-pool
+  # (CPU-only, RFC #41 Decision 4 Finding 1).
+  nodeSelector:
+    karpenter.k8s.aws/instance-gpu-manufacturer: nvidia
+  tolerations:
+    - operator: Exists
+
+  # The chart's own default is system-node-critical; overridden to an
+  # empty string (the upstream DaemonSet template then renders no
+  # priorityClassName at all) deliberately: that class lets the kubelet
+  # evict other pods on the node to admit this one, a priority reserved
+  # for what the node cannot run without. dcgm-exporter is not on the
+  # critical boot path the way karpenter/kueue are (RFC #41 Decision 1's
+  # own core/platform-optional split), so it must never displace a
+  # team's training pod on a GPU node.
+  priorityClassName: ""
+
+  networkPolicy:
+    enabled: true
+    # Deny by default (#63, independent security-axis review, filed as
+    # "SA4"): no monitoring namespace or scraper exists yet in this
+    # repository (the `prometheus` catalog entry is a later PR, and
+    # `serviceMonitor.enabled` above is false), so there is no in-cluster
+    # consumer this metrics port needs to be reachable from today. An
+    # empty allowedPeers list renders the upstream chart's own
+    # NetworkPolicy with `ingress: []` (checked directly against the
+    # rendered manifest, 2026-11-22) -- every other pod in the cluster is
+    # denied, not only every other namespace, which is the platform's own
+    # default-deny-and-name-the-exception posture (gitops/README.md
+    # "NetworkPolicy defaults"). This is a functional no-op today (nothing
+    # scrapes port 9400 yet) and a real narrowing the day something does:
+    # a cell wiring up a real scraper overrides
+    # `dcgm-exporter.networkPolicy.allowedPeers` itself
+    # (`overridableKeys`, gitops/addon-catalog/dcgm-exporter/addon.yaml)
+    # with that scraper's own identity (a podSelector/namespaceSelector
+    # naming it), never a blanket `namespaceSelector: {}` again.
+    allowedPeers: []
