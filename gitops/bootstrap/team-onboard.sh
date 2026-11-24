@@ -1,72 +1,83 @@
 #!/usr/bin/env bash
 # gitops/bootstrap/team-onboard.sh - RFC #22 Decision 10 H11.
 #
-# *** WARNING, READ BEFORE USING THIS SCRIPT ON A REAL TEAM ***
-# This script's own AppProject (step 4 below) allows Role/RoleBinding in
-# namespaceResourceWhitelist and sets destinationServiceAccounts, on the
-# premise that Argo CD sync impersonation would then be the real
-# boundary (#22 Decision 10 H11 "Option A", issue #57 item 1's own
-# comparison table). infra/foundation/tests/4.argocd-impersonation.sh's
-# own real-hardware check (2026-11-25, its own eighth attempt, checks
-# 1-5, see that file's header) found impersonation is NOT actually
-# engaged on the EKS managed Argo CD capability: there is no
-# customer-reachable way to set `application.sync.impersonation.enabled`
-# (no argocd-cm in this namespace; `aws eks create-capability help`'s own
-# `argoCd` configuration object has no such field either), and a
-# differential test confirmed Argo CD still syncs with its own
-# capability-wide identity regardless of what the team's own
-# ServiceAccount's Role says. **This means allowing Role/RoleBinding
-# here is not merely ineffective, it is unsafe**: a team's own chart
-# could ship a RoleBinding to an existing, more privileged ClusterRole
-# (or a Role granting broad permissions) and Argo CD's own unconstrained
-# identity will apply it, since the RBAC-escalation check only fires
-# against the actual caller, never the team here (checked and reasoned
-# through in that test's own header, not independently exploited by this
-# script). Filed to the upstream tracking issue (#49). Do not run this
-# script's own AppProject step against a real team's namespace until
-# either AWS exposes a way to activate impersonation, or this script is
-# changed to go back to H11's original deny (remove Role/RoleBinding
-# from the whitelist below, and do not rely on destinationServiceAccounts
-# for safety).
+# issue #57's own goal (unchanged by any of this file's history): a team
+# installs a chart shipping its own namespaced Role/RoleBinding into its
+# own namespace with no admin pre-creating that RBAC by hand. The first
+# version of this script tried to get there via Argo CD sync
+# impersonation (#22 Decision 10 H11 "Option A", issue #57 item 1's own
+# comparison table): make the team's own ServiceAccount the real actor,
+# and let the Kubernetes API server's own RBAC-escalation check be the
+# boundary. infra/foundation/tests/4.argocd-impersonation.sh's own
+# real-hardware differential check found that premise false: Argo CD
+# sync impersonation is not engaged on the EKS managed Argo CD
+# capability (no customer-reachable way to set
+# `application.sync.impersonation.enabled`; destinationServiceAccounts
+# is accepted by the AppProject CRD's schema but has no observed
+# effect), so every sync still runs as the capability's own identity --
+# which `infra/foundation/argocd.tf`'s own comment on
+# aws_eks_access_policy_association.argocd confirms is bound to
+# AmazonEKSClusterAdminPolicy, i.e. already holds every permission there
+# is. An escalation check against an identity that already holds
+# everything never fires, no matter how narrow the team's own
+# ServiceAccount's Role (step 3 below) is kept -- that Role is never the
+# identity actually performing the write. Narrowing it is still useful
+# (a direct caller using this identity, e.g. kubectl --as, IS checked
+# against it -- infra/foundation/tests/4.argocd-impersonation.sh's own
+# check 4), but it does not by itself make Role/RoleBinding safe to
+# whitelist for Argo CD's own sync.
 #
-# What this records (issue #57 item 1's own comparison table, Option A):
-# before this script, #22's own team AppProject did not exist in code
-# (confirmed on issue #57's own comment thread), and H11 as originally
-# written put RoleBinding on every team project's
-# namespaceResourceBlacklist outright -- a blanket deny that issue #57
-# found refuses any chart shipping its own namespaced RBAC (exactly what
-# examples/inference/vllm/disagg-pd-llmd's sidecar needs). Option A would
-# have fixed that by making the Kubernetes API server's own RBAC
-# authorizer the real boundary instead of an Argo CD resource-kind list
-# -- but it needs sync impersonation to actually be honored, which the
-# real-hardware check above found it is not on this capability today.
-# Option A is therefore NOT adopted; #22 Decision 10 H11's original deny
-# stays in force for any team actually onboarded with this script.
+# The actual fix (gitops/bootstrap/team-rbac-guard.yaml, applied by step
+# 1 below, cluster-wide): a ValidatingAdmissionPolicy that runs for
+# every Role/RoleBinding write in a team namespace regardless of who
+# the caller is -- including Argo CD's own cluster-admin-equivalent sync
+# identity, since admission runs after authorization already let the
+# request through, independent of the caller's own RBAC. It denies the
+# specific shapes that would otherwise let a team's own chart grant
+# itself (or anyone) more than intended: a RoleBinding referencing a
+# ClusterRole (cluster-admin among them), and a Role granting
+# escalate/bind/impersonate, any rbac.authorization.k8s.io permission, a
+# wildcard apiGroup/resource/verb, or any permission on Secrets. With
+# that guard in place, Role and RoleBinding are back in the team
+# AppProject's own namespaceResourceWhitelist (step 4) -- issue #57's
+# own goal is restored, on an admission-based boundary instead of an
+# RBAC-escalation-based one that this capability does not actually
+# enforce for Argo CD's own identity.
 #
 # What this script creates, run once per team by an admin (or an admin's
 # own automation -- never by a team's own Application, which is exactly
 # the boundary this design keeps):
-#   1. (idempotent, cluster-wide, not per-team, best-effort -- see the
-#      code's own comment) attempts to enable Argo CD sync impersonation
-#      in argocd-cm; on this capability it always finds no such
-#      ConfigMap and logs a warning instead of failing, since that is
-#      the now-confirmed, expected state, not an error in this script.
-#   2. the team's own Namespace (if it does not already exist).
+#   1. (cluster-wide, not per-team, idempotent) the team-rbac-guard
+#      ValidatingAdmissionPolicy/Binding (gitops/bootstrap/team-rbac-guard.yaml
+#      verbatim), the real boundary described above. Also attempts to
+#      enable Argo CD sync impersonation in argocd-cm, best-effort (see
+#      the code's own comment): on this capability it always finds no
+#      such ConfigMap and logs a warning instead of failing, since that
+#      is the now-confirmed, expected state -- kept only so this starts
+#      working with no further change if AWS ever fixes the underlying
+#      gap; nothing here currently depends on it succeeding.
+#   2. the team's own Namespace (if it does not already exist), labeled
+#      distai.dev/team -- what team-rbac-guard.yaml's own
+#      namespaceSelector matches on.
 #   3. the team's own ServiceAccount + namespace-scoped Role + RoleBinding
 #      -- a team identity usable for a direct caller (kubectl --as, or a
-#      future human/pod identity path), kept for that purpose even
-#      though it does NOT currently constrain Argo CD's own sync
-#      (checks above). Deliberately excludes: anything cluster-scoped,
-#      the "escalate"/"bind"/"impersonate" RBAC verbs, and Secrets.
+#      future human/pod identity path; checked directly by
+#      infra/foundation/tests/4.argocd-impersonation.sh's own check 4).
+#      Deliberately excludes: anything cluster-scoped, the
+#      "escalate"/"bind"/"impersonate" RBAC verbs, and Secrets -- the
+#      same ceiling team-rbac-guard.yaml enforces on any Role a team's
+#      own chart ships, kept here too so a direct caller using this
+#      identity is held to the same standard.
 #   4. the team's own AppProject: destinationServiceAccounts is set
 #      (harmless today since it has no observed effect; kept so this
 #      starts working with no further change if AWS ever fixes the
 #      underlying gap), destinations restricted to exactly this one
 #      namespace, clusterResourceWhitelist empty (teams get zero
 #      cluster-scoped kinds through GitOps, full stop), and
-#      namespaceResourceWhitelist covering namespaced workload kinds a
-#      team's own chart may ship -- deliberately NOT Role/RoleBinding
-#      (see the warning above).
+#      namespaceResourceWhitelist covering the namespaced workload kinds
+#      a team's own chart may ship, including Role and RoleBinding --
+#      safe because team-rbac-guard.yaml (step 1) constrains their
+#      content regardless of sync identity.
 #
 # Deliberately NOT created here (left to a later PR, so this one stays
 # checkable against what it actually claims):
@@ -229,6 +240,20 @@ else
   echo "WARNING: no argocd-cm ConfigMap exists in namespace ${ARGOCD_NAMESPACE} -- this looks like the EKS managed Argo CD capability, whose own control plane (and therefore argocd-cm) runs outside this cluster and is not customer-reachable; continuing WITHOUT being able to confirm this cluster-wide flag is set. Whether destinationServiceAccounts below actually impersonates without it is unconfirmed by this script alone." >&2
 fi
 
+# --- 1a. the real boundary: team-rbac-guard (cluster-wide, once) ---------
+# Applied verbatim from the sibling file so there is exactly one copy of
+# this policy's own text (this script's own header explains why it is
+# needed regardless of whether step 1 above ever succeeds). Idempotent
+# kubectl apply, like every other object this script creates; both
+# objects are cluster-scoped (a ValidatingAdmissionPolicy/Binding is not
+# itself per-namespace -- its own namespaceSelector is what scopes which
+# namespaces it actually constrains), so this is safe to re-run for
+# every team onboarded without creating a second copy.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+kubectl apply -f "${SCRIPT_DIR}/team-rbac-guard.yaml" \
+  || { echo "kubectl apply gitops/bootstrap/team-rbac-guard.yaml" >&2; exit 1; }
+echo "applied gitops/bootstrap/team-rbac-guard.yaml (ValidatingAdmissionPolicy team-rbac-guard + its Binding)" >&2
+
 # --- 2. the team's own Namespace ------------------------------------------
 kubectl apply -f - <<EOF
 apiVersion: v1
@@ -348,20 +373,25 @@ spec:
       kind: Pod
     - group: ""
       kind: Service
-    # Role and RoleBinding are deliberately NOT here (H11's original
-    # deny, restored): infra/foundation/tests/4.argocd-impersonation.sh's
-    # own real-hardware finding (2026-11-25) is that Argo CD sync
-    # impersonation is not actually engaged on this capability, so
-    # allowing a team's own chart to ship these kinds would let Argo
-    # CD's own unconstrained, capability-wide identity apply whatever
-    # RBAC that chart contains -- including a RoleBinding to an
-    # existing, more privileged ClusterRole -- with no escalation check
-    # against the team at all (see this script's own header warning).
-    # team-a-deployer-role above still grants this ServiceAccount itself
-    # roles/rolebindings verbs, which is unaffected by this: that Role
-    # only governs direct callers using this identity (e.g. the
-    # escalation check this repository's own test exercises with
-    # kubectl --as), never what an Argo CD Application may sync.
+    # Role and RoleBinding ARE here (issue #57's own goal), safe only
+    # because team-rbac-guard.yaml (step 1a above) constrains their
+    # content regardless of sync identity -- not because Argo CD sync
+    # impersonation constrains who performs the write (confirmed NOT
+    # engaged on this capability, infra/foundation/tests/4.argocd-impersonation.sh's
+    # own check 6). Without that guard, allowing these two kinds here
+    # would let a team's own chart ship a RoleBinding to an existing,
+    # more privileged ClusterRole, or a Role granting broad permissions,
+    # and Argo CD's own unconstrained, capability-wide sync identity
+    # would apply it with no RBAC-escalation check against the team at
+    # all (this script's own header explains why that check never
+    # fires for that identity). This whitelist entry and
+    # team-rbac-guard.yaml's own existence are therefore not
+    # independent of each other -- removing the guard without also
+    # removing Role/RoleBinding here would reopen the gap.
+    - group: "rbac.authorization.k8s.io"
+      kind: Role
+    - group: "rbac.authorization.k8s.io"
+      kind: RoleBinding
     - group: "apps"
       kind: Deployment
     - group: "apps"

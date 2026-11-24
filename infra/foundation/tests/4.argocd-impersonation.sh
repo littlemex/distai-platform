@@ -1,79 +1,91 @@
 #!/usr/bin/env bash
-# Real-hardware check of whether Argo CD sync impersonation actually runs
-# on the EKS managed Argo CD capability -- issue #22 Decision 10 H11,
-# issue #57 item 1, closing the one thing an earlier real-hardware probe
-# (recorded as comments on #56/#57 and a fact update to #22) left open:
-# that probe confirmed the live AppProject CRD's own OpenAPI schema
-# declares spec.destinationServiceAccounts and the value round-trips
-# unchanged on a real `kubectl apply`, but it built foundation + the
-# capability only, with no delivered Application, so it never attempted
-# one real impersonated sync. This script does, and the confirmed answer
-# (checks 1-6 below, real hardware, 2026-11-25) is: **no, it does not**.
-# destinationServiceAccounts is accepted by the AppProject CRD's own
-# schema but has no observed effect, because there is no
+# Real-hardware check of issue #57's own goal -- a team installs a
+# chart shipping its own namespaced Role/RoleBinding into its own
+# namespace with no admin pre-creating that RBAC by hand -- and of #22
+# Decision 10 H11's own two candidate boundaries for making that safe:
+# Argo CD sync impersonation ("Option A") and an admission-time guard
+# (gitops/bootstrap/team-rbac-guard.yaml). Closes the one thing an
+# earlier real-hardware probe (recorded as comments on #56/#57 and a
+# fact update to #22) left open: that probe confirmed the live
+# AppProject CRD's own OpenAPI schema declares
+# spec.destinationServiceAccounts and the value round-trips unchanged on
+# a real `kubectl apply`, but it built foundation + the capability only,
+# with no delivered Application, so it never attempted one real
+# impersonated sync.
+#
+# CONFIRMED ANSWER, real hardware, 2026-11-25 (check 7 below): Argo CD
+# sync impersonation is **not** engaged on the EKS managed Argo CD
+# capability. destinationServiceAccounts is accepted by the AppProject
+# CRD's own schema but has no observed effect, because there is no
 # customer-reachable way to set `application.sync.impersonation.enabled`
-# (a documented upstream prerequisite for the feature) on this managed
-# capability -- its own namespace holds no argocd-cm at all (checks
-# below), and `aws eks create-capability help`'s own `argoCd`
-# configuration object (namespace, awsIdc, rbacRoleMappings,
-# networkAccess) has no such field either. Filed to the upstream tracking
-# issue (#49). #22 Decision 10 H11 Option A ("same-namespace
-# Role/RoleBinding on team projects, synced through a per-team identity")
-# is therefore NOT adopted by this PR; gitops/bootstrap/team-onboard.sh's
-# own AppProject keeps H11's original deny (no Role/RoleBinding in its
-# namespaceResourceWhitelist), which checks 1b and 6 below both exercise.
+# (a documented upstream prerequisite for the feature) -- this
+# capability's own namespace holds no argocd-cm at all, and
+# `aws eks create-capability help`'s own `argoCd` configuration object
+# (namespace, awsIdc, rbacRoleMappings, networkAccess) has no such field
+# either. Filed to the upstream tracking issue (#49). Option A is
+# therefore NOT adopted for safety on its own. Because every sync still
+# runs as the capability's own identity, which
+# infra/foundation/argocd.tf's own comment confirms is bound to
+# AmazonEKSClusterAdminPolicy (already holds every permission there is),
+# the Kubernetes RBAC-escalation check never fires for that identity no
+# matter what any team's own ServiceAccount's Role says -- checks 2 and
+# 3 below show this concretely, including the actual exploit shape
+# (a RoleBinding to the built-in cluster-admin ClusterRole).
+#
+# The boundary that actually works regardless of sync identity:
+# gitops/bootstrap/team-rbac-guard.yaml, a ValidatingAdmissionPolicy
+# that runs for every Role/RoleBinding write in a team namespace no
+# matter who the caller is (admission runs after authorization already
+# let the request through). With that guard in place,
+# gitops/bootstrap/team-onboard.sh's own AppProject whitelists
+# Role/RoleBinding again -- #57's own goal is restored (check 2) -- and
+# the guard itself refuses the one shape that would otherwise reopen the
+# gap (check 3).
 #
 # What this checks, each against the real API server (not a dry run):
 #   1. a team's own Application, in its own team AppProject, self-syncs
 #      an ordinary, non-RBAC workload chart (ServiceAccount+ConfigMap)
-#      into its own namespace with no admin pre-creating it -- ordinary
-#      self-service still works once Role/RoleBinding are excluded.
-#   1b. the SAME team project refuses a chart shipping its own namespaced
-#      Role/RoleBinding -- the exact #57 item 1 scenario
-#      (examples/inference/vllm/disagg-pd-llmd's sidecar RBAC) -- because
-#      gitops/bootstrap/team-onboard.sh's own AppProject does not
-#      whitelist those two kinds (H11's original deny).
-#   2. the SAME non-RBAC manifest as check 1, synced through the SAME
+#      into its own namespace with no admin pre-creating it.
+#   2. the SAME team project self-syncs a chart shipping its own benign,
+#      namespace-scoped Role/RoleBinding -- the exact #57 item 1 scenario
+#      (examples/inference/vllm/disagg-pd-llmd's sidecar RBAC) -- with no
+#      admin pre-creating that RBAC. Issue #57's own goal.
+#   3. the SAME team project refuses a RoleBinding referencing the
+#      built-in cluster-admin ClusterRole, synced by Argo CD's own
+#      capability-wide (cluster-admin-equivalent) identity -- refused by
+#      team-rbac-guard.yaml's own ValidatingAdmissionPolicy, not by
+#      anything checking the caller's own RBAC (there is nothing to
+#      check: the caller already holds cluster-admin).
+#   4. the SAME non-RBAC manifest as check 1, synced through the SAME
 #      team project but aimed at a different namespace, is refused by
 #      the AppProject's own destinations list, before the API server is
 #      even asked. Argo CD's own project-level policy, independent of
 #      which identity performs the sync.
-#   3. a bare cluster-scoped object (ClusterRole), synced through the same
+#   5. a bare cluster-scoped object (ClusterRole), synced through the same
 #      team project, is refused by the project's own empty
 #      clusterResourceWhitelist. Also Argo CD's own project-level policy,
 #      independent of sync identity.
-#   4. the team's own ServiceAccount, asked directly (kubectl --as, no Argo
+#   6. the team's own ServiceAccount, asked directly (kubectl --as, no Argo
 #      CD involved) to create a Role granting a permission it does not
 #      itself hold (secrets, which gitops/bootstrap/team-onboard.sh's own
 #      Role never grants), is refused by the Kubernetes API server's own
 #      RBAC escalation check. This proves the escalation check works on
 #      this identity when IT is the one making the request directly -- it
 #      says nothing about whether Argo CD's own sync ever acts as this
-#      identity (that is check 6, next).
-#   6. (the differential check that actually distinguishes impersonated
-#      from non-impersonated sync, and the reason checks 1b/H11's deny
-#      are kept rather than relaxed): removing a permission from the
-#      team's own ServiceAccount's Role, then forcing a resync of the
-#      already-Synced Application from check 1, still SUCCEEDS --
-#      proving Argo CD performed that sync (and check 1's own sync) with
-#      its own capability-wide identity throughout, never impersonating
-#      the team's ServiceAccount. Checks 2-4 alone would have been
-#      consistent with real self-service tenancy; this check is what
-#      shows they were not evidence of it.
-#
-# A further implication, reasoned from check 6 but not independently
-# exploited in this script (recorded as a risk this script's own H11
-# deny closes, not a demonstrated exploit it leaves open): had
-# Role/RoleBinding been left in a team AppProject's
-# namespaceResourceWhitelist on the premise that impersonation would
-# constrain them (checks 1b/6 show it would not), a team's own chart
-# could have shipped a RoleBinding to any existing ClusterRole (including
-# a highly privileged one) or a Role granting broad permissions, and
-# Argo CD's own unconstrained identity would have applied it with no
-# RBAC-escalation check against the team at all (that check only fires
-# against the actual API caller, which checks 1-6 show is never the team
-# here). gitops/bootstrap/team-onboard.sh carries this warning verbatim
-# in its own header.
+#      identity (that is check 7, next).
+#   7. (the differential check that actually distinguishes impersonated
+#      from non-impersonated sync, and the reason this script does not
+#      rely on RBAC-escalation checks for checks 2-3's own safety):
+#      removing a permission from the team's own ServiceAccount's Role,
+#      then forcing a resync of the already-Synced Application from
+#      check 1, still SUCCEEDS -- proving Argo CD performed that sync
+#      (and checks 1-3's own syncs) with its own capability-wide
+#      identity throughout, never impersonating the team's
+#      ServiceAccount. Checks 4-6 alone would have been consistent with
+#      real self-service tenancy; this check is what shows they were
+#      not evidence of it, and why checks 2-3 instead rest on
+#      team-rbac-guard.yaml, not on narrowing a Role nobody's sync
+#      actually uses.
 #
 # This script builds only infra/foundation with var.argocd set (the
 # managed Argo CD capability) -- no Karpenter, no Kueue, no accelerator
@@ -162,7 +174,7 @@ cleanup() {
       info "cleanup: the test did not reach a successful destroy; cleaning up"
       if kubectl get nodes >/dev/null 2>&1; then
         local argons; argons="$(tf_out argocd_namespace 2>/dev/null || echo argocd)"
-        kubectl delete application team-a-chart team-a-rbac-probe team-a-cross-ns team-a-clusterrole -n "${argons}" --ignore-not-found --wait=false >/dev/null 2>&1
+        kubectl delete application team-a-chart team-a-rbac-probe team-a-clusteradmin-probe team-a-cross-ns team-a-clusterrole -n "${argons}" --ignore-not-found --wait=false >/dev/null 2>&1
         kubectl delete appproject "${TEAM}" -n "${argons}" --ignore-not-found --wait=false >/dev/null 2>&1
         kubectl delete namespace "${TEAM}" "${OTHER_NS}" --ignore-not-found --wait=false >/dev/null 2>&1
       fi
@@ -405,14 +417,14 @@ kubectl get serviceaccount probe-sidecar -n "${TEAM}" >/dev/null 2>&1 \
   || fail "ServiceAccount probe-sidecar was not actually created in ${TEAM} despite a Succeeded sync"
 kubectl get configmap probe-config -n "${TEAM}" >/dev/null 2>&1 \
   || fail "ConfigMap probe-config was not actually created in ${TEAM} despite a Succeeded sync"
-pass "CHECK 1/6: team-a-chart (project ${TEAM}) self-synced an ordinary, non-RBAC workload chart (ServiceAccount+ConfigMap) into its own namespace ${TEAM} with no admin pre-creating it"
+pass "CHECK 1/7: team-a-chart (project ${TEAM}) self-synced an ordinary, non-RBAC workload chart (ServiceAccount+ConfigMap) into its own namespace ${TEAM} with no admin pre-creating it"
 
-# ------------------------------------------------ 4a2. a team project denies
+# ------------------------------------------------ 4a2. issue #57's own goal:
 # ------------------------------------------------      a chart shipping its
-# ------------------------------------------------      own namespaced RBAC
-# ------------------------------------------------      (H11's original deny,
-# ------------------------------------------------      restored -- Option A
-# ------------------------------------------------      is not adopted)
+# ------------------------------------------------      own benign namespaced
+# ------------------------------------------------      RBAC self-syncs, with
+# ------------------------------------------------      team-rbac-guard.yaml
+# ------------------------------------------------      as the real boundary
 
 kubectl apply -n "${ARGOCD_NAMESPACE}" -f - <<EOF || fail "kubectl apply Application team-a-rbac-probe"
 apiVersion: argoproj.io/v1alpha1
@@ -430,21 +442,66 @@ spec:
     name: "${CLUSTER}"
     namespace: ${TEAM}
 EOF
-rbac_probe_blocked() {
-  local cond
-  cond="$(kubectl get application team-a-rbac-probe -n "${ARGOCD_NAMESPACE}" \
-    -o jsonpath='{.status.conditions[*].message}{.status.operationState.message}' 2>/dev/null)"
-  [[ "${cond}" == *"not permitted in project"* || "${cond}" == *"is not permitted"* ]]
-}
-trigger_sync team-a-rbac-probe >/dev/null 2>&1 || true
-wait_until 120 5 "team-a-rbac-probe refused (Role/RoleBinding not permitted in project)" rbac_probe_blocked \
-  || fail "team-a-rbac-probe was not refused: conditions=$(kubectl get application team-a-rbac-probe -n "${ARGOCD_NAMESPACE}" -o jsonpath='{.status.conditions}') operationState=$(operation_message team-a-rbac-probe)"
+trigger_sync team-a-rbac-probe || fail "trigger team-a-rbac-probe's sync"
+rbac_probe_op_done() { local p; p="$(operation_phase team-a-rbac-probe)"; [[ "${p}" == "Succeeded" || "${p}" == "Failed" || "${p}" == "Error" ]]; }
+wait_until 180 5 "team-a-rbac-probe's sync operation to finish" rbac_probe_op_done \
+  || fail "team-a-rbac-probe's sync did not finish within 180s (phase: $(operation_phase team-a-rbac-probe))"
+[[ "$(operation_phase team-a-rbac-probe)" == "Succeeded" ]] \
+  || fail "team-a-rbac-probe's sync did not Succeed (phase $(operation_phase team-a-rbac-probe), message: $(operation_message team-a-rbac-probe)) -- #57's own goal (a benign chart shipping its own namespaced Role/RoleBinding self-syncing) should work once team-rbac-guard.yaml is the boundary instead of excluding the kind outright"
 kubectl get role probe-sidecar-role -n "${TEAM}" >/dev/null 2>&1 \
-  && fail "Role probe-sidecar-role was actually created in ${TEAM} despite the AppProject's own namespaceResourceWhitelist refusal" || true
+  || fail "Role probe-sidecar-role was not actually created in ${TEAM} despite a Succeeded sync"
 kubectl get rolebinding probe-sidecar-binding -n "${TEAM}" >/dev/null 2>&1 \
-  && fail "RoleBinding probe-sidecar-binding was actually created in ${TEAM} despite the AppProject's own namespaceResourceWhitelist refusal" || true
-pass "CHECK 1b/6: a chart shipping its own namespaced Role/RoleBinding (#57 item 1's exact scenario) was refused by the same team project ${TEAM} -- gitops/bootstrap/team-onboard.sh's own AppProject does not whitelist Role/RoleBinding (H11's original deny, restored, since sync impersonation is confirmed not engaged -- check 5 below); no Role/RoleBinding was created"
-kubectl delete application team-a-rbac-probe -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
+  || fail "RoleBinding probe-sidecar-binding was not actually created in ${TEAM} despite a Succeeded sync"
+pass "CHECK 2/7: team-a-rbac-probe (project ${TEAM}) self-synced its own benign, namespace-scoped Role/RoleBinding (#57 item 1's exact scenario) with no admin pre-creating it -- #57's own goal, restored, with gitops/bootstrap/team-rbac-guard.yaml (not Argo CD sync impersonation, confirmed not engaged -- check 7 below) as the real boundary"
+
+# ------------------------------------------------ 4a3. team-rbac-guard.yaml
+# ------------------------------------------------      refuses the concrete
+# ------------------------------------------------      exploit: a RoleBinding
+# ------------------------------------------------      to an existing,
+# ------------------------------------------------      more privileged
+# ------------------------------------------------      ClusterRole
+
+kubectl apply -n "${ARGOCD_NAMESPACE}" -f - <<EOF || fail "kubectl apply Application team-a-clusteradmin-probe"
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: team-a-clusteradmin-probe
+  namespace: ${ARGOCD_NAMESPACE}
+spec:
+  project: ${TEAM}
+  source:
+    repoURL: https://github.com/littlemex/distai-platform.git
+    targetRevision: ${REVISION}
+    path: infra/foundation/tests/fixtures/tenancy-argocd-impersonation/malicious-clusteradmin-probe
+  destination:
+    name: "${CLUSTER}"
+    namespace: ${TEAM}
+EOF
+clusteradmin_probe_message() {
+  kubectl get application team-a-clusteradmin-probe -n "${ARGOCD_NAMESPACE}" \
+    -o jsonpath='{.status.conditions[*].message}{.status.operationState.message}{.status.operationState.syncResult.resources[*].message}' 2>/dev/null
+}
+clusteradmin_probe_blocked() {
+  local msg
+  msg="$(clusteradmin_probe_message)"
+  [[ "${msg}" == *"team-rbac-guard"* || "${msg}" == *"may not reference a ClusterRole"* ]]
+}
+trigger_sync team-a-clusteradmin-probe || fail "trigger team-a-clusteradmin-probe's sync"
+# Polls the blocked-message condition directly (same pattern as
+# cross_ns_blocked/clusterrole_blocked above), not operation_phase first:
+# an admission denial can surface as early as Argo CD's own
+# comparison/diff dry-run, before (or without ever reaching) a terminal
+# operationState phase -- gated on reaching Succeeded/Failed/Error
+# first, like checks 1/2's own op_done, would time out wrongly if the
+# denial only ever shows up as a status.conditions entry.
+wait_until 120 5 "team-a-clusteradmin-probe refused by team-rbac-guard" clusteradmin_probe_blocked \
+  || fail "team-a-clusteradmin-probe was not refused within 120s: phase=$(operation_phase team-a-clusteradmin-probe) message=$(clusteradmin_probe_message)"
+[[ "$(operation_phase team-a-clusteradmin-probe)" != "Succeeded" ]] \
+  || fail "team-a-clusteradmin-probe's sync SUCCEEDED -- a RoleBinding to ClusterRole cluster-admin was created in ${TEAM}; team-rbac-guard.yaml did not block it"
+kubectl get rolebinding probe-escalation-binding -n "${TEAM}" >/dev/null 2>&1 \
+  && fail "RoleBinding probe-escalation-binding (roleRef ClusterRole cluster-admin) was actually created in ${TEAM} despite team-rbac-guard's own refusal" || true
+pass "CHECK 3/7: a RoleBinding referencing the built-in cluster-admin ClusterRole, synced through the same team project ${TEAM} by Argo CD's own capability-wide (cluster-admin-equivalent) sync identity, was refused by the team-rbac-guard ValidatingAdmissionPolicy (phase $(operation_phase team-a-clusteradmin-probe); message: $(clusteradmin_probe_message)) -- admission runs regardless of the caller's own RBAC, closing the exact gap check 7 below shows RBAC-escalation checks leave open for this identity; no such RoleBinding was created"
+kubectl delete application team-a-rbac-probe team-a-clusteradmin-probe -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 
 # ------------------------------------------------- 4b. a team project denies
 # -------------------------------------------------     a destination
@@ -477,7 +534,7 @@ wait_until 120 5 "team-a-cross-ns's own InvalidSpecError (destination not permit
   || fail "team-a-cross-ns was not refused for its destination namespace ${OTHER_NS}: $(kubectl get application team-a-cross-ns -n "${ARGOCD_NAMESPACE}" -o jsonpath='{.status.conditions}')"
 kubectl get configmap probe-config -n "${OTHER_NS}" >/dev/null 2>&1 \
   && fail "ConfigMap probe-config was actually created in ${OTHER_NS} despite the AppProject's own destination refusal" || true
-pass "CHECK 2/6: the same non-RBAC manifest, same team project ${TEAM}, aimed at ${OTHER_NS} instead of its own ${TEAM}, was refused by the AppProject's own destinations list before anything was written to ${OTHER_NS}"
+pass "CHECK 4/7: the same non-RBAC manifest, same team project ${TEAM}, aimed at ${OTHER_NS} instead of its own ${TEAM}, was refused by the AppProject's own destinations list before anything was written to ${OTHER_NS}"
 kubectl delete application team-a-cross-ns -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 
 # ------------------------------------------------- 4c. a team project denies
@@ -510,7 +567,7 @@ wait_until 120 5 "team-a-clusterrole refused (ClusterRole not permitted in proje
   || fail "team-a-clusterrole was not refused: conditions=$(kubectl get application team-a-clusterrole -n "${ARGOCD_NAMESPACE}" -o jsonpath='{.status.conditions}') operationState=$(operation_message team-a-clusterrole)"
 kubectl get clusterrole tenancy-probe-clusterrole-should-be-rejected >/dev/null 2>&1 \
   && fail "ClusterRole tenancy-probe-clusterrole-should-be-rejected was actually created despite the AppProject's own empty clusterResourceWhitelist" || true
-pass "CHECK 3/6: a bare ClusterRole, synced through the same team project ${TEAM}, was refused by the AppProject's own empty clusterResourceWhitelist; no ClusterRole was created"
+pass "CHECK 5/7: a bare ClusterRole, synced through the same team project ${TEAM}, was refused by the AppProject's own empty clusterResourceWhitelist; no ClusterRole was created"
 kubectl delete application team-a-clusterrole -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 
 # ------------------------------------------------- 4d. the team's own
@@ -531,7 +588,7 @@ ESCALATE_ERR="$(kubectl create role escalate-attempt -n "${TEAM}" \
   || fail "the escalation refusal did not name ${DEPLOYER} as the subject: ${ESCALATE_ERR}"
 kubectl get role escalate-attempt -n "${TEAM}" >/dev/null 2>&1 \
   && fail "Role escalate-attempt was actually created in ${TEAM} despite the refusal" || true
-pass "CHECK 4/6: ${DEPLOYER}, asked to create a Role granting 'secrets' (a resource its own Role does not itself hold), was refused by the Kubernetes API server's own RBAC escalation check, naming ${DEPLOYER} in the refusal; no such Role was created"
+pass "CHECK 6/7: ${DEPLOYER}, asked to create a Role granting 'secrets' (a resource its own Role does not itself hold), was refused by the Kubernetes API server's own RBAC escalation check, naming ${DEPLOYER} in the refusal; no such Role was created"
 
 # ------------------------------------------------- 5. the differential
 # -------------------------------------------------    check: is
@@ -592,7 +649,7 @@ SECOND_MESSAGE="$(operation_message team-a-chart)"
   || fail "team-a-chart's second sync was ${SECOND_PHASE} (message: ${SECOND_MESSAGE}), expected Succeeded -- this would mean impersonation IS now engaged (a change from the confirmed 2026-11-25 behavior this test documents); if so, update this assertion and revisit #22 Decision 10 H11 Option A, do not just make this check pass again"
 kubectl get configmap probe-config -n "${TEAM}" >/dev/null 2>&1 \
   || fail "ConfigMap probe-config was not recreated in ${TEAM} despite a Succeeded second sync"
-pass "CHECK 6/6 (differential check, confirmed finding): even after ${DEPLOYER} itself lost the 'configmaps' permission, the SAME Application's resync still Succeeded and recreated probe-config -- sync impersonation is NOT actually engaged on this capability (tracked at #49; #22 Decision 10 H11 Option A is not viable as of 2026-11-25). Argo CD performed this sync with its own capability-wide identity throughout, not team-a-deployer's"
+pass "CHECK 7/7 (differential check, confirmed finding): even after ${DEPLOYER} itself lost the 'configmaps' permission, the SAME Application's resync still Succeeded and recreated probe-config -- sync impersonation is NOT actually engaged on this capability (tracked at #49; #22 Decision 10 H11 Option A is not viable as of 2026-11-25). Argo CD performed this sync with its own capability-wide identity throughout, not team-a-deployer's"
 
 # Restore team-a-deployer-role to its original rules regardless (leaves
 # the cell in the same state checks 1-4 left it in, for a clean
