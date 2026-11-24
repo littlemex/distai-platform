@@ -1,0 +1,47 @@
+# Fixture for infra/foundation/tests/4.argocd-impersonation.sh (issue #22
+# Decision 10 H11, issue #57 item 1). Stands in for the kind of
+# self-authored, namespaced RBAC a real chart ships alongside its own
+# workload (the exact shape issue #57 found in
+# examples/inference/vllm/disagg-pd-llmd/templates/sidecar-rbac.yaml: a
+# ServiceAccount plus a same-namespace Role/RoleBinding for a sidecar).
+# No metadata.namespace is set on purpose: the test applies this same,
+# unmodified fixture through two different Applications with two
+# different destination.namespace values (team-a, where the team
+# AppProject permits it, and team-b, where it does not), so the
+# Application's own destination -- not a value baked into the manifest --
+# is what decides where these objects are allowed to land. A production
+# chart would set metadata.namespace explicitly once rendered
+# per-release (the #57 item 2 fix); this fixture stays unrendered so one
+# file can be reused unmodified for both the allowed and the denied case.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: probe-sidecar
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: probe-sidecar-role
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: probe-sidecar-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: probe-sidecar-role
+subjects:
+  - kind: ServiceAccount
+    name: probe-sidecar
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: probe-config
+data:
+  hello: "world"
