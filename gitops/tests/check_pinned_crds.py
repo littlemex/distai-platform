@@ -287,7 +287,6 @@ def check_method_label_rendered(label, rendered_text, key, value):
     return None if not found_any_daemonset else False
 
 
-
 def container_security_contexts(ds_spec):
     """Every container's own rendered securityContext in a DaemonSet's pod
     template (init and regular; a dropped-privilege override on one and not
