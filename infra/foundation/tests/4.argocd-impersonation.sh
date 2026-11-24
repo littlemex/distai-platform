@@ -259,6 +259,17 @@ stringData:
 EOF
 pass "registered cluster ${CLUSTER} as its own Argo CD destination"
 
+# Diagnostic only (not a check): list every ConfigMap/Secret actually
+# present in the capability's own namespace before team-onboard.sh
+# assumes a plain argocd-cm exists there. The EKS managed capability is
+# not a self-hosted Argo CD helm chart, and nothing in this script's own
+# prior research (the probe behind #22's own Decision 10 H11 fact
+# update) confirmed argocd-cm's own name, shape, or even presence on
+# this capability -- only that the AppProject CRD's own schema accepts
+# destinationServiceAccounts.
+info "ConfigMaps in ${ARGOCD_NAMESPACE}: $(kubectl get configmap -n "${ARGOCD_NAMESPACE}" -o name 2>&1 | tr '\n' ' ')"
+info "Secrets in ${ARGOCD_NAMESPACE}: $(kubectl get secret -n "${ARGOCD_NAMESPACE}" -o name 2>&1 | tr '\n' ' ')"
+
 # ------------------------------------------------- 3. onboard team "team-a"
 # -------------------------------------------------    with the real,
 # -------------------------------------------------    shipped script
