@@ -1,0 +1,166 @@
+{{- include "agg.validate" . -}}
+{{- $fullname := include "agg.fullname" . -}}
+{{- $e := .Values.engine -}}
+{{- $resources := deepCopy (default (dict) $e.resources) -}}
+{{- $_ := set $resources "limits" (merge (dict .Values.accelerator.resourceName (int $e.gpusPerEngine)) (default (dict) $resources.limits)) -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "agg.labels" . | nindent 4 }}
+spec:
+  replicas: {{ $e.replicas }}
+  # See the vLLM agg-baseline chart's own engine.yaml for why this is set
+  # explicitly: the Kubernetes default (600s) is well below the
+  # startupProbe's own budget (engine.startupTimeoutSeconds, 1800s by
+  # default), so a real cold start can exceed the default deadline with
+  # the probes still passing on time. `max 600` never shortens the
+  # Kubernetes default, even for a release with a very small
+  # startupTimeoutSeconds.
+  progressDeadlineSeconds: {{ max 600 (add (int $e.startupTimeoutSeconds) 300) }}
+  selector:
+    matchLabels:
+      {{- include "agg.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agg.labels" . | nindent 8 }}
+        {{- if .Values.metrics.enabled }}
+        sglang-metrics: "true"
+        # The role label the upstream awsome-distributed-ai "sglang" scrape
+        # job reads; same value as app.kubernetes.io/component.
+        component: aggregated
+        {{- end }}
+      {{- if .Values.metrics.enabled }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ $e.port | quote }}
+        prometheus.io/path: /metrics
+      {{- end }}
+    spec:
+      {{- with $e.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $e.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml $e.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: sglang
+          image: {{ include "agg.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              if [ -z "$MODEL_ID" ]; then
+                echo "model.name is not set: install with --set model.name=MODEL_ID, a Hugging Face model id" >&2
+                exit 1
+              fi
+              mkdir -p "$HOME"
+              set -- --model-path "$MODEL_ID" --host 0.0.0.0 --port "$ENGINE_PORT" \
+                --tp-size "$GPUS_PER_ENGINE" "$@"
+              [ -z "$MODEL_REVISION" ] || set -- --revision "$MODEL_REVISION" "$@"
+              [ -z "$SERVED_MODEL_NAME" ] || set -- --served-model-name "$SERVED_MODEL_NAME" "$@"
+              exec python3 -m sglang.launch_server "$@"
+            - sglang-aggregated
+          args:
+            {{- range (fromJsonArray (include "agg.engineArgs" .)) }}
+            - {{ . | toString | quote }}
+            {{- end }}
+          env:
+            - name: MODEL_ID
+              value: {{ .Values.model.name | quote }}
+            - name: MODEL_REVISION
+              value: {{ .Values.model.revision | quote }}
+            - name: SERVED_MODEL_NAME
+              value: {{ .Values.model.servedModelName | quote }}
+            - name: ENGINE_PORT
+              value: {{ $e.port | quote }}
+            - name: GPUS_PER_ENGINE
+              value: {{ $e.gpusPerEngine | quote }}
+            # The image runs as root by default and has no home for another
+            # user; keep HOME (and with it the JIT and compile caches) on
+            # the writable cache volume.
+            - name: HOME
+              value: /cache/home
+            - name: HF_HOME
+              value: /cache/huggingface
+            {{- if .Values.model.hfTokenSecret.name }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.model.hfTokenSecret.name }}
+                  key: {{ .Values.model.hfTokenSecret.key }}
+            {{- end }}
+            {{- with $e.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $e.port }}
+          resources:
+            {{- toYaml $resources | nindent 12 }}
+          securityContext:
+            {{- toYaml $e.containerSecurityContext | nindent 12 }}
+          {{- /*
+            SGLang's /health generates one token when the engine is idle and
+            returns 503 while it is still starting (http_server.py
+            health_generate), so it answers "can this engine generate", not
+            only "is the process up". It waits at least one second for that
+            token, hence a timeout well above the 1-second default and
+            above SGLang's own 20-second health-check limit.
+          */}}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 25
+            failureThreshold: {{ div (int $e.startupTimeoutSeconds) 10 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 25
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 25
+            failureThreshold: 5
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: cache
+              mountPath: /cache
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ $e.shmSizeLimit }}
+        - name: cache
+          {{- toYaml $e.cacheVolume | nindent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "agg.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "agg.selector" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

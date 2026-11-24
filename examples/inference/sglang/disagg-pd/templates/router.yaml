@@ -1,0 +1,159 @@
+{{- $fullname := include "disagg.fullname" . -}}
+{{- $rt := .Values.router -}}
+{{- /*
+  The router's Kubernetes discovery lists and watches pods to find the
+  engines (sgl-model-gateway, src/service_discovery.rs). Read-only, pods
+  only, this namespace only: a Role, never a ClusterRole, and the router is
+  told to watch this namespace alone (--service-discovery-namespace).
+*/ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-router
+  labels:
+    {{- include "disagg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-router
+  labels:
+    {{- include "disagg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-router
+  labels:
+    {{- include "disagg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-router
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-router
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-router
+  labels:
+    {{- include "disagg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+spec:
+  replicas: {{ $rt.replicas }}
+  selector:
+    matchLabels:
+      {{- include "disagg.selector" (dict "root" . "component" "router") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "disagg.labels" . | nindent 8 }}
+        app.kubernetes.io/component: router
+    spec:
+      {{- with $rt.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $rt.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ $fullname }}-router
+      securityContext:
+        {{- toYaml $rt.podSecurityContext | nindent 8 }}
+      containers:
+        - name: router
+          # The sgl-model-gateway binary shipped in the same SGLang image, so
+          # router and engines come from one SGLang commit.
+          image: {{ include "disagg.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/opt/sglang/bin/sgl-model-gateway"]
+          args:
+            - --host
+            - 0.0.0.0
+            - --port
+            - {{ $rt.port | quote }}
+            - --pd-disaggregation
+            - --prefill-policy
+            - {{ $rt.prefillPolicy | quote }}
+            - --decode-policy
+            - {{ $rt.decodePolicy | quote }}
+            - --service-discovery
+            - --service-discovery-namespace
+            - {{ .Release.Namespace | quote }}
+            - --service-discovery-port
+            - {{ .Values.engine.port | quote }}
+            - --prefill-selector
+            {{- range $k, $v := fromYaml (include "disagg.selector" (dict "root" . "component" "prefill")) }}
+            - {{ printf "%s=%s" $k $v | quote }}
+            {{- end }}
+            - --decode-selector
+            {{- range $k, $v := fromYaml (include "disagg.selector" (dict "root" . "component" "decode")) }}
+            - {{ printf "%s=%s" $k $v | quote }}
+            {{- end }}
+            - --prometheus-host
+            - 0.0.0.0
+            - --prometheus-port
+            - {{ $rt.metricsPort | quote }}
+            {{- if $rt.disableRetries }}
+            - --disable-retries
+            {{- end }}
+            {{- range $rt.extraArgs }}
+            - {{ . | toString | quote }}
+            {{- end }}
+          env:
+            - name: HOME
+              value: /tmp
+          ports:
+            - name: http
+              containerPort: {{ $rt.port }}
+            - name: metrics
+              containerPort: {{ $rt.metricsPort }}
+          resources:
+            {{- toYaml $rt.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml $rt.containerSecurityContext | nindent 12 }}
+          # /readiness is 200 only while at least one prefill and one decode
+          # engine are registered and healthy (src/server.rs).
+          readinessProbe:
+            httpGet:
+              path: /readiness
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /liveness
+              port: http
+            periodSeconds: 20
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "disagg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "disagg.selector" (dict "root" . "component" "router") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

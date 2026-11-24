@@ -1,0 +1,414 @@
+# Same engines, placement and transport as ../disagg-pd (the keys from image
+# through engine below mean exactly what they mean there, and render the same
+# nodeSelector, affinity, resources and KV connector configuration); only the
+# routing differs. Instead of that chart's hand-written proxy, requests reach
+# the engines through a Gateway API HTTPRoute, an InferencePool and llm-d's
+# Endpoint Picker (EPP), configured under llmdRouter below, and a routing
+# sidecar in every decode pod (routingSidecar below) runs the prefill call the
+# EPP chose. Defaults are the safe shape: prefill and decode on different
+# nodes, KV transfer over libfabric on EFA, nothing exposed outside the
+# cluster, and a request that cannot be routed fails instead of reaching an
+# engine the EPP did not pick.
+
+image:
+  repository: vllm/vllm-openai
+  # The -efa variant of the vLLM release image is built with vLLM's KV
+  # connectors (NIXL) and the AWS EFA userspace (libfabric) that NIXL's
+  # LIBFABRIC backend loads. Pinned by tag and by digest (multi-arch index).
+  tag: v0.34.0-efa
+  digest: sha256:c5248ff7ce6296602c730c646e8d53a42bea62bd43d60541c7076ba795ec975a
+  pullPolicy: IfNotPresent
+
+model:
+  # Hugging Face model repository id. No default: the engines refuse to start
+  # (with a message saying so) until it is set.
+  name: ""
+  # Commit or tag of the model repository; empty means the default branch.
+  # Pin it for any measurement, so two runs serve the same weights.
+  revision: ""
+  # Name clients send as "model"; empty means model.name.
+  servedModelName: ""
+  # Secret holding a Hugging Face token, for gated models. Empty: no token.
+  hfTokenSecret:
+    name: ""
+    key: token
+
+# Extended resource the accelerator device plugin advertises.
+accelerator:
+  resourceName: nvidia.com/gpu
+
+placement:
+  # Node label key that tells prefill nodes from decode nodes. Each role
+  # selects nodes where this key equals its own nodeSelectorValue, unless
+  # sameNodeMeasurement overrides both to sharedPoolValue (below).
+  nodeSelectorKey: distai.dev/pd-role
+  # false (default): both roles keep their own nodeSelectorValue (prefill,
+  # decode), so they can never land on the same node (two different pools).
+  # true: both roles' nodeSelector instead targets sharedPoolValue, a single
+  # shared pool. Pair with a pool whose NodePool.spec.limits is sized to fit
+  # both roles' combined request on exactly one instance, so Karpenter cannot
+  # launch a second node for it; combined with enforceAntiAffinity below,
+  # this is what makes the fault-injection and same-node measurement cells
+  # possible at all.
+  sameNodeMeasurement: false
+  sharedPoolValue: shared
+  # true (default): a required pod anti-affinity rule on kubernetes.io/hostname,
+  # rendered on the decode Deployment only (never on both roles - a required
+  # term on both can leave neither schedulable, each waiting on a peer that
+  # is itself waiting), keeps decode off any node running a prefill pod of
+  # this release. false: that rule is dropped. If sameNodeMeasurement is also
+  # true, a required pod affinity (toward prefill) is rendered on decode
+  # instead, to actively pull it onto prefill's own node rather than merely
+  # permitting it.
+  enforceAntiAffinity: true
+  tolerations: []
+
+transport:
+  # NIXL backend for the KV transfer: LIBFABRIC (EFA) or UCX.
+  backend: LIBFABRIC
+  # With LIBFABRIC, FI_PROVIDER=efa and FI_EFA_USE_DEVICE_RDMA=1 are always
+  # set. libfabric's EFA provider still moves a same-host transfer over its
+  # shared-memory path by default. true sets FI_EFA_ENABLE_SHM_TRANSFER=0 on
+  # prefill and decode, which forces even a same-host transfer onto the EFA
+  # device. false sets it to 1 explicitly, matching the library default
+  # (stated rather than left unset).
+  #
+  # Observed on real hardware (g7.48xlarge, 2026-11-20, placement.sameNodeMeasurement,
+  # each role's Pod already holding its own distinct physical EFA interface):
+  # both values moved identical, nonzero EFA traffic - a measurement, not a
+  # theory. The likely reason (not separately confirmed) is that Kubernetes'
+  # EFA device plugin never lets two Pods share one physical interface, and
+  # libfabric's shm bypass is keyed to both endpoints resolving to the SAME
+  # device; a difference in IPC/shared-memory namespace between two separate
+  # Pods was not ruled out either. See the disagg-pd chart's own README,
+  # "Known issues", before relying on this value for a shm-vs-EFA comparison.
+  forceEfaSameNode: false
+  # Extended resource the EFA device plugin advertises.
+  efaResourceName: vpc.amazonaws.com/efa
+  # NIXL handshake port (VLLM_NIXL_SIDE_CHANNEL_PORT); the pod IP is the host.
+  sideChannelPort: 5600
+  # What a decode engine does when it cannot load a transferred KV cache:
+  # "fail" returns an error, "recompute" silently runs the prefill again on
+  # decode (and hides a broken transfer from every measurement).
+  kvLoadFailurePolicy: fail
+  # Merged into kv_connector_extra_config next to "backends".
+  extraConnectorConfig: {}
+
+# One engine is one vLLM server process with gpusPerEngine GPUs (tensor
+# parallel degree). Total GPUs = prefill.replicas x prefill.gpusPerEngine +
+# decode.replicas x decode.gpusPerEngine; the ratio is free.
+prefill:
+  replicas: 1
+  gpusPerEngine: 1
+  # EFA devices per engine pod. Required by the LIBFABRIC backend.
+  efaDevices: 1
+  nodeSelectorValue: prefill
+  extraNodeSelector: {}
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+  extraArgs: []
+  extraEnv: []
+  # Same shape, same rationale and the same real-hardware basis as
+  # ../disagg-pd/values.yaml's own prefill.mps/prefill.gpuMemoryUtilization
+  # (see that chart's own comment): set when this role's own
+  # nodeSelectorValue targets an MPS-split pool (capacity-pool's own
+  # accelerator.sharingLabel), with mps.replicas matching that pool's own
+  # split count.
+  mps:
+    enabled: false
+    replicas: 2
+  gpuMemoryUtilization: ""
+
+decode:
+  replicas: 1
+  gpusPerEngine: 1
+  efaDevices: 1
+  nodeSelectorValue: decode
+  extraNodeSelector: {}
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+  extraArgs: []
+  extraEnv: []
+  mps:
+    enabled: false
+    replicas: 2
+  gpuMemoryUtilization: ""
+
+engine:
+  # Port every engine pod serves the OpenAI API on, and the InferencePool's
+  # target port (llmdRouter.router.modelServers.targetPorts must list exactly
+  # this port; the chart fails to render otherwise). On a prefill pod it is
+  # vLLM itself; on a decode pod it is the routing sidecar, with vLLM behind
+  # it on routingSidecar.enginePort.
+  port: 8000
+  # Shared memory for tensor-parallel workers (/dev/shm, memory-backed).
+  shmSizeLimit: 16Gi
+  # Model download cache. emptyDir re-downloads on every pod start; replace
+  # with a persistent volume source to keep the weights across restarts.
+  cacheVolume:
+    emptyDir: {}
+  # Model download and load time allowed before the engine is restarted.
+  startupTimeoutSeconds: 1800
+  # The vLLM image provides a non-root "vllm" user (UID 2000, GID 0) for
+  # exactly this; its home and cache directories are group-writable.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 2000
+    runAsGroup: 0
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+
+# llm-d's routing sidecar, run in every decode pod as a native sidecar
+# (an init container with restartPolicy: Always) on engine.port. For each
+# request the EPP has already chosen a decode pod (the request lands on this
+# sidecar) and a prefill pod (named in the x-llm-d-prefiller-host-port header
+# the EPP adds). The sidecar sends the request to that prefill pod with
+# max_tokens=1 and kv_transfer_params.do_remote_decode=true, then sends the
+# original request plus the returned kv_transfer_params to the vLLM decode
+# engine next to it on routingSidecar.enginePort: the same two-step flow as
+# ../disagg-pd's own proxy, run per decode pod rather than in one central
+# proxy.
+routingSidecar:
+  image:
+    repository: ghcr.io/llm-d/llm-d-router-disagg-sidecar
+    # The llm-d v1.0.0 release image (the tag llm-d's own pd-disaggregation
+    # guide sets in recipes/modelserver/components/images/routing-sidecar/
+    # release), pinned by tag and by digest (multi-arch index).
+    tag: v1.0.0
+    digest: sha256:83cdf20199485329baca89b69d78f695735855ed93412aeaeec325d2374ced04
+    pullPolicy: IfNotPresent
+  # Port the decode pod's vLLM engine listens on, behind the sidecar (the
+  # sidecar's own --model-server-port default).
+  enginePort: 8200
+  # The sidecar's KV protocol toward vLLM's NixlConnector.
+  kvConnector: nixlv2
+  # true (default): the sidecar only sends a prefill request to a pod that is
+  # a member of this release's own InferencePool (the sidecar watches that
+  # pool and its pods, with a namespaced Role this chart creates). The prefill
+  # target comes from a request header, so without this any client that can
+  # reach a decode pod's port could make the sidecar POST to an arbitrary
+  # host:port. false drops the check and the Role.
+  ssrfProtection: true
+  # Port of the sidecar's own Prometheus /metrics endpoint
+  # (llm_d_disagg_sidecar_* counters, including prefill and decode stage
+  # durations and errors). 0 disables it.
+  metricsPort: 9100
+  # zap log level of the sidecar. "info" logs errors and retries only; "4"
+  # (logr V(4), llm-d's DEBUG level) also logs "sending prefill request" with
+  # the prefill pod's ip:port for every request - see the README, "Confirm
+  # the EPP split each request".
+  logLevel: info
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+    limits:
+      memory: 1Gi
+  # The image runs as UID/GID 65532 (Dockerfile.sidecar, USER 65532:65532),
+  # not as the vLLM image's UID 2000, so it sets its own user here, overriding
+  # engine.podSecurityContext for this container only.
+  containerSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+
+# llm-d's router chart (oci://ghcr.io/llm-d/charts/llm-d-router-gateway,
+# v1.0.0, a dependency of this chart), configured here under its own keys.
+# It renders the EPP Deployment, ConfigMap, Service and namespaced RBAC, the
+# InferencePool (named after the release) and the HTTPRoute. It does not
+# render a Gateway: the Gateway, its GatewayClass and the Gateway
+# implementation behind them, and the Gateway API and Gateway API Inference
+# Extension CRDs, are cluster-scoped and installed by the cluster
+# administrator (the RFC's serving add-on wave, issue #37 follow-up A); see
+# the README, "Prerequisites". Upstream reference for every key below:
+# https://github.com/llm-d/llm-d-router/blob/v1.0.0/config/charts/routerlib/values.yaml
+llmdRouter:
+  # Gateway-implementation-specific extras the router chart can add (gke,
+  # istio). none renders only portable Gateway API objects.
+  provider:
+    name: none
+  httpRoute:
+    create: true
+    # The administrator's Gateway this release's HTTPRoute attaches to. Empty
+    # namespace means the release's own namespace. A Gateway in another
+    # namespace must allow routes from this one
+    # (spec.listeners[].allowedRoutes.namespaces).
+    inferenceGatewayName: llm-d-inference-gateway
+    inferenceGatewayNamespace: ""
+    # Longest a single request may take through the Gateway.
+    requestTimeout: "300s"
+  router:
+    epp:
+      # One replica: the inflight-load-producer's per-endpoint token
+      # accounting, which the token-load-scorer reads, is local to each EPP
+      # process (llm-d's own pd-disaggregation guide sets 1 for this reason).
+      replicas: 1
+      image:
+        registry: ghcr.io/llm-d
+        repository: llm-d-router-endpoint-picker
+        # The router chart's own default is tag "main" with pullPolicy
+        # Always; this pins the llm-d v1.0.0 release image by tag and digest
+        # (multi-arch index). The chart renders registry/repository:tag, so
+        # the digest rides on the tag.
+        tag: v1.0.0@sha256:024188e998f516879f68532016ca24fabca00afbdcc2af9a61b17634e197df2c
+        pullPolicy: IfNotPresent
+      # Rendered as --v=3: llm-d's VERBOSE level, at which the EPP logs one
+      # "Request handled" line per request (with the decode endpoint it
+      # picked) and "Running scheduler profile" for the prefill and the
+      # decode profile. 4 (DEBUG) adds every picker result, including the
+      # prefill endpoint. See the README, "Confirm the EPP split each
+      # request".
+      flags:
+        v: 3
+      pluginsConfigFile: pd-config.yaml
+      # llm-d's own pd-disaggregation guide configuration
+      # (guides/pd-disaggregation/router/pd-disaggregation.values.yaml,
+      # llm-d v1.0.0) without its prefix-cache-affinity-filter, whose one
+      # parameter (peakPrefillThroughput) is a throughput upstream measured
+      # for one model on one GPU and says to re-measure for any other; an
+      # unmeasured value is not a neutral default. always-disagg-pd-decider
+      # sends every request through prefill and then decode, the same rule as
+      # ../disagg-pd's proxy, so the two routing paths differ only in which
+      # endpoint each step picks.
+      pluginsCustomConfig:
+        pd-config.yaml: |
+          apiVersion: llm-d.ai/v1
+          kind: EndpointPickerConfig
+          plugins:
+          - type: always-disagg-pd-decider
+          - type: disagg-profile-handler
+            parameters:
+              deciders:
+                prefill: always-disagg-pd-decider
+          - type: prefill-filter
+          - type: decode-filter
+          - type: approx-prefix-cache-producer
+          - type: inflight-load-producer
+          - type: token-load-scorer
+          - type: active-request-scorer
+          - type: max-score-picker
+          schedulingProfiles:
+          - name: prefill
+            plugins:
+            - pluginRef: prefill-filter
+            - pluginRef: token-load-scorer
+            - pluginRef: max-score-picker
+          - name: decode
+            plugins:
+            - pluginRef: decode-filter
+            - pluginRef: active-request-scorer
+            - pluginRef: max-score-picker
+      resources:
+        requests:
+          cpu: "4"
+          memory: 8Gi
+        limits:
+          memory: 16Gi
+      # The EPP image runs as UID/GID 65532 (Dockerfile.epp); the router
+      # chart's own defaults set no security context at all.
+      podSecurityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      # Read by the "llm-d-epp" scrape job in
+      # examples/inference/_shared/dashboards/scrape-configs.yaml, which keeps
+      # pods carrying the router chart's own llm-d-router-gateway label and
+      # these annotations (llm_d_epp_* metrics, including
+      # llm_d_epp_disagg_decision_total). 9090 is the router chart's metrics
+      # port.
+      podAnnotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: /metrics
+    inferencePool:
+      # FailClose: if the EPP does not answer, the Gateway rejects the
+      # request instead of sending it to any pool member - which here could be
+      # a prefill pod, or a decode pod with no prefill step at all, and would
+      # look like a successful but differently routed request. The router
+      # chart's own default is FailOpen.
+      failureMode: FailClose
+    modelServers:
+      type: vllm
+      protocol: http
+      # Must be exactly [engine.port] (checked at render time).
+      targetPorts:
+        - number: 8000
+      # The InferencePool's pod selector. This chart also puts these labels
+      # on every prefill and decode pod (plus llm-d.ai/role=prefill or
+      # decode, which the EPP's prefill-filter and decode-filter read), so
+      # the two always agree. Change the value for a second release in the
+      # same namespace, or both pools select both releases' pods.
+      matchLabels:
+        distai.dev/llm-d-pool: vllm-disagg-pd-llmd
+    monitoring:
+      prometheus:
+        # No ServiceMonitor (this platform's metrics pipeline is the ADOT
+        # Collector -> Amazon Managed Prometheus path, RFC #37 Decision 7,
+        # with no Prometheus Operator CRDs to attach one to).
+        enabled: false
+        auth:
+          # false serves the EPP's /metrics without a bearer token, as the
+          # annotation-based scrape above needs, and keeps the router chart
+          # from creating its ClusterRole/ClusterRoleBinding for token
+          # reviews: everything this release creates stays namespaced. The
+          # metrics port is reachable only inside the cluster (ClusterIP).
+          enabled: false
+
+networkPolicy:
+  # Default off, unlike vllm/disagg-pd's own networkPolicy.enabled: true
+  # (#63, filed as a private report "SA2"). The real caller on the engine
+  # HTTP port is the Gateway implementation's own data-plane Pod -- an
+  # administrator-installed, implementation-specific thing (NGINX Gateway
+  # Fabric, or another Gateway API implementation) this chart deliberately
+  # does not render or own (see this chart's own README's "Prerequisites").
+  # A generic podSelector/namespaceSelector naming "the Gateway's data
+  # plane" would have to guess at labels this chart has no way to confirm
+  # for every implementation, and a wrong guess would silently block real
+  # traffic rather than protect anything. Enabling this only adds the one
+  # rule this chart CAN state precisely (the NIXL side channel between the
+  # peer roles); the engine HTTP port is NOT opened by this policy at any
+  # setting, so enabling it without also adding a matching NetworkPolicy
+  # for the installed Gateway's own data-plane Pods stops all traffic,
+  # including legitimate requests.
+  enabled: false
+
+metrics:
+  # Adds the vllm-metrics=true pod label and the prometheus.io/* annotations
+  # that the "vllm" scrape job in examples/inference/_shared/dashboards/
+  # scrape-configs.yaml selects on. vLLM serves /metrics on its own port; on
+  # a decode pod the annotation names routingSidecar.enginePort, so the scrape
+  # reaches vLLM directly rather than through the sidecar.
+  enabled: true
+
+
+# Same values, same rendering and same open questions as ../disagg-pd's
+# kvCacheTier (see that chart's values.yaml for the full explanation).
+# Skeleton only: gpu-only (default) is NixlConnector alone; local and remote
+# both stack LMCacheMPConnector, pointed at kvCacheTier.lmcache.mpServerEndpoint,
+# onto it and render identically. Not built or measured on real hardware.
+kvCacheTier:
+  mode: gpu-only
+  lmcache:
+    # host:port, no scheme (the chart adds tcp://). Required whenever mode is
+    # not gpu-only.
+    mpServerEndpoint: ""
+    extraConfig: {}

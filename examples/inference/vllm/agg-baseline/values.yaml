@@ -1,0 +1,128 @@
+# One Deployment of vLLM engines, each running prefill and decode itself.
+# vLLM's own scheduler defaults are kept on purpose (chunked prefill on,
+# running decodes scheduled ahead of new prefills): they are the tuned
+# aggregated baseline, so no scheduler flag is set here.
+
+image:
+  repository: vllm/vllm-openai
+  # Same pinned image as the disagg-pd chart, so a comparison changes the
+  # layout only.
+  tag: v0.34.0-efa
+  digest: sha256:c5248ff7ce6296602c730c646e8d53a42bea62bd43d60541c7076ba795ec975a
+  pullPolicy: IfNotPresent
+
+model:
+  # Hugging Face model repository id. No default: the engine refuses to start
+  # (with a message saying so) until it is set.
+  name: ""
+  # Commit or tag of the model repository; pin it for any measurement.
+  revision: ""
+  servedModelName: ""
+  hfTokenSecret:
+    name: ""
+    key: token
+
+accelerator:
+  resourceName: nvidia.com/gpu
+
+engine:
+  replicas: 1
+  # Tensor parallel degree; GPUs this release uses = replicas x gpusPerEngine.
+  gpusPerEngine: 1
+  port: 8000
+  # Nodes the engines may run on. Empty: any node with the accelerator. To
+  # compare with disagg-pd on the same hardware, select the same nodes, for
+  # example {"distai.dev/pd-role": "prefill"}.
+  nodeSelector: {}
+  tolerations: []
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+  extraArgs: []
+  extraEnv: []
+  shmSizeLimit: 16Gi
+  cacheVolume:
+    emptyDir: {}
+  startupTimeoutSeconds: 1800
+  # Set when this release's replicas land on an MPS-split GPU
+  # (capacity-pool's own accelerator.sharingLabel, e.g. "mps-2" ->
+  # mps.replicas: 2 here must match). On real hardware (#37), this chart's
+  # own default run (gpuMemoryUtilization unset, MPS-split node) did NOT
+  # crash -- but ../disagg-pd's own default run, on the same node family,
+  # crashed repeatedly on vLLM's startup memory check at a desired
+  # fraction near 0.92. Why the two charts' un-fixed defaults differ is not
+  # established (examples/inference/README.md's own MPS investigation
+  # states this as open, not this chart's own settled behavior); this field
+  # exists so a caller does not have to find out either way by trial.
+  # gpuMemoryUtilization: "" (default) computes a safe
+  # fraction from mps.replicas when mps.enabled is true, and leaves vLLM's
+  # own default alone (the flag is not passed at all) when mps.enabled is
+  # false, matching this chart's behavior before this field existed. An
+  # explicit gpuMemoryUtilization is always honored, but rendering fails if
+  # it exceeds the safe ceiling mps.replicas implies -- see
+  # examples/inference/README.md's own MPS investigation for the
+  # real-hardware numbers this ceiling is based on.
+  mps:
+    enabled: false
+    replicas: 2
+  gpuMemoryUtilization: ""
+  # The vLLM image provides a non-root "vllm" user (UID 2000, GID 0) for
+  # exactly this; its home and cache directories are group-writable.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 2000
+    runAsGroup: 0
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+
+# ClusterIP: reachable only from inside the cluster. vLLM has no
+# authentication of its own here.
+service:
+  type: ClusterIP
+  port: 8000
+
+metrics:
+  # Adds the vllm-metrics=true pod label and the prometheus.io/* annotations
+  # that the "vllm" scrape job in examples/inference/_shared/dashboards/
+  # scrape-configs.yaml selects on. vLLM serves /metrics on the engine port.
+  enabled: true
+
+networkPolicy:
+  # Default deny, name the exception (#63, filed as a private report
+  # "SA2"): see vllm/disagg-pd's own values.yaml comment for the full
+  # reasoning; this chart has the same gap (no NetworkPolicy ships) and
+  # the same fix.
+  enabled: true
+  # See vllm/disagg-pd's own values.yaml comment for the full reasoning:
+  # metrics.enabled's own scrape is on the same port this policy
+  # otherwise restricts to load-replay alone, so a real collector
+  # (cluster-wide Pod discovery, not necessarily this release's own
+  # namespace or selectors) needs this set, or its scrapes stop with
+  # networkPolicy.enabled on.
+  metricsScrapeFrom: []
+
+# Skeleton only (values and rendering, not built or measured on real
+# hardware yet). Same kvCacheTier shape as ../disagg-pd/values.yaml's own
+# (see that chart's comment for what is and is not confirmed about the
+# exact LMCache config keys, the LMCacheMPConnector name, and why local
+# and remote render identically and do not actually select a node-local
+# vs. off-node backend - mpServerEndpoint is one static value rendered
+# into every replica here too) - this chart has no NixlConnector to stack
+# onto, so local/remote set kv-transfer-config to LMCacheMPConnector alone
+# instead of a MultiConnector list. The one shared mp server this does
+# express is this aggregated baseline's own way to show cross-replica
+# prefix reuse, which a bigger single-process cache cannot get once
+# engine.replicas is more than 1.
+kvCacheTier:
+  mode: gpu-only
+  lmcache:
+    # host:port of LMCache's own separate "mp server" process; see
+    # ../disagg-pd/values.yaml's own mpServerEndpoint comment for the
+    # format (no scheme, numeric port) and default port.
+    mpServerEndpoint: ""
+    extraConfig: {}

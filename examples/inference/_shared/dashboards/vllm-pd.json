@@ -1,0 +1,1320 @@
+{
+  "__inputs": [],
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "vllm",
+    "pd-disaggregation",
+    "nixl",
+    "efa",
+    "slo"
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "vLLM PD disaggregation: latency, KV transfer, EFA and joint-SLO goodput",
+  "uid": "vllm-pd-efa",
+  "version": 1,
+  "weekStart": "",
+  "description": "vLLM prefill/decode disaggregation (and its aggregated baseline): engine latency histograms, queue depth, KV cache use, NIXL KV transfer, EFA RDMA counters per node, and the joint-SLO goodput of scored runs. Needs the vllm and distai-pd-score scrape jobs in examples/inference/_shared/dashboards/scrape-configs.yaml and the efa-exporter job from awsome-distributed-ai eks-managed-observability.",
+  "panels": [
+    {
+      "type": "row",
+      "id": 1,
+      "title": "Request latency (engine-side histograms)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 2,
+      "title": "TTFT p50/p90/p99 by role",
+      "description": "histogram_quantile over vllm:time_to_first_token_seconds_bucket, per component. In disaggregated serving a prefill engine times its own single-token prefill, and a decode engine times the first token after it pulled the KV cache, so neither alone is the client-side TTFT; the scorer's TTFT (measured by the load generator) is.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, component) (rate(vllm:time_to_first_token_seconds_bucket{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval])))",
+          "legendFormat": "{{component}} p50",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.9, sum by (le, component) (rate(vllm:time_to_first_token_seconds_bucket{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval])))",
+          "legendFormat": "{{component}} p90",
+          "refId": "B",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, component) (rate(vllm:time_to_first_token_seconds_bucket{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval])))",
+          "legendFormat": "{{component}} p99",
+          "refId": "C",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 3,
+      "title": "Inter-token latency p50/p90/p99 by role",
+      "description": "histogram_quantile over vllm:inter_token_latency_seconds_bucket (the per-token gap; vLLM's current name for what older releases exported as time per output token). Only decode and aggregated engines generate more than one token.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, component) (rate(vllm:inter_token_latency_seconds_bucket{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval])))",
+          "legendFormat": "{{component}} p50",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.9, sum by (le, component) (rate(vllm:inter_token_latency_seconds_bucket{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval])))",
+          "legendFormat": "{{component}} p90",
+          "refId": "B",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, component) (rate(vllm:inter_token_latency_seconds_bucket{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval])))",
+          "legendFormat": "{{component}} p99",
+          "refId": "C",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 4,
+      "title": "End-to-end request latency p50/p90/p99 by role",
+      "description": "histogram_quantile over vllm:e2e_request_latency_seconds_bucket, per component.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, component) (rate(vllm:e2e_request_latency_seconds_bucket{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval])))",
+          "legendFormat": "{{component}} p50",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.9, sum by (le, component) (rate(vllm:e2e_request_latency_seconds_bucket{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval])))",
+          "legendFormat": "{{component}} p90",
+          "refId": "B",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, component) (rate(vllm:e2e_request_latency_seconds_bucket{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval])))",
+          "legendFormat": "{{component}} p99",
+          "refId": "C",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 5,
+      "title": "Time per output token per request p50/p90/p99 by role",
+      "description": "histogram_quantile over vllm:request_time_per_output_token_seconds_bucket: each request's average gap. An average hides a single long stall; the scorer's longest-gap distribution does not.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, component) (rate(vllm:request_time_per_output_token_seconds_bucket{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval])))",
+          "legendFormat": "{{component}} p50",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.9, sum by (le, component) (rate(vllm:request_time_per_output_token_seconds_bucket{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval])))",
+          "legendFormat": "{{component}} p90",
+          "refId": "B",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, component) (rate(vllm:request_time_per_output_token_seconds_bucket{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval])))",
+          "legendFormat": "{{component}} p99",
+          "refId": "C",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 6,
+      "title": "Load and KV cache",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 7,
+      "title": "Running and waiting requests by role",
+      "description": "vllm:num_requests_running and vllm:num_requests_waiting summed per component.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (component) (vllm:num_requests_running{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"})",
+          "legendFormat": "{{component}} running",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (component) (vllm:num_requests_waiting{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"})",
+          "legendFormat": "{{component}} waiting",
+          "refId": "B",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 8,
+      "title": "KV cache usage by pod",
+      "description": "vllm:kv_cache_usage_perc (0 to 1; vLLM's current name for the former gpu_cache_usage_perc).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (component, pod) (vllm:kv_cache_usage_perc{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"})",
+          "legendFormat": "{{component}} {{pod}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 9,
+      "title": "Engine replicas up by role",
+      "description": "count(up == 1) per component: how many engines of each role are being scraped successfully.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "count by (component) (up{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\",component=~\"prefill|decode|aggregated\"} == 1)",
+          "legendFormat": "{{component}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 10,
+      "title": "Engine placement (pod per node)",
+      "description": "up per pod, labeled with the node it runs on. Prefill and decode pods sharing a kubernetes_node means the same-node transport path is in use.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (component, pod, kubernetes_node) (up{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"})",
+          "legendFormat": "{{component}} {{pod}} on {{kubernetes_node}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 11,
+      "title": "KV transfer (NIXL) and EFA",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 12,
+      "title": "NIXL KV transfer time p50/p90/p99",
+      "description": "histogram_quantile over vllm:nixl_xfer_time_seconds_bucket, the duration of each NIXL KV cache transfer as the reading (decode) engine sees it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, component) (rate(vllm:nixl_xfer_time_seconds_bucket{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval])))",
+          "legendFormat": "{{component}} p50",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.9, sum by (le, component) (rate(vllm:nixl_xfer_time_seconds_bucket{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval])))",
+          "legendFormat": "{{component}} p90",
+          "refId": "B",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, component) (rate(vllm:nixl_xfer_time_seconds_bucket{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval])))",
+          "legendFormat": "{{component}} p99",
+          "refId": "C",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 13,
+      "title": "NIXL KV bytes transferred per second, and failed transfers",
+      "description": "rate of vllm:nixl_bytes_transferred_sum per component, and the rate of failed NIXL transfers. These count what the connector moved, whatever the path; the EFA counters below show whether it went over the EFA device.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 35
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (component) (rate(vllm:nixl_bytes_transferred_sum{job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval]))",
+          "legendFormat": "{{component}} bytes/s",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (component) (rate({__name__=~\"vllm:nixl_num_failed_transfers(_total)?\",job=\"vllm\",namespace=\"$namespace\",release=~\"$release\"}[$__rate_interval]))",
+          "legendFormat": "{{component}} failed/s",
+          "refId": "B",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 14,
+      "title": "EFA TX and RX bytes per node",
+      "description": "rate of node_amazonefa_tx_bytes_total and node_amazonefa_rx_bytes_total (efa-node-exporter) per node.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 43
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (kubernetes_node) (rate(node_amazonefa_tx_bytes_total{job=\"efa-exporter\",kubernetes_node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "{{kubernetes_node}} tx",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (kubernetes_node) (rate(node_amazonefa_rx_bytes_total{job=\"efa-exporter\",kubernetes_node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "{{kubernetes_node}} rx",
+          "refId": "B",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 15,
+      "title": "EFA RDMA write bytes per node",
+      "description": "rate of node_amazonefa_rdma_write_bytes_total and node_amazonefa_rdma_write_recv_bytes_total per node. Confirmed on real hardware: node_amazonefa_rdma_write_bytes_total stays flat for this chart's own default connector/role (NixlPullConnector, a pull not a push), on both a cross-node and a same-host run; node_amazonefa_rdma_write_recv_bytes_total was not independently read in that run. Read rdma_read_bytes / tx_bytes / rx_bytes instead for that default; no panel for those exists in this dashboard yet (examples/inference/vllm/disagg-pd/README.md, Known issues).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 43
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (kubernetes_node) (rate(node_amazonefa_rdma_write_bytes_total{job=\"efa-exporter\",kubernetes_node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "{{kubernetes_node}} rdma write",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (kubernetes_node) (rate(node_amazonefa_rdma_write_recv_bytes_total{job=\"efa-exporter\",kubernetes_node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "{{kubernetes_node}} rdma write recv",
+          "refId": "B",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 16,
+      "title": "Joint SLO (scored runs)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 51
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 17,
+      "title": "Joint-SLO goodput per GPU, per scored run",
+      "description": "distai_pd_goodput_per_gpu pushed by examples/inference/_shared/scorer/to_prom.py: requests meeting the TTFT limit and the longest-gap limit jointly, per GPU-second, drain included. One step per scored run; the slo_* labels carry the limits it was scored against.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 52
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (layout, run_id, slo_ttft_ms, slo_gap_ms) (distai_pd_goodput_per_gpu{job=\"distai-pd-score\"})",
+          "legendFormat": "{{layout}} {{run_id}} (TTFT {{slo_ttft_ms}} ms, gap {{slo_gap_ms}} ms)",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "lineInterpolation": "stepAfter"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 18,
+      "title": "Joint-SLO attainment share of planned requests, per scored run",
+      "description": "distai_pd_joint_attainment_share: jointly attaining requests divided by the planned request count (not by the requests that happened to complete).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 52
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (layout, run_id, slo_ttft_ms, slo_gap_ms) (distai_pd_joint_attainment_share{job=\"distai-pd-score\"})",
+          "legendFormat": "{{layout}} {{run_id}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "lineInterpolation": "stepAfter"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 19,
+      "title": "GPU utilization (DCGM, skeleton - no real run yet)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "GPU utilization percent, per node, averaged across its GPUs (DCGM_FI_DEV_GPU_UTIL)",
+      "description": "avg by (kubernetes_node) of DCGM_FI_DEV_GPU_UTIL from the dcgm-gpu scrape job (examples/inference/_shared/dashboards/scrape-configs.yaml) - one value per GPU on the node, averaged, not a node-level metric DCGM itself reports. Skeleton panel: no real run has fed this job yet, see this directory's own README.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 61
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "avg by (kubernetes_node) (DCGM_FI_DEV_GPU_UTIL{job=\"dcgm-gpu\",kubernetes_node=~\"$node\"})",
+          "legendFormat": "{{kubernetes_node}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "GPU memory used bytes, per node, summed across its GPUs (DCGM_FI_DEV_FB_USED)",
+      "description": "sum by (kubernetes_node) of DCGM_FI_DEV_FB_USED (framebuffer/HBM used, MiB in DCGM's own unit, converted here) from the dcgm-gpu scrape job - summed across every GPU DCGM reports for that node, not a node-level metric DCGM itself reports. Skeleton panel: no real run has fed this job yet, see this directory's own README. Double-counts if both the standalone dcgm-exporter chart and the GPU Operator's own bundled copy run at once on the same node - do not run both.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 61
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (kubernetes_node) (DCGM_FI_DEV_FB_USED{job=\"dcgm-gpu\",kubernetes_node=~\"$node\"} * 1024 * 1024)",
+          "legendFormat": "{{kubernetes_node}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "options": [],
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(up{job=\"vllm\"}, namespace)",
+        "query": {
+          "query": "label_values(up{job=\"vllm\"}, namespace)",
+          "refId": "namespace"
+        },
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "refresh": 2,
+        "sort": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "options": []
+      },
+      {
+        "name": "release",
+        "label": "Helm release",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(up{job=\"vllm\",namespace=\"$namespace\"}, release)",
+        "query": {
+          "query": "label_values(up{job=\"vllm\",namespace=\"$namespace\"}, release)",
+          "refId": "release"
+        },
+        "current": {},
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "options": [],
+        "allValue": ".*"
+      },
+      {
+        "name": "node",
+        "label": "EFA node",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(node_amazonefa_tx_bytes_total{job=\"efa-exporter\"}, kubernetes_node)",
+        "query": {
+          "query": "label_values(node_amazonefa_tx_bytes_total{job=\"efa-exporter\"}, kubernetes_node)",
+          "refId": "node"
+        },
+        "current": {},
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "options": [],
+        "allValue": ".*"
+      }
+    ]
+  }
+}

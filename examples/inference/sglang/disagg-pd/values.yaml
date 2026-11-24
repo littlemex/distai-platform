@@ -1,0 +1,248 @@
+# Defaults are the safe shape: prefill and decode on different nodes, KV
+# transfer over NIXL's libfabric backend on EFA, libfabric's own same-host
+# behavior stated explicitly, every Service cluster-internal. The value
+# names follow ../../vllm/disagg-pd/values.yaml wherever the two engines
+# share a concept; transport.* differs because SGLang's own transfer
+# backends differ (RFC #37, Decision 6).
+
+image:
+  repository: lmsysorg/sglang
+  # The -efa variant of the SGLang release image carries the AWS EFA
+  # userspace (libfabric), NIXL with its LIBFABRIC plugin linked against
+  # that libfabric, the EFA build of the Mooncake transfer engine (amd64
+  # only), and the sgl-model-gateway router binary (docker/efa.Dockerfile
+  # at the v0.5.23 tag). Pinned by tag and by digest (multi-arch index,
+  # Docker Hub).
+  tag: v0.5.23-efa
+  digest: sha256:644f315d1d48ade2f95d76c2a8a802541a027e7e56af289b17bd5d1fdf4c8fe7
+  pullPolicy: IfNotPresent
+
+model:
+  # Hugging Face model repository id. No default: the engines refuse to start
+  # (with a message saying so) until it is set.
+  name: ""
+  # Commit or tag of the model repository; empty means the default branch.
+  # Pin it for any measurement, so two runs serve the same weights.
+  revision: ""
+  # Name clients send as "model"; empty means model.name.
+  servedModelName: ""
+  # Secret holding a Hugging Face token, for gated models. Empty: no token.
+  hfTokenSecret:
+    name: ""
+    key: token
+
+# Extended resource the accelerator device plugin advertises.
+accelerator:
+  resourceName: nvidia.com/gpu
+
+# Identical to ../../vllm/disagg-pd/values.yaml's placement block: the same
+# values, the same rendering, the same reasons (RFC #37, Decision 3). See
+# that file for the full explanation of each value.
+placement:
+  nodeSelectorKey: distai.dev/pd-role
+  # true: both roles target sharedPoolValue (one capped pool) instead of
+  # their own nodeSelectorValue.
+  sameNodeMeasurement: false
+  sharedPoolValue: shared
+  # true: required anti-affinity on decode against prefill's node. false
+  # with sameNodeMeasurement=true: required affinity toward it instead.
+  enforceAntiAffinity: true
+  tolerations: []
+
+transport:
+  # SGLang's own transfer backend (--disaggregation-transfer-backend):
+  #   NIXL: NIXL, with its own backend chosen by sglangNixlBackend below.
+  #   MOONCAKE: the Mooncake transfer engine, with its protocol chosen by
+  #     mooncakeProtocol below.
+  # SGLang's own default is mooncake; this chart defaults to NIXL with
+  # LIBFABRIC because that is the same libfabric/EFA path the vLLM chart
+  # uses, so an engine comparison changes the engine and not the transport.
+  backend: NIXL
+  # SGLANG_DISAGGREGATION_NIXL_BACKEND, used with backend=NIXL only:
+  # LIBFABRIC (EFA) or UCX. SGLang's own default is UCX
+  # (python/sglang/srt/environ.py); the chart always renders the value and
+  # the --disaggregation-transfer-backend nixl flag together, never one
+  # without the other.
+  sglangNixlBackend: LIBFABRIC
+  # MOONCAKE_PROTOCOL, used with backend=MOONCAKE only: efa (Mooncake's EFA
+  # transport, through libfabric) or tcp (its TCP transport, the negative
+  # control with no EFA traffic). SGLang reads this variable when it
+  # initializes Mooncake (python/sglang/srt/distributed/device_communicators/
+  # mooncake_transfer_engine.py; SGLang's own default is rdma, for
+  # InfiniBand). The EFA build of Mooncake is amd64-only in this image.
+  mooncakeProtocol: efa
+  # With backend=NIXL and sglangNixlBackend=LIBFABRIC, FI_PROVIDER=efa and
+  # FI_EFA_USE_DEVICE_RDMA=1 are always set, and FI_EFA_ENABLE_SHM_TRANSFER
+  # is always rendered explicitly: true sets it to 0 (a same-host transfer
+  # forced onto the EFA device), false sets it to 1 (libfabric's own
+  # default, stated rather than left unset). Only meaningful with
+  # placement.sameNodeMeasurement=true. Not defined for Mooncake: whether
+  # Mooncake's EFA transport honors this libfabric variable is unconfirmed
+  # (RFC #37, Decision 6), so the chart refuses the combination.
+  #
+  # Observed with the vLLM chart on real hardware (g7.48xlarge,
+  # 2026-11-20): with each role's Pod holding its own physical EFA
+  # interface, both values moved identical, nonzero EFA traffic. The same
+  # two-Pod model applies here; see ../../vllm/disagg-pd/README.md before
+  # relying on this value for a shm-vs-EFA comparison.
+  forceEfaSameNode: false
+  # Extended resource the EFA device plugin advertises.
+  efaResourceName: vpc.amazonaws.com/efa
+  # Prefill's bootstrap server port (--disaggregation-bootstrap-port): decode
+  # engines connect to it to set up each KV transfer. SGLang's own default.
+  # The router learns it from the prefill pods' sglang.ai/bootstrap-port
+  # annotation.
+  bootstrapPort: 8998
+
+# One engine is one SGLang server process with gpusPerEngine GPUs (--tp-size).
+# Total GPUs = prefill.replicas x prefill.gpusPerEngine +
+# decode.replicas x decode.gpusPerEngine; the ratio is free.
+prefill:
+  replicas: 1
+  gpusPerEngine: 1
+  # EFA devices per engine pod. Required by every EFA transport
+  # (NIXL+LIBFABRIC, MOONCAKE+efa).
+  efaDevices: 1
+  nodeSelectorValue: prefill
+  extraNodeSelector: {}
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+  extraArgs: []
+  extraEnv: []
+
+decode:
+  replicas: 1
+  gpusPerEngine: 1
+  efaDevices: 1
+  nodeSelectorValue: decode
+  extraNodeSelector: {}
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+  # For example ["--disaggregation-decode-enable-radix-cache"], which caches
+  # KV prefixes on decode to avoid transferring them again (RFC #37,
+  # Decision 10 asks for prefix-heavy traffic to be re-measured with it).
+  extraArgs: []
+  extraEnv: []
+
+engine:
+  port: 8000
+  # Shared memory for tensor-parallel workers (/dev/shm, memory-backed).
+  shmSizeLimit: 16Gi
+  # Model download cache, HOME and the compile caches. emptyDir re-downloads
+  # on every pod start; replace with a persistent volume source to keep the
+  # weights across restarts.
+  cacheVolume:
+    emptyDir: {}
+  # Model download and load time allowed before the engine is restarted.
+  startupTimeoutSeconds: 1800
+  # The SGLang image has no non-root user of its own; it runs as root by
+  # default. These values run it as an arbitrary non-root UID instead, with
+  # HOME and every cache under the writable /cache volume. Confirmed on
+  # real hardware: both engines and the router reach Running/Ready under
+  # this security context (README, Known issues).
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+
+# SGLang's own router, sgl-model-gateway (the binary of the sglang_router
+# package, shipped in the same image), in prefill/decode mode. It finds the
+# engines itself through the Kubernetes API (pods of this release, Ready
+# only, by their app.kubernetes.io/component label), sends each request to
+# one prefill and one decode engine with the prefill engine's bootstrap
+# address, and streams decode's answer back. RFC #37, Decision 2.
+router:
+  replicas: 1
+  port: 8000
+  # Engine selection per role: random, round_robin, cache_aware,
+  # power_of_two (needs at least 2 engines of that role) or prefix_hash.
+  # round_robin matches the vLLM chart's proxy, so an engine comparison
+  # does not also change the routing policy; cache_aware is SGLang's own
+  # prefix-aware choice.
+  prefillPolicy: round_robin
+  decodePolicy: round_robin
+  # true (default): a request that fails is a failed request, never silently
+  # retried on another engine, so a broken KV transfer shows up in the
+  # measurement as failures, not as slower successes.
+  disableRetries: true
+  # The router's own Prometheus endpoint (--prometheus-port). Not scraped by
+  # the jobs in examples/inference/_shared/dashboards/.
+  metricsPort: 29000
+  extraArgs: []
+  resources:
+    requests:
+      cpu: "2"
+      memory: 2Gi
+    limits:
+      memory: 2Gi
+  nodeSelector: {}
+  tolerations: []
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+
+# The client-facing Service, in front of the router. ClusterIP: reachable
+# only from inside the cluster. The engines have no authentication of their
+# own.
+service:
+  type: ClusterIP
+  port: 8000
+
+networkPolicy:
+  # Default deny, name the exception (#63, filed as a private report
+  # "SA2"): see vllm/disagg-pd's own values.yaml comment for the full
+  # reasoning; this chart has the same gap and the same fix.
+  enabled: true
+  # See vllm/disagg-pd's own values.yaml comment for the full reasoning:
+  # metrics.enabled's own scrape is on the same port this policy
+  # otherwise restricts, so a real collector needs this set, or its
+  # scrapes stop with networkPolicy.enabled on.
+  metricsScrapeFrom: []
+
+metrics:
+  # Adds --enable-metrics, the sglang-metrics=true and component pod labels
+  # and the prometheus.io/* annotations that the "sglang" scrape job in
+  # examples/inference/_shared/dashboards/scrape-configs.yaml (and the
+  # upstream awsome-distributed-ai job of the same name) selects on. SGLang
+  # serves /metrics on the engine port.
+  enabled: true
+
+# Skeleton only (values and rendering, not built or measured on real
+# hardware yet). The same three tier names as the vLLM charts (RFC #37,
+# Decision 11), mapped onto SGLang's own HiCache:
+#   gpu-only (default): HiCache off.
+#   local: --enable-hierarchical-cache with an explicit host pool size
+#     (--hicache-size) on the PREFILL engines only. Prefill is where a
+#     reused prefix saves work in this layout; HiCache on a decode engine
+#     in PD mode is a separate, decode-side feature
+#     (--disaggregation-decode-enable-offload-kvcache) this tier does not
+#     turn on. The host tier is node-local and owned by one engine.
+#   remote: fails to render. SGLang's own HiCache docs list no
+#     Redis/ElastiCache L3 backend, so this tier is vLLM-only until that is
+#     confirmed.
+kvCacheTier:
+  mode: gpu-only
+  hicache:
+    # Host KV pool per prefill engine, in GB as SGLang counts it (10^9
+    # bytes, --hicache-size). Required with mode=local; raise
+    # prefill.resources.requests.memory by at least this much.
+    sizeGb: 0
+    extraArgs: []

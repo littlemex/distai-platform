@@ -1,0 +1,23 @@
+{{- $fullname := include "disagg.fullname" . -}}
+{{- $hr := .Values.llmdRouter.httpRoute -}}
+{{- $gwns := default .Release.Namespace $hr.inferenceGatewayNamespace -}}
+Routing: Gateway {{ $gwns }}/{{ $hr.inferenceGatewayName }} -> HTTPRoute {{ .Release.Namespace }}/{{ .Release.Name }} -> InferencePool {{ .Release.Namespace }}/{{ include "disagg.inferencePoolName" . }} (EPP {{ .Release.Namespace }}/{{ printf "%s" (.Release.Name | lower | trim | trunc 40) }}-epp, failureMode {{ .Values.llmdRouter.router.inferencePool.failureMode }})
+  -> decode pod's routing sidecar (:{{ .Values.engine.port }}) -> prefill pod picked by the EPP, then vLLM decode (:{{ .Values.routingSidecar.enginePort }})
+
+Endpoint (cluster-internal): the address of Gateway {{ $gwns }}/{{ $hr.inferenceGatewayName }}, which this chart does not create:
+  kubectl get gateway {{ $hr.inferenceGatewayName }} -n {{ $gwns }} -o jsonpath='{.status.addresses[0].value}'
+
+GPUs this release requests (the --gpu-count for score.py):
+  {{ add (mul (int .Values.prefill.replicas) (int .Values.prefill.gpusPerEngine)) (mul (int .Values.decode.replicas) (int .Values.decode.gpusPerEngine)) }} = prefill {{ .Values.prefill.replicas }} x {{ .Values.prefill.gpusPerEngine }} + decode {{ .Values.decode.replicas }} x {{ .Values.decode.gpusPerEngine }}
+
+Placement: {{ if .Values.placement.sameNodeMeasurement }}sameNodeMeasurement=true: both roles target placement.sharedPoolValue ({{ .Values.placement.sharedPoolValue }}).{{ if .Values.placement.enforceAntiAffinity }} enforceAntiAffinity=true: decode still carries required anti-affinity against prefill (fault-injection shape - expect one Running, one Pending on a one-node pool).{{ else }} enforceAntiAffinity=false: decode carries required affinity toward prefill instead (same-node transport measurement shape).{{ end }}{{ else }}prefill and decode target different pools and can never share a node (required pod anti-affinity on decode, against prefill).{{ end }}
+Transport: NIXL {{ .Values.transport.backend }}{{ if eq .Values.transport.backend "LIBFABRIC" }}, FI_PROVIDER=efa, FI_EFA_USE_DEVICE_RDMA=1, FI_EFA_ENABLE_SHM_TRANSFER={{ if .Values.transport.forceEfaSameNode }}0 (same-host transfers forced onto EFA){{ else }}1 (library default, stated explicitly){{ end }}{{ end }}
+{{- if not .Values.model.name }}
+
+WARNING: model.name is empty; the engines exit until it is set.
+{{- end }}
+
+Check where the roles landed:
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }} -o wide
+Check that the HTTPRoute was accepted by the Gateway and resolved the InferencePool:
+  kubectl get httproute {{ .Release.Name }} -n {{ .Release.Namespace }} -o jsonpath='{range .status.parents[*].conditions[*]}{.type}={.status} {end}'

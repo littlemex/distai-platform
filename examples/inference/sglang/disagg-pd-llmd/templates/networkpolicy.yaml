@@ -1,0 +1,42 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $fullname := include "disagg.fullname" . -}}
+{{- /*
+  Same reasoning as ../../vllm/disagg-pd-llmd's own networkpolicy.yaml: the
+  real caller on the engine HTTP port is the Gateway implementation's own
+  data-plane Pod, which this chart does not render or own. Two rules this
+  chart CAN state precisely, both between the peer roles: SGLang's own
+  NIXL port 5600 and prefill's own bootstrap port (decode's SGLang process
+  -- not the sidecar -- connects to both directly for the handshake), and
+  (unlike the vLLM chart, which has no equivalent) the decode pod's own
+  routing sidecar calling prefill's engine.port (8000) to deliver the
+  bootstrap-injected request -- the podSelector below matches the whole
+  decode Pod, sidecar container included, so this one rule covers it.
+*/}}
+{{- range $role := list "prefill" "decode" }}
+{{- $peer := ternary "decode" "prefill" (eq $role "prefill") }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-{{ $role }}
+  labels:
+    {{- include "disagg.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "disagg.selector" (dict "root" $ "component" $peer) | nindent 14 }}
+      ports:
+        - port: 5600
+        {{- if eq $role "prefill" }}
+        - port: {{ $.Values.transport.bootstrapPort }}
+        - port: {{ $.Values.engine.port }}
+        {{- end }}
+{{- end }}
+{{- end }}

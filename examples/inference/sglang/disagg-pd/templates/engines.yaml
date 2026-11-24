@@ -1,0 +1,274 @@
+{{- include "disagg.validate" . -}}
+{{- $fullname := include "disagg.fullname" . -}}
+{{- $t := .Values.transport -}}
+{{- $nixlLibfabric := and (eq $t.backend "NIXL") (eq $t.sglangNixlBackend "LIBFABRIC") -}}
+{{- range $role := list "prefill" "decode" }}
+{{- $r := index $.Values $role }}
+{{- $limits := dict $.Values.accelerator.resourceName (int $r.gpusPerEngine) }}
+{{- if gt (int $r.efaDevices) 0 }}
+{{- $_ := set $limits $t.efaResourceName (int $r.efaDevices) }}
+{{- end }}
+{{- $resources := deepCopy (default (dict) $r.resources) }}
+{{- $_ := set $resources "limits" (merge $limits (default (dict) $resources.limits)) }}
+---
+# Headless: one DNS record per ready {{ $role }} pod, for reaching an engine
+# directly. The router does not use it; it finds engines through the
+# Kubernetes API (templates/router.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-{{ $role }}
+  labels:
+    {{- include "disagg.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $.Values.engine.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-{{ $role }}
+  labels:
+    {{- include "disagg.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  replicas: {{ $r.replicas }}
+  # See vllm/disagg-pd's own engines.yaml for why this is set explicitly:
+  # the Kubernetes default (600s) is well below this chart's own
+  # startupProbe budget (engine.startupTimeoutSeconds, 1800s by default).
+  # `max 600` never shortens the Kubernetes default, even for a release
+  # with a very small startupTimeoutSeconds.
+  progressDeadlineSeconds: {{ max 600 (add (int $.Values.engine.startupTimeoutSeconds) 300) }}
+  {{- /*
+    Same reason as the vLLM chart (confirmed there on real hardware,
+    g7.48xlarge, 2026-11-20): the shared pool of sameNodeMeasurement has no
+    spare GPU/EFA for a RollingUpdate surge pod, so a later `helm upgrade`
+    would hang. Recreate frees the node first.
+
+    Confirmed again on real hardware (g7.8xlarge x2, 2026-11-23, sibling
+    chart sglang/disagg-pd-llmd, outside sameNodeMeasurement): the same
+    deadlock happens whenever a role's own dedicated pool is sized to fit
+    exactly one node -- this chart's own README's shape, not only the
+    shared-pool case. Recreate is rendered unconditionally for both roles
+    for this reason.
+  */}}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "disagg.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: {{ $role }}
+        {{- if $.Values.metrics.enabled }}
+        sglang-metrics: "true"
+        # The role label the upstream awsome-distributed-ai "sglang" scrape
+        # job reads; same value as app.kubernetes.io/component.
+        component: {{ $role }}
+        {{- end }}
+      annotations:
+        {{- if eq $role "prefill" }}
+        # Read by the router's Kubernetes discovery: the port decode engines
+        # reach this prefill engine's bootstrap server on.
+        sglang.ai/bootstrap-port: {{ $t.bootstrapPort | quote }}
+        {{- end }}
+        {{- if $.Values.metrics.enabled }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ $.Values.engine.port | quote }}
+        prometheus.io/path: /metrics
+        {{- end }}
+    spec:
+      nodeSelector:
+        {{- with $r.extraNodeSelector }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{ $.Values.placement.nodeSelectorKey }}: {{ ternary $.Values.placement.sharedPoolValue $r.nodeSelectorValue $.Values.placement.sameNodeMeasurement | quote }}
+      {{- /*
+        Required affinity/anti-affinity on decode only, never on both roles
+        (a required term on both can leave neither schedulable). The same
+        rules as ../../vllm/disagg-pd/templates/engines.yaml, including the
+        same-zone requirement whenever either role requests an EFA device:
+        EFA traffic cannot cross an Availability Zone.
+      */}}
+      {{- if eq $role "decode" }}
+      {{- $wantsEfa := or (gt (int $.Values.prefill.efaDevices) 0) (gt (int $.Values.decode.efaDevices) 0) }}
+      {{- if $.Values.placement.enforceAntiAffinity }}
+      affinity:
+        podAntiAffinity:
+          # Never on a node that runs a prefill pod of this release.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "disagg.selector" (dict "root" $ "component" "prefill") | nindent 18 }}
+        {{- if $wantsEfa }}
+        podAffinity:
+          # Same zone as a prefill pod of this release.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: topology.kubernetes.io/zone
+              labelSelector:
+                matchLabels:
+                  {{- include "disagg.selector" (dict "root" $ "component" "prefill") | nindent 18 }}
+        {{- end }}
+      {{- else if $.Values.placement.sameNodeMeasurement }}
+      affinity:
+        podAffinity:
+          # Actively pulled onto the same node as a prefill pod of this
+          # release, not merely left free to land there by chance.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "disagg.selector" (dict "root" $ "component" "prefill") | nindent 18 }}
+      {{- end }}
+      {{- end }}
+      {{- with $.Values.placement.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml $.Values.engine.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: sglang
+          image: {{ include "disagg.image" $ }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              if [ -z "$MODEL_ID" ]; then
+                echo "model.name is not set: install with --set model.name=MODEL_ID, a Hugging Face model id" >&2
+                exit 1
+              fi
+              mkdir -p "$HOME"
+              set -- --model-path "$MODEL_ID" --host 0.0.0.0 --port "$ENGINE_PORT" \
+                --tp-size "$GPUS_PER_ENGINE" "$@"
+              [ -z "$MODEL_REVISION" ] || set -- --revision "$MODEL_REVISION" "$@"
+              [ -z "$SERVED_MODEL_NAME" ] || set -- --served-model-name "$SERVED_MODEL_NAME" "$@"
+              exec python3 -m sglang.launch_server "$@"
+            - sglang-{{ $role }}
+          args:
+            {{- range (fromJsonArray (include "disagg.engineArgs" (dict "root" $ "role" $role))) }}
+            - {{ . | toString | quote }}
+            {{- end }}
+          env:
+            - name: MODEL_ID
+              value: {{ $.Values.model.name | quote }}
+            - name: MODEL_REVISION
+              value: {{ $.Values.model.revision | quote }}
+            - name: SERVED_MODEL_NAME
+              value: {{ $.Values.model.servedModelName | quote }}
+            - name: ENGINE_PORT
+              value: {{ $.Values.engine.port | quote }}
+            - name: GPUS_PER_ENGINE
+              value: {{ $r.gpusPerEngine | quote }}
+            # The address this engine advertises for the KV transfer
+            # handshake (SGLang's get_local_ip_auto reads SGLANG_HOST_IP
+            # first): the pod IP, never a guess from the interfaces.
+            - name: SGLANG_HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            {{- if eq $t.backend "NIXL" }}
+            # Rendered together with --disaggregation-transfer-backend nixl,
+            # never one without the other. The image sets the same variable;
+            # it is stated here so the chart, not the image, decides.
+            - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+              value: {{ $t.sglangNixlBackend | quote }}
+            {{- end }}
+            {{- if $nixlLibfabric }}
+            - name: FI_PROVIDER
+              value: efa
+            - name: FI_EFA_USE_DEVICE_RDMA
+              value: "1"
+            # Always set explicitly, never left to the library's own
+            # default: 0 forces even a same-host transfer onto the EFA
+            # device, 1 is libfabric's own default. See values.yaml's
+            # transport.forceEfaSameNode for what the vLLM chart observed
+            # on real hardware under the same two-Pod model.
+            - name: FI_EFA_ENABLE_SHM_TRANSFER
+              value: {{ if $t.forceEfaSameNode }}"0"{{ else }}"1"{{ end }}
+            {{- end }}
+            {{- if eq $t.backend "MOONCAKE" }}
+            # Mooncake's transport protocol. The image sets efa; it is
+            # stated here so the chart, not the image, decides.
+            - name: MOONCAKE_PROTOCOL
+              value: {{ $t.mooncakeProtocol | quote }}
+            {{- end }}
+            # The image runs as root by default and has no home for another
+            # user; keep HOME (and with it the JIT and compile caches) on
+            # the writable cache volume.
+            - name: HOME
+              value: /cache/home
+            - name: HF_HOME
+              value: /cache/huggingface
+            {{- if $.Values.model.hfTokenSecret.name }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.model.hfTokenSecret.name }}
+                  key: {{ $.Values.model.hfTokenSecret.key }}
+            {{- end }}
+            {{- with $r.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $.Values.engine.port }}
+            {{- if eq $role "prefill" }}
+            - name: bootstrap
+              containerPort: {{ $t.bootstrapPort }}
+            {{- end }}
+          resources:
+            {{- toYaml $resources | nindent 12 }}
+          securityContext:
+            {{- toYaml $.Values.engine.containerSecurityContext | nindent 12 }}
+          {{- /*
+            SGLang's /health generates one token when the engine is idle and
+            returns 503 while it is still starting, so it takes at least one
+            second: hence a timeout well above the 1-second default and
+            above SGLang's own 20-second health-check limit.
+          */}}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 25
+            failureThreshold: {{ div (int $.Values.engine.startupTimeoutSeconds) 10 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 25
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 25
+            failureThreshold: 5
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: cache
+              mountPath: /cache
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ $.Values.engine.shmSizeLimit }}
+        - name: cache
+          {{- toYaml $.Values.engine.cacheVolume | nindent 10 }}
+{{- end }}
