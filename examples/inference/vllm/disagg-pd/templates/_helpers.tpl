@@ -44,7 +44,7 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- if eq $t.backend "UCX" -}}
 {{- if not (regexMatch "^[1-9][0-9]{0,4}-[1-9][0-9]{0,4}$" $t.ucx.tcpPortRange) -}}
-{{- fail (printf "transport.ucx.tcpPortRange must be \"<first>-<last>\" with plain decimal digits only (no leading zero -- sprig's int() reinterprets a leading 0 as octal), got %q" $t.ucx.tcpPortRange) -}}
+{{- fail (printf "transport.ucx.tcpPortRange must be \"<first>-<last>\" with plain decimal digits only (no leading zero), got %q" $t.ucx.tcpPortRange) -}}
 {{- end -}}
 {{- $ucxParts := splitList "-" $t.ucx.tcpPortRange -}}
 {{- $ucxFirst := atoi (index $ucxParts 0) -}}

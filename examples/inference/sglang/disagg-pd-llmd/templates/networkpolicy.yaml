@@ -19,7 +19,6 @@
   transport.ucx.tcpPortRange for the value.
 */}}
 {{- $nixlUcx := and (eq $.Values.transport.backend "NIXL") (eq $.Values.transport.sglangNixlBackend "UCX") }}
-{{- $ucxParts := splitList "-" $.Values.transport.ucx.tcpPortRange }}
 {{- range $role := list "prefill" "decode" }}
 {{- $peer := ternary "decode" "prefill" (eq $role "prefill") }}
 ---
@@ -47,6 +46,7 @@ spec:
         - port: {{ $.Values.engine.port }}
         {{- end }}
         {{- if $nixlUcx }}
+        {{- $ucxParts := splitList "-" $.Values.transport.ucx.tcpPortRange }}
         - port: {{ index $ucxParts 0 | atoi }}
           endPort: {{ index $ucxParts 1 | atoi }}
         {{- end }}

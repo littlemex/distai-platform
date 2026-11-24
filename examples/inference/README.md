@@ -159,8 +159,8 @@ on real hardware, see `vllm/disagg-pd/README.md`'s own "Known issues" entry for
 `transport.backend=UCX` for the exact log and the fix.** Whether this round's own cell had that
 enforcement active is not recorded either way, so whether it would have hit the same failure is
 not established; this paragraph's own claim (the `mps.*` A/B pair, both halves run back to back
-in the same cell with no change to the cluster's own NetworkPolicy enforcement in between) still
-stands on its own regardless. The same
+in the same cell, with no action taken to change the cluster's own NetworkPolicy enforcement in
+between) still stands on its own regardless. The same
 cell's own unmodified `disagg-pd` (no `mps.*` set, vLLM's own default fraction, same node)
 reproduced the original `CrashLoopBackOff` (confirmed again by `RESTARTS`/pod status, though this
 round's own log capture missed the crashing container's exact traceback — `kubectl logs` without

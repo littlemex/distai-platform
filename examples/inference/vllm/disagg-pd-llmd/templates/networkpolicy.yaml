@@ -20,7 +20,6 @@
 */}}
 {{- range $role := list "prefill" "decode" }}
 {{- $peer := ternary "decode" "prefill" (eq $role "prefill") }}
-{{- $ucxParts := splitList "-" $.Values.transport.ucx.tcpPortRange }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -42,6 +41,7 @@ spec:
       ports:
         - port: {{ $.Values.transport.sideChannelPort }}
         {{- if eq $.Values.transport.backend "UCX" }}
+        {{- $ucxParts := splitList "-" $.Values.transport.ucx.tcpPortRange }}
         - port: {{ index $ucxParts 0 | atoi }}
           endPort: {{ index $ucxParts 1 | atoi }}
         {{- end }}
