@@ -20,9 +20,9 @@ AWS credentials, no cluster), for every chart and for BOTH the prefill and the d
      NIXL+LIBFABRIC, and separately MOONCAKE) -- no engine container carries
      UCX_TCP_PORT_RANGE, and no rendered NetworkPolicy contains an endPort field at all.
      This fix adds a port range only for NIXL's UCX backend: LIBFABRIC's own KV bytes move
-     over the EFA userspace, bypassing the kernel's TCP/IP stack entirely (see each chart's
-     own README for the real-hardware evidence that is based on), so there is nothing for a
-     NetworkPolicy port range to open there. MOONCAKE
+     over the EFA userspace, bypassing the kernel's TCP/IP stack entirely (the mechanism;
+     see each chart's own README for which real-hardware rounds measured it), so there is
+     nothing for a NetworkPolicy port range to open there. MOONCAKE
      never goes through NIXL's UCX backend at all (so this fix correctly adds no range for
      it either), but whether MOONCAKE's own mooncakeProtocol=tcp has an equivalent
      dynamic-port gap of its own was not examined by this fix (see each sglang chart's
@@ -327,7 +327,13 @@ def check_chart(helm, name, chart, ucx_sets, default_sets, extra_default_cases=(
     bad_values = [
         ("20000", FORMAT_MSG),           # no dash
         ("a-b", FORMAT_MSG),             # non-numeric
-        ("020000-020063", FORMAT_MSG),   # leading zero
+        ("02000-02063", FORMAT_MSG),      # leading zero, same digit count as a valid
+                                          # 5-digit value -- isolates "leading zero" from
+                                          # "too many digits" (a 6-digit value like
+                                          # "020000-020063" would fail the length limit
+                                          # regardless of the leading zero)
+        ("200000-200630", FORMAT_MSG),    # too many digits (6), no leading zero -- the
+                                          # complementary isolation of the other failure
         ("20063-20000", BOUNDS_MSG),     # reversed
         ("20000-20000", BOUNDS_MSG),     # equal
         ("0-10", FORMAT_MSG),            # "0" itself has no leading [1-9] digit, so this

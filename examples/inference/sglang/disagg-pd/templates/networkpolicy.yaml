@@ -48,7 +48,7 @@ spec:
       ports:
         - port: {{ $.Values.transport.bootstrapPort }}
         {{- if $nixlUcx }}
-        {{- $ucxParts := splitList "-" $.Values.transport.ucx.tcpPortRange }}
+        {{- $ucxParts := splitList "-" (toString (dig "ucx" "tcpPortRange" "" $.Values.transport)) }}
         - port: {{ index $ucxParts 0 | atoi }}
           endPort: {{ index $ucxParts 1 | atoi }}
         {{- end }}

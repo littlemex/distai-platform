@@ -43,17 +43,26 @@ app.kubernetes.io/component: {{ .component }}
 {{- fail (printf "transport.kvLoadFailurePolicy must be fail or recompute, got %q" $t.kvLoadFailurePolicy) -}}
 {{- end -}}
 {{- if eq $t.backend "UCX" -}}
-{{- if not (regexMatch "^[1-9][0-9]{0,4}-[1-9][0-9]{0,4}$" $t.ucx.tcpPortRange) -}}
-{{- fail (printf "transport.ucx.tcpPortRange must be \"<first>-<last>\" with plain decimal digits only (no leading zero), got %q" $t.ucx.tcpPortRange) -}}
+{{- /* dig + toString: transport.ucx.tcpPortRange directly would panic with a raw
+  "nil pointer evaluating interface {}.tcpPortRange" if transport.ucx is absent entirely
+  (helm upgrade --reuse-values from a pre-fix release that has no "ucx" key at all), and
+  would fail with a generic Go-template type error ("wrong type for value; expected
+  string; got int64") instead of this chart's own message if a values file left the value
+  unquoted. dig returns "" for either a missing "ucx" key or a missing "tcpPortRange" key
+  instead of panicking; toString coerces an accidental int64/float64 back to a string so
+  regexMatch below always gets a string to work with either way. */ -}}
+{{- $ucxRange := toString (dig "ucx" "tcpPortRange" "" $t) -}}
+{{- if not (regexMatch "^[1-9][0-9]{0,4}-[1-9][0-9]{0,4}$" $ucxRange) -}}
+{{- fail (printf "transport.ucx.tcpPortRange must be \"<first>-<last>\" with plain decimal digits only (no leading zero), got %q" $ucxRange) -}}
 {{- end -}}
-{{- $ucxParts := splitList "-" $t.ucx.tcpPortRange -}}
+{{- $ucxParts := splitList "-" $ucxRange -}}
 {{- $ucxFirst := atoi (index $ucxParts 0) -}}
 {{- $ucxLast := atoi (index $ucxParts 1) -}}
 {{- if or (lt $ucxFirst 1) (gt $ucxLast 65535) (ge $ucxFirst $ucxLast) -}}
-{{- fail (printf "transport.ucx.tcpPortRange=%q must satisfy 1 <= first < last <= 65535" $t.ucx.tcpPortRange) -}}
+{{- fail (printf "transport.ucx.tcpPortRange=%q must satisfy 1 <= first < last <= 65535" $ucxRange) -}}
 {{- end -}}
 {{- if gt (sub (add $ucxLast 1) $ucxFirst) 4096 -}}
-{{- fail (printf "transport.ucx.tcpPortRange=%q spans more than 4096 ports -- keep this narrow (never something like 1024-65535)" $t.ucx.tcpPortRange) -}}
+{{- fail (printf "transport.ucx.tcpPortRange=%q spans more than 4096 ports -- keep this narrow (never something like 1024-65535)" $ucxRange) -}}
 {{- end -}}
 {{- end -}}
 {{- if not .Values.placement.nodeSelectorKey -}}

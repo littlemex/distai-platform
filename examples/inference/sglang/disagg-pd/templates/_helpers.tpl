@@ -48,17 +48,20 @@ true
 {{- fail (printf "transport.mooncakeProtocol must be efa or tcp, got %q" $t.mooncakeProtocol) -}}
 {{- end -}}
 {{- if and (eq $t.backend "NIXL") (eq $t.sglangNixlBackend "UCX") -}}
-{{- if not (regexMatch "^[1-9][0-9]{0,4}-[1-9][0-9]{0,4}$" $t.ucx.tcpPortRange) -}}
-{{- fail (printf "transport.ucx.tcpPortRange must be \"<first>-<last>\" with plain decimal digits only (no leading zero), got %q" $t.ucx.tcpPortRange) -}}
+{{- /* dig + toString: see vllm/disagg-pd's own _helpers.tpl comment for why (reuse-values
+  nil pointer, unquoted-int generic type error). */ -}}
+{{- $ucxRange := toString (dig "ucx" "tcpPortRange" "" $t) -}}
+{{- if not (regexMatch "^[1-9][0-9]{0,4}-[1-9][0-9]{0,4}$" $ucxRange) -}}
+{{- fail (printf "transport.ucx.tcpPortRange must be \"<first>-<last>\" with plain decimal digits only (no leading zero), got %q" $ucxRange) -}}
 {{- end -}}
-{{- $ucxParts := splitList "-" $t.ucx.tcpPortRange -}}
+{{- $ucxParts := splitList "-" $ucxRange -}}
 {{- $ucxFirst := atoi (index $ucxParts 0) -}}
 {{- $ucxLast := atoi (index $ucxParts 1) -}}
 {{- if or (lt $ucxFirst 1) (gt $ucxLast 65535) (ge $ucxFirst $ucxLast) -}}
-{{- fail (printf "transport.ucx.tcpPortRange=%q must satisfy 1 <= first < last <= 65535" $t.ucx.tcpPortRange) -}}
+{{- fail (printf "transport.ucx.tcpPortRange=%q must satisfy 1 <= first < last <= 65535" $ucxRange) -}}
 {{- end -}}
 {{- if gt (sub (add $ucxLast 1) $ucxFirst) 4096 -}}
-{{- fail (printf "transport.ucx.tcpPortRange=%q spans more than 4096 ports -- keep this narrow (never something like 1024-65535)" $t.ucx.tcpPortRange) -}}
+{{- fail (printf "transport.ucx.tcpPortRange=%q spans more than 4096 ports -- keep this narrow (never something like 1024-65535)" $ucxRange) -}}
 {{- end -}}
 {{- end -}}
 {{- if and $t.forceEfaSameNode (eq $t.backend "MOONCAKE") -}}
