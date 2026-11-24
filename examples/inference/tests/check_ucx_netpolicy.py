@@ -61,38 +61,30 @@ def check(label, ok, detail=""):
     return ok
 
 
-def helm_template(helm, chart, sets):
+def helm_template(helm, chart, sets, force_string=False):
+    """Plain --set by default (needed so booleans like networkPolicy.enabled=false, and
+    Helm's own structural null syntax like transport.ucx=null, parse as the type they look
+    like, not as a string). force_string=True uses --set-string instead -- needed only when
+    deliberately testing a value that LOOKS like another type (a bare numeric string such as
+    "20000" for transport.ucx.tcpPortRange): Helm's strvals parser would otherwise coerce it
+    to an int64, and the chart's own regexMatch-based validation would then fail on a generic
+    "wrong type for value; expected string; got int64" instead of this chart's own message
+    (confirmed: Helm v3.22.1, read the exact stderr on the runner). Every *valid* range this
+    script passes contains a dash, which strvals never parses as a number/bool/null anyway,
+    so plain --set is correct and sufficient for everything except that one deliberately
+    ambiguous negative case."""
     cmd = [helm, "template", "ucx-netpolicy-test", chart, "--namespace", "ucx-netpolicy-test"]
+    flag = "--set-string" if force_string else "--set"
     for s in sets:
-        # --set-string, not --set: Helm's strvals parser coerces a bare numeric-looking
-        # token like "20000" to an int64, so --set transport.ucx.tcpPortRange=20000 fails
-        # on a generic "wrong type for value; expected string; got int64" from regexMatch,
-        # not on this chart's own validation message (confirmed: Helm v3.22.1, read the
-        # exact error). Every value this script passes is a string in values.yaml (chart
-        # defaults, read via YAML, are never bare ints here either), so --set-string is
-        # always correct, not just for the ambiguous numeric case.
-        cmd += ["--set-string", s]
+        cmd += [flag, s]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         return None, proc.stderr.strip()
     return [d for d in yaml.safe_load_all(proc.stdout) if isinstance(d, dict)], ""
 
 
-def helm_template_raw(helm, chart, sets):
-    """Like helm_template, but with plain --set (not --set-string): only for the one case
-    that needs Helm's own strvals structural syntax (transport.ucx=null, to delete a key
-    entirely), where forcing a string would set the literal string "null" instead."""
-    cmd = [helm, "template", "ucx-netpolicy-test", chart, "--namespace", "ucx-netpolicy-test"]
-    for s in sets:
-        cmd += ["--set", s]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        return None, proc.stderr.strip()
-    return [d for d in yaml.safe_load_all(proc.stdout) if isinstance(d, dict)], ""
-
-
-def helm_template_fails(helm, chart, sets):
-    docs, err = helm_template(helm, chart, sets)
+def helm_template_fails(helm, chart, sets, force_string=False):
+    docs, err = helm_template(helm, chart, sets, force_string=force_string)
     return docs is None, err
 
 
@@ -325,7 +317,8 @@ def check_chart(helm, name, chart, ucx_sets, default_sets, extra_default_cases=(
     bad_values = ["20000", "a-b", "020000-020063", "20063-20000", "20000-20000",
                   "0-10", "1-70000", "20000-30000"]
     for bad in bad_values:
-        fails, err = helm_template_fails(helm, chart, ucx_sets + [f"transport.ucx.tcpPortRange={bad}"])
+        fails, err = helm_template_fails(helm, chart, ucx_sets + [f"transport.ucx.tcpPortRange={bad}"],
+                                          force_string=True)
         check(f"{name}: transport.ucx.tcpPortRange={bad!r} makes helm template fail "
               "on this chart's own tcpPortRange validation message",
               fails and "tcpPortRange" in (err or ""), err or "rendered without error")
@@ -334,8 +327,8 @@ def check_chart(helm, name, chart, ucx_sets, default_sets, extra_default_cases=(
     # --reuse-values from a pre-fix release, where the old stored config has no "ucx" key at
     # all and the chart's own default never gets a chance to fill it in) must still succeed,
     # and must not render any UCX_TCP_PORT_RANGE or endPort.
-    nodocs, err = helm_template_raw(helm, chart, default_sets + ["networkPolicy.enabled=true",
-                                                                  "transport.ucx=null"])
+    nodocs, err = helm_template(helm, chart, default_sets + ["networkPolicy.enabled=true",
+                                                               "transport.ucx=null"])
     if check(f"{name}: default transport with transport.ucx entirely absent (simulated "
              "--reuse-values from a pre-fix release) still renders", nodocs is not None, err):
         check(f"{name}: transport.ucx absent + default transport renders no endPort anywhere",
