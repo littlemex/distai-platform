@@ -330,7 +330,11 @@ def check_chart(helm, name, chart, ucx_sets, default_sets, extra_default_cases=(
         ("020000-020063", FORMAT_MSG),   # leading zero
         ("20063-20000", BOUNDS_MSG),     # reversed
         ("20000-20000", BOUNDS_MSG),     # equal
-        ("0-10", BOUNDS_MSG),            # first < 1
+        ("0-10", FORMAT_MSG),            # "0" itself has no leading [1-9] digit, so this
+                                          # fails the format regex before the bounds check
+                                          # ever runs (first < 1 is actually unreachable
+                                          # once the format regex passes, since every digit
+                                          # string the regex accepts starts with 1-9)
         ("65000-66000", BOUNDS_MSG),     # last > 65535, width (1001) well under the cap --
                                           # isolates the upper bound from the width cap
         ("1-70000", BOUNDS_MSG),         # both the bound and the width are violated; the
