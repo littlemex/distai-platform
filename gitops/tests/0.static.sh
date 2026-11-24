@@ -375,7 +375,7 @@ must_fail() {
 # set problem check_gitops_contract.py's own addon_dirs already hit once
 # independently.
 mapfile -t fixture_charts < <(find "${FIXTURES_DIR}" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)
-# A Fable 5.2 review found the derive-from-filesystem change above
+# A review found the derive-from-filesystem change above
 # silently inverted a guarantee: the old hardcoded "for chart in
 # capacity-pool smoke" meant a missing tests/fixtures/smoke/ directory
 # (Git does not track empty directories) produced no failure here at
