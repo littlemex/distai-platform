@@ -2,6 +2,7 @@
 {{- $fullname := include "disagg.fullname" . -}}
 {{- $t := .Values.transport -}}
 {{- $nixlLibfabric := and (eq $t.backend "NIXL") (eq $t.sglangNixlBackend "LIBFABRIC") -}}
+{{- $nixlUcx := and (eq $t.backend "NIXL") (eq $t.sglangNixlBackend "UCX") -}}
 {{- range $role := list "prefill" "decode" }}
 {{- $r := index $.Values $role }}
 {{- $limits := dict $.Values.accelerator.resourceName (int $r.gpusPerEngine) }}
@@ -185,6 +186,13 @@ spec:
             # it is stated here so the chart, not the image, decides.
             - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
               value: {{ $t.sglangNixlBackend | quote }}
+            {{- end }}
+            {{- if $nixlUcx }}
+            # Fixes the TCP port NIXL's own UCX backend listens on for the
+            # actual KV connection, so the NetworkPolicy below can name it
+            # (see values.yaml's own transport.ucx.tcpPortRange comment).
+            - name: UCX_TCP_PORT_RANGE
+              value: {{ $t.ucx.tcpPortRange | quote }}
             {{- end }}
             {{- if $nixlLibfabric }}
             - name: FI_PROVIDER

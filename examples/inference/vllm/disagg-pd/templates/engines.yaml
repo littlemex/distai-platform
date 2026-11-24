@@ -234,6 +234,13 @@ spec:
                   fieldPath: status.podIP
             - name: VLLM_NIXL_SIDE_CHANNEL_PORT
               value: {{ $t.sideChannelPort | quote }}
+            {{- if eq $t.backend "UCX" }}
+            # Fixes the TCP port UCX's own TCP transport listens on for the
+            # actual KV connection, so the NetworkPolicy below can name it
+            # (see values.yaml's own transport.ucx.tcpPortRange comment).
+            - name: UCX_TCP_PORT_RANGE
+              value: {{ $t.ucx.tcpPortRange | quote }}
+            {{- end }}
             {{- if eq $t.backend "LIBFABRIC" }}
             - name: FI_PROVIDER
               value: efa

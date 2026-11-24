@@ -7,11 +7,18 @@
   actual HTTP calls directly to each engine Pod -- the engine's own
   ingress rule names the router the same way vllm/disagg-pd names its
   proxy.
+
+  transport.backend=NIXL with sglangNixlBackend=UCX needs the same fixed,
+  narrow TCP port range as ../../vllm/disagg-pd's own networkpolicy.yaml
+  -- see that file's comment for why, and values.yaml's own
+  transport.ucx.tcpPortRange for the value.
 */}}
 ---
 # prefill and decode engines: the HTTP port (engine.port) only from this
 # release's own router, and the bootstrap port (transport.bootstrapPort,
 # SGLang's own PD handshake) only from the PEER role's own Pods.
+{{- $nixlUcx := and (eq $.Values.transport.backend "NIXL") (eq $.Values.transport.sglangNixlBackend "UCX") }}
+{{- $ucxParts := splitList "-" $.Values.transport.ucx.tcpPortRange }}
 {{- range $role := list "prefill" "decode" }}
 {{- $peer := ternary "decode" "prefill" (eq $role "prefill") }}
 ---
@@ -40,6 +47,10 @@ spec:
               {{- include "disagg.selector" (dict "root" $ "component" $peer) | nindent 14 }}
       ports:
         - port: {{ $.Values.transport.bootstrapPort }}
+        {{- if $nixlUcx }}
+        - port: {{ index $ucxParts 0 | int }}
+          endPort: {{ index $ucxParts 1 | int }}
+        {{- end }}
     {{- if and $.Values.metrics.enabled $.Values.networkPolicy.metricsScrapeFrom }}
     - from:
         {{- toYaml $.Values.networkPolicy.metricsScrapeFrom | nindent 8 }}

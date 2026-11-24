@@ -93,6 +93,21 @@ transport:
   # The router learns it from the prefill pods' sglang.ai/bootstrap-port
   # annotation.
   bootstrapPort: 8998
+  # Only read with backend=NIXL, sglangNixlBackend=UCX -- the same
+  # NIXL+UCX backend the vLLM charts use, so the same gap applies here:
+  # NIXL's UCX backend builds its UCX worker config with ucp_config_read()
+  # using prefix "NIXL" (ai-dynamo/nixl's src/plugins/ucx/config.cpp),
+  # which falls back to the plain UCX_<X> variable this chart sets below
+  # when NIXL_UCX_<X> is unset. UCX_TCP_PORT_RANGE ("<first>-<last>",
+  # openucx/ucx's src/uct/tcp/tcp_iface.c PORT_RANGE entry) fixes the TCP
+  # port UCX's own TCP transport listens on for the actual KV connection,
+  # instead of an unpredictable OS-picked ephemeral port a default-deny
+  # NetworkPolicy can never name in advance. See
+  # ../../vllm/disagg-pd/values.yaml's own transport.ucx.tcpPortRange
+  # comment for the full reasoning (why a real range, why this specific
+  # block).
+  ucx:
+    tcpPortRange: "20000-20063"
 
 # One engine is one SGLang server process with gpusPerEngine GPUs (--tp-size).
 # Total GPUs = prefill.replicas x prefill.gpusPerEngine +

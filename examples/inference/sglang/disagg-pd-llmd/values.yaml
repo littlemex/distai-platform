@@ -75,6 +75,10 @@ transport:
   # own --disaggregation-bootstrap-port flag and the decode pod's sidecar
   # env, so the two always agree.
   bootstrapPort: 8998
+  # Only read with backend=NIXL, sglangNixlBackend=UCX. See
+  # ../disagg-pd's own values.yaml comment for the full explanation.
+  ucx:
+    tcpPortRange: "20000-20063"
 
 # One engine is one SGLang server process with gpusPerEngine GPUs
 # (--tp-size). Total GPUs = prefill.replicas x prefill.gpusPerEngine +

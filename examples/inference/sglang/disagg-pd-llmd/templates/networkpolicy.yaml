@@ -11,7 +11,14 @@
   routing sidecar calling prefill's engine.port (8000) to deliver the
   bootstrap-injected request -- the podSelector below matches the whole
   decode Pod, sidecar container included, so this one rule covers it.
+
+  transport.backend=NIXL with sglangNixlBackend=UCX needs the same fixed,
+  narrow TCP port range as ../../vllm/disagg-pd's own networkpolicy.yaml
+  -- see that file's comment for why, and values.yaml's own
+  transport.ucx.tcpPortRange for the value.
 */}}
+{{- $nixlUcx := and (eq $.Values.transport.backend "NIXL") (eq $.Values.transport.sglangNixlBackend "UCX") }}
+{{- $ucxParts := splitList "-" $.Values.transport.ucx.tcpPortRange }}
 {{- range $role := list "prefill" "decode" }}
 {{- $peer := ternary "decode" "prefill" (eq $role "prefill") }}
 ---
@@ -37,6 +44,10 @@ spec:
         {{- if eq $role "prefill" }}
         - port: {{ $.Values.transport.bootstrapPort }}
         - port: {{ $.Values.engine.port }}
+        {{- end }}
+        {{- if $nixlUcx }}
+        - port: {{ index $ucxParts 0 | int }}
+          endPort: {{ index $ucxParts 1 | int }}
         {{- end }}
 {{- end }}
 {{- end }}

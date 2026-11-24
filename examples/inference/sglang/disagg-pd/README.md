@@ -175,6 +175,7 @@ Use the in-cluster load replay and the scorer in [`../../_shared/`](../../_share
 | `transport.forceEfaSameNode` | `false` | `true` sets `FI_EFA_ENABLE_SHM_TRANSFER=0` on both roles (else explicitly `1`); requires `NIXL` with `LIBFABRIC` and `placement.sameNodeMeasurement=true` |
 | `transport.efaResourceName` | `vpc.amazonaws.com/efa` | Extended resource the EFA device plugin advertises |
 | `transport.bootstrapPort` | `8998` | Prefill's bootstrap server port (`--disaggregation-bootstrap-port`), also published as the `sglang.ai/bootstrap-port` annotation |
+| `transport.ucx.tcpPortRange` | `"20000-20063"` | `UCX_TCP_PORT_RANGE`, only read with `backend=NIXL`, `sglangNixlBackend=UCX`: fixes the TCP port NIXL's UCX backend listens on for the actual KV connection, so the NetworkPolicy can open exactly it (see "Known issues") |
 | `prefill.replicas`, `decode.replicas` | `1`, `1` | Engines per role |
 | `prefill.gpusPerEngine`, `decode.gpusPerEngine` | `1`, `1` | GPUs per engine (`--tp-size`) |
 | `prefill.efaDevices`, `decode.efaDevices` | `1`, `1` | EFA devices per engine pod; at least 1 with an EFA transport |
@@ -213,6 +214,7 @@ Use the in-cluster load replay and the scorer in [`../../_shared/`](../../_share
 - `transport.forceEfaSameNode` is not expected to show a shm-versus-EFA contrast under `placement.sameNodeMeasurement=true`; see [Placement and transport](#placement-and-transport).
 - `placement.sameNodeMeasurement=true` sets the roles' `strategy.type` to `Recreate` (brief downtime on every `helm upgrade` in that mode), for the same reason as the vLLM chart.
 - `sglang:kv_transfer_latency_ms` has fixed buckets ending at 5000 ms, so its quantiles saturate for any transfer slower than that (RFC #37, Decision 7).
+- **Fixed**: with `transport.backend=NIXL`, `transport.sglangNixlBackend=UCX`, this chart shares the same NIXL UCX backend the vLLM chart uses, and the same bug: every request failed with HTTP 500 on real hardware because NIXL's UCX backend listens on a TCP port the OS picks at random, which a default-deny NetworkPolicy cannot name in advance (confirmed on `us-east-1` `g7.8xlarge` x2 with the vLLM chart; see [`../../vllm/disagg-pd/README.md`](../../vllm/disagg-pd/#known-issues)'s own entry for the exact log). `transport.ucx.tcpPortRange` fixes the port to a narrow, declared range, and the NetworkPolicy now opens exactly that range from the peer role only. `transport.sglangNixlBackend=LIBFABRIC` was never affected: its KV bytes move over the EFA userspace, bypassing the kernel's TCP/IP stack entirely. `transport.backend=MOONCAKE` is unaffected by this specific fix either way (it never goes through NIXL's UCX backend at all); whether `mooncakeProtocol=tcp` (Mooncake's own, separate TCP transport, not UCX's) has an equivalent dynamic-port gap was not examined by this round — out of scope for a fix aimed at NIXL's UCX backend specifically.
 
 ## Clean up
 

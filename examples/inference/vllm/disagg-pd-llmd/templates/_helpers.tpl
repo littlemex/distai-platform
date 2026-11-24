@@ -42,6 +42,15 @@ app.kubernetes.io/component: {{ .component }}
 {{- if not (has $t.kvLoadFailurePolicy (list "fail" "recompute")) -}}
 {{- fail (printf "transport.kvLoadFailurePolicy must be fail or recompute, got %q" $t.kvLoadFailurePolicy) -}}
 {{- end -}}
+{{- $ucxParts := splitList "-" $t.ucx.tcpPortRange -}}
+{{- if ne (len $ucxParts) 2 -}}
+{{- fail (printf "transport.ucx.tcpPortRange must be \"<first>-<last>\", got %q" $t.ucx.tcpPortRange) -}}
+{{- end -}}
+{{- $ucxFirst := int (index $ucxParts 0) -}}
+{{- $ucxLast := int (index $ucxParts 1) -}}
+{{- if or (lt $ucxFirst 1) (gt $ucxLast 65535) (ge $ucxFirst $ucxLast) -}}
+{{- fail (printf "transport.ucx.tcpPortRange=%q must satisfy 1 <= first < last <= 65535" $t.ucx.tcpPortRange) -}}
+{{- end -}}
 {{- if not .Values.placement.nodeSelectorKey -}}
 {{- fail "placement.nodeSelectorKey must not be empty" -}}
 {{- end -}}

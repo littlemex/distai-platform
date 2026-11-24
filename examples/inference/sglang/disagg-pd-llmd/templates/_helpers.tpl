@@ -95,6 +95,15 @@ app.kubernetes.io/component: {{ .component }}
 {{- if and (eq $t.backend "MOONCAKE") (not (has $t.mooncakeProtocol (list "efa" "tcp"))) -}}
 {{- fail (printf "transport.mooncakeProtocol must be efa or tcp, got %q" $t.mooncakeProtocol) -}}
 {{- end -}}
+{{- $ucxParts := splitList "-" $t.ucx.tcpPortRange -}}
+{{- if ne (len $ucxParts) 2 -}}
+{{- fail (printf "transport.ucx.tcpPortRange must be \"<first>-<last>\", got %q" $t.ucx.tcpPortRange) -}}
+{{- end -}}
+{{- $ucxFirst := int (index $ucxParts 0) -}}
+{{- $ucxLast := int (index $ucxParts 1) -}}
+{{- if or (lt $ucxFirst 1) (gt $ucxLast 65535) (ge $ucxFirst $ucxLast) -}}
+{{- fail (printf "transport.ucx.tcpPortRange=%q must satisfy 1 <= first < last <= 65535" $t.ucx.tcpPortRange) -}}
+{{- end -}}
 {{- if and $t.forceEfaSameNode (not (and (eq $t.backend "NIXL") (eq $t.sglangNixlBackend "LIBFABRIC"))) -}}
 {{- fail "transport.forceEfaSameNode is only defined for transport.backend=NIXL with sglangNixlBackend=LIBFABRIC (the only combination that sets FI_EFA_ENABLE_SHM_TRANSFER at all): with backend=MOONCAKE, whether Mooncake's EFA transport honors the same libfabric variable is unconfirmed (RFC #37, Decision 6); with sglangNixlBackend=UCX, no FI_EFA_* env is rendered at all, so the flag would silently do nothing rather than force anything onto EFA" -}}
 {{- end -}}

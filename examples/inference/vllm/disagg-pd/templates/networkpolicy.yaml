@@ -27,8 +27,20 @@
 # handshake port to the peer role narrows who can ever negotiate a
 # transfer in the first place; it is not a claim that the KV bytes
 # themselves are also NetworkPolicy-protected.
+#
+# transport.backend=UCX is the one case where the above does NOT hold:
+# NIXL's UCX backend has no EFA userspace to hand the connection to, so
+# its own TCP transport both negotiates AND moves the KV bytes over the
+# kernel's own IP stack (confirmed on real hardware -- a g7.8xlarge pair
+# with no EFA device, default UCX_TCP_PORT_RANGE, every request failed
+# HTTP 500: NIXL's own UCX worker could not create an endpoint to the
+# peer's dynamic, OS-picked ephemeral port, which this policy's own
+# default-deny had no way to name). transport.ucx.tcpPortRange fixes that
+# port to a narrow, declared range (see values.yaml) so this policy can
+# open exactly it, from the peer role only -- never 1024-65535.
 {{- range $role := list "prefill" "decode" }}
 {{- $peer := ternary "decode" "prefill" (eq $role "prefill") }}
+{{- $ucxParts := splitList "-" $.Values.transport.ucx.tcpPortRange }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -55,6 +67,10 @@ spec:
               {{- include "disagg.selector" (dict "root" $ "component" $peer) | nindent 14 }}
       ports:
         - port: {{ $.Values.transport.sideChannelPort }}
+        {{- if eq $.Values.transport.backend "UCX" }}
+        - port: {{ index $ucxParts 0 | int }}
+          endPort: {{ index $ucxParts 1 | int }}
+        {{- end }}
     {{- if and $.Values.metrics.enabled $.Values.networkPolicy.metricsScrapeFrom }}
     - from:
         {{- toYaml $.Values.networkPolicy.metricsScrapeFrom | nindent 8 }}

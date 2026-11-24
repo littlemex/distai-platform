@@ -17,8 +17,10 @@
 #      pinned upstream schemas, including the Gateway API and Gateway API
 #      Inference Extension CRD schemas for vllm/disagg-pd-llmd;
 #   6. the placement/transport values contract (test_placement_transport.sh);
-#   7. the Grafana dashboard (check_dashboard.py);
-#   8. the load driver's own documented guarantees that are visible
+#   7. the UCX dynamic-port NetworkPolicy contract, on all four disaggregation
+#      charts (check_ucx_netpolicy.py);
+#   8. the Grafana dashboard (check_dashboard.py);
+#   9. the load driver's own documented guarantees that are visible
 #      without a cluster: in-cluster only (no port-forward), the
 #      --max-send-lag-ms bound, the GC freeze, the before/after pod
 #      snapshots.
@@ -379,13 +381,28 @@ else
   fail "placement/transport values contract: a chart is missing"
 fi
 
-# --------------------------------------------------------- 7. dashboard
+# ---------------------------------------- 7. UCX NetworkPolicy contract
+
+if [[ -f "${DISAGG}/Chart.yaml" && -f "${LLMD}/Chart.yaml" && -f "${SGLANG_DISAGG}/Chart.yaml" && -f "${SGLANG_LLMD}/Chart.yaml" ]]; then
+  run_check "UCX dynamic-port NetworkPolicy contract" \
+    "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+    python3 "${SCRIPT_DIR}/check_ucx_netpolicy.py" \
+    --helm "${HELM}" \
+    --vllm-disagg-pd "${DISAGG}" \
+    --vllm-disagg-pd-llmd "${LLMD}" \
+    --sglang-disagg-pd "${SGLANG_DISAGG}" \
+    --sglang-disagg-pd-llmd "${SGLANG_LLMD}"
+else
+  fail "UCX dynamic-port NetworkPolicy contract: a chart is missing"
+fi
+
+# --------------------------------------------------------- 8. dashboard
 
 if [[ -f "${DASHBOARD}" ]]; then
   run_check "dashboard vllm-pd.json" "${PYTHON}" "${SCRIPT_DIR}/check_dashboard.py" "${DASHBOARD}"
 fi
 
-# ------------------------------------------------------ 8. load driver
+# ------------------------------------------------------ 9. load driver
 
 if [[ -f "${LOAD}/run-load.sh" ]]; then
   if grep -q -- 'port-forward' "${LOAD}/run-load.sh" "${LOAD}/load-job.yaml" 2>/dev/null; then

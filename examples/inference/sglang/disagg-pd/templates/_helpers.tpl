@@ -47,6 +47,15 @@ true
 {{- if not (has $t.mooncakeProtocol (list "efa" "tcp")) -}}
 {{- fail (printf "transport.mooncakeProtocol must be efa or tcp, got %q" $t.mooncakeProtocol) -}}
 {{- end -}}
+{{- $ucxParts := splitList "-" $t.ucx.tcpPortRange -}}
+{{- if ne (len $ucxParts) 2 -}}
+{{- fail (printf "transport.ucx.tcpPortRange must be \"<first>-<last>\", got %q" $t.ucx.tcpPortRange) -}}
+{{- end -}}
+{{- $ucxFirst := int (index $ucxParts 0) -}}
+{{- $ucxLast := int (index $ucxParts 1) -}}
+{{- if or (lt $ucxFirst 1) (gt $ucxLast 65535) (ge $ucxFirst $ucxLast) -}}
+{{- fail (printf "transport.ucx.tcpPortRange=%q must satisfy 1 <= first < last <= 65535" $t.ucx.tcpPortRange) -}}
+{{- end -}}
 {{- if and $t.forceEfaSameNode (eq $t.backend "MOONCAKE") -}}
 {{- fail "transport.forceEfaSameNode=true is not defined for transport.backend=MOONCAKE: whether Mooncake's EFA transport honors FI_EFA_ENABLE_SHM_TRANSFER is unconfirmed (RFC #37, Decision 6)" -}}
 {{- end -}}

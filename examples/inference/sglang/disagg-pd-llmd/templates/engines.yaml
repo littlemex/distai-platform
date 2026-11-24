@@ -4,6 +4,7 @@
 {{- $t := .Values.transport -}}
 {{- $sc := .Values.routingSidecar -}}
 {{- $nixlLibfabric := and (eq $t.backend "NIXL") (eq $t.sglangNixlBackend "LIBFABRIC") -}}
+{{- $nixlUcx := and (eq $t.backend "NIXL") (eq $t.sglangNixlBackend "UCX") -}}
 {{- $poolLabels := .Values.llmdRouter.router.modelServers.matchLabels -}}
 {{- range $role := list "prefill" "decode" }}
 {{- $r := index $.Values $role }}
@@ -244,6 +245,14 @@ spec:
             {{- if eq $t.backend "NIXL" }}
             - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
               value: {{ $t.sglangNixlBackend | quote }}
+            {{- end }}
+            {{- if $nixlUcx }}
+            # Fixes the TCP port NIXL's own UCX backend listens on for the
+            # actual KV connection, so the NetworkPolicy below can name it
+            # (see ../disagg-pd/values.yaml's own transport.ucx.tcpPortRange
+            # comment).
+            - name: UCX_TCP_PORT_RANGE
+              value: {{ $t.ucx.tcpPortRange | quote }}
             {{- end }}
             {{- if $nixlLibfabric }}
             - name: FI_PROVIDER
