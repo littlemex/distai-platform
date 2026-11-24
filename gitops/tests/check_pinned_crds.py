@@ -189,7 +189,7 @@ def daemonset_carries_label(ds_spec, key, value):
 
 
 def check_method_label_rendered(label, rendered_text, key, value):
-    """#28, Blocking finding from the Fable 5.2 review of this PR: a
+    """#28, Blocking finding from a review of this PR: a
     values key that is not a real field in the pinned chart is silently
     ignored by Helm, not an error -- confirmed by the review, and the
     reason this script (which already has the exact pinned chart's own

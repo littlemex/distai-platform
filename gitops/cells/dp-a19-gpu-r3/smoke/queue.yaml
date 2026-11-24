@@ -7,7 +7,7 @@
 # of #28's own accelerator-specific checks, which use a separate bare pod
 # requesting nvidia.com/gpu directly. clusterQueue.acceleratorResource/
 # acceleratorQuota (#63, filed as #56) now cover that resource too,
-# matching gpu.yaml's own taint on it. A Fable 5.2 review of an earlier
+# matching gpu.yaml's own taint on it. A review of an earlier
 # version of this fix found that covering the resource here alone does
 # not close #56: Kueue applies a ResourceFlavor's own tolerations to
 # every Workload admitted through it regardless of what that Workload

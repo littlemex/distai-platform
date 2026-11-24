@@ -1938,7 +1938,7 @@ SMOKE_CLUSTERQUEUE="$(k get localqueue "${SMOKE_LOCALQUEUE}" -n "${SMOKE_NS}" -o
 [[ -n "${SMOKE_CLUSTERQUEUE}" ]] || fail "LocalQueue ${SMOKE_NS}/${SMOKE_LOCALQUEUE} has no spec.clusterQueue"
 pass "discovered the admin smoke LocalQueue: ${SMOKE_NS}/${SMOKE_LOCALQUEUE} (ClusterQueue ${SMOKE_CLUSTERQUEUE})"
 
-# #63, filed as #56: a Fable 5.2 review of an earlier version of this fix
+# #63, filed as #56: a review of an earlier version of this fix
 # (which only added the accelerator resource to the smoke ClusterQueue's
 # own resourceGroups, never made anything actually request it) found that
 # Kueue applies a ResourceFlavor's own tolerations to every Workload it

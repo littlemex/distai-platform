@@ -5,7 +5,7 @@
 # ResourceFlavor this cell's own capacity-pool/trn.yaml creates (#28
 # section D). clusterQueue.acceleratorResource/acceleratorQuota (#63,
 # filed as #56) now cover aws.amazon.com/neuron too, matching trn.yaml's
-# own taint on that resource. A Fable 5.2 review of an earlier version of
+# own taint on that resource. A review of an earlier version of
 # this fix found that covering the resource here alone does not close
 # #56: Kueue applies a ResourceFlavor's own tolerations to every Workload
 # admitted through it regardless of what that Workload requests, so a
