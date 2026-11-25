@@ -83,14 +83,14 @@ plays two roles on the same issue, so that tests are not shaped around the
 implementation and the review is not anchored on the author's reasoning.
 The same model may back several sessions.
 
-| Role | Default model | Reads | Produces | Branch |
+| Role | Default session | Reads | Produces | Branch |
 | --- | --- | --- | --- | --- |
 | Maintainer | human, `@littlemex` | issue, pull request | agreement on the plan, the go-ahead to verify, the merge | — |
 | Orchestrator | main AI session | everything | the issue, member briefs, the pull request, status labels, the merge of the test branch into the implementation branch | — |
-| Implementer | Opus 5.5 | this file, README, the issue | the change | `<type>/<issue>-<slug>` |
-| Test author | Opus 5.5 | this file, README, the issue (not the implementation) | tests and checks derived from the acceptance criteria | `test/<issue>-<slug>` |
-| Reviewer | Fable 5.2 | this file, README, the issue, the diff, the review packs in section 7 | findings ranked by severity, each with a concrete failure scenario | — |
-| Verifier | Opus 5.5 | this file, README, the issue, the pull request | an end-to-end run on the test cluster, pasted under `## Test Results` | — |
+| Implementer | an agent session | this file, README, the issue | the change | `<type>/<issue>-<slug>` |
+| Test author | a separate agent session | this file, README, the issue (not the implementation) | tests and checks derived from the acceptance criteria | `test/<issue>-<slug>` |
+| Reviewer | a review session | this file, README, the issue, the diff, the review packs in section 7 | findings ranked by severity, each with a concrete failure scenario | — |
+| Verifier | a separate agent session | this file, README, the issue, the pull request | an end-to-end run on the test cluster, pasted under `## Test Results` | — |
 
 `<type>` is one of `feat`, `fix`, `docs`, `ci`, `refactor`, `chore`.
 
@@ -111,9 +111,8 @@ judgment alone.
 
 | Directory | Contents |
 | --- | --- |
-| `infra/eks/` | Terraform root for the EKS platform, Helm charts under `charts/`, operational scripts under `scripts/`, design records under `docs/` |
-| `infra/data-layer/` | Optional data-layer stack |
-| `infra/scripts/` | Installers and release helpers |
+| `infra/foundation/` | Terraform root for one cell: VPC, EKS cluster, system node group, Karpenter IAM and interruption queue, optional Argo CD capability. Tests under `tests/`, helper scripts under `scripts/` |
+| `gitops/` | Manifests and Helm charts that Argo CD delivers to cells: node pools, queues, device advertisers (planned, [#17](https://github.com/littlemex/distai-platform/issues/17)) |
 | `docs/workshop/` | Hands-on workshop chapters, English and Japanese |
 | `docs/deep-dives/` | Self-contained explainer pages `NNNNN-<slug>.html` (numbered from `00000`), English and Japanese |
 | `.github/` | Issue and pull request templates, workflows |
@@ -219,9 +218,8 @@ that holds AWS credentials.
 
 ## 7. Reviews
 
-Reviewers apply the review packs of the maintainer's
-[review-html skill](https://github.com/littlemex/explainers/blob/6766d86d12f2dfbfdc35971dac8b95a0428b25da/skills/review-html.html)
-(pinned commit; the packs are written in Japanese) that match the change:
+Reviewers apply the review packs that match the change, chosen from the
+table below:
 
 | Change | Packs |
 | --- | --- |
