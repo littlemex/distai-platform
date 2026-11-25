@@ -1,0 +1,15 @@
+# Namespace the kueue addon.yaml delivers its controller-manager Deployment
+# into. No default: must match gitops/addons/kueue/addon.yaml's own
+# namespace: field exactly, or this policy's podSelector would apply in
+# the wrong namespace and never match the real controller-manager Pod.
+namespace: ""
+
+# Pod labels the pinned chart's own Deployment sets on its controller-manager
+# Pod (helm template oci://registry.k8s.io/kueue/charts/kueue:0.20.6,
+# confirmed 2026-11-23). A version bump that changes these needs a reviewed
+# diff here too - nothing mechanically keeps the two in sync, the same
+# caveat gitops/README.md's Versioning section already states for other
+# cross-chart assumptions.
+podSelector:
+  app.kubernetes.io/name: kueue
+  control-plane: controller-manager

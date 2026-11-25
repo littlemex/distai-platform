@@ -1,0 +1,24 @@
+# Karpenter's five CustomResourceDefinitions (EC2NodeClass, NodeClaim,
+# NodePool, NodeOverlay, CapacityBuffer - the chart ships all five as plain
+# templates, no crds/ folder,
+# so Argo CD upgrades them on every sync like any other template). Delivered
+# one step ahead of the "karpenter" add-on, which ships the same five CRDs a
+# second time, in a true crds/ folder, and sets helm.skipCrds (below) so the
+# two Applications never both own them (RFC #25, Facts checked).
+#
+# Chart source: https://github.com/aws/karpenter-provider-aws (tag v1.15.2).
+# Version and digest confirmed against the chart's own OCI manifest,
+# 2026-11-19:
+#   oci://public.ecr.aws/karpenter/karpenter-crd:1.15.2
+#   sha256:51c0f66de3a1af2da916f3c6aba9cfac9badde9a0efc348c615bb2412c1f3287
+# Argo CD's Application CRD has no field to pin an OCI Helm chart by this
+# digest (confirmed against the upstream Helm user guide, which documents
+# targetRevision as a semver string only); the digest is recorded here so a
+# reviewer can tell a republished 1.15.2 tag apart from the one this PR
+# reviewed, not because anything in this file enforces it.
+addon: karpenter-crd
+chart: karpenter-crd
+repoURL: public.ecr.aws/karpenter
+version: "1.15.2"
+wave: crds
+namespace: kube-system

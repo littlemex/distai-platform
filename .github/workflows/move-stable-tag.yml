@@ -1,0 +1,74 @@
+# RFC #25 Decision 6: `stable` is the one moving tag a cell's own root
+# Application targetRevision (gitops/bootstrap/root-application.yaml,
+# applied by gitops/bootstrap/bootstrap.sh) and every Application sourced
+# from this repository itself (every `cells`-generated Application; a
+# platform add-on Application such as karpenter/kueue/karpenter-crd is
+# instead sourced from its own upstream chart registry, pinned to an
+# exact chart version in its own addon.yaml, never to `stable`) are
+# pinned to. This job is the only thing that re-points it,
+# immediately after a merge lands on main - never on a pull request, so a
+# fork's own workflow run can never move it (no pull_request or
+# pull_request_target trigger exists in this file at all).
+#
+# "Only by CI" is enforced by a GitHub tag protection ruleset naming this
+# job's own actor, which a maintainer with Administration access configures
+# once, outside this workflow's reach (RFC #25 Decision 6 Residual risks;
+# this repository's own CI/automation tokens have no Administration scope
+# either); until then, anyone with write access to this repository (tag
+# pushes are not scoped to main branch protection specifically) can still
+# move `stable` by hand.
+#
+# No marketplace action is used, so there is nothing to pin by commit SHA:
+# the GitHub CLI (gh) that ships on the hosted runner image is the only
+# tool this job calls, authenticated with the workflow's own
+# repository-scoped GITHUB_TOKEN.
+name: Move stable tag
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: move-stable-tag
+  cancel-in-progress: false
+
+jobs:
+  move-stable:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Move (or create) the stable tag at this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Re-running an OLD workflow run (GitHub Actions' own "Re-run
+          # jobs") re-executes with github.sha fixed to whatever commit
+          # triggered that run, not main's current tip -- moving stable
+          # backwards past a newer commit that has already merged and
+          # already moved it forward. Refuse to move the tag unless SHA
+          # is still main's current tip right now.
+          MAIN_SHA="$(gh api "repos/${REPO}/commits/main" --jq .sha)"
+          if [[ "${SHA}" != "${MAIN_SHA}" ]]; then
+            echo "main is now at ${MAIN_SHA}, not this run's own ${SHA} (a re-run of an old workflow run, or a race with a later push); refusing to move stable backwards"
+            exit 0
+          fi
+          # "git/ref/..." (singular), never "git/refs/..." (plural): the
+          # plural form is GitHub's legacy prefix-matching list endpoint,
+          # so a tag such as "stable-backup" would also match it and read
+          # back as "stable already exists" even when the exact "stable"
+          # tag itself does not.
+          if gh api "repos/${REPO}/git/ref/tags/stable" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/${REPO}/git/refs/tags/stable" \
+              -f "sha=${SHA}" -F "force=true"
+            echo "moved existing tag stable -> ${SHA}"
+          else
+            gh api --method POST "repos/${REPO}/git/refs" \
+              -f "ref=refs/tags/stable" -f "sha=${SHA}"
+            echo "created tag stable -> ${SHA}"
+          fi

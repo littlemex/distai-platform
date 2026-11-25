@@ -133,7 +133,7 @@ variable "system_node_group" {
 }
 
 variable "argocd" {
-  description = "Create the EKS managed Argo CD capability (hub cells only) when set. idc_instance_arn and idc_region identify the IAM Identity Center instance; role_mappings gives each listed Identity Center group one of the Argo CD roles (ADMIN, EDITOR or VIEWER) across all applications of the capability; scoping a team to its own applications is done by per-team AppProjects in the tenancy layer."
+  description = "Create the EKS managed Argo CD capability (hub cells only) when set. idc_instance_arn and idc_region identify the IAM Identity Center instance; role_mappings gives each listed Identity Center group one of the Argo CD roles (ADMIN, EDITOR or VIEWER) across all applications of the capability. Until the tenancy layer's per-team AppProjects ship (#22), the only AppProject is the admin-owned `platform` project (gitops/bootstrap/bootstrap.sh), so every role here, including EDITOR and VIEWER, can act on every object that AppProject allows (#63, filed as a private report \"SA1\"): ADMIN can deploy any add-on's own Kubernetes objects within that AppProject's scope, and Argo CD does not have a lower-privilege Edit/View split below the AppProject boundary itself. Map a group to EDITOR or VIEWER here only when that group should already have that access; do not treat either as a safe, read-mostly default for a wider audience until #22 ships."
   type = object({
     idc_instance_arn = string
     idc_region       = string
@@ -189,5 +189,15 @@ variable "test_invalid_karpenter_node_principal_arn" {
   validation {
     condition     = var.test_invalid_karpenter_node_principal_arn == null || length(var.test_invalid_karpenter_node_principal_arn) > 0
     error_message = "test_invalid_karpenter_node_principal_arn must not be an empty string; use null to disable."
+  }
+}
+
+variable "test_invalid_coredns_version" {
+  type        = string
+  default     = null
+  description = "Test-only. When set, used as the add-on version for the coredns add-on instead of the pinned version, letting a test force terraform apply to fail after the cluster and system node group already exist (see issue #26). Must stay null outside tests."
+  validation {
+    condition     = var.test_invalid_coredns_version == null || length(var.test_invalid_coredns_version) > 0
+    error_message = "test_invalid_coredns_version must not be an empty string; use null to disable."
   }
 }

@@ -1,0 +1,147 @@
+# RFC #25 Decision 2/3/4. One Application per gitops/addons/<name>/addon.yaml,
+# per registered cluster (Matrix: Cluster generator x Git FILE generator).
+# This PR ships only the "crds" and "controllers" steps (karpenter-crd,
+# karpenter, kueue); "accelerators" and "extras" are later PRs' (#19, #18,
+# #23) and simply have no addon.yaml yet, so they generate nothing today.
+#
+# goTemplate is on (a decision this PR makes, not spelled out by the RFC's
+# own prose, which quotes the legacy fasttemplate form for a single field):
+# templatePatch below needs .values as a real nested object for toYaml, and
+# a flat, dot-flattened legacy parameter map cannot give it that. Verified
+# on a real cluster: every generated Application reaches Synced with this
+# mechanism (karpenter and kueue also reach Healthy; karpenter-crd ships
+# only CustomResourceDefinition objects, with no Health status of its own
+# to report), confirming goTemplate plus templatePatch render correctly
+# end to end (Decision 9's own reason for this PR to exist first, in
+# isolation).
+#
+# The Cluster generator's selector excludes the capability's own built-in
+# local/in-cluster entry (no registration Secret, no annotations, a
+# destination this capability does not support - Facts checked): only a
+# cell's own cell-registration Secret carries this label.
+#
+# The Git file generator's own revision is templated from the Cluster
+# generator's annotation, not a literal value, so the generator-ordering
+# rule (the consumer comes after the producer, Decision 1) is satisfied
+# inside one Matrix generator.
+#
+# RollingSync is this PR's Decision-4 answer (Experiment 4: whether the
+# managed capability's ApplicationSet controller actually exposes
+# Progressive Syncs - Beta since Argo CD v3.3.0). Confirmed on a real
+# cluster (gitops/tests/1.e2e.sh, reading this ApplicationSet's own
+# status.applicationStatus): it does not, as of this PR. Every generated
+# Application instead syncs independently with automated.selfHeal, and a
+# later step's Application fails once and succeeds on retry against an
+# earlier step that has not converged yet - the fallback this manifest's
+# retry policy is already sized for. The strategy.type: RollingSync block
+# below is kept rather than removed: it is harmless when unsupported (the
+# controller simply ignores it, confirmed by the same real-cluster run),
+# and ready to take effect the day the managed capability does expose it.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: platform
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=zero"]
+  generators:
+    - matrix:
+        generators:
+          - clusters:
+              selector:
+                matchLabels:
+                  argocd.argoproj.io/secret-type: cluster
+          - git:
+              repoURL: https://github.com/littlemex/distai-platform.git
+              revision: '{{ index .metadata.annotations "distai.dev.annotations/revision" }}'
+              files:
+                - path: "gitops/addons/*/addon.yaml"
+  # RFC #25 Decision 8: an addon.yaml removed by a PR, or a cell briefly
+  # unmatched, orphans that Application's resources (CRDs, controllers)
+  # instead of deleting them. Only this field, on the ApplicationSet
+  # itself, does that - not an AppProject setting.
+  syncPolicy:
+    preserveResourcesOnDeletion: true
+  strategy:
+    type: RollingSync
+    rollingSync:
+      steps:
+        - matchExpressions:
+            - key: distai.dev/wave
+              operator: In
+              values: ["crds"]
+        - matchExpressions:
+            - key: distai.dev/wave
+              operator: In
+              values: ["controllers"]
+  template:
+    metadata:
+      name: "{{ .name }}-{{ .addon }}"
+      labels:
+        distai.dev/wave: "{{ .wave }}"
+        distai.dev/cell: "{{ .name }}"
+    spec:
+      project: platform
+      source:
+        repoURL: "{{ .repoURL }}"
+        chart: "{{ .chart }}"
+        targetRevision: "{{ .version }}"
+      destination:
+        name: "{{ .name }}"
+        namespace: "{{ .namespace }}"
+      syncPolicy:
+        automated:
+          selfHeal: true
+          prune: true
+        retry:
+          limit: 20
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 5m
+        syncOptions:
+          - CreateNamespace=true
+  # Always rendered as a Go template (sprig included), regardless of
+  # spec.goTemplate above - the only way Decision 2's per-add-on values
+  # (karpenter's settings.clusterName and so on) avoid being forced into
+  # every other add-on's template.
+  templatePatch: |
+    spec:
+      source:
+        helm:
+          {{- if .skipCrds }}
+          skipCrds: true
+          {{- end }}
+          {{- if .values }}
+          valuesObject:
+            {{- toYaml .values | nindent 12 }}
+          {{- end }}
+          {{- if .valuesFrom }}
+          parameters:
+          {{- range .valuesFrom }}
+          - name: {{ .helmKey }}
+            {{- if .param }}
+            value: "{{ index $ .param }}"
+            {{- else }}
+            value: "{{ index $.metadata.annotations .annotationKey }}"
+            {{- end }}
+          {{- end }}
+          {{- end }}
+      {{- if .syncOptions }}
+      # templatePatch is applied as a JSON merge patch over the rendered
+      # base template above (goTemplate's own semantics): a present key
+      # replaces the base's list wholesale, it does not append to it. An
+      # addon.yaml that sets its own syncOptions would otherwise silently
+      # lose the base template's CreateNamespace=true (#63/#64) -
+      # CreateNamespace=true is always rendered first here, and an
+      # addon.yaml that also lists it explicitly (as gitops/addons/kueue's
+      # used to, before this fix) is de-duplicated rather than repeated.
+      syncPolicy:
+        syncOptions:
+        - CreateNamespace=true
+        {{- range .syncOptions }}
+        {{- if ne . "CreateNamespace=true" }}
+        - {{ . }}
+        {{- end }}
+        {{- end }}
+      {{- end }}

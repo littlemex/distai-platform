@@ -1,0 +1,18 @@
+apiVersion: v2
+name: karpenter-netpol
+description: >-
+  NetworkPolicy for Karpenter's own controller Pod (#63, independent
+  security-axis review pass, filed as "SA4"). Not a wrapper around any
+  upstream chart: Karpenter's own Helm chart (gitops/addons/karpenter)
+  ships no NetworkPolicy template and, at this pinned version (1.15.2),
+  no webhook server at all (confirmed by rendering the chart: only ports
+  8080/http-metrics and 8081/health-probe exist on its Deployment,
+  2026-11-23 - the ValidatingWebhookConfiguration/knative-style webhook
+  server older Karpenter releases shipped was removed upstream).
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+home: https://github.com/littlemex/distai-platform
+sources:
+  - https://github.com/littlemex/distai-platform
+  - https://github.com/aws/karpenter-provider-aws

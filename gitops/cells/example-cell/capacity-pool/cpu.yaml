@@ -1,0 +1,22 @@
+# Parameter file for cells.ApplicationSet.yaml's Git file generator
+# (RFC #25 Decision 2/3). Example pair for a cell literally named
+# "example-cell" (matching infra/foundation/README.md's own NAME=example-cell
+# convention) - copy this directory, replace example-cell with the real
+# cell name, and adjust pool.name/clusterQueue.resourceFlavor together if
+# more than one pool is ever needed.
+addon: capacity-pool-cpu
+wave: capacity
+dir: gitops/charts/capacity-pool
+namespace: kube-system
+values:
+  pool:
+    name: cpu
+valuesFrom:
+  # The Cluster generator's own "name" field: this cell's cluster_name.
+  - helmKey: clusterName
+    param: name
+  # infra/foundation output karpenter_node_role_name, carried by the
+  # registration Secret (RFC #25 Decision 1/2) - the one annotation no
+  # platform add-on reads.
+  - helmKey: nodeRole
+    annotationKey: distai.dev.annotations/karpenter-node-role

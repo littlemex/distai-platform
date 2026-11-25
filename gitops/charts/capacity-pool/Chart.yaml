@@ -1,0 +1,15 @@
+apiVersion: v2
+name: capacity-pool
+description: >-
+  One Karpenter NodePool, its EC2NodeClass and the matching Kueue
+  ResourceFlavor, as a single admin-authored unit (RFC #25 Decision 9). This
+  PR ships a minimal CPU-only skeleton only: one capacity type, no
+  reserved/on-demand/flex ordering across several NodePools. #17's own PR
+  extends this chart with that logic; this chart's name and shape do not
+  change under that extension.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+home: https://github.com/littlemex/distai-platform
+sources:
+  - https://github.com/littlemex/distai-platform

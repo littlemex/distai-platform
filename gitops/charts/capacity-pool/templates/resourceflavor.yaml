@@ -1,0 +1,11 @@
+# Kueue's own kind, not Karpenter's; Karpenter labels every node it
+# launches with karpenter.sh/nodepool=<pool name> on its own, so this
+# ResourceFlavor's nodeLabels needs no extra label on the NodePool side to
+# match nodes launched from it.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: {{ .Values.pool.name | quote }}
+spec:
+  nodeLabels:
+    karpenter.sh/nodepool: {{ .Values.pool.name | quote }}

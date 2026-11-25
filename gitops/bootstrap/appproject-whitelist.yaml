@@ -1,0 +1,129 @@
+# The platform AppProject's own clusterResourceWhitelist/namespaceResourceWhitelist
+# (#63, independent security-axis review pass, filed as "SA1" item 1): the
+# exact (group, kind) pairs every addon this checkout delivers actually
+# renders, derived by `helm template`-ing every gitops/addons/*/addon.yaml
+# and gitops/addon-catalog/*/addon.yaml (both chart:- and dir:-sourced) and
+# recording every distinct kind found, 2026-11-23 - not hand-guessed from
+# memory. A later PR adding an addon whose chart renders a kind not listed
+# here fails gitops/tests/check_appproject_whitelist.py (which performs the
+# exact same render-and-collect pass against this same file) before it can
+# reach a real cluster; it is not asserted only here.
+#
+# bootstrap.sh reads this file verbatim and nests it under the AppProject's
+# spec: (sed 's/^/  /' - see bootstrap.sh's own comment on Object 2) - this
+# is the one file both the running script and the static check load, so
+# there is exactly one place this list can drift from what is actually
+# true.
+#
+# Cluster-scoped kinds: every built-in Kubernetes kind here (Namespace,
+# ClusterRole[Binding], the four admissionregistration.k8s.io kinds,
+# CustomResourceDefinition, APIService) is cluster-scoped by definition and
+# never changes meaning.
+#
+# CRD-backed kinds (karpenter.k8s.aws, karpenter.sh, kueue.x-k8s.io,
+# resource.k8s.io): the one generic "CustomResourceDefinition" entry above
+# already covers every CRD *definition* karpenter-crd and kueue install
+# (16 total, confirmed by rendering both charts) - a specific kind is
+# listed below only when this repository's own addon.yaml/cells/
+# parameter files actually create an *instance* of it through an Argo
+# CD-synced Application (EC2NodeClass/NodePool via capacity-pool and
+# optional-pool; ResourceFlavor/ClusterQueue/LocalQueue via smoke;
+# DeviceClass via accel-device-classes and the DRA add-ons). Sibling CRDs
+# from the same charts with no instance ever created this way (NodeClaim,
+# NodeOverlay, CapacityBuffer, Cohort, AdmissionCheck, MultiKueueCluster,
+# MultiKueueConfig, ProvisioningRequestConfig, Topology,
+# WorkloadPriorityClass, Workload) are deliberately left out - see the
+# comments inline below each group. Each kind's own scope (Namespaced vs
+# Cluster) was read from the CRD's own spec.scope field at the pinned
+# chart version, not assumed.
+clusterResourceWhitelist:
+  - group: ""
+    kind: Namespace
+  - group: "admissionregistration.k8s.io"
+    kind: MutatingWebhookConfiguration
+  - group: "admissionregistration.k8s.io"
+    kind: ValidatingWebhookConfiguration
+  - group: "admissionregistration.k8s.io"
+    kind: ValidatingAdmissionPolicy
+  - group: "admissionregistration.k8s.io"
+    kind: ValidatingAdmissionPolicyBinding
+  - group: "apiextensions.k8s.io"
+    kind: CustomResourceDefinition
+  - group: "apiregistration.k8s.io"
+    kind: APIService
+  - group: "rbac.authorization.k8s.io"
+    kind: ClusterRole
+  - group: "rbac.authorization.k8s.io"
+    kind: ClusterRoleBinding
+  - group: "resource.k8s.io"
+    kind: DeviceClass
+  - group: "karpenter.k8s.aws"
+    kind: EC2NodeClass
+  - group: "karpenter.sh"
+    kind: NodePool
+  # NodeClaim and NodeOverlay (also karpenter.sh, also Cluster-scoped CRDs
+  # karpenter-crd installs) are deliberately not here: Karpenter's own
+  # controller creates NodeClaim instances directly against the Kubernetes
+  # API at runtime, never through an Argo CD-synced Application, and
+  # nothing in this repository's own addon.yaml/cell files ever creates a
+  # NodeOverlay. Least privilege means listing only what Argo CD itself is
+  # ever asked to write, not every kind a CRD this AppProject's sync
+  # installs happens to define.
+  - group: "kueue.x-k8s.io"
+    kind: ResourceFlavor
+  - group: "kueue.x-k8s.io"
+    kind: ClusterQueue
+    # Cohort, AdmissionCheck, MultiKueueCluster, MultiKueueConfig,
+    # ProvisioningRequestConfig, Topology and WorkloadPriorityClass (also
+    # kueue.x-k8s.io, also Cluster-scoped CRDs the kueue chart installs) are
+    # not here for the same reason NodeClaim/NodeOverlay are not: no
+    # addon.yaml or cells/ parameter file in this repository ever creates an
+    # instance of any of them.
+
+# Namespace-scoped kinds every addon's own rendered output actually uses,
+# plus one kind no addon renders: ApplicationSet (#63, a review
+# found this missing). gitops/bootstrap/root-application.yaml (Object 3
+# below) is an Application, project: platform, whose own Git source is
+# gitops/appsets/ - the two literal ApplicationSet manifests there
+# (platform.ApplicationSet.yaml, cells.ApplicationSet.yaml) are therefore
+# resources this same AppProject's sync has to be allowed to create too,
+# the same "app of apps" pattern Argo CD's own docs describe (a parent
+# Application's project whitelist governs every resource its own source
+# renders, including a child ApplicationSet/Application, not only the
+# chart-rendered objects this file's other entries cover). ApplicationSet
+# is Namespaced in Argo CD's own CRD (lives alongside Application in the
+# capability's own namespace), so it belongs here, not in
+# clusterResourceWhitelist.
+namespaceResourceWhitelist:
+  - group: "argoproj.io"
+    kind: ApplicationSet
+  - group: ""
+    kind: ConfigMap
+  - group: ""
+    kind: Pod
+  - group: ""
+    kind: Secret
+  - group: ""
+    kind: Service
+  - group: ""
+    kind: ServiceAccount
+  - group: "apps"
+    kind: DaemonSet
+  - group: "apps"
+    kind: Deployment
+  - group: "policy"
+    kind: PodDisruptionBudget
+  - group: "rbac.authorization.k8s.io"
+    kind: Role
+  - group: "rbac.authorization.k8s.io"
+    kind: RoleBinding
+  - group: "networking.k8s.io"
+    kind: NetworkPolicy
+  - group: "kueue.x-k8s.io"
+    kind: LocalQueue
+    # Workload (kueue.x-k8s.io, Namespaced) and CapacityBuffer
+    # (autoscaling.x-k8s.io, also Namespaced, bundled in karpenter-crd) are
+    # not here either: a Workload is created by Kueue's own webhook when a
+    # Job/Pod is submitted, and a CapacityBuffer is created by whoever
+    # operates a cluster autoscaler integration - neither is ever created by
+    # an Argo CD-synced Application in this repository.

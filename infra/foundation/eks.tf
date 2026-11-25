@@ -453,9 +453,14 @@ resource "aws_eks_node_group" "system" {
 resource "aws_eks_addon" "after_nodes" {
   for_each = toset(local.addons_after_nodes)
 
-  cluster_name                = aws_eks_cluster.this.name
-  addon_name                  = each.value
-  addon_version               = local.addon_versions[var.kubernetes_version][each.value]
+  cluster_name = aws_eks_cluster.this.name
+  addon_name   = each.value
+  # var.test_invalid_coredns_version is test-only (null outside tests).
+  addon_version = (
+    each.value == "coredns" && var.test_invalid_coredns_version != null
+    ? var.test_invalid_coredns_version
+    : local.addon_versions[var.kubernetes_version][each.value]
+  )
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
 

@@ -1,0 +1,28 @@
+# A single-flavor ClusterQueue naming one capacity-pool ResourceFlavor.
+# Kueue's own kind (not Karpenter's); the retry-based dependency on the
+# "controllers" step (this chart's Application lives in a different
+# ApplicationSet - cells, not platform - RFC #25 Decision 4) is what makes
+# this converge only once Kueue's CRDs and webhook are Healthy.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: {{ .Values.clusterQueue.name | quote }}
+spec:
+  # Restricted to this chart's own namespace (the built-in, immutable
+  # kubernetes.io/metadata.name label every Namespace carries): an empty
+  # selector would let a LocalQueue in any namespace draw on this admin
+  # quota, which this fixture's own smoke workload never needs and the
+  # multi-tenancy principle (this platform's own design note 0b) does not
+  # allow by default.
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ .Values.namespace | quote }}
+  resourceGroups:
+    - coveredResources: ["cpu", "memory"]
+      flavors:
+        - name: {{ required "clusterQueue.resourceFlavor is required" .Values.clusterQueue.resourceFlavor | quote }}
+          resources:
+            - name: "cpu"
+              nominalQuota: {{ .Values.clusterQueue.cpuQuota | quote }}
+            - name: "memory"
+              nominalQuota: "64Gi"

@@ -1,0 +1,46 @@
+# No default is safe for clusterName or nodeRole: both are cell-specific and
+# come from a cells/<cluster-name>/capacity-pool/*.yaml parameter file via
+# cells.ApplicationSet.yaml's valuesFrom (clusterName from the Cluster
+# generator's own "name" param; nodeRole from the registration Secret's
+# distai.dev.annotations/karpenter-node-role annotation, the one Terraform
+# output no platform add-on reads - RFC #25 Decision 2).
+clusterName: ""
+nodeRole: ""
+
+pool:
+  # Shared by the NodePool, its EC2NodeClass and the matching ResourceFlavor.
+  name: ""
+
+  # CPU-only, on-demand, amd64: the minimal skeleton this PR ships. #17's PR
+  # adds spot/flex requirements and per-capacity-type pools (-rsv/-od/-flex)
+  # on top of this same chart.
+  requirements:
+    - key: karpenter.sh/capacity-type
+      operator: In
+      values: ["on-demand"]
+    - key: kubernetes.io/arch
+      operator: In
+      values: ["amd64"]
+    - key: karpenter.k8s.aws/instance-category
+      operator: In
+      values: ["c", "m", "r"]
+    - key: karpenter.k8s.aws/instance-generation
+      operator: Gt
+      values: ["5"]
+
+  limits:
+    cpu: "32"
+
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 60s
+
+# Pinned, not "latest": confirmed against the public SSM parameter
+# /aws/service/eks/optimized-ami/1.37/amazon-linux-2023/x86_64/standard/recommended/release_version
+# (value 1.37.1-20261112 on 2026-11-19), the same EKS-optimized AL2023
+# release the foundation e2e's own, now-removed stand-in Karpenter install
+# pinned (al2023@v20261112) -- a reviewed diff bumps this, never an
+# unattended "latest" pull on every node launch.
+amiFamily: AL2023
+amiSelectorTerms:
+  - alias: al2023@v20261112

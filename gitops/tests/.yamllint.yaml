@@ -1,0 +1,22 @@
+# yamllint config for the gitops/ delivery layer. Applies only to the
+# literal, non-templated YAML listed explicitly by 0.static.sh (parameter
+# files, ApplicationSets, the root Application, each chart's Chart.yaml and
+# default values.yaml) -- never to charts/*/templates/*.yaml, which embed Go
+# template directives ({{ ... }}) that are not valid YAML before `helm
+# template` renders them.
+extends: default
+
+rules:
+  line-length: disable
+  document-start: disable
+  truthy:
+    allowed-values: ["true", "false"]
+  comments:
+    min-spaces-from-content: 1
+  braces:
+    # Decision 2's templatePatch values and Decision 2's Git-generator
+    # revision field both use Argo CD's Go-template-in-YAML syntax
+    # ("{{ ... }}") inside plain scalars, which the default spacing rule
+    # would otherwise flag as a style violation of a value yamllint is not
+    # meant to understand.
+    max-spaces-inside: 2
