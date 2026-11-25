@@ -50,6 +50,12 @@
 #      serves
 #      (check_pinned_crds.py; needs network access to each add-on's own
 #      OCI registry, the same one Argo CD itself pulls from).
+#   9. issue #50's pool.networkInterfaces generator, from committed
+#      fixtures only (check_nic_layout.py): re-run against every
+#      charts/capacity-pool/tools/fixtures/*.describe.json and byte-compared
+#      with the committed *.networkInterfaces.yaml; each committed layout
+#      checked against the issue's own algorithm and per-instance-type table;
+#      its refusals on synthetic inputs; and exceptions.json's p6-b300 entry.
 #
 # Every check prints PASS or FAIL. Exits non-zero if any failed.
 #
@@ -674,6 +680,31 @@ run_check "pinned-chart-version CRDs (check_pinned_crds.py)" \
 run_check "platform AppProject whitelist (check_appproject_whitelist.py)" \
   "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
   python3 "${SCRIPT_DIR}/check_appproject_whitelist.py" "${REPO_ROOT}"
+
+# --------------------------------------- 9. EFA network-interface layout
+#
+# Issue #50: gitops/charts/capacity-pool/tools/render-network-interfaces.py
+# turns a committed, trimmed DescribeInstanceTypes NetworkInfo block into a
+# pool.networkInterfaces value. This section needs no AWS credentials and
+# no network: it reads only committed fixtures. check_nic_layout.py re-runs
+# the generator against every fixtures/*.describe.json and fails on any
+# byte difference from the committed *.networkInterfaces.yaml (the
+# "generate, diff, fail on drift" check), and separately checks each
+# committed layout against the issue's own algorithm and per-instance-type
+# table, so a fixture regenerated to match a generator bug (p5en.48xlarge's
+# secondary cards at deviceIndex 0, the defect the issue exists to prevent)
+# still fails. It also checks the generator refuses EFA-unsupported input,
+# E == C - 1 for a family with no exceptions.json entry, and E neither C nor
+# C - 1, and that exceptions.json's p6-b300 entry stays confirmed: false
+# with a source. --selftest runs first, against stub generators and
+# throwaway fixtures, so a broken checker fails here loudly.
+run_check "EFA network-interface layout self-test (check_nic_layout.py --selftest)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_nic_layout.py" --selftest
+
+run_check "EFA network-interface layout (check_nic_layout.py)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_nic_layout.py" "${REPO_ROOT}"
 
 echo
 if [[ "${failures}" -eq 0 ]]; then

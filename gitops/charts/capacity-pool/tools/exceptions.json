@@ -1,0 +1,8 @@
+{
+  "p6-b300": {
+    "excludedCard": 0,
+    "secondaryDeviceIndex": 0,
+    "confirmed": false,
+    "source": "awslabs/awsome-distributed-ai at commit 25d5723cb62ab1f83b0f4307c28c8f3496bfaa53: NicLayout mapping https://github.com/awslabs/awsome-distributed-ai/blob/25d5723cb62ab1f83b0f4307c28c8f3496bfaa53/architectures/amazon-eks/assets/eks-add-gpu-nodegroup.yaml#L292-L298 (PrimaryEfa: \"false\", SecondaryDeviceIndex: \"0\", \"card 0 is ENA-only, and cards 1-16 carry EFA at device index 0\") and add-cng-p6-b300.yaml NetworkInterfaces block https://github.com/awslabs/awsome-distributed-ai/blob/25d5723cb62ab1f83b0f4307c28c8f3496bfaa53/architectures/aws-pcs/assets/add-cng-p6-b300.yaml#L592-L622 (card 0 \"must be a plain ENA interface (no InterfaceType)\"). Table only: not reproduced on real p6-b300.48xlarge hardware by this platform."
+  }
+}

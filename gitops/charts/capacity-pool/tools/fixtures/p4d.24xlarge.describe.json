@@ -1,0 +1,63 @@
+{
+  "_source": {
+    "instanceType": "p4d.24xlarge",
+    "region": "us-east-1",
+    "capturedUtc": "2026-11-25",
+    "command": "aws ec2 describe-instance-types --instance-types p4d.24xlarge --query 'InstanceTypes[0].NetworkInfo' --output json"
+  },
+  "NetworkPerformance": "4x 100 Gigabit",
+  "MaximumNetworkInterfaces": 60,
+  "MaximumNetworkCards": 4,
+  "DefaultNetworkCardIndex": 0,
+  "NetworkCards": [
+    {
+      "NetworkCardIndex": 0,
+      "NetworkPerformance": "100 Gigabit",
+      "MaximumNetworkInterfaces": 15,
+      "BaselineBandwidthInGbps": 100.0,
+      "PeakBandwidthInGbps": 100.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 1,
+      "NetworkPerformance": "100 Gigabit",
+      "MaximumNetworkInterfaces": 15,
+      "BaselineBandwidthInGbps": 100.0,
+      "PeakBandwidthInGbps": 100.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 2,
+      "NetworkPerformance": "100 Gigabit",
+      "MaximumNetworkInterfaces": 15,
+      "BaselineBandwidthInGbps": 100.0,
+      "PeakBandwidthInGbps": 100.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 3,
+      "NetworkPerformance": "100 Gigabit",
+      "MaximumNetworkInterfaces": 15,
+      "BaselineBandwidthInGbps": 100.0,
+      "PeakBandwidthInGbps": 100.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    }
+  ],
+  "Ipv4AddressesPerInterface": 50,
+  "Ipv6AddressesPerInterface": 50,
+  "Ipv6Supported": true,
+  "EnaSupport": "required",
+  "EfaSupported": true,
+  "EfaInfo": {
+    "MaximumEfaInterfaces": 4
+  },
+  "EncryptionInTransitSupported": true,
+  "EnaSrdSupported": false,
+  "FlexibleEnaQueuesSupport": "unsupported",
+  "ConnectionTrackingConfiguration": {
+    "DefaultTcpEstablishedTimeout": 432000,
+    "DefaultUdpTimeout": 30,
+    "DefaultUdpStreamTimeout": 180
+  },
+  "SecondaryNetworkSupported": false
+}
