@@ -1,0 +1,6 @@
+# Static-check input (0.static.sh): a -flex pool (spot, then on-demand).
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: cpu-flex
+  capacityType: flex

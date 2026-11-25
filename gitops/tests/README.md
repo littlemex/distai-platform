@@ -4,7 +4,10 @@ Three scripts check `gitops/` against the acceptance criteria of
 [issue #25](https://github.com/littlemex/distai-platform/issues/25) (the
 delivery layer), scoped to its first PR (decision 9): bootstrap, the
 `crds`/`controllers`/`capacity` steps, the CPU `capacity-pool` skeleton, the
-admin smoke queue, and the upgrade e2e's version-pair check. No
+admin smoke queue, and the upgrade e2e's version-pair check -- plus the
+acceptance criteria of [issue #27](https://github.com/littlemex/distai-platform/issues/27)
+(the `capacity-pool` chart's `-rsv`/`-od`/`-flex` pools, its `accelerator`/
+`tenancy` values and the smoke chart's `memQuota`). No
 accelerators (`#19`), no per-team objects (`#22`) and no `sharedfs`/
 notifications (`#18`/`#23`) ship in this PR, so this layer's tests do not
 check them either.
@@ -19,18 +22,19 @@ platform-optional entry. Two static checks (`check_addon_tiers.py`,
 
 | Script | What it checks | Needs AWS | Duration |
 | --- | --- | --- | --- |
-| `0.static.sh` | Required files, `bash -n`/`shellcheck` on every `*.sh` under `gitops/` (including this suite's own three scripts, not only `bootstrap.sh`), `yamllint` on every literal (non-templated) tracked YAML file, the structural contract of every `addon.yaml`/cells parameter file and the three ApplicationSets (`check_gitops_contract.py`), the tier and naming rules of issue #41 Decision 2 (`check_addon_tiers.py`), issue #41 Decision 3's checks (0)-(4) of every `cells/*/addons/*.yaml` marker against its catalog entry, including each `overridableKeys` path against the wrapper chart's coalesced defaults (`check_addon_catalog_sync.py`), `helm lint`/`helm template` of `charts/capacity-pool`, `charts/smoke`, `charts/optional-pool` and `charts/dcgm-exporter` (after `helm dependency build`), `kubeconform` of the rendered output plus the three ApplicationSets and the root Application against pinned upstream + CRD-catalog schemas, and `check_pinned_crds.py` validating the rendered CRD-backed objects against each pinned chart's own exact CRD versions | No | About 2 to 3 minutes |
-| `1.e2e.sh` | Builds one foundation cell (with a temporary Identity Center group), the before/after RBAC change on the capability's own access entry, bootstrap idempotency / `--revision`-only re-run / wrong-cluster abort, the `crds`→`controllers`→`capacity` ordering (including two deliberately broken steps), the OCI chart and Git-file-generator-revision checks, no shared CRD between `karpenter-crd` and `karpenter`, the admin smoke canary through Kueue and Karpenter, one accidental generator-entry loss, one full bootstrap-object teardown and re-adopt, the `dcgm-exporter` platform-optional add-then-remove cycle with a GPU placement check (issue #41), then destroy and leftovers | Yes | About 60 to 80 minutes |
+| `0.static.sh` | Required files, `bash -n`/`shellcheck` on every `*.sh` under `gitops/` (including this suite's own three scripts, not only `bootstrap.sh`), `yamllint` on every literal (non-templated) tracked YAML file, the structural contract of every `addon.yaml`/cells parameter file and the three ApplicationSets (`check_gitops_contract.py`, including issue #27's `pool.capacityType`/`reservation.tags` rules, exercised against disposable copies since the tracked tree ships no reserved pool), the tier and naming rules of issue #41 Decision 2 (`check_addon_tiers.py`), issue #41 Decision 3's checks (0)-(4) of every `cells/*/addons/*.yaml` marker against its catalog entry, including each `overridableKeys` path against the wrapper chart's coalesced defaults (`check_addon_catalog_sync.py`), `helm lint`/`helm template` of `charts/capacity-pool`, `charts/smoke`, `charts/optional-pool` and `charts/dcgm-exporter` (after `helm dependency build`), the same for every values fixture under `fixtures/` (issue #27's shapes: `on-demand`/`reserved`/`flex`, `accelerator`+`tenancy`, a no-value taint, `memQuota`, and seven fixtures that must be refused) with the rendered fields of every fixture -- including the unchanged `on-demand` default -- checked field-by-field by `check_chart_renders.py` against the exact fixture set shipped, `kubeconform` of all rendered output plus the three ApplicationSets and the root Application against pinned upstream + CRD-catalog schemas, and `check_pinned_crds.py` validating the rendered CRD-backed objects against each pinned chart's own exact CRD versions | No | About 2 to 3 minutes |
+| `1.e2e.sh` | Builds one foundation cell (with a temporary Identity Center group), the before/after RBAC change on the capability's own access entry, bootstrap idempotency / `--revision`-only re-run / wrong-cluster abort, the `crds`→`controllers`→`capacity` ordering (including two deliberately broken steps), the OCI chart and Git-file-generator-revision checks, no shared CRD between `karpenter-crd` and `karpenter`, the admin smoke canary through Kueue and Karpenter, issue #27's three pools (`-rsv` backed by a real targeted Capacity Reservation, `-od`, `-flex`) with one canary each and a second `-rsv` canary held by quota, then the reservation cancelled, one accidental generator-entry loss, one full bootstrap-object teardown and re-adopt, the `dcgm-exporter` platform-optional add-then-remove cycle with a GPU placement check (issue #41), then destroy and leftovers | Yes | About 60 to 85 minutes (measured 60m07s on the issue #27 implementation's own real-cluster run) |
 | `2.upgrade.sh` | The mechanical version-pair check (decision 6) on a mismatched `karpenter`/`karpenter-crd` bump, then a matched bump against a live cell: no `Application` goes `Degraded`, the `NodePool`-launched instance is not replaced, and the canary pod stays `Running` throughout | Yes | About 35 to 50 minutes |
 
 ## Prerequisites
 
 Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
 
-- Bash `>= 4` (`mapfile`/`readarray`, used throughout all three scripts).
-  macOS's own shipped `/bin/bash` is 3.2 and does not have it; run these on
-  Linux (this repository's own distai-platform-runner CI, Amazon Linux's
-  `bash` is `>= 5`, always satisfies this).
+- Bash 4.3 or later (both `mapfile`/`readarray` and the `${var,,}`
+  lowercasing expansion, used throughout all three scripts, need it).
+  macOS's own shipped `/bin/bash` is 3.2 and does not have either; run
+  these on Linux (this repository's own distai-platform-runner CI, Amazon
+  Linux's `bash` is `>= 5`, always satisfies this).
 - Helm `>= 3.8` (OCI charts), for `0.static.sh` only (`1.e2e.sh`/`2.upgrade.sh`
   never call `helm` themselves -- Argo CD installs every chart in-cluster).
 - `uv` (for `0.static.sh`'s pinned `yamllint`/`pyyaml`, and for `2.upgrade.sh`'s
@@ -43,7 +47,22 @@ Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
   (`1.e2e.sh`/`2.upgrade.sh` create and delete their own temporary group;
   unlike `infra/foundation/tests/1.e2e.sh`, no pre-existing group ID is
   taken as input), `eks:ListAssociatedAccessPolicies`,
-  `eks:DescribeCapability`, `eks:ListCapabilities`.
+  `eks:DescribeCapability`, `eks:ListCapabilities`, and for `1.e2e.sh`
+  step 11b's Capacity Reservation `ec2:CreateCapacityReservation`,
+  `ec2:DescribeCapacityReservations`, `ec2:CancelCapacityReservation`,
+  `ec2:CreateTags` (on `capacity-reservation`, for its
+  `--tag-specifications`), `ec2:DescribeInstanceTypes`,
+  `ec2:DescribeInstanceTypeOfferings` and `ec2:DescribeSubnets`.
+- For `1.e2e.sh` step 11b: On-Demand capacity for one
+  `E2E_RSV_INSTANCE_TYPE` (default `m7i.large`) instance in one of the
+  cell's own Availability Zones (each is tried in turn), and Spot usable in
+  the account (the `-flex` pool may launch Spot; the
+  `AWSServiceRoleForEC2Spot` service-linked role must exist or be
+  creatable). The reservation is billed from creation until step 11b's
+  own teardown cancels it (about 9 minutes, measured 9m19s on the issue
+  #27 implementation's own real-cluster run); it ends on its own 110
+  minutes after creation in any case, so a run that fails before reaching
+  11b-6 and before `cleanup()` runs still bounds the cost.
 - A GitHub token with **Contents: write** on `littlemex/distai-platform`
   itself (`GITOPS_TEST_REPO_URL` defaults to it, and every manifest this
   suite bootstraps - both `ApplicationSet`s, the root Application,
@@ -128,7 +147,22 @@ every other disposable branch here), and bootstraps from that branch
 instead of the literal `GITOPS_REVISION` for the rest of the run. `NAME`
 and `example-cell` collide with nothing: a run with `NAME=example-cell`
 finds the checked-in directory already there and creates no branch at
-all.
+all. Two more cell directories ship as of #28, `dp-a19-gpu-r3` and
+`dp-a19-trn-r3` (one NVIDIA GPU pool and one Trainium pool, issue #28's
+own light-tier accelerator fixtures, each carrying a method label
+`ensure_cell_fixture()`'s own plain copy of `example-cell` would not).
+With `GITOPS_RUN_ACCEL_E2E=1` (below), **`NAME` must be `dp-a19-gpu-r3`**:
+that extension builds only one cell directly (the plain `1.e2e.sh` flow
+already above), and treats it as the GPU accelerator cell;
+`dp-a19-trn-r3` is never a valid value for `NAME` itself, only for
+`ACCEL_TRN_CELL_NAME` -- the Trainium cell is a second, separate
+foundation cell the extension builds and destroys on its own, in
+`ACCEL_TRN_REGION`. (Both fixture names carry an `-r3` suffix: an
+unrelated agent working on a different issue independently created a
+cell also named `dp-a19-gpu` in another Region, and since IAM role names
+are account-global, its own teardown deleted and recreated roles this
+PR's own verification cluster was using mid-run -- renamed once to a
+name nobody else has used, never reused again.):
 
 ```bash
 export AWS_PROFILE="${AWS_PROFILE:-default}"
@@ -150,6 +184,42 @@ cd gitops/tests
 
 For `2.upgrade.sh` instead, additionally export `UPGRADE_TO_KARPENTER_VERSION` (a real, published Karpenter version different from `addons/karpenter/addon.yaml`'s pinned one) and run `./2.upgrade.sh` in place of `./1.e2e.sh` above.
 
+(swap the trailing command and add `--env UPGRADE_TO_KARPENTER_VERSION=<x>`
+for `2.upgrade.sh`). As with `infra/foundation/tests/1.e2e.sh`,
+`AWS_PROFILE=default` on the runner (it authenticates via its IAM role
+through IMDS) and `MY_CIDR` is the runner's own public IP, not the Mac's.
+
+### Accelerator extension (issue #28, opt-in: `GITOPS_RUN_ACCEL_E2E=1`)
+
+Adds the `accelerators` step's own real-hardware check, light tier (#16):
+a Layer 1 pod on the existing cell's NVIDIA GPU pool, and a second
+foundation cell built in a Trainium-capable Region for a Layer 1 pod on a
+Neuron pool. Off by default, so an ordinary `1.e2e.sh` run (any `NAME`) is
+unaffected.
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `GITOPS_RUN_ACCEL_E2E` | no (default `0`) | Set to `1` to run this extension |
+| `NAME` | yes, when set to `1` | Must equal `ACCEL_GPU_CELL_NAME` (default `dp-a19-gpu-r3`) -- the GPU accelerator check reuses this script's own existing cell, it does not build a third one |
+| `ACCEL_GPU_CELL_NAME` | no (default `dp-a19-gpu-r3`) | Must match `NAME` and the `gitops/cells/<name>/` fixture this cell's pool comes from |
+| `ACCEL_TRN_CELL_NAME` | no (default `dp-a19-trn-r3`) | Name of the second, Trainium-only foundation cell this extension builds and destroys itself |
+| `ACCEL_TRN_REGION` | no (default `ap-southeast-4`) | Region offering `trn2.3xlarge` spot capacity; the Identity Center instance stays wherever `ARGOCD_IDC_REGION` already points (#28 section E) |
+| `ACCEL_GPU_TEST_IMAGE` | yes, when set to `1` | Container image with `nvidia-smi` on `PATH` (for example a CUDA base image), no default pinned in this repository |
+| `ACCEL_TRN_TEST_IMAGE` | yes, when set to `1` | Container image with `neuron-ls` on `PATH` (a Neuron SDK image), no default pinned in this repository |
+| `ACCEL_POD_TIMEOUT_SECONDS` | no (default `1800`) | How long to wait for each accelerator pod's node to launch |
+
+```bash
+runner/run.sh --ref "${GITOPS_REVISION}" \
+  --env NAME=dp-a19-gpu-r3 \
+  --env AWS_REGION=<Region offering g7/g6e/g5 spot capacity> \
+  ... (every variable the plain 1.e2e.sh invocation above already needs) \
+  --env GITOPS_RUN_ACCEL_E2E=1 \
+  --env ACCEL_GPU_TEST_IMAGE=<a CUDA image reference> \
+  --env ACCEL_TRN_TEST_IMAGE=<a Neuron SDK image reference> \
+  --detach \
+  -- bash gitops/tests/1.e2e.sh
+```
+
 ## Acceptance criteria -> checks
 
 | Acceptance criterion (issue #25) | Checked by |
@@ -160,7 +230,14 @@ For `2.upgrade.sh` instead, additionally export `UPGRADE_TO_KARPENTER_VERSION` (
 | Cross-`Application` ordering evidenced by breaking `crds` and `kueue`, not asserted from documentation | `1.e2e.sh` step 3c stages A-C (this cell's own first-ever bootstrap, pristinely proving capacity fails to create NEW objects while either chart is broken) and step 12 (breaking each chart on an already-converged cell, reverted and recovery confirmed) |
 | `karpenter-crd`/`karpenter` report no shared CRD | `1.e2e.sh` step 9 (`status.resources` kind=CustomResourceDefinition lists compared) |
 | `kueue`/`karpenter` Healthy before any `NodePool`-launched node exists; smoke canary admitted and a node launches | `1.e2e.sh` steps 9 and 11 |
-| Removing one `addon.yaml` orphans nothing; deleting the three bootstrap objects orphans `NodePool`/`EC2NodeClass`/the instance; re-running bootstrap.sh re-adopts without duplicating; destroy still terminates the instance | `1.e2e.sh` steps 13, 14 and 15 (creationTimestamp/instance-state comparisons) |
+| Removing one `addon.yaml` orphans nothing; deleting the three bootstrap objects orphans `NodePool`/`EC2NodeClass`/the instance; re-running bootstrap.sh re-adopts without duplicating; destroy still terminates the instance | `1.e2e.sh` steps 13-15 (creationTimestamp/instance-state comparisons) |
+| #27: a `-rsv`, `-od` and `-flex` release each render one `NodePool`/`EC2NodeClass`/`ResourceFlavor` joined by `karpenter.sh/nodepool`, with the pool's `karpenter.sh/capacity-type` requirement and, for `-rsv` only, `capacityReservationSelectorTerms` from `reservation.tags` (targeted) -- on a real cluster | `1.e2e.sh` step 11b-3 (each live object's spec; `EC2NodeClass` status resolves the reservation for `-rsv` only); `0.static.sh` section 5b for the rendered shape |
+| #27: a targeted one-instance two-hour ODCR backs `-rsv`: a canary launches exactly one node with `capacity-type=reserved` and `capacity-reservation-id` equal to the reservation; a second canary is not admitted, by the `ClusterQueue`'s quota | `1.e2e.sh` steps 11b-1, 11b-4 (node labels, NodeClaim count, the instance's own `CapacityReservationId`) and 11b-5 (`Workload` `QuotaReserved=False` on quota, `ClusterQueue` admitted/pending `1/1`, Job suspended with no pod, still one NodeClaim) |
+| #27: `-od` and `-flex` each admit a canary and launch a node of the pool's capacity type | `1.e2e.sh` step 11b-4 |
+| #27: with `accelerator`/`tenancy` unset, the rendered fields are identical to #25's | `0.static.sh` section 5b (`check_chart_renders.py` on `fixtures/capacity-pool/on-demand-default.yaml` and `fixtures/smoke/default.yaml`: object counts, names, the join, the capacity-type requirement, no reservation/taints/tolerations/labels/annotation) |
+| #27: `accelerator.*` and `tenancy.teamTaint` render taints, mirrored tolerations, the method label and the resource-name annotation | `0.static.sh` section 5b (`check_chart_renders.py` on `fixtures/capacity-pool/accelerator-tenancy.yaml`) |
+| #27: the reservation is cancelled at the end, pass or fail, shown by `DescribeCapacityReservations` | `1.e2e.sh` step 11b-6, and `cleanup()` (`cancel_run_capacity_reservations`) if 11b-6 was not reached |
+| #27: `helm lint` and `kubeconform` pass for every new values shape, including `memQuota` | `0.static.sh` sections 5b and 6 (every `fixture-*.yaml` render is a `kubeconform` target) |
 | Upgrade e2e's version-pair check catches a mismatch; a matched bump passes no-replacement and canary-stays-Running | `2.upgrade.sh` experiments A and B |
 | Issue #41: every `gitops/addons/` entry is `tier: core`, every catalog entry `platform-optional` or `workload`, directory name equals `addon`, no name in both directories | `0.static.sh` (`check_addon_tiers.py`) |
 | Issue #41: markers match their catalog entry (stem/`addon`/`fromCatalog`, cell-wide uniqueness, `dir`/`namespace`/`skipCrds`, tier, wave, `dependsOn`, `overridableKeys`) | `0.static.sh` (`check_addon_catalog_sync.py`) |
@@ -168,6 +245,16 @@ For `2.upgrade.sh` instead, additionally export `UPGRADE_TO_KARPENTER_VERSION` (
 | Issue #41 Decision 4: add-then-remove cycle of a catalog entry on a real cell -- no `Application` without the marker, `Healthy`/`Synced` with it, removal orphans the resources; the component's pods land only where its own `nodeSelector` says | `1.e2e.sh` step 14b (`dcgm-exporter`, a disposable GPU `NodePool` test fixture, DaemonSet/Namespace UID comparisons) |
 | CRD-schema-diff check not claimed met | `2.upgrade.sh`'s final `INFO` line states this explicitly; no assertion claims it |
 | Every claim about upstream versions/capability behavior backed by a primary source or an "unconfirmed" marker | Enforced by this README and the scripts' own comments pointing at the issue's facts comment, not re-derived here |
+
+| Acceptance criterion (issue #28) | Checked by |
+| --- | --- |
+| Every `addon.yaml`/chart file in the Interface table exists and matches the stated shape | `0.static.sh` (`check_gitops_contract.py`, helm lint/template, kubeconform, `check_pinned_crds.py`) |
+| A real `g7`/`g6e`/`g5` node, `pool.capacityType: flex` (spot or on-demand, device-plugin method) runs a Layer 1 `nvidia.com/gpu` pod; `nvidia-smi` reports one GPU | `1.e2e.sh` `check_accel_layer1` on the GPU cell (`GITOPS_RUN_ACCEL_E2E=1`) |
+| A real `trn2.3xlarge` node in `ap-southeast-4`, `pool.capacityType: flex` (spot or on-demand, device-plugin method) runs a Layer 1 `aws.amazon.com/neuron` pod; `neuron-ls` reports one device | `1.e2e.sh` `check_accel_layer1` on the Trainium cell |
+| Each method-labeled `NodePool` carries only the one advertiser its label selects | `1.e2e.sh` `check_accel_layer1`'s own node-level DaemonSet/namespace check |
+| The `accelerators` step reaches Healthy+Synced for the device-plugin releases before anything is asserted about them | `1.e2e.sh` `check_accel_layer1`'s own `app_healthy_synced` wait |
+| Both light-tier cells torn down with no leftover instance/ENI/launch template/volume | `1.e2e.sh` steps 15 and 19 (`report_leftovers`, parameterized per cell) |
+| DRA `addon.yaml` files pass static checks; not required to launch a real DRA node | `0.static.sh`; `1.e2e.sh` only asserts the DRA Application exists in a distinct namespace from its device-plugin sibling, never schedules a pod onto it |
 
 ## Assumptions behind these checks (flagged for the implementer and reviewer to reconcile)
 
@@ -395,6 +482,34 @@ silently:
   Checked structurally by `check_gitops_contract.py` (acceptance-criterion-
   adjacent, not itself one of the nine criteria) and confirmed in
   `1.e2e.sh` by each `Application`'s own resource list (criterion 5).
+
+- **Issue #27's cell-specific fixtures live on a disposable branch,
+  never in the tracked tree.** `1.e2e.sh` step 11b writes
+  `gitops/cells/<NAME>/capacity-pool/cpu-{rsv,od,flex}.yaml` and
+  `gitops/cells/<NAME>/smoke/cpu-{rsv,od,flex}.yaml` into a clone of
+  `GITOPS_REVISION`, commits them to `e2e/<run-id>/capacity-types`
+  (the `-rsv` file selects this run's own reservation tag, so it cannot be
+  a permanent file), re-points the cell at that branch with a
+  `--revision`-only `bootstrap.sh` re-run, and points it back at
+  `GITOPS_REVISION` and deletes every object the three pools created
+  before step 12, so steps 12-15 see the single-pool cell step 11 left.
+  Each smoke fixture uses its own `addon: smoke-<pool>` value (one
+  `Application` name each), which `check_gitops_contract.py` accepts.
+- **No checked-in golden file for the unchanged default pool/queue; its
+  rendered fields, not its raw bytes, are what issue #27 is checked
+  against.** `check_chart_renders.py`'s own module docstring has the
+  reasoning: a byte-level golden file breaks on an unrelated base-branch
+  rebase or a different Helm version, neither a field regression, with
+  no way to tell the two apart from a byte diff alone.
+  `check_chart_renders.py`'s own field-level assertions on
+  `fixtures/capacity-pool/on-demand-default.yaml` and
+  `fixtures/smoke/default.yaml` are the evidence instead; the rendered
+  bytes are not identical to #25's original output (the capacity-pool
+  chart's own top-of-file comment reads differently), stated explicitly
+  since issue #27's own wording asks for byte-for-byte identity.
+- **Values paths follow issue #27's own spelling**: `pool.capacityType`,
+  and top-level `reservation.*`, `accelerator.*`, `tenancy.teamTaint`;
+  `clusterQueue.memQuota` for the smoke chart.
 
 ## Known issues
 

@@ -1,20 +1,84 @@
-# One NodePool per release of this chart (RFC #25 Decision 9: a minimal
-# CPU-only skeleton - one capacity type, no -rsv/-od/-flex ordering across
-# several NodePools of this same pool name; #17's own PR adds that on top
-# of this chart, unchanged in name or shape).
+{{- /*
+pool.capacityType drives the karpenter.sh/capacity-type requirement
+(capacity-pool.requirements in _helpers.tpl): one capacity type per
+release, so -rsv, -od and -flex are three releases of this chart.
+*/}}
+# One NodePool per release of this chart (RFC #17: one NodePool per
+# ResourceFlavor; RFC #25 Decision 9: this chart's own name and the three
+# kinds it renders do not change between the minimal CPU-only skeleton and
+# the -rsv/-od/-flex extension, only the values do).
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
   name: {{ .Values.pool.name | quote }}
+{{- with include "capacity-pool.annotations" . }}
+{{ . | indent 2 }}
+{{- end }}
 spec:
   template:
+{{- $methodLabel := (default (dict) .Values.accelerator).methodLabel }}
+{{- $sharingLabel := (default (dict) .Values.accelerator).sharingLabel }}
+{{- $mpsLabel := (default (dict) .Values.accelerator).mpsLabel }}
+{{- $hasMethodLabel := and $methodLabel $methodLabel.key }}
+{{- $hasSharingLabel := and $sharingLabel $sharingLabel.key }}
+{{- $hasMpsLabel := and $mpsLabel $mpsLabel.key }}
+{{- /*
+distai.dev/efa-attached must mean an EFA device is actually attached, not
+merely that pool.networkInterfaces is non-empty: Karpenter's own CEL
+validation on EC2NodeClass.spec.networkInterfaces requires a primary
+"interface" entry whenever the list is non-empty, but never requires an
+"efa-only" one, so a pool could in principle list only the primary ENI
+(the chart's own ec2nodeclass.yaml comment: "EFA (and any other
+non-default ENI attachment)") with zero EFA devices. Checking for at
+least one efa-only entry is the actual signal.
+*/}}
+{{- $hasEfa := false }}
+{{- range (default (list) .Values.pool.networkInterfaces) }}
+{{- if eq (toString .interfaceType) "efa-only" }}
+{{- $hasEfa = true }}
+{{- end }}
+{{- end }}
+{{- if or $hasMethodLabel $hasSharingLabel $hasMpsLabel $hasEfa }}
+    metadata:
+      labels:
+{{- if $hasMethodLabel }}
+        {{ $methodLabel.key | quote }}: {{ $methodLabel.value | toString | quote }}
+{{- end }}
+{{- if $hasSharingLabel }}
+        {{ $sharingLabel.key | quote }}: {{ $sharingLabel.value | toString | quote }}
+{{- end }}
+{{- if $hasMpsLabel }}
+        {{ $mpsLabel.key | quote }}: {{ $mpsLabel.value | toString | quote }}
+{{- end }}
+{{- if $hasEfa }}
+        # Set only when this pool's own EC2NodeClass actually attaches at least one
+        # EFA network interface (pool.networkInterfaces contains an interfaceType:
+        # efa-only entry, #50 -- non-empty alone is not enough: Karpenter's own CEL
+        # validation requires a primary "interface" entry whenever the list is
+        # non-empty but never requires an "efa-only" one) -- not derived from the
+        # accelerator method label or the instance type, both of which a pool can
+        # carry without ever requesting an EFA interface. accel-efa-device-plugin-*
+        # (#19/#50) AND into this label on top of the vendor method label, so a
+        # method-labeled pool that never configured EFA interfaces never gets that
+        # DaemonSet's Pod at all -- confirmed on real hardware (distai-platform PR
+        # for accel-efa-device-plugin-nvidia/-neuron) that the pinned
+        # aws-efa-k8s-device-plugin chart's own Pod crash-loops on an EFA-capable
+        # instance type with zero physical EFA interfaces, which is exactly the
+        # combination this label is designed to keep that Pod away from.
+        distai.dev/efa-attached: "true"
+{{- end }}
+{{- end }}
     spec:
       nodeClassRef:
         group: karpenter.k8s.aws
         kind: EC2NodeClass
         name: {{ .Values.pool.name | quote }}
       requirements:
-{{ toYaml .Values.pool.requirements | indent 8 }}
+{{ include "capacity-pool.requirements" . | fromJsonArray | toYaml | indent 8 }}
+{{- with include "capacity-pool.taints" . | fromJsonArray }}
+      taints:
+{{ toYaml . | indent 8 }}
+{{- end }}
       terminationGracePeriod: 24h0m0s
   limits:
 {{ toYaml .Values.pool.limits | indent 4 }}

@@ -1,0 +1,238 @@
+# gitops/bootstrap/team-namespace-guard.yaml - RFC #22 Decision 10 H11,
+# issue #57 item 1's own remaining PR #66 caveat.
+#
+# Why this exists: gitops/bootstrap/team-rbac-guard.yaml's own
+# matchConstraints.namespaceSelector decides which namespaces that
+# guard constrains at all by checking ONE thing: does the namespace
+# carry the distai.dev/team label (operator: Exists)? PR #66's own
+# text, once that guard shipped, named one thing it had not checked: an
+# Argo CD Application's own spec.syncPolicy.managedNamespaceMetadata
+# (paired with syncOptions: [CreateNamespace=true]) lets that
+# Application's own sync set the destination namespace's labels and
+# annotations on every sync -- a mechanism that runs through Argo CD's
+# own capability-wide sync identity exactly like every object this
+# namespace's own team Application syncs, not through the team's own,
+# narrower ServiceAccount
+# (infra/foundation/tests/4.argocd-impersonation.sh's own check 7
+# already confirmed every sync uses that capability identity, never the
+# team's). By code reading alone, a team's own Application, inside its
+# own AppProject, targeting its own existing namespace, looked free to
+# set managedNamespaceMetadata to any labels it likes -- including,
+# simply by never naming distai.dev/team in that field. If that label
+# disappeared, team-rbac-guard.yaml's own namespaceSelector (operator:
+# Exists, value-agnostic) would stop matching this namespace at all,
+# and every Role/RoleBinding rule in it would go dark -- the same
+# escalation team-rbac-guard.yaml exists to stop, reached through the
+# one surface that guard's own resourceRules (which match only
+# "roles"/"rolebindings", never "namespaces") cannot see. Changing the
+# VALUE (rather than removing the key) does not affect that
+# Exists-based selector at all, but is still worth denying on its own
+# terms: team-onboard.sh's own refusal to adopt a pre-existing
+# namespace compares this exact value against the team name it was
+# given (its own EXISTING_LABEL check), and any future piece of this
+# platform that trusts this label's value as the record of which team
+# owns a namespace would be the same kind of surface -- rule 1 below
+# denies both removal and value-change for that reason, not because
+# team-rbac-guard.yaml's own selector cares about the value.
+# gitops/bootstrap/team-onboard.sh's own
+# pod-security.kubernetes.io/enforce: restricted label on the same
+# Namespace object is reachable the same way and matters just as much
+# (that label is what actually stops a privileged DaemonSet or a
+# hostNetwork Pod, a gap team-rbac-guard.yaml's own header already
+# states no RBAC-content rule can reach).
+#
+# Real-hardware result, two runs (infra/foundation/tests/4.argocd-impersonation.sh's
+# own checks 10-11, as they stood before a later review round rewrote
+# both -- that rewritten form has not itself been run on real hardware
+# yet, tracked in #67, stated plainly rather than implied): an Application whose
+# managedNamespaceMetadata omits distai.dev/team and explicitly sets
+# pod-security.kubernetes.io/enforce: privileged, synced once with
+# team-namespace-guard-binding deleted and once with it restored, left
+# both labels unchanged in both runs. On those two runs, Argo CD's own
+# managedNamespaceMetadata reconciliation on the EKS managed Argo CD
+# capability did not visibly attempt to overwrite either pre-existing
+# label, so neither run exercised this policy's own denial -- that is
+# the one thing those two runs establish, not a general claim that
+# this reconciliation "never" does so. It does not make the
+# code-reading analysis above wrong, and it says nothing about every
+# Argo CD version, every self-hosted install, or every other write
+# path (a different controller, a human `kubectl edit`, a future
+# chart feature). Check 11 tests this policy directly with
+# `kubectl label` (no Argo CD at all), the same delete-the-Binding /
+# restore-the-Binding mutation-check shape checks 8-9 already use for
+# team-rbac-guard.yaml, and confirms the policy itself denies an
+# explicit value override of pod-security.kubernetes.io/enforce, an
+# outright removal of distai.dev/team, and an introduction of
+# pod-security.kubernetes.io/enforce-version (rule 3 below),
+# regardless of whether Argo CD's own reconciliation ever reaches for
+# any of the three.
+#
+# The fix is the same shape as team-rbac-guard.yaml's own: a
+# ValidatingAdmissionPolicy that runs on every UPDATE of a Namespace
+# object regardless of the caller's own identity (admission runs after
+# authorization already let the request through, so it does not matter
+# that the caller here is Argo CD's own capability-wide identity, not
+# the team's). It does not forbid managedNamespaceMetadata, or Argo CD
+# managing a team namespace's metadata at all -- a team's own
+# Application may still add, through that field, any label or
+# annotation it likes, including ones that did not exist before. It
+# forbids three things on a namespace that already carries
+# distai.dev/team: removing or changing the VALUE of distai.dev/team
+# itself; removing or changing the VALUE of
+# pod-security.kubernetes.io/enforce once that namespace carries it;
+# and introducing, removing or changing
+# pod-security.kubernetes.io/enforce-version (rule 3's own comment
+# below explains why its own "absent" branch, unlike rules 1-2's,
+# covers the common case rather than a corner one). A namespace that does not yet carry
+# distai.dev/team is unaffected by any rule here (matchConditions below
+# gates all three on that one fact), and this policy's own CREATE path
+# is never reached at all (a Namespace is created once, by
+# team-onboard.sh, already carrying the label; every later write is an
+# UPDATE).
+#
+#   1. distai.dev/team may not be removed or have its value changed.
+#      This is the label gitops/bootstrap/team-rbac-guard.yaml's own
+#      namespaceSelector reads to decide which namespaces it
+#      constrains at all.
+#   2. pod-security.kubernetes.io/enforce may not be removed or have
+#      its value changed, once the namespace already carries it (which
+#      every team namespace does, set to "restricted" by
+#      gitops/bootstrap/team-onboard.sh at creation). This is the
+#      control that actually stops a privileged DaemonSet or a
+#      hostNetwork Pod.
+#   3. pod-security.kubernetes.io/enforce-version may not be
+#      introduced where it was absent, or removed or changed where it
+#      already had a value -- the same "compare against the OLD
+#      object" shape as
+#      rules 1-2, with one difference: rules 1-2 anchor on a value
+#      team-onboard.sh always sets (so the "absent in oldObject" branch
+#      never actually matters in practice); this key is never set by
+#      team-onboard.sh at all, so its own "absent" branch is the common
+#      case and denies introducing the key outright, while an "already
+#      present" branch (should it ever end up set some other way, on a
+#      namespace that predates this policy, for example) only pins its
+#      existing value rather than denying every future UPDATE forever.
+#      That second branch matters: a state check instead of a
+#      transition check ("deny if the key is ever present in the new
+#      object", with no comparison to the old one) would deny every
+#      UPDATE to a namespace that already carries this key for any
+#      reason -- including the namespace controller's own routine
+#      writes -- not just the one UPDATE that introduces or changes it.
+#      Why this key needs protecting at all: the Kubernetes default
+#      (no enforce-version label) already resolves to the latest Pod
+#      Security Standard definitions, and a team introducing this
+#      label pinned to an old version could relax what "restricted"
+#      actually disallows without ever touching either value rules 1-2
+#      protect -- a "weaken" path through exactly the surface this
+#      file exists to close, that a rule anchored only on rules 1-2's
+#      own two keys would miss entirely.
+#
+# Known, bounded scope: this does not stop an admin's own direct,
+# intentional change to any of the three (there is no caller-identity
+# exemption here, matching team-rbac-guard.yaml's own "no exemption of
+# any kind" design -- a label-based or identity-based exemption is
+# exactly the shape that guard's own history (RFC #22 Decision 10 H11)
+# already found attacker-controlled once). An admin who genuinely needs
+# to change distai.dev/team or pod-security.kubernetes.io/enforce --
+# re-labeling a namespace to a different team, or relaxing/tightening
+# its Pod Security level -- deletes team-namespace-guard-binding
+# first, makes the change, and reapplies
+# gitops/bootstrap/team-onboard.sh (which reapplies this file). This
+# policy says nothing about annotations, or about any OTHER label a
+# team's own managedNamespaceMetadata might set or remove -- only these
+# three specific, security-relevant keys. resourceRules below also
+# names the Namespace's own status and finalize subresources -- both
+# needed, confirmed on a real Kubernetes 1.30 API server (etcd +
+# kube-apiserver via envtest, no containers, run on the repo's own CI
+# runner, not EKS): a plain `Status().Update` and a plain
+# `SubResource("finalize").Update` BOTH change metadata.labels when
+# nothing blocks them (an update strategy resetting ObjectMeta for
+# either subresource, which an earlier draft of this comment assumed
+# from memory, is not what Kubernetes 1.30 actually does), and this
+# policy's own validations correctly deny the same label change
+# through the status subresource that check 11's own direct kubectl
+# probe already confirmed through the main resource.
+#
+# Scope: matchConstraints.resourceRules matches UPDATE on the core/v1
+# Namespace resource and its status and finalize subresources, all
+# cluster-scoped
+# (Namespace objects are not themselves "in" a namespace, so
+# namespaceSelector does not apply the way it does on
+# team-rbac-guard.yaml; matchConditions below does the equivalent
+# scoping by reading the OLD object's own distai.dev/team label
+# directly -- deliberately NOT also gated on
+# pod-security.kubernetes.io/enforce being present, which would widen
+# this policy to every namespace in the cluster that happens to carry
+# a Pod Security label, team-onboard.sh-created or not). failurePolicy:
+# Fail, same reasoning as team-rbac-guard.yaml: a CEL evaluation
+# failure should block the write, not silently let it through.
+#
+# Applied once, cluster-wide, by gitops/bootstrap/team-onboard.sh's own
+# step 1 (idempotent `kubectl apply`, alongside team-rbac-guard.yaml) --
+# never per-team, since both objects here are cluster-scoped.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: team-namespace-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["namespaces", "namespaces/status", "namespaces/finalize"]
+  matchConditions:
+    - name: old-namespace-is-a-team-namespace
+      # has(...) is a defensive guard, not a statement that any real
+      # namespace actually lacks labels (Kubernetes itself injects
+      # kubernetes.io/metadata.name onto every namespace): on a map CEL
+      # does not itself consider present, 'key in labels' is a CEL
+      # runtime error, not plainly false -- fatal here, since
+      # failurePolicy: Fail denies the write on any evaluation error,
+      # which would otherwise make an ordinary UPDATE fail for a
+      # reason that has nothing to do with this policy on the one
+      # object shape (metadata.labels absent entirely, as opposed to
+      # present-but-empty) this guard exists to rule out.
+      # Gated on distai.dev/team alone (not also on
+      # pod-security.kubernetes.io/enforce): every namespace this
+      # policy is meant to govern carries both, set together by
+      # team-onboard.sh, so distai.dev/team alone is already a
+      # complete gate -- adding an OR on the Pod Security label would
+      # instead widen this policy to any OTHER namespace in the
+      # cluster that happens to carry that label for an unrelated
+      # reason (an add-on namespace a Helm or Terraform upgrade
+      # relabels, for example), freezing its own Pod Security level
+      # with a deny message that cites team-onboard.sh for a namespace
+      # that script never touched.
+      expression: >-
+        has(oldObject.metadata.labels) &&
+        'distai.dev/team' in oldObject.metadata.labels
+  validations:
+    - expression: >-
+        !('distai.dev/team' in oldObject.metadata.labels) ||
+        (has(object.metadata.labels) &&
+         'distai.dev/team' in object.metadata.labels &&
+         object.metadata.labels['distai.dev/team'] == oldObject.metadata.labels['distai.dev/team'])
+      message: "a namespace's own distai.dev/team label may not be removed or changed once set -- gitops/bootstrap/team-rbac-guard.yaml's own namespaceSelector depends on this exact label to decide which namespaces it constrains at all (RFC #22 Decision 10 H11, issue #57 item 1, gitops/bootstrap/team-namespace-guard.yaml); use managedNamespaceMetadata to add other labels freely, or delete team-namespace-guard-binding first if this change is intentional"
+    - expression: >-
+        !('pod-security.kubernetes.io/enforce' in oldObject.metadata.labels) ||
+        (has(object.metadata.labels) &&
+         'pod-security.kubernetes.io/enforce' in object.metadata.labels &&
+         object.metadata.labels['pod-security.kubernetes.io/enforce'] == oldObject.metadata.labels['pod-security.kubernetes.io/enforce'])
+      message: "a namespace's own pod-security.kubernetes.io/enforce label may not be removed or changed once set -- gitops/bootstrap/team-onboard.sh's own Namespace object sets this to 'restricted', the control that actually stops a privileged DaemonSet or a hostNetwork Pod (RFC #22 Decision 10 H11, issue #57 item 1, gitops/bootstrap/team-namespace-guard.yaml); delete team-namespace-guard-binding first if this change is intentional"
+    - expression: >-
+        (has(oldObject.metadata.labels) && 'pod-security.kubernetes.io/enforce-version' in oldObject.metadata.labels)
+        ? (has(object.metadata.labels) &&
+           'pod-security.kubernetes.io/enforce-version' in object.metadata.labels &&
+           object.metadata.labels['pod-security.kubernetes.io/enforce-version'] == oldObject.metadata.labels['pod-security.kubernetes.io/enforce-version'])
+        : (!has(object.metadata.labels) || !('pod-security.kubernetes.io/enforce-version' in object.metadata.labels))
+      message: "a team namespace may not introduce, remove or change pod-security.kubernetes.io/enforce-version -- team-onboard.sh never sets it (the Kubernetes default already resolves to the latest Pod Security Standard definitions), and pinning it to an older version could relax what 'restricted' disallows without changing the enforce label's own value (RFC #22 Decision 10 H11, issue #57 item 1, gitops/bootstrap/team-namespace-guard.yaml); delete team-namespace-guard-binding first if this change is intentional"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: team-namespace-guard-binding
+spec:
+  policyName: team-namespace-guard
+  validationActions: ["Deny"]

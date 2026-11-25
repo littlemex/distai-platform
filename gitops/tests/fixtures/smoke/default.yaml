@@ -1,0 +1,6 @@
+# Static-check input (0.static.sh): a smoke queue that does not set
+# clusterQueue.memQuota. check_chart_renders.py checks its rendered
+# fields match this chart's pre-#27 shape: one ClusterQueue naming one
+# flavor, memory nominalQuota still the "64Gi" default.
+clusterQueue:
+  resourceFlavor: cpu

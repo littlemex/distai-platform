@@ -1,0 +1,10 @@
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {"name": "example", "namespace": "run-board-sample"},
+  "status": {
+    "startTime": "2026-11-20T17:30:00Z",
+    "active": 1,
+    "conditions": []
+  }
+}

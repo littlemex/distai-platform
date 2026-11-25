@@ -2,12 +2,18 @@
 """Structural checks for the gitops/ delivery layer (issue #25) that do not
 need a cluster: the shape of the ApplicationSets, the root Application, and
 every add-on/cell parameter file, against the decisions in the issue body.
+Extended for issue #28 (the accelerator add-ons): the four accel-* add-ons,
+the platform's own Neuron DeviceClass chart, capacity-pool's
+accelerator.methodLabel (#17's own shape) and the two light-tier
+accelerator cells, against that issue's
+"Interface" table and acceptance criteria.
 
 This is a static, content-only check. It knows nothing about whether Argo CD
 would actually accept these objects (that needs `1.e2e.sh`) and nothing
 about the implementation that produced them -- every assertion below is
 traceable to one decision in
-https://github.com/littlemex/distai-platform/issues/25.
+https://github.com/littlemex/distai-platform/issues/25 or to one row of the
+"Interface" table in https://github.com/littlemex/distai-platform/issues/28.
 
 Run with a pinned PyYAML, e.g.:
     uv run --no-project -q --with pyyaml==6.0.2 python3 check_gitops_contract.py <repo-root>
@@ -20,6 +26,7 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import sys
 
 import yaml
@@ -52,8 +59,8 @@ def main(root: str) -> int:
     gitops = os.path.join(root, "gitops")
 
     # ---------------------------------------------------- required files
-    # Decision 3's layout, scoped to Decision 9's first-PR content: no
-    # accelerators/, no teams/* yet.
+    # Decision 3's layout, scoped to Decision 9's first-PR content plus
+    # issue #28's accelerator add-ons; no teams/* yet.
     required = [
         "bootstrap/bootstrap.sh",
         "bootstrap/root-application.yaml",
@@ -64,6 +71,23 @@ def main(root: str) -> int:
         "addons/kueue/addon.yaml",
         "charts/capacity-pool/Chart.yaml",
         "charts/smoke/Chart.yaml",
+        # Issue #28, Interface table: four accel-* add-ons, the platform's own
+        # DeviceClass catalog add-on and its local chart.
+        "addons/accel-nvidia-device-plugin/addon.yaml",
+        "addons/accel-nvidia-dra/addon.yaml",
+        "addons/accel-neuron-device-plugin/addon.yaml",
+        "addons/accel-neuron-dra/addon.yaml",
+        "addons/accel-device-classes/addon.yaml",
+        "charts/accel-device-classes/Chart.yaml",
+        # Issue #50/the EFA Capacity Block work: the EFA advertiser, two
+        # more accelerators-step add-ons alongside the five above (no new
+        # chart of their own - no "charts/..." entry needed). Two
+        # releases of the same chart, not one: see
+        # addons/accel-efa-device-plugin-nvidia/addon.yaml's own comment
+        # ("Two releases, not one") for why a single release cannot
+        # express this add-on's own OR-across-two-vendor-labels opt-in.
+        "addons/accel-efa-device-plugin-nvidia/addon.yaml",
+        "addons/accel-efa-device-plugin-neuron/addon.yaml",
     ]
     for rel in required:
         check(f"file gitops/{rel} exists", os.path.isfile(os.path.join(gitops, rel)))
@@ -84,15 +108,16 @@ def main(root: str) -> int:
     # Every directory under addons/ has exactly one addon.yaml, and that
     # file is independently structurally valid (checked below via
     # check_addon_yaml). An earlier version of this check asserted an
-    # exact, hand-typed set of directory names instead; this PR (#41,
-    # adding optional-pool) and #28/#40's chain each extended their own
-    # copy of that literal for their own addons, so the merged tree's real
-    # addon count matched neither copy and the check failed regardless of
-    # which PR landed second (#63, filed as #55). This directory-shape
-    # check is derived from the filesystem, like sourceRepos already is in
-    # bootstrap.sh, and needs no further edit as addons/ grows; the three
-    # addon.yaml files RFC #25's own Decisions discuss by name are still
-    # checked explicitly below, independent of this generic shape check.
+    # exact, hand-typed set of directory names instead; this PR (#28,
+    # adding five accelerator-step add-ons) and #41 each extended their
+    # own copy of that literal for their own addons, so the merged tree's
+    # real addon count matched neither copy and the check failed
+    # regardless of which PR landed second (#63, filed as #55). This
+    # directory-shape check is derived from the filesystem, like
+    # sourceRepos already is in bootstrap.sh, and needs no further edit
+    # as addons/ grows; the three addon.yaml files RFC #25's own
+    # Decisions discuss by name are still checked explicitly below,
+    # independent of this generic shape check.
     addon_dirs = sorted(
         d
         for d in os.listdir(os.path.join(gitops, "addons"))
@@ -216,19 +241,67 @@ def main(root: str) -> int:
             )
 
     # ------------------------------------------------- cells/ parameter files
+    # Issue #27: pool.capacityType is an enum, and a reserved pool selects
+    # its reservation by tag -- a reserved pool with no tags would leave a
+    # selector term matching every reservation of its instanceMatchCriteria
+    # in the account.
+    allowed_capacity_types = {"on-demand", "reserved", "flex"}
+    addons_by_cell: dict[str, list[tuple[str, str]]] = {}
     for path in cell_capacity_pool_files:
         rel = os.path.relpath(path, root)
         doc = check_addon_yaml(path, allow_dir=True)
+        addons_by_cell.setdefault(os.path.dirname(os.path.dirname(path)), []).append((rel, str(doc.get("addon", ""))))
         check(f"{rel}'s addon value is 'capacity-pool-<pool>' (decision 2)", str(doc.get("addon", "")).startswith("capacity-pool-"))
         check(f"{rel}'s wave is one of {sorted(allowed_cells_waves)}", doc.get("wave") in allowed_cells_waves)
         if "dir" in doc:
             check(f"{rel}'s dir points under gitops/charts/", str(doc["dir"]).rstrip("/").endswith("charts/capacity-pool") or "charts/capacity-pool" in str(doc["dir"]))
+        values = doc.get("values") or {}
+        capacity_type = (values.get("pool") or {}).get("capacityType", "on-demand")
+        check(
+            f"{rel}'s values.pool.capacityType is one of {sorted(allowed_capacity_types)} (issue #27)",
+            capacity_type in allowed_capacity_types,
+            f"got {capacity_type!r}",
+        )
+        if capacity_type == "reserved":
+            tags = (values.get("reservation") or {}).get("tags")
+            check(
+                f"{rel} is a reserved pool and sets a non-empty values.reservation.tags (issue #27)",
+                isinstance(tags, dict) and len(tags) >= 1 and all(str(k) and str(v) for k, v in tags.items()),
+                f"got {tags!r}",
+            )
+            imc = (values.get("reservation") or {}).get("instanceMatchCriteria", "targeted")
+            check(
+                f"{rel}'s values.reservation.instanceMatchCriteria is 'targeted' (issue #27: never 'open' for a pool's own reservation)",
+                imc == "targeted",
+                f"got {imc!r}",
+            )
 
+    # A cell may carry more than one smoke queue (one per pool, as
+    # 1.e2e.sh's issue #27 fixture does), so 'smoke-<suffix>' is accepted
+    # alongside 'smoke'.
     for path in cell_smoke_files:
         rel = os.path.relpath(path, root)
         doc = check_addon_yaml(path, allow_dir=True)
-        check(f"{rel}'s addon value is 'smoke' (decision 2)", doc.get("addon") == "smoke")
+        addon = str(doc.get("addon", ""))
+        addons_by_cell.setdefault(os.path.dirname(os.path.dirname(path)), []).append((rel, addon))
+        check(f"{rel}'s addon value is 'smoke' or 'smoke-<suffix>' (decision 2)", addon == "smoke" or addon.startswith("smoke-"))
         check(f"{rel}'s wave is one of {sorted(allowed_cells_waves)}", doc.get("wave") in allowed_cells_waves)
+
+    # Decision 2: a generated Application is named {{name}}-{{addon}}, so two
+    # parameter files of one cell with the same addon value would generate
+    # two Applications with one name.
+    for cell_dir, entries in sorted(addons_by_cell.items()):
+        seen: dict[str, str] = {}
+        dupes = []
+        for rel, addon in entries:
+            if addon in seen:
+                dupes.append(f"{addon} ({seen[addon]}, {rel})")
+            seen.setdefault(addon, rel)
+        check(
+            f"{os.path.relpath(cell_dir, root)}'s parameter files have unique addon values (decision 2: one Application name each)",
+            not dupes,
+            f"duplicates: {dupes}",
+        )
 
     # ----------------------------------------------- ApplicationSet shape
     def check_applicationset(path: str, expected_steps: set[str]) -> dict:
@@ -299,12 +372,434 @@ def main(root: str) -> int:
             print(f"INFO {rel} has no strategy.type: RollingSync -- assuming the retry-based fallback branch of decision 4 (unconfirmed by the issue's own facts)")
         return doc
 
-    check_applicationset(os.path.join(gitops, "appsets/platform.ApplicationSet.yaml"), {"crds", "controllers"})
+    check_applicationset(os.path.join(gitops, "appsets/platform.ApplicationSet.yaml"), {"crds", "controllers", "accelerators"})
     check_applicationset(os.path.join(gitops, "appsets/cells.ApplicationSet.yaml"), {"capacity"})
     check_applicationset(
         os.path.join(gitops, "appsets/addons-optional.ApplicationSet.yaml"),
         {"optional-1", "optional-2", "optional-3", "optional-4"},
     )
+
+    # #28 Interface: "rollingSync.steps gains one step matching
+    # distai.dev/wave In [accelerators], after controllers". The set check
+    # above cannot see order; this one can.
+    platform_appset_path = os.path.join(gitops, "appsets/platform.ApplicationSet.yaml")
+    platform_appset = load_one(platform_appset_path)
+    platform_strategy = (platform_appset.get("spec") or {}).get("strategy") or {}
+    if platform_strategy.get("type") == "RollingSync":
+        step_order: list[str] = []
+        for step in (platform_strategy.get("rollingSync") or {}).get("steps", []) or []:
+            for m in step.get("matchExpressions", []) or []:
+                if m.get("key") == "distai.dev/wave":
+                    step_order.extend(m.get("values", []) or [])
+        check(
+            "appsets/platform.ApplicationSet.yaml's 'accelerators' RollingSync step comes after 'controllers' (#28 Interface)",
+            "accelerators" in step_order
+            and "controllers" in step_order
+            and step_order.index("accelerators") > step_order.index("controllers"),
+            f"got step order {step_order!r}",
+        )
+
+    # #28 section B: accel-device-classes is the first *platform* add-on
+    # delivered from a local dir instead of a registry chart. The platform
+    # ApplicationSet's own template must therefore be able to emit a
+    # path-sourced Application at all -- an addon.yaml with no 'chart' key
+    # generating `chart: ""` would never sync. Checked on the raw text (the
+    # template is a Go template, not data): it must reference .dir somewhere.
+    with open(platform_appset_path, encoding="utf-8") as f:
+        platform_appset_text = f.read()
+    check(
+        "appsets/platform.ApplicationSet.yaml's template references .dir (#28 section B: a local-dir platform add-on must be deliverable)",
+        re.search(r"\{\{[^}]*\.dir\b", platform_appset_text) is not None,
+        "no '{{ ... .dir ... }}' reference found; accel-device-classes/addon.yaml (dir, no chart) could not generate a working Application",
+    )
+
+    # --------------------------------------- accelerator add-ons (#28)
+    #
+    # Every expectation below is one row of issue #28's Interface table.
+    # The method label's exact chart-values *path* differs per upstream
+    # chart (NVIDIA: values.nodeSelector; Neuron: values.devicePlugin.* /
+    # values.draDriver.*), so the label is found by walking the whole
+    # values block, never by a hardcoded path. What is asserted is the
+    # issue's core safety property at the one layer a static check reaches:
+    # each release declares exactly one method label, for its own vendor,
+    # with its own method as the value -- never both methods, never the
+    # other vendor's label (#19 E1/E4: two advertisers for one device class
+    # on one node silently double-allocate).
+    def load_one_or_fail(path: str) -> dict | None:
+        rel = os.path.relpath(path, root)
+        if not os.path.isfile(path):
+            check(f"{rel} exists", False)
+            return None
+        try:
+            return load_one(path)
+        except (ValueError, yaml.YAMLError) as e:
+            check(f"{rel} parses as exactly one YAML document", False, str(e))
+            return None
+
+    def method_labels(node, path: str = "") -> list[tuple[str, str, str]]:
+        """Every (path, label key, label value) for a distai.dev/*-method
+        label anywhere under `node`: a nodeSelector-style mapping entry
+        ({key: value}) or a nodeAffinity-style matchExpression
+        ({key: ..., values: [...]})."""
+        found: list[tuple[str, str, str]] = []
+        if isinstance(node, dict):
+            k_ = node.get("key")
+            if isinstance(k_, str) and k_.startswith("distai.dev/") and k_.endswith("-method"):
+                for v in node.get("values", []) or []:
+                    found.append((path, k_, str(v)))
+            for key, value in node.items():
+                child = f"{path}.{key}" if path else str(key)
+                if isinstance(key, str) and key.startswith("distai.dev/") and key.endswith("-method"):
+                    found.append((path, key, str(value)))
+                else:
+                    found.extend(method_labels(value, child))
+        elif isinstance(node, list):
+            for i, item in enumerate(node):
+                found.extend(method_labels(item, f"{path}[{i}]"))
+        return found
+
+    def find_key_anywhere(node, wanted: str) -> list:
+        out = []
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == wanted:
+                    out.append(value)
+                out.extend(find_key_anywhere(value, wanted))
+        elif isinstance(node, list):
+            for item in node:
+                out.extend(find_key_anywhere(item, wanted))
+        return out
+
+    def enabled_of(values: dict, component: str):
+        sub = values.get(component)
+        return sub.get("enabled") if isinstance(sub, dict) else None
+
+    accel_registry_addons = {
+        "accel-nvidia-device-plugin": {
+            "chart": "nvidia-device-plugin",
+            "repoURL": "https://nvidia.github.io/k8s-device-plugin",
+            "version": "0.20.2",
+            "namespace": "nvidia-device-plugin",
+            "label": "distai.dev/nvidia-gpu-method",
+            "method": "device-plugin",
+        },
+        "accel-nvidia-dra": {
+            "chart": "dra-driver-nvidia-gpu",
+            "repoURL": "registry.k8s.io/dra-driver-nvidia/charts",
+            "version": "0.5.1",
+            "namespace": "nvidia-dra",
+            "label": "distai.dev/nvidia-gpu-method",
+            "method": "dra",
+        },
+        "accel-neuron-device-plugin": {
+            "chart": "neuron-helm-chart",
+            "repoURL": "public.ecr.aws/neuron",
+            "version": "1.11.2",
+            "namespace": "neuron-device-plugin",
+            "label": "distai.dev/neuron-method",
+            "method": "device-plugin",
+        },
+        "accel-neuron-dra": {
+            "chart": "neuron-helm-chart",
+            "repoURL": "public.ecr.aws/neuron",
+            "version": "1.11.2",
+            "namespace": "neuron-dra",
+            "label": "distai.dev/neuron-method",
+            "method": "dra",
+        },
+    }
+    accel_docs: dict[str, dict] = {}
+    for name, want in accel_registry_addons.items():
+        path = os.path.join(gitops, "addons", name, "addon.yaml")
+        rel = f"addons/{name}/addon.yaml"
+        if load_one_or_fail(path) is None:
+            continue
+        doc = check_addon_yaml(path, allow_dir=False)
+        accel_docs[name] = doc
+        # The generated Application is "<cell>-<addon>" (#25 decision 2);
+        # 1.e2e.sh waits on exactly "<cell>-accel-nvidia-device-plugin" and
+        # "<cell>-accel-neuron-device-plugin", so addon must equal the
+        # directory name.
+        check(f"{rel}'s addon is {name!r} (#28 Interface; 1.e2e.sh waits on <cell>-{name})", doc.get("addon") == name, f"got {doc.get('addon')!r}")
+        check(f"{rel} is in the 'accelerators' step (#28 Interface)", doc.get("wave") == "accelerators", f"got {doc.get('wave')!r}")
+        for field in ("chart", "repoURL", "version", "namespace"):
+            check(
+                f"{rel}'s {field} is {want[field]!r} (#28 Interface)",
+                str(doc.get(field)) == want[field],
+                f"got {doc.get(field)!r}",
+            )
+        values = doc.get("values")
+        check(f"{rel} has a non-empty 'values' block (#28 section A: the method-label nodeSelector lives there)", isinstance(values, dict) and bool(values))
+        if not isinstance(values, dict):
+            continue
+        labels = method_labels(values)
+        pairs = {(k_, v) for _, k_, v in labels}
+        check(
+            f"{rel}'s values declare exactly one method label, {want['label']}={want['method']} (#28 section A, #19 E1/E4: never two advertisers for one device class on one node)",
+            pairs == {(want["label"], want["method"])},
+            f"found {sorted(labels)!r}",
+        )
+        other_method = "dra" if want["method"] == "device-plugin" else "device-plugin"
+        check(
+            f"{rel}'s values never select {other_method!r} as a method value (#28 section A)",
+            all(v != other_method for _, _, v in labels),
+            f"found {sorted(labels)!r}",
+        )
+        check(
+            f"{rel}'s method label sits under a nodeSelector/affinity key, where it actually restricts scheduling (#28 section A)",
+            bool(labels) and all(("nodeSelector" in p or "affinity" in p.lower()) for p, _, _ in labels),
+            f"found at paths {sorted({p for p, _, _ in labels})!r}",
+        )
+        # gpuResourcesEnabledOverride is the NVIDIA DRA chart's own flag
+        # (#28 Facts checked: "the install does nothing without this flag").
+        overrides = find_key_anywhere(values, "gpuResourcesEnabledOverride")
+        if name == "accel-nvidia-dra":
+            check(
+                f"{rel} sets values.gpuResourcesEnabledOverride: true (#28 Facts checked/section A: whole-GPU allocation is off without it)",
+                values.get("gpuResourcesEnabledOverride") is True,
+                f"got {values.get('gpuResourcesEnabledOverride')!r}",
+            )
+        else:
+            check(
+                f"{rel} does not set gpuResourcesEnabledOverride (a key of the NVIDIA DRA chart only)",
+                not overrides,
+                f"found {overrides!r}",
+            )
+
+    # #28 Interface, Neuron's one-chart-two-releases split (#25 decision 5:
+    # without it both releases run the same sub-components twice, colliding
+    # on object names; Neuron docs: device plugin and DRA driver "cannot run
+    # on the same node").
+    ndp = (accel_docs.get("accel-neuron-device-plugin") or {}).get("values")
+    if isinstance(ndp, dict):
+        check(
+            "addons/accel-neuron-device-plugin/addon.yaml sets draDriver.enabled: false (#28 Interface)",
+            enabled_of(ndp, "draDriver") is False,
+            f"got draDriver={ndp.get('draDriver')!r}",
+        )
+        check(
+            "addons/accel-neuron-device-plugin/addon.yaml does not disable devicePlugin (#28 Interface)",
+            enabled_of(ndp, "devicePlugin") is not False,
+            f"got devicePlugin={ndp.get('devicePlugin')!r}",
+        )
+        for comp in ("scheduler", "npd", "observer"):
+            check(
+                f"addons/accel-neuron-device-plugin/addon.yaml keeps {comp} at the chart default (not disabled; #28 section A)",
+                enabled_of(ndp, comp) is not False,
+                f"got {comp}={ndp.get(comp)!r}",
+            )
+    ndra = (accel_docs.get("accel-neuron-dra") or {}).get("values")
+    if isinstance(ndra, dict):
+        check(
+            "addons/accel-neuron-dra/addon.yaml sets draDriver.enabled: true (#28 Interface)",
+            enabled_of(ndra, "draDriver") is True,
+            f"got draDriver={ndra.get('draDriver')!r}",
+        )
+        check(
+            "addons/accel-neuron-dra/addon.yaml sets devicePlugin.enabled: false (#28 Interface; Neuron DRA docs: never both on one cluster node)",
+            enabled_of(ndra, "devicePlugin") is False,
+            f"got devicePlugin={ndra.get('devicePlugin')!r}",
+        )
+        for comp in ("scheduler", "npd", "observer"):
+            check(
+                f"addons/accel-neuron-dra/addon.yaml sets {comp}.enabled: false (#28 Interface, #25 decision 5: no duplicate sub-components across the two releases)",
+                enabled_of(ndra, comp) is False,
+                f"got {comp}={ndra.get(comp)!r}",
+            )
+    ndp_doc = accel_docs.get("accel-neuron-device-plugin") or {}
+    ndra_doc = accel_docs.get("accel-neuron-dra") or {}
+    if ndp_doc and ndra_doc:
+        check(
+            "addons/accel-neuron-device-plugin and accel-neuron-dra pin the same chart and version (#28 Interface: 'same chart/version')",
+            (ndp_doc.get("chart"), str(ndp_doc.get("version"))) == (ndra_doc.get("chart"), str(ndra_doc.get("version"))),
+        )
+        check(
+            "addons/accel-neuron-device-plugin and accel-neuron-dra install into different namespaces (two releases of one chart)",
+            ndp_doc.get("namespace") != ndra_doc.get("namespace"),
+        )
+
+    # valuesFrom shape (#25 decision 2) applies to the new add-ons as well.
+    for name, doc in accel_docs.items():
+        for entry in doc.get("valuesFrom") or []:
+            check(
+                f"addons/{name}/addon.yaml valuesFrom entry {entry.get('helmKey')!r} has exactly one of annotationKey/param (decision 2)",
+                bool(entry.get("helmKey")) and (("annotationKey" in entry) != ("param" in entry)),
+                f"got {entry!r}",
+            )
+
+    # ----------------------------- accel-device-classes add-on and chart (#28 B)
+    adc_path = os.path.join(gitops, "addons/accel-device-classes/addon.yaml")
+    if load_one_or_fail(adc_path) is not None:
+        adc = check_addon_yaml(adc_path, allow_dir=True)
+        check("addons/accel-device-classes/addon.yaml's addon is 'accel-device-classes' (#28 Interface)", adc.get("addon") == "accel-device-classes", f"got {adc.get('addon')!r}")
+        check("addons/accel-device-classes/addon.yaml is in the 'accelerators' step (#28 Interface)", adc.get("wave") == "accelerators", f"got {adc.get('wave')!r}")
+        check(
+            "addons/accel-device-classes/addon.yaml's dir is gitops/charts/accel-device-classes (#28 Interface: a local chart)",
+            "charts/accel-device-classes" in str(adc.get("dir", "")),
+            f"got dir={adc.get('dir')!r}",
+        )
+        for k_ in ("chart", "repoURL", "version"):
+            check(f"addons/accel-device-classes/addon.yaml has no '{k_}' (#28 Interface: never an upstream registry)", k_ not in adc)
+
+    adc_templates = sorted(glob.glob(os.path.join(gitops, "charts/accel-device-classes/templates/*.yaml")))
+    check(
+        "charts/accel-device-classes/templates/ has at least one *.yaml (#28 Interface: templates/neuron-deviceclass.yaml)",
+        len(adc_templates) >= 1,
+        f"found {adc_templates!r}",
+    )
+
+    # Templates may carry Helm directives and are not necessarily standalone
+    # YAML; a line holding only a directive is dropped and an inline one
+    # replaced by a placeholder, which is enough to read the literal fields
+    # the Interface fixes ("name and selector fixed, no cell-specific value
+    # needed"). helm lint/template of the chart itself is 0.static.sh's.
+    directive_only_line = re.compile(r"^\s*\{\{.*\}\}\s*$")
+    inline_directive = re.compile(r"\{\{.*?\}\}")
+    adc_docs: list[dict] = []
+    adc_raw = ""
+    for tpl in adc_templates:
+        with open(tpl, encoding="utf-8") as f:
+            raw = f.read()
+        adc_raw += raw
+        cleaned = "\n".join(
+            inline_directive.sub("helm-directive-placeholder", line)
+            for line in raw.splitlines()
+            if not directive_only_line.match(line)
+        )
+        try:
+            adc_docs.extend(d for d in yaml.safe_load_all(cleaned) if d is not None)
+        except yaml.YAMLError as e:
+            check(f"{os.path.relpath(tpl, root)} is readable as YAML once Helm directives are masked", False, str(e))
+    if adc_templates:
+        check(
+            "charts/accel-device-classes renders exactly one object (#28 Interface: 'one DeviceClass')",
+            len(adc_docs) == 1,
+            f"found {len(adc_docs)}: {[d.get('kind') for d in adc_docs]!r}",
+        )
+        dc = adc_docs[0] if len(adc_docs) == 1 else {}
+        check("charts/accel-device-classes' object is kind DeviceClass (#28 section B)", dc.get("kind") == "DeviceClass", f"got {dc.get('kind')!r}")
+        check(
+            "charts/accel-device-classes' DeviceClass is named neuron-extended-resource (#28 section B)",
+            (dc.get("metadata") or {}).get("name") == "neuron-extended-resource",
+            f"got {(dc.get('metadata') or {}).get('name')!r}",
+        )
+        check(
+            "charts/accel-device-classes' DeviceClass sets spec.extendedResourceName: aws.amazon.com/neuron (#28 section B, #19 E4b)",
+            (dc.get("spec") or {}).get("extendedResourceName") == "aws.amazon.com/neuron",
+            f"got {(dc.get('spec') or {}).get('extendedResourceName')!r}",
+        )
+        selector_text = yaml.safe_dump((dc.get("spec") or {}).get("selectors") or [])
+        check(
+            "charts/accel-device-classes' DeviceClass selects device.driver == \"neuron.aws.com\" (#28 section B)",
+            "neuron.aws.com" in adc_raw and "device.driver" in selector_text and "neuron.aws.com" in selector_text,
+            f"spec.selectors={selector_text.strip()!r}",
+        )
+
+    # ------------------------------- capacity-pool accelerator.methodLabel (#28 C)
+    #
+    # #17 (feat/17-capacity-pools) owns this chart's shape: the method label
+    # #28 section C needs is accelerator.methodLabel.key/.value, not a
+    # chart-local pool.labels map (fix/capacity-pool-root-volume restack).
+    cp_values_path = os.path.join(gitops, "charts/capacity-pool/values.yaml")
+    cp_values = load_one_or_fail(cp_values_path) or {}
+    cp_accelerator = cp_values.get("accelerator") if isinstance(cp_values, dict) else None
+    check(
+        "charts/capacity-pool/values.yaml declares accelerator.methodLabel (#28 section C, #17's own shape; its default value is the chart's choice)",
+        isinstance(cp_accelerator, dict) and isinstance(cp_accelerator.get("methodLabel"), dict) and "key" in cp_accelerator["methodLabel"],
+        f"accelerator: {cp_accelerator!r}",
+    )
+    cp_nodepool_tpl = os.path.join(gitops, "charts/capacity-pool/templates/nodepool.yaml")
+    if os.path.isfile(cp_nodepool_tpl):
+        with open(cp_nodepool_tpl, encoding="utf-8") as f:
+            nodepool_tpl_text = f.read()
+        check(
+            "charts/capacity-pool/templates/nodepool.yaml reads .Values.accelerator.methodLabel (#28 section C: rendered as spec.template.metadata.labels)",
+            ".methodLabel" in nodepool_tpl_text and ".Values.accelerator" in nodepool_tpl_text,
+        )
+
+    # ------------------------------------ light-tier accelerator cells (#28 D)
+    #
+    # The two real cells 1.e2e.sh (GITOPS_RUN_ACCEL_E2E=1) and the
+    # real-machine verification launch nodes from. Their names and label
+    # values must be exact, not just present: 1.e2e.sh runs with
+    # NAME=dp-a19-gpu-r3 and ACCEL_TRN_CELL_NAME=dp-a19-trn-r3, and
+    # cells.ApplicationSet reads gitops/cells/<that name>/.
+    #
+    # Exactly one capacity-pool file per accelerator cell: 1.e2e.sh's
+    # existing step 10 (which runs unchanged on the GPU cell) asserts
+    # exactly one NodePool/EC2NodeClass/ResourceFlavor in the cell.
+    # Both cells use flex (#28 section H has the full finding and its own
+    # history): dp-a19-trn-r3's NodePool names exactly one instance type
+    # (trn2.3xlarge is the only Trainium2 size), and on a real run Karpenter's
+    # own price-based offering ranking kept re-selecting spot every time its
+    # unavailable-offerings cache entry expired, never actually trying
+    # on-demand for real even though a dry-run CreateFleet confirmed on-demand
+    # capacity was available. Switching this cell to pool.capacityType:
+    # on-demand to work around that was tried and itself failed a real run a
+    # different, still-unexplained way (zero real launch attempts at all,
+    # "nodepool requirements filtered out all instance types" for the full
+    # wait, with no EC2NodeClass error of its own) -- not root caused with
+    # the same confidence, so reverted. flex stays the fixture's own value;
+    # dp-a19-gpu-r3's NodePool has three instance families (g7/g6e/g5) and
+    # has passed with flex on a real run.
+    accel_cells = {
+        "dp-a19-gpu-r3": {"pool": "gpu", "label": "distai.dev/nvidia-gpu-method", "family": "g7", "capacityType": "flex"},
+        "dp-a19-trn-r3": {"pool": "trn", "label": "distai.dev/neuron-method", "family": "trn2", "capacityType": "flex"},
+    }
+    for cell, want in accel_cells.items():
+        files = sorted(glob.glob(os.path.join(gitops, "cells", cell, "capacity-pool", "*.yaml")))
+        check(
+            f"cells/{cell}/capacity-pool/ has exactly one parameter file (#28 section D; 1.e2e.sh step 10 expects one NodePool per cell)",
+            len(files) == 1,
+            f"found {[os.path.relpath(p, root) for p in files]!r}",
+        )
+        for path in files:
+            rel = os.path.relpath(path, root)
+            doc = load_one_or_fail(path) or {}
+            values = (doc.get("values") or {}) if isinstance(doc, dict) else {}
+            pool = values.get("pool") or {}
+            accelerator = values.get("accelerator") or {}
+            check(f"{rel}'s pool.name is {want['pool']!r} (#28 section D)", pool.get("name") == want["pool"], f"got {pool.get('name')!r}")
+            check(
+                f"{rel}'s accelerator.methodLabel is exactly {{key: {want['label']}, value: device-plugin}} (#28 section D: device-plugin method, never DRA, one key per device class; #17's own shape, not a chart-local pool.labels map)",
+                accelerator.get("methodLabel") == {"key": want["label"], "value": "device-plugin"},
+                f"got {accelerator.get('methodLabel')!r}",
+            )
+            reqs = {r.get("key"): r for r in (pool.get("requirements") or []) if isinstance(r, dict)}
+            family = reqs.get("karpenter.k8s.aws/instance-family") or {}
+            check(
+                f"{rel}'s pool.requirements allow instance-family {want['family']} (#28 section D/acceptance criteria)",
+                family.get("operator") == "In" and want["family"] in (family.get("values") or []),
+                f"got {family!r}",
+            )
+            check(
+                f"{rel}'s pool.requirements does not name karpenter.sh/capacity-type (#17's own capacity-pool.requirements helper fails the render if it does; pool.capacityType is the only place the capacity type is declared)",
+                "karpenter.sh/capacity-type" not in reqs,
+                f"got {reqs.get('karpenter.sh/capacity-type')!r}",
+            )
+            check(
+                f"{rel}'s pool.capacityType is {want['capacityType']!r} (#17's own enum has no spot-only option; #28 section H for why the two cells differ)",
+                pool.get("capacityType") == want["capacityType"],
+                f"got {pool.get('capacityType')!r}",
+            )
+
+    # The GPU cell also runs 1.e2e.sh's existing steps 8-11 unchanged
+    # (NAME=dp-a19-gpu-r3): they need one smoke LocalQueue, whose
+    # ClusterQueue must name that cell's own (only) ResourceFlavor.
+    gpu_smoke = sorted(glob.glob(os.path.join(gitops, "cells", "dp-a19-gpu-r3", "smoke", "*.yaml")))
+    check(
+        "cells/dp-a19-gpu-r3/smoke/ has exactly one parameter file (1.e2e.sh steps 8-11 run on this cell when GITOPS_RUN_ACCEL_E2E=1)",
+        len(gpu_smoke) == 1,
+        f"found {[os.path.relpath(p, root) for p in gpu_smoke]!r}",
+    )
+    for path in gpu_smoke:
+        doc = load_one_or_fail(path) or {}
+        flavor = (((doc.get("values") or {}).get("clusterQueue") or {}).get("resourceFlavor")) if isinstance(doc, dict) else None
+        check(
+            f"{os.path.relpath(path, root)}'s clusterQueue.resourceFlavor names the cell's own pool 'gpu'",
+            flavor == accel_cells["dp-a19-gpu-r3"]["pool"],
+            f"got {flavor!r}",
+        )
 
     # ----------------------------------------------------- root Application
     root_app_path = os.path.join(gitops, "bootstrap/root-application.yaml")

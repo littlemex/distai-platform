@@ -1,0 +1,12 @@
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {"name": "example", "namespace": "run-board-sample"},
+  "status": {
+    "startTime": "2026-11-20T17:30:00Z",
+    "failed": 1,
+    "conditions": [
+      {"type": "Failed", "status": "True", "lastTransitionTime": "2026-11-20T18:05:00Z", "reason": "BackoffLimitExceeded"}
+    ]
+  }
+}

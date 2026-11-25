@@ -1,0 +1,28 @@
+# The platform's own DeviceClass catalog (#19 Decision 1(c), #28 section
+# B): today one DeviceClass, neuron-extended-resource, mapping the Neuron
+# DRA driver's devices to the extended resource aws.amazon.com/neuron, so a
+# Layer 1 pod reaches a Neuron DRA node (#19 E4b). NVIDIA needs no entry:
+# its DRA chart already ships gpu.nvidia.com with
+# extendedResourceName: nvidia.com/gpu (#19 E0).
+#
+# A local chart (dir), never an upstream registry: an upstream chart's own
+# templates cannot be extended with an object it does not define without
+# forking it (#28, Alternatives Considered). It lives under addons/, not
+# cells/, because nothing in it varies per cell - the same "dir" shape
+# cells/*/capacity-pool/*.yaml already uses (#25 Decision 2), applied to a
+# platform-wide chart.
+#
+# Same "accelerators" step as the four advertisers. A DeviceClass is a
+# cluster-scoped object that selects devices by driver name; it is valid
+# with no driver installed and simply matches nothing until
+# accel-neuron-dra publishes devices, so it has no ordering dependency on
+# them. namespace is required by the ApplicationSet template's destination
+# but unused by this cluster-scoped chart.
+addon: accel-device-classes
+# RFC #41 Decision 1: gitops/addons/ is delivered unconditionally to
+# every cell, no opt-out, and check_addon_tiers.py requires every
+# addon.yaml here to say so explicitly.
+tier: core
+wave: accelerators
+dir: gitops/charts/accel-device-classes
+namespace: kube-system

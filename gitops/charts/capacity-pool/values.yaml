@@ -2,8 +2,12 @@
 # come from a cells/<cluster-name>/capacity-pool/*.yaml parameter file via
 # cells.ApplicationSet.yaml's valuesFrom (clusterName from the Cluster
 # generator's own "name" param; nodeRole from the registration Secret's
-# distai.dev.annotations/karpenter-node-role annotation, the one Terraform
-# output no platform add-on reads - RFC #25 Decision 2).
+# distai.dev.annotations/karpenter-node-role annotation - RFC #25 Decision
+# 2). This was previously described as "the one Terraform output no
+# platform add-on reads"; #41's optional-pool (a platform add-on, core
+# tier) reads exactly this annotation too (#63, filed as #58) - the
+# annotation is not cell-specific-parameter-file-only, only nodeRole's
+# *value* is cell-specific.
 clusterName: ""
 nodeRole: ""
 
@@ -11,13 +15,20 @@ pool:
   # Shared by the NodePool, its EC2NodeClass and the matching ResourceFlavor.
   name: ""
 
-  # CPU-only, on-demand, amd64: the minimal skeleton this PR ships. #17's PR
-  # adds spot/flex requirements and per-capacity-type pools (-rsv/-od/-flex)
-  # on top of this same chart.
+  # The one capacity type this pool launches (#17's -rsv/-od/-flex pools).
+  # The chart generates the NodePool's karpenter.sh/capacity-type
+  # requirement from this field:
+  #   on-demand -> ["on-demand"]
+  #   reserved  -> ["reserved"] (never mixed with on-demand; needs
+  #                reservation.tags below)
+  #   flex      -> ["spot", "on-demand"]
+  # Any other value fails the render.
+  capacityType: on-demand
+
+  # Every other scheduling requirement. Must not contain
+  # karpenter.sh/capacity-type (the render fails if it does): capacityType
+  # above is the only place the capacity type is declared.
   requirements:
-    - key: karpenter.sh/capacity-type
-      operator: In
-      values: ["on-demand"]
     - key: kubernetes.io/arch
       operator: In
       values: ["amd64"]
@@ -34,6 +45,143 @@ pool:
   disruption:
     consolidationPolicy: WhenEmptyOrUnderutilized
     consolidateAfter: 60s
+
+  # EC2NodeClass.spec.blockDeviceMappings' root volume size, as a plain
+  # Kubernetes quantity string (e.g. "100Gi" or "150Gi"). Empty by
+  # default: the EC2NodeClass renders no blockDeviceMappings at all, so a
+  # node's root volume stays whatever the AMI's own default is -- no
+  # behavior change for an existing pool that does not set this. Set it
+  # when a pool's own workloads need more room than that default leaves
+  # free for container images. Confirmed necessary on real hardware: a
+  # trn2.3xlarge node's default root volume ran out of space mid-pull of
+  # a 7.5 GiB verification image ("no space left on device" while
+  # extracting a layer); kubelet's own disk-pressure eviction then turned
+  # that into a pod that was genuinely Scheduled and bound, evicted, and
+  # whose now-pod-less node Karpenter reclaimed as idle shortly after --
+  # a failure that reads, from Karpenter's own side alone, as an
+  # unrelated empty-node consolidation.
+  rootVolumeSizeGi: ""
+
+  # Empty (default): no extra ENI is requested, matching every existing
+  # pool exactly (no behavior change for a pool that does not set this). A
+  # pool targeting an EFA-capable instance type (for example the
+  # single-network-card g7/g7e sizes, which carry exactly one EFA
+  # interface) sets this to request it; otherwise the instance boots
+  # without an EFA device even though the type supports one (see
+  # ec2nodeclass.yaml's own comment). Example for one EFA device on
+  # network card 0, the only shape a single-network-card instance type
+  # supports:
+  #   networkInterfaces:
+  #     - networkCardIndex: 0
+  #       deviceIndex: 0
+  #       interfaceType: interface
+  #     - networkCardIndex: 0
+  #       deviceIndex: 1
+  #       interfaceType: efa-only
+  networkInterfaces: []
+
+# Used only when pool.capacityType is "reserved": renders
+# EC2NodeClass.spec.capacityReservationSelectorTerms as one term
+# [{tags, instanceMatchCriteria}]. Reservations are selected by tag, not by
+# ID, so a replacement reservation (every Capacity Block purchase is one) is
+# picked up as long as it carries the same tags. tags must be non-empty when
+# capacityType is "reserved" (the render fails otherwise).
+# instanceMatchCriteria defaults to "targeted": an "open" reservation can be
+# consumed by any matching On-Demand launch in the account, not only by
+# this pool.
+reservation:
+  tags: {}
+  instanceMatchCriteria: targeted
+
+# Optional accelerator-class fields shared by every accelerator vendor
+# (#19, #22). Values only: nothing here installs a device plugin or
+# enforces anything; left empty (the default), none of it renders.
+#   resourceName  - provenance annotation distai.dev/accelerator-resource-name
+#                   on the NodePool and the ResourceFlavor (for example
+#                   nvidia.com/gpu or aws.amazon.com/neuron); no template
+#                   branches on its value.
+#   taint         - a NodePool taint, mirrored as a ResourceFlavor
+#                   toleration. Rendered only when taint.key is set; effect
+#                   must then be NoSchedule, PreferNoSchedule or NoExecute.
+#   methodLabel   - a label on the NodePool's node template, for an
+#                   advertiser DaemonSet to select nodes by. Rendered only
+#                   when methodLabel.key is set.
+#   sharingLabel  - a second, independent label on the same node
+#                   template, for GPU sub-device sharing (MPS or
+#                   time-slicing) opt-in. Rendered only when
+#                   sharingLabel.key is set, alongside methodLabel if
+#                   both are set (two separate keys in the same
+#                   metadata.labels map -- this is additive, not a
+#                   replacement for methodLabel, since a pool opts into
+#                   both "which advertiser" and "how that advertiser
+#                   should split one device" independently). The
+#                   verified, intended use (2026-11-22, real hardware):
+#                   NVIDIA's own k8s-device-plugin chart reads a node
+#                   label named nvidia.com/device-plugin.config to pick
+#                   a named entry from its config.map (see this
+#                   platform's accel-nvidia-device-plugin addon) --
+#                   sharingLabel.key = "nvidia.com/device-plugin.config",
+#                   sharingLabel.value = the chosen config name (for
+#                   example "mps-2"). A pool that never sets this gets
+#                   no label and so falls back to the device plugin's
+#                   own config.default (whole-GPU, no sharing) --
+#                   unchanged behavior for every existing pool.
+#   mpsLabel      - a third, independent label on the same node
+#                   template, same shape and same reasoning as
+#                   sharingLabel (rendered only when mpsLabel.key is
+#                   set, additive alongside methodLabel/sharingLabel).
+#                   Exists because NVIDIA's mps-control-daemon
+#                   DaemonSet -- the process that actually performs the
+#                   split sharingLabel above opts into -- is itself
+#                   gated by a THIRD label the upstream chart hardcodes
+#                   (nvidia.com/mps.capable=true), separate from the
+#                   device-plugin.config label sharingLabel sets.
+#                   Before this field existed, that label had to be
+#                   kubectl-applied by hand after the node joined,
+#                   which does not survive a Karpenter drift
+#                   replacement: any later edit to this same pool's
+#                   requirements reads as drift, Karpenter replaces the
+#                   node, and the hand-applied label is gone from the
+#                   new one (confirmed on real hardware, 2026-11-22 --
+#                   see this chart's own "GPU sub-device sharing"
+#                   section below). mpsLabel puts the label in the
+#                   NodePool's own node template instead, so every node
+#                   this pool ever launches -- including every
+#                   Karpenter-driven replacement -- carries it from
+#                   birth, with no manual step and nothing to lose on
+#                   drift. mpsLabel.key = "nvidia.com/mps.capable",
+#                   mpsLabel.value = "true" for the pool opting a node
+#                   into MPS; a pool that never sets this gets no label
+#                   and so is never selected by mps-control-daemon's own
+#                   nodeSelector -- unchanged behavior for every
+#                   existing pool, including one that sets sharingLabel
+#                   for time-slicing (not MPS) without also setting
+#                   mpsLabel.
+accelerator:
+  resourceName: ""
+  taint:
+    key: ""
+    value: ""
+    effect: ""
+  methodLabel:
+    key: ""
+    value: ""
+  sharingLabel:
+    key: ""
+    value: ""
+  mpsLabel:
+    key: ""
+    value: ""
+
+# Optional team-exclusive taint (#22 Decision 3), rendered exactly like
+# accelerator.taint: a NodePool taint mirrored as a ResourceFlavor
+# toleration, only when teamTaint.key is set. A value only: nothing in this
+# chart stops another team's ClusterQueue from listing this ResourceFlavor.
+tenancy:
+  teamTaint:
+    key: ""
+    value: ""
+    effect: ""
 
 # Pinned, not "latest": confirmed against the public SSM parameter
 # /aws/service/eks/optimized-ami/1.37/amazon-linux-2023/x86_64/standard/recommended/release_version

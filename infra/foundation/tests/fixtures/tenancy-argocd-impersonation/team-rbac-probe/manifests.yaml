@@ -1,0 +1,51 @@
+# Fixture for infra/foundation/tests/4.argocd-impersonation.sh (issue #22
+# Decision 10 H11, issue #57 item 1). Stands in for the kind of
+# self-authored, namespaced RBAC a real chart ships alongside its own
+# workload (the exact shape issue #57 found in
+# examples/inference/vllm/disagg-pd-llmd/templates/sidecar-rbac.yaml: a
+# ServiceAccount plus a same-namespace Role/RoleBinding for a sidecar).
+#
+# Used for issue #57's own goal, restored (check 2 of
+# infra/foundation/tests/4.argocd-impersonation.sh): gitops/bootstrap/team-onboard.sh's
+# own AppProject DOES whitelist Role/RoleBinding, safe only because
+# gitops/bootstrap/team-rbac-guard.yaml (a ValidatingAdmissionPolicy)
+# constrains their content for every caller -- this fixture's own
+# content (a Role granting only "configmaps" verbs, nothing
+# rbac.authorization.k8s.io, escalate/bind/impersonate or wildcard) is
+# exactly the shape that guard allows, so this chart's own sync is
+# expected to SUCCEED. plain-workload-probe/manifests.yaml (no RBAC at
+# all) is used where a check needs a manifest with no Role/RoleBinding
+# content; malicious-clusteradmin-probe/manifests.yaml is the fixture
+# used for the check where a sync is expected to be refused.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: probe-sidecar
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: probe-sidecar-role
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: probe-sidecar-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: probe-sidecar-role
+subjects:
+  - kind: ServiceAccount
+    name: probe-sidecar
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: probe-config
+data:
+  hello: "world"

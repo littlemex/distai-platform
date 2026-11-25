@@ -113,6 +113,10 @@ CELL_FIXTURE_BRANCH=""
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 pass() { log "PASS $*"; }
+# Stops this run immediately, same contract and same reason as
+# 1.e2e.sh's own fail() (#63, filed as #61 item 4) -- see that file's
+# comment for the other two fail()/run_check() contracts this name
+# carries elsewhere in this repository under the same name.
 fail() {
   FAILED_STEP="$*"
   log "FAIL $*"

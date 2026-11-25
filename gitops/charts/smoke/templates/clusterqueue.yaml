@@ -18,11 +18,26 @@ spec:
     matchLabels:
       kubernetes.io/metadata.name: {{ .Values.namespace | quote }}
   resourceGroups:
-    - coveredResources: ["cpu", "memory"]
+    - coveredResources:
+        - "cpu"
+        - "memory"
+        {{- if .Values.clusterQueue.acceleratorResource }}
+        - {{ .Values.clusterQueue.acceleratorResource | quote }}
+        {{- end }}
       flavors:
         - name: {{ required "clusterQueue.resourceFlavor is required" .Values.clusterQueue.resourceFlavor | quote }}
           resources:
             - name: "cpu"
               nominalQuota: {{ .Values.clusterQueue.cpuQuota | quote }}
             - name: "memory"
-              nominalQuota: "64Gi"
+              nominalQuota: {{ .Values.clusterQueue.memQuota | quote }}
+            {{- if .Values.clusterQueue.acceleratorResource }}
+            # #63/#56: when resourceFlavor carries an accelerator taint,
+            # this resource must be covered here too - otherwise Kueue
+            # would admit a CPU-only pod through this flavor (and so onto
+            # a tainted accelerator node, via the flavor's own mirrored
+            # toleration) with no accelerator request ever reaching Kueue
+            # at all.
+            - name: {{ .Values.clusterQueue.acceleratorResource | quote }}
+              nominalQuota: {{ .Values.clusterQueue.acceleratorQuota | quote }}
+            {{- end }}

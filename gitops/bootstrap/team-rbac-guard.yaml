@@ -1,0 +1,214 @@
+# gitops/bootstrap/team-rbac-guard.yaml - RFC #22 Decision 10 H11.
+#
+# Why this exists: the RBAC-escalation check Kubernetes itself runs
+# when a Role/RoleBinding is created (`attempting to grant RBAC
+# permissions not currently held`) only protects against a CALLER who
+# does not already hold the permissions it is trying to grant.
+# infra/foundation/tests/4.argocd-impersonation.sh's own real-hardware
+# check confirmed two separate facts that combine into a real gap: (1)
+# Argo CD sync impersonation is not engaged on the EKS managed Argo CD
+# capability (destinationServiceAccounts has no observed effect --
+# check 7 there), so every sync runs as the capability's own identity,
+# not a team's; (2) that capability identity is bound to
+# AmazonEKSClusterAdminPolicy (infra/foundation/argocd.tf's own comment
+# on aws_eks_access_policy_association.argocd), i.e. already holds
+# every permission there is -- so the escalation check trivially passes
+# for ANY Role/RoleBinding that identity creates, no matter what it
+# grants. Narrowing a team's own identity Role
+# (gitops/bootstrap/team-onboard.sh step 3) does not close this: that
+# Role is never the identity actually performing the write, and making
+# it the exception to this policy via a label is itself
+# attacker-controlled (any object, team-authored or not, can carry
+# whatever label it likes) -- this policy has no exemption of any kind.
+#
+# The fix is a control that does not depend on who the writer is at
+# all: a ValidatingAdmissionPolicy runs for every matching request
+# regardless of the caller's own RBAC permissions (it is evaluated by
+# the API server's admission chain, after authorization already let the
+# request through). This restores issue #57's own actual goal -- a
+# team's own chart may ship its own namespaced Role/RoleBinding (H11's
+# original deny is lifted again once this guard exists,
+# gitops/bootstrap/team-onboard.sh's own AppProject whitelist).
+#
+# Design, rule 2's own history: the first version of this policy was a
+# deny-list (no escalate/bind/impersonate verb, no
+# rbac.authorization.k8s.io permission, no wildcard, no Secrets).
+# Review rounds kept finding shapes it did not name: pods/exec family
+# and serviceaccounts/token (added, then still missed the "*/exec" /
+# "*/token" wildcard-subresource form a bare "*" check does not catch),
+# and -- the one that settled this -- a Role granting "patch" on the
+# "namespaces" resource itself, which lets a team's own chart remove
+# this policy's own namespaceSelector label (distai.dev/team) or
+# gitops/bootstrap/team-onboard.sh's own Pod Security label from its
+# own Namespace, turning both controls off from the inside. A deny-list
+# can only ever be as complete as the list of shapes someone has
+# already thought of; this policy is an ALLOW-list instead (rule 2):
+# every apiGroup, resource and verb a Role grants must appear in a
+# fixed, named set, or the whole Role is denied. There is no shape left
+# to miss, because nothing not on the list is ever reachable, and
+# "namespaces" (along with rbac.authorization.k8s.io, Secrets,
+# ".../exec", ".../token" and every subresource) is simply absent from
+# that set.
+#
+#   1. a RoleBinding may not reference a ClusterRole as its roleRef --
+#      every RoleBinding a team's own chart ships must bind to a Role
+#      already defined inside that same namespace (which rule 2 below
+#      also constrains), never an existing, possibly far more
+#      privileged, cluster-wide ClusterRole (cluster-admin among them).
+#      This rule does not itself restrict which namespace-scoped Role a
+#      RoleBinding may name -- safe only because every Role in this
+#      namespace is itself bounded by rule 2.
+#   2. a Role's every rule must use ONLY apiGroups, resources and verbs
+#      drawn from the fixed allow-list below (ALLOWED_API_GROUPS,
+#      ALLOWED_RESOURCES, ALLOWED_VERBS in this file's own comments) --
+#      anything else, including any resource string containing "/"
+#      (every subresource, named or wildcarded: "pods/exec",
+#      "serviceaccounts/token", "*/exec", "pods/ephemeralcontainers",
+#      "pods/proxy", everything), any apiGroup or verb not on the list
+#      (rbac.authorization.k8s.io, escalate/bind/impersonate, "*"), and
+#      "namespaces" itself, is denied outright. Allowed today:
+#        - apiGroups: "" (core), "apps", "batch", "policy",
+#          "networking.k8s.io"
+#        - resources: serviceaccounts, configmaps, pods, services,
+#          deployments, statefulsets, daemonsets, jobs, cronjobs,
+#          poddisruptionbudgets, networkpolicies -- the ordinary
+#          namespaced workload kinds a team's own chart ships, matching
+#          the namespaced-workload side of gitops/bootstrap/team-onboard.sh's
+#          own AppProject namespaceResourceWhitelist exactly (minus
+#          Role/RoleBinding, which rule 1 governs instead). endpoints
+#          and endpointslices were considered and left off: a flat verb
+#          list means allowing "get" also allows "create"/"patch"/
+#          "delete", and upstream Kubernetes itself removed Endpoints
+#          write from the built-in edit/admin ClusterRoles over
+#          CVE-2021-25740 (Endpoints write enabling a man-in-the-middle
+#          of Service traffic) -- add them deliberately, narrowed to
+#          read-only verbs, if a real chart needs them, rather than by
+#          default.
+#        - inferencepools (apiGroup inference.networking.k8s.io, the
+#          Gateway API Inference Extension's own CRD group) and
+#          inferenceobjectives, inferencemodelrewrites (apiGroup
+#          llm-d.ai -- llm-d's own CRD group, separate from the Gateway
+#          API Inference Extension project; only InferencePool belongs
+#          to that project) were added for issue #57 item 1's own
+#          motivating chart (examples/inference/vllm/disagg-pd-llmd and
+#          examples/inference/sglang/disagg-pd-llmd, both at
+#          feat/disagg-pd-reference@246b7ef): their shared sidecar
+#          Role (templates/sidecar-rbac.yaml) and the llm-d-router-gateway
+#          dependency chart's own namespaced Role
+#          (templates/rbac.yaml's "non-sa" Role; charts/router/templates/_rbac.yaml
+#          defines a separate "sa" Role, get/watch/list on pods only,
+#          already covered by the allow-list before this PR) both
+#          grant only get/watch/list on these three resources, to watch
+#          this release's own InferencePool and the InferenceObjective/
+#          InferenceModelRewrite CRs llm-d.ai defines -- all three are
+#          namespace-scoped, matching every other entry already on
+#          this list, and the dependency chart's own
+#          ClusterRole/ClusterRoleBinding (token-review auth for its
+#          Prometheus metrics endpoint) is never rendered here, because
+#          the chart's own values.yaml sets
+#          llmdRouter.router.monitoring.prometheus.auth.enabled: false
+#          for exactly this reason (see that file's own comment) -- an
+#          EARLIER form of infra/foundation/tests/4.argocd-impersonation.sh's
+#          own checks 12-13 confirmed this with a real server-side
+#          sync; the current, revised form of those checks has since
+#          been re-run on real EKS and confirmed PASS too (issue #67,
+#          closed). The verb
+#          narrowing immediately below was checked on a real local
+#          Kubernetes 1.30 API server (envtest, not EKS, no containers)
+#          against Role rule shapes read from `helm template` output
+#          for both charts, both the denied (inferencepools + delete)
+#          and the allowed (inferencepools get/list/watch, the shape
+#          those charts' own sidecar Role and their llm-d-router-gateway
+#          dependency chart's own Role actually use) case. Unlike every resource above, these three are
+#          restricted to get/list/watch ONLY (rule 2's own CEL has a
+#          separate, narrower verb clause for exactly these three) --
+#          every real caller needs only those three verbs, and this
+#          file's own rule (stated when endpoints/endpointslices were
+#          left off, above) is to add anything beyond the ordinary
+#          namespaced-workload defaults narrowed to what is actually
+#          needed, not by the same full-CRUD default as everything
+#          else.
+#        - verbs: get, list, watch, create, update, patch, delete for
+#          every resource above except inferencepools,
+#          inferenceobjectives and inferencemodelrewrites, which are
+#          get, list, watch only.
+#      Widening any of the three lists (for example, if a real chart
+#      this guard is meant to allow needs a resource not on it) is a
+#      one-line, auditable, reviewed change to this file -- not a
+#      guessing game of which new deny rule the next bypass needs.
+#
+# Known, bounded scope: this allow-list is a complete answer to "what
+# can a Role in a team namespace ever grant", which closes every
+# enumeration-shaped gap a deny-list is exposed to -- it is not a
+# complete answer to every Kubernetes-level RBAC question. A Role
+# binding to a PRE-EXISTING, already-permissive Role in the same
+# namespace (one this guard did not itself review, created before this
+# guard existed or by a different path) is outside what rule 1 alone
+# can check; this guard assumes every Role in a namespace it governs
+# was itself created under this same policy. gitops/bootstrap/team-onboard.sh's
+# own Namespace object separately sets Pod Security Admission to
+# "restricted", which is what actually stops a privileged DaemonSet or
+# a hostNetwork Pod -- neither is an RBAC question, so no rule in this
+# file could reach either one regardless of how complete the allow-list
+# above is. Secrets are not confidential from a Role holder even though
+# this allow-list denies granting permission on the Secret resource
+# directly: "create" on "pods" (allowed) already lets its holder mount
+# any Secret already present in the namespace as a volume, and run as
+# any ServiceAccount in the namespace via the Pod's own
+# serviceAccountName field -- a team's own chart can already reach both
+# through the ordinary workload kinds this guard allows, with or
+# without this guard's own Secret-resource rule, so that rule is a
+# defense against a team granting itself DIRECT API read/write on
+# Secrets (listing every Secret's own data via `kubectl get secret`),
+# not a boundary around what a Pod this guard allows can mount.
+#
+# Scope: matchConstraints.namespaceSelector matches only namespaces
+# carrying the distai.dev/team label (gitops/bootstrap/team-onboard.sh's
+# own Namespace object sets this) -- system/admin namespaces (argocd,
+# kube-system, kueue-system, karpenter's own) never carry that label and
+# are therefore never constrained by this guard. failurePolicy: Fail
+# (deny-on-evaluation-error) is a deliberate choice for a security
+# control: a CEL evaluation failure should block the write, not silently
+# let it through.
+#
+# Applied once, cluster-wide, by gitops/bootstrap/team-onboard.sh's own
+# step 1 (idempotent `kubectl apply`, same as every other object that
+# script creates) -- never per-team, since both objects here are
+# cluster-scoped.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: team-rbac-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchExpressions:
+        - key: distai.dev/team
+          operator: Exists
+    resourceRules:
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["roles", "rolebindings"]
+  validations:
+    - expression: "request.resource.resource != 'rolebindings' || object.roleRef.kind != 'ClusterRole'"
+      message: "a RoleBinding in a team namespace may not reference a ClusterRole; define a namespace-scoped Role instead (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
+    - expression: >-
+        request.resource.resource != 'roles' || !has(object.rules) ||
+        object.rules.all(r,
+          r.apiGroups.all(g, g in ['', 'apps', 'batch', 'policy', 'networking.k8s.io', 'inference.networking.k8s.io', 'llm-d.ai']) &&
+          r.resources.all(x, x in ['serviceaccounts', 'configmaps', 'pods', 'services', 'deployments', 'statefulsets', 'daemonsets', 'jobs', 'cronjobs', 'poddisruptionbudgets', 'networkpolicies', 'inferencepools', 'inferenceobjectives', 'inferencemodelrewrites']) &&
+          (r.resources.exists(x, x in ['inferencepools', 'inferenceobjectives', 'inferencemodelrewrites'])
+            ? r.verbs.all(v, v in ['get', 'list', 'watch'])
+            : r.verbs.all(v, v in ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete']))
+        )
+      message: "a Role in a team namespace may grant only {get,list,watch,create,update,patch,delete} on {serviceaccounts,configmaps,pods,services,deployments,statefulsets,daemonsets,jobs,cronjobs,poddisruptionbudgets,networkpolicies} (or {get,list,watch} only on {inferencepools,inferenceobjectives,inferencemodelrewrites}) in {core,apps,batch,policy,networking.k8s.io,inference.networking.k8s.io,llm-d.ai} -- this rule granted something outside that allow-list (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: team-rbac-guard-binding
+spec:
+  policyName: team-rbac-guard
+  validationActions: ["Deny"]

@@ -33,6 +33,7 @@ Usage: check_pinned_crds.py <repo_root> <rendered_dir>
 """
 import glob
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -83,8 +84,33 @@ def helm_template_chart(addon_doc, workdir, namespace=None):
     chart = addon_doc["chart"]
     version = str(addon_doc["version"])
     skip_crds = bool(addon_doc.get("skipCrds"))
-    ref = f"oci://{addon_doc['repoURL']}/{chart}"
-    cmd = ["helm", "template", f"{chart}-pinned-crd-check", ref, "--version", version]
+    repo_url = addon_doc["repoURL"]
+    # #28: not every registry chart is OCI. accel-nvidia-device-plugin's
+    # repoURL is a classic Helm chart repo (index.yaml at
+    # https://nvidia.github.io/k8s-device-plugin), which `helm template`
+    # reaches with `--repo <url> <chart-name>`, never an `oci://` ref --
+    # prefixing "oci://" onto an already-"https://" URL produced an
+    # unparseable "oci://https://..." reference (found while extending
+    # this script for #28). Every other pinned addon.yaml in this repo so
+    # far (karpenter*, kueue, the other three accel-* add-ons) uses an OCI
+    # registry host with no scheme of its own, so this branch leaves their
+    # behavior unchanged.
+    if repo_url.startswith("http://") or repo_url.startswith("https://"):
+        ref = f"{repo_url}#{chart}"  # descriptive only, for the FAIL message below; not a real helm ref
+        cmd = ["helm", "template", f"{chart}-pinned-crd-check", chart, "--repo", repo_url, "--version", version]
+    else:
+        ref = f"oci://{repo_url}/{chart}"
+        cmd = ["helm", "template", f"{chart}-pinned-crd-check", ref, "--version", version]
+    # Both NVIDIA charts (accel-nvidia-device-plugin, accel-nvidia-dra)
+    # template a validation guard refusing the implicit "default"
+    # namespace ("Running in the 'default' namespace is not recommended"),
+    # found running this script for #28 -- the render fails outright
+    # without a namespace, not merely mislabels one. Combined with #63's
+    # own need (an addon's namespaced objects must carry their *real*
+    # namespace, not Helm's "default" fallback, for check_appproject_
+    # whitelist.py's own comparison), both callers below now pass this
+    # addon's own namespace: field through as the `namespace` parameter,
+    # rather than this function re-deriving it a second way.
     if namespace:
         cmd += ["--namespace", namespace, "--create-namespace"]
     if skip_crds:
@@ -103,29 +129,14 @@ def helm_template_chart(addon_doc, workdir, namespace=None):
     return proc.stdout
 
 
-def extract_served_versions(rendered_text):
-    """{(group, kind): {served version name, ...}}, one CRD extraction unit."""
-    out = {}
-    for doc in yaml.safe_load_all(rendered_text):
-        if not doc or doc.get("kind") != "CustomResourceDefinition":
-            continue
-        spec = doc.get("spec", {}) or {}
-        group = spec.get("group")
-        kind = (spec.get("names") or {}).get("kind")
-        versions = {v["name"] for v in spec.get("versions", []) if v.get("served", True)}
-        if group and kind and versions:
-            out.setdefault((group, kind), set()).update(versions)
-    return out
-
-
 def helm_template_dir_chart(addon_doc, repo_root, workdir):
     """Same idea as helm_template_chart, for a local dir:-sourced chart
     (gitops/addon-catalog/<name>/addon.yaml) instead of a registry one --
     dcgm-exporter's own wrapper around an upstream `dependencies:` entry
-    is the one that needs this (#63, independent security-axis review
-    pass, filed as "SA3" item 2). `helm dependency build` resolves that
-    dependency into charts/ first, the same step gitops/tests/0.static.sh's
-    own helm lint/template steps already run for this chart."""
+    is the one that needs this today (#63, filed as "SA3" item 2). `helm
+    dependency build` resolves that dependency into charts/ first, the
+    same step gitops/tests/0.static.sh's own helm lint/template steps
+    already run for this chart."""
     chart_ref = os.path.join(repo_root, addon_doc["dir"])
     subprocess.run(["helm", "dependency", "build", chart_ref], capture_output=True, text=True, timeout=120)
     name = addon_doc.get("addon", os.path.basename(chart_ref))
@@ -147,6 +158,135 @@ def helm_template_dir_chart(addon_doc, repo_root, workdir):
     return proc.stdout
 
 
+def extract_served_versions(rendered_text):
+    """{(group, kind): {served version name, ...}}, one CRD extraction unit."""
+    out = {}
+    for doc in yaml.safe_load_all(rendered_text):
+        if not doc or doc.get("kind") != "CustomResourceDefinition":
+            continue
+        spec = doc.get("spec", {}) or {}
+        group = spec.get("group")
+        kind = (spec.get("names") or {}).get("kind")
+        versions = {v["name"] for v in spec.get("versions", []) if v.get("served", True)}
+        if group and kind and versions:
+            out.setdefault((group, kind), set()).update(versions)
+    return out
+
+
+# A fixed, named securityContext policy per addon label (#63, independent
+# security-axis review pass, filed as "SA3" item 2 - this table used to be
+# a single hardcoded dict for the two accel-efa-device-plugin-* addons
+# only; dcgm-exporter's own hardening was not mechanically checked at all
+# until this entry was added). For accel-efa-device-plugin-{nvidia,neuron}
+# (gitops/addons/<name>/addon.yaml), each entry is the exact
+# values.securityContext override that file sets. dcgm-exporter has no
+# such override of its own (gitops/addon-catalog/dcgm-exporter/addon.yaml
+# names no values.securityContext key at all) -- its entry is instead
+# what gitops/charts/dcgm-exporter (the in-tree wrapper chart, pulling
+# the real dcgm-exporter chart in as a Helm dependency) renders by
+# default with no override applied, confirmed by rendering it, kept
+# here the same way and for the same reason as the other two: never
+# read back from the file being checked, for the reason explained above
+# check_security_context_rendered's own call sites. A version bump to
+# that dependency can change this default with no diff anywhere this
+# script reads from -- a known risk of relying on an upstream default
+# rather than an explicit override, not something fixed here.
+SECURITY_CONTEXT_EXPECTATIONS = {
+    "accel-efa-device-plugin-nvidia": {
+        "privileged": False,
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+    },
+    "accel-efa-device-plugin-neuron": {
+        "privileged": False,
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+    },
+    "dcgm-exporter": {
+        # SYS_ADMIN and root (runAsUser: 0) are what the upstream chart's
+        # own default needs to read GPU profiling metrics (DCGM's perf
+        # counters require it); privileged: False keeps that to exactly
+        # the one capability, not the whole-device-passthrough grant
+        # "privileged" would add. Added after a review of a
+        # sibling branch found this entry missing the privileged: False
+        # key every other entry here has -- check_security_context_
+        # rendered() only compares keys present in this dict, so a
+        # privileged: true regression on this one container would pass
+        # silently, the exact failure mode this whole check exists to
+        # catch (confirmed: the rendered container's own securityContext
+        # carries no "privileged" key at all today, i.e. the implicit
+        # Kubernetes default, False).
+        "privileged": False,
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"add": ["SYS_ADMIN"], "drop": ["ALL"]},
+        "runAsNonRoot": False,
+        "runAsUser": 0,
+    },
+}
+
+METHOD_LABEL_RE = re.compile(r"^distai\.dev/[\w-]+-method$")
+
+
+def find_method_label(values):
+    """#28: search an addon.yaml's own `values` block (recursively; a method
+    label lives at a different nesting depth per chart -- top-level
+    nodeSelector for both NVIDIA charts, devicePlugin.nodeSelector /
+    draDriver.nodeSelector for Neuron) for the one key matching
+    distai.dev/<vendor>-method. Returns (key, value) or None."""
+    if isinstance(values, dict):
+        for k, v in values.items():
+            if isinstance(k, str) and METHOD_LABEL_RE.match(k) and isinstance(v, str):
+                return (k, v)
+            found = find_method_label(v)
+            if found:
+                return found
+    elif isinstance(values, list):
+        for item in values:
+            found = find_method_label(item)
+            if found:
+                return found
+    return None
+
+
+def daemonset_carries_label(ds_spec, key, value):
+    """True if this DaemonSet's pod template selects nodes by key=value,
+    either through a plain nodeSelector or a required nodeAffinity
+    matchExpressions term (both chart families in this PR use one or the
+    other, confirmed against the pinned chart versions' own values.yaml)."""
+    pod_spec = ((ds_spec.get("template") or {}).get("spec") or {})
+    if (pod_spec.get("nodeSelector") or {}).get(key) == value:
+        return True
+    terms = (
+        ((pod_spec.get("affinity") or {}).get("nodeAffinity") or {})
+        .get("requiredDuringSchedulingIgnoredDuringExecution", {})
+        .get("nodeSelectorTerms", [])
+    )
+    for term in terms:
+        for expr in term.get("matchExpressions", []):
+            if expr.get("key") == key and value in (expr.get("values") or []):
+                return True
+    return False
+
+
+def check_method_label_rendered(label, rendered_text, key, value):
+    """#28, Blocking finding from a review of this PR: a
+    values key that is not a real field in the pinned chart is silently
+    ignored by Helm, not an error -- confirmed by the review, and the
+    reason this script (which already has the exact pinned chart's own
+    real rendered output) checks the label actually reached a DaemonSet's
+    pod template, rather than trusting that setting it in addon.yaml's
+    values was enough. Returns True/False/None (None: no DaemonSet in
+    this chart's output at all, which is itself worth flagging)."""
+    found_any_daemonset = False
+    for doc in yaml.safe_load_all(rendered_text):
+        if not doc or doc.get("kind") != "DaemonSet":
+            continue
+        found_any_daemonset = True
+        if daemonset_carries_label(doc.get("spec") or {}, key, value):
+            return True
+    return None if not found_any_daemonset else False
+
+
 def container_security_contexts(ds_spec):
     """Every container's own rendered securityContext in a DaemonSet's pod
     template (init and regular; a dropped-privilege override on one and not
@@ -157,30 +297,41 @@ def container_security_contexts(ds_spec):
 
 
 # Keys whose documented Kubernetes default genuinely IS false/no-
-# enforcement (#63, review round 2 of a sibling branch):
-# "privileged" defaults to false; "runAsNonRoot" unset means no non-root
-# requirement is enforced, the same practical effect as an explicit
-# false. Anything NOT in this set -- most importantly
-# allowPrivilegeEscalation, whose own Kubernetes default when unset is
-# to ALLOW escalation, the opposite of what a False expectation here
-# means -- must still match exactly; keying this tolerance only on the
-# expected value (want is False) would also silently weaken the
-# allowPrivilegeEscalation check, the same "regression passes silently"
-# failure mode this whole function exists to catch.
+# enforcement, so a container that never sets the key at all is making
+# the same real-world claim as one that sets it to false explicitly
+# (#63, review round 2 of a sibling branch): "privileged"
+# defaults to false; "runAsNonRoot" unset means no non-root requirement
+# is enforced, the same practical effect as an explicit false. Anything
+# NOT in this set -- most importantly allowPrivilegeEscalation, whose
+# own Kubernetes default when unset is to ALLOW escalation (no
+# no_new_privs), the opposite of what a False expectation here means --
+# must still match exactly; an earlier version of this tolerance keyed
+# only on the expected value (want is False), which also silently
+# weakened the allowPrivilegeEscalation check for the two EFA addons and
+# for dcgm-exporter alike, the same "regression passes silently" failure
+# mode this whole function exists to catch, found by review before it
+# shipped.
 ABSENT_MEANS_FALSE = {"privileged", "runAsNonRoot"}
 
 
 def check_security_context_rendered(rendered_text, expected):
     """A fixed, named securityContext policy, checked against the exact
-    pinned chart's own rendered output (#63, filed as "SA3" item 2) -
-    dcgm-exporter's own hardening (allowPrivilegeEscalation: false,
-    capabilities add SYS_ADMIN/drop ALL, runAsNonRoot: false, runAsUser:
-    0), kept here rather than read back from addon.yaml's own values on
-    purpose: reading the expectation from the same file being checked
-    would pass trivially the moment that file's own override is weakened
-    or dropped. Returns (True, "") or (False, reason). No DaemonSet in
-    the chart's output at all is reported as a reason, not a silent pass
-    -- that would otherwise look identical to "override lost"."""
+    pinned chart's own rendered output (#63, filed as "SA3" item 2, and
+    accel-efa-device-plugin-{nvidia,neuron} review round 2 finding N6):
+    an addon.yaml's own `values.securityContext` override is, like a
+    method label, a real Helm value that is silently ignored if the key
+    or nesting is wrong -- the same failure mode #19/#28's own review
+    already found once for `nodeSelector`. dcgm-exporter's own hardening
+    (allowPrivilegeEscalation: false, capabilities add SYS_ADMIN/drop ALL,
+    runAsNonRoot: false, runAsUser: 0) has no override of its own in
+    addon.yaml, so its expectation is instead what the chart renders by
+    default (see SECURITY_CONTEXT_EXPECTATIONS above). Either way the
+    expectation is kept here rather than read back from the file being
+    checked, on purpose: reading it from the same file would pass
+    trivially the moment that file's own override is weakened or dropped.
+    Returns (True, "") or (False, reason). No DaemonSet in the chart's
+    output at all is reported as a reason, not a silent pass -- that
+    would otherwise look identical to "override lost'."""
     found_any_daemonset = False
     mismatches = []
     for doc in yaml.safe_load_all(rendered_text):
@@ -207,44 +358,26 @@ def check_security_context_rendered(rendered_text, expected):
     return True, ""
 
 
-# Addon label -> expected securityContext (#63, filed as "SA3" item 2).
-# dcgm-exporter's own entry has no values.securityContext override of its
-# own (gitops/addon-catalog/dcgm-exporter/addon.yaml sets no such key) --
-# this is what gitops/charts/dcgm-exporter (the in-tree wrapper chart,
-# pulling the real dcgm-exporter chart in as a Helm dependency) renders
-# by default with no override applied, confirmed by rendering it, kept
-# here rather than read back from that chart for the same reason
-# explained above check_security_context_rendered's own call sites. A
-# dependency version bump can change this default with nothing else in
-# a diff to catch it -- a known risk of relying on an upstream default
-# rather than an explicit override, not fixed here. privileged: False
-# is included deliberately (#63): check_security_context_
-# rendered() only compares keys present here, so leaving this key out
-# would let a privileged: true regression on this container pass
-# silently -- confirmed the rendered container carries no "privileged"
-# key today (the implicit Kubernetes default, False) before adding it.
-SECURITY_CONTEXT_EXPECTATIONS = {
-    "dcgm-exporter": {
-        "privileged": False,
-        "allowPrivilegeEscalation": False,
-        "capabilities": {"add": ["SYS_ADMIN"], "drop": ["ALL"]},
-        "runAsNonRoot": False,
-        "runAsUser": 0,
-    },
-}
-
-
 def main(repo_root, rendered_dir):
     failures = 0
     served = {}
-    # Every addon.yaml/addon-catalog label this run actually found, versus
-    # every label whose SECURITY_CONTEXT_EXPECTATIONS entry was actually
-    # exercised below (#63): a label this run DID find, that is also in
-    # SECURITY_CONTEXT_EXPECTATIONS, but whose own entry skips
-    # check_security_context_rendered() for some other reason, is a
-    # silent no-op the comparison below turns into a failure instead.
-    # This does not catch the label itself being renamed or mistyped --
-    # see the comparison's own comment further down for why.
+    # Every addon.yaml label this run actually found (registry or catalog,
+    # regardless of whether it carries a securityContext expectation),
+    # versus every label whose SECURITY_CONTEXT_EXPECTATIONS entry was
+    # actually exercised below (#63): a label this run DID find, that is
+    # also in SECURITY_CONTEXT_EXPECTATIONS, but whose own entry skipped
+    # check_security_context_rendered() for some other reason (a catalog
+    # entry with no "dir" key, for example) is a shape this expectation
+    # table assumed cannot happen -- comparing the two sets below turns
+    # that into a FAIL instead of a silent no-op, the exact "a check
+    # never actually ran" risk this whole file exists to catch. This
+    # does NOT catch the addon or catalog entry's own `addon:` field (or
+    # its directory name) being renamed or mistyped: a typo changes
+    # which string labels_seen holds too, so the expected label vanishes
+    # from both sets at once and the comparison sees nothing to flag --
+    # indistinguishable, from this script's own point of view, from a
+    # sibling branch's addon that legitimately does not exist in this
+    # checkout yet, which must not fail.
     labels_seen = set()
     security_context_checked = set()
     addon_files = sorted(glob.glob(os.path.join(repo_root, "gitops", "addons", "*", "addon.yaml")))
@@ -259,7 +392,7 @@ def main(repo_root, rendered_dir):
                 # future one might, and it is simply out of this script's
                 # scope (its CRDs, if any, would be checked in tree).
                 continue
-            rendered = helm_template_chart(doc, workdir)
+            rendered = helm_template_chart(doc, workdir, namespace=doc.get("namespace"))
             if rendered is None:
                 failures += 1
                 continue
@@ -272,10 +405,82 @@ def main(repo_root, rendered_dir):
             suffix = " (skipCrds: its own crds/-folder CRDs are not applied)" if skip_crds else ""
             print(f"INFO {label} ({chart}:{doc['version']}) ships {len(crds)} CustomResourceDefinition kind(s){suffix}")
 
-    # Local dir:-sourced addon-catalog charts (dcgm-exporter, #63 filed
-    # as "SA3" item 2): these ship no CRD of their own, so they sit
+            # #28: every accel-* advertiser (never accel-device-classes,
+            # which is a dir-only addon with no chart and no method label
+            # of its own) must have its declared method label actually
+            # reach a DaemonSet in the rendered output of the exact
+            # pinned chart version -- not merely present in addon.yaml's
+            # own values block, which Helm would silently accept and
+            # ignore if the key were wrong (the review finding this
+            # closes).
+            if label.startswith("accel-"):
+                method = find_method_label(doc.get("values") or {})
+                if not method:
+                    print(f"FAIL {label}: no distai.dev/*-method key found anywhere in its values block")
+                    failures += 1
+                else:
+                    mkey, mvalue = method
+                    result = check_method_label_rendered(label, rendered, mkey, mvalue)
+                    if result is True:
+                        print(f"PASS {label}: a DaemonSet in the rendered chart selects nodes by {mkey}={mvalue}")
+                    elif result is False:
+                        print(
+                            f"FAIL {label}: no DaemonSet in the rendered chart selects nodes by {mkey}={mvalue} "
+                            f"(the values key holding it may not be a real field of {chart}:{doc['version']})"
+                        )
+                        failures += 1
+                    else:
+                        print(f"FAIL {label}: the rendered chart has no DaemonSet at all to carry {mkey}={mvalue}")
+                        failures += 1
+
+            # accel-efa-device-plugin-{nvidia,neuron} (review round 2,
+            # finding N6): the same "a values override can be silently ignored"
+            # failure mode as the method-label check above, for the
+            # securityContext hardening these add-ons ship instead of the
+            # pinned chart's own default. This is a fixed, named policy per
+            # addon -- SECURITY_CONTEXT_EXPECTATIONS below, never read back
+            # from addon.yaml's own values -- on purpose: reading the
+            # expectation from the same file being checked would pass
+            # trivially the moment addon.yaml's own override is weakened or
+            # dropped (confirmed by a deliberately-broken copy during this
+            # check's own development: an earlier, condition-on-addon.yaml's-
+            # own-value version of this check silently skipped a
+            # `privileged: true` regression instead of failing it).
+            if label in SECURITY_CONTEXT_EXPECTATIONS:
+                security_context_checked.add(label)
+                ok, reason = check_security_context_rendered(rendered, SECURITY_CONTEXT_EXPECTATIONS[label])
+                if ok:
+                    print(f"PASS {label}: the rendered chart's own container(s) carry the hardened securityContext")
+                else:
+                    print(f"FAIL {label}: the rendered chart's own container(s) do not carry the hardened securityContext ({reason})")
+                    failures += 1
+
+                # Review round 4: a method label alone is not enough --
+                # confirmed on real hardware that this chart's own Pod crash-loops
+                # on an EFA-capable instance type with zero physical EFA interfaces,
+                # which a method-labeled pool can have (gitops/cells/dp-a19-gpu-r3,
+                # dp-a19-trn-r3, #28). The fix is capacity-pool's own
+                # distai.dev/efa-attached="true" label (set only when
+                # pool.networkInterfaces is non-empty) ANDed into both releases' own
+                # nodeSelector; this asserts that AND actually reaches the rendered
+                # DaemonSet, the same silent-Helm-value risk the method-label check
+                # above already guards against.
+                efa_result = check_method_label_rendered(label, rendered, "distai.dev/efa-attached", "true")
+                if efa_result is True:
+                    print(f"PASS {label}: a DaemonSet in the rendered chart also requires distai.dev/efa-attached=true")
+                else:
+                    print(
+                        f"FAIL {label}: no DaemonSet in the rendered chart requires distai.dev/efa-attached=true "
+                        "(a method label alone would schedule this Pod on an EFA-less node and crash-loop there, "
+                        "confirmed on real hardware)"
+                    )
+                    failures += 1
+
+    # Local dir:-sourced addon-catalog charts (dcgm-exporter today, #63
+    # filed as "SA3" item 2): these ship no CRD of their own, so they sit
     # outside the registry-chart loop above, but a securityContext
-    # expectation in SECURITY_CONTEXT_EXPECTATIONS still applies to them.
+    # expectation in SECURITY_CONTEXT_EXPECTATIONS still applies to them
+    # the same way.
     catalog_files = sorted(glob.glob(os.path.join(repo_root, "gitops", "addon-catalog", "*", "addon.yaml")))
     with tempfile.TemporaryDirectory() as catalog_workdir:
         for addon_path in catalog_files:

@@ -1,0 +1,13 @@
+# Fixture for infra/foundation/tests/4.argocd-impersonation.sh: a bare
+# cluster-scoped object, so the test can confirm a team AppProject (an
+# empty clusterResourceWhitelist, team-onboard.sh) refuses to sync any
+# cluster-scoped kind at all, independent of the namespace-scoped RBAC
+# case the team-rbac-probe fixture exercises.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tenancy-probe-clusterrole-should-be-rejected
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
