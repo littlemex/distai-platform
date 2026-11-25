@@ -150,8 +150,7 @@
 #      it is NOT constrained.
 #  12. (PR #66's own second remaining caveat, addressed; an earlier
 #      form of this exact check already passed on real hardware, this
-#      revised form has not itself been re-run -- the real-hardware
-#      budget for this PR is exhausted): the real
+#      revised form has not itself been re-run -- tracked in #67): the real
 #      chart issue #57 item 1 named
 #      (examples/inference/vllm/disagg-pd-llmd, pinned at
 #      feat/disagg-pd-reference's own commit) self-syncs through the
@@ -1380,7 +1379,13 @@ assert_nsguard_denied "direct kubectl: removing the distai.dev/team label" "${RE
 # also be denied.
 assert_nsguard_denied "direct kubectl: introducing pod-security.kubernetes.io/enforce-version" "${VERSION_MSG}" \
   kubectl label namespace "${TEAM}" "pod-security.kubernetes.io/enforce-version=v1.28"
-[[ -z "$(read_version_label)" ]] \
+# Assigned to a variable first, not tested inline as [[ -z "$(...)" ]]:
+# read_version_label's own fail() exits only the subshell that
+# "$(...)" creates, which [[ ]] does not itself check the exit status
+# of -- an API error inside read_version_label would otherwise read
+# identically to "the label is unset" (a round 4 review finding).
+VERSION_LABEL_NOW="$(read_version_label)"
+[[ -z "${VERSION_LABEL_NOW}" ]] \
   || fail "SECURITY: after the direct, denied kubectl label attempt, pod-security.kubernetes.io/enforce-version is set"
 pass "direct kubectl (no Argo CD): team-namespace-guard denies an explicit value override of pod-security.kubernetes.io/enforce, an outright removal of distai.dev/team, and introducing pod-security.kubernetes.io/enforce-version; none of the three changed anything"
 
@@ -1411,7 +1416,8 @@ kubectl get namespace "${TEAM}" >/dev/null 2>&1 \
 introduce_version_label_succeeds() { kubectl label namespace "${TEAM}" "pod-security.kubernetes.io/enforce-version=v1.28" >/dev/null 2>&1; }
 wait_until 60 3 "direct kubectl label (enforce-version) to succeed once team-namespace-guard-binding is deleted" introduce_version_label_succeeds \
   || fail "direct kubectl label (enforce-version) did not succeed within 60s of deleting team-namespace-guard-binding -- something else (not team-namespace-guard) was the reason it was denied above"
-[[ "$(read_version_label)" == "v1.28" ]] \
+VERSION_LABEL_NOW="$(read_version_label)"
+[[ "${VERSION_LABEL_NOW}" == "v1.28" ]] \
   || fail "pod-security.kubernetes.io/enforce-version did not actually get set to v1.28 even though the kubectl label command reported success"
 pass "mutation check (guard absent): the SAME three direct attempts check 11 showed denied all SUCCEED once team-namespace-guard-binding is deleted -- confirms the guard itself, not an unrelated cluster behavior, was responsible"
 kubectl label namespace "${TEAM}" --overwrite \
@@ -1430,7 +1436,8 @@ assert_nsguard_denied "direct kubectl (Binding restored): introducing pod-securi
   kubectl label namespace "${TEAM}" "pod-security.kubernetes.io/enforce-version=v1.28"
 [[ "$(read_team_label)" == "${TEAM}" && "$(read_psa_label)" == "restricted" ]] \
   || fail "after restoring team-namespace-guard-binding, labels are distai.dev/team='$(read_team_label)' pod-security.kubernetes.io/enforce='$(read_psa_label)', expected ${TEAM}/restricted"
-[[ -z "$(read_version_label)" ]] \
+VERSION_LABEL_NOW="$(read_version_label)"
+[[ -z "${VERSION_LABEL_NOW}" ]] \
   || fail "after restoring team-namespace-guard-binding, pod-security.kubernetes.io/enforce-version is still set"
 
 # Scope check (round 2 review item 1): a namespace that carries a Pod

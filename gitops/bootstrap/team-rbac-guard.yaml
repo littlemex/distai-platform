@@ -110,13 +110,15 @@
 #          for exactly this reason (see that file's own comment) -- an
 #          EARLIER form of infra/foundation/tests/4.argocd-impersonation.sh's
 #          own checks 12-13 confirmed this with a real server-side
-#          sync; that form has since been revised and not re-run (the
-#          real-hardware budget for this PR is exhausted). The verb
+#          sync; that form has since been revised and not re-run
+#          (tracked in #67). The verb
 #          narrowing immediately below was checked on a real local
-#          Kubernetes 1.30 API server (envtest, not EKS) against a
-#          Role shape matching what `helm template` actually renders
-#          for both charts; see this policy's own validations comment
-#          for that evidence. Unlike every resource above, these three are
+#          Kubernetes 1.30 API server (envtest, not EKS, no containers)
+#          against Role rule shapes read from `helm template` output
+#          for both charts, both the denied (inferencepools + delete)
+#          and the allowed (inferencepools get/list/watch, the shape
+#          those charts' own sidecar Role and their llm-d-router-gateway
+#          dependency chart's own Role actually use) case. Unlike every resource above, these three are
 #          restricted to get/list/watch ONLY (rule 2's own CEL has a
 #          separate, narrower verb clause for exactly these three) --
 #          every real caller needs only those three verbs, and this

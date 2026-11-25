@@ -104,8 +104,7 @@
 # (inference.networking.k8s.io) and inferenceobjectives/inferencemodelrewrites
 # (llm-d.ai). Checks 12-13 were since revised (scoped lookups, a Pod
 # check) and have not themselves been re-run against real hardware --
-# stated plainly rather than implied, since the real-hardware budget
-# for this PR is exhausted. See team-rbac-guard.yaml's own comment on
+# stated plainly rather than implied, tracked in #67. See team-rbac-guard.yaml's own comment on
 # the widening for exactly which rule needed which resource, and why
 # no chart-side change was needed instead. The AppProject's own
 # namespaceResourceWhitelist below (step
@@ -523,8 +522,8 @@ spec:
     # rendered by this chart). An EARLIER form of
     # infra/foundation/tests/4.argocd-impersonation.sh's own checks
     # 12-13 confirmed this with a real sync, not merely a dry run;
-    # that form has since been revised and not re-run (the real-hardware
-    # budget for this PR is exhausted) -- stated plainly, not implied.
+    # that form has since been revised and not re-run (tracked in #67)
+    # -- stated plainly, not implied.
     # Caveat (not checked by that real sync, which
     # installed no Gateway at all): whether a team's own HTTPRoute can
     # claim a hostname another team also expects depends entirely on
