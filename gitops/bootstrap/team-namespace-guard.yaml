@@ -44,7 +44,7 @@
 # Real-hardware result, two runs (infra/foundation/tests/4.argocd-impersonation.sh's
 # own checks 10-11, as they stood before a later review round rewrote
 # both -- that rewritten form has not itself been run on real hardware
-# yet, stated plainly rather than implied): an Application whose
+# yet, tracked in #67, stated plainly rather than implied): an Application whose
 # managedNamespaceMetadata omits distai.dev/team and explicitly sets
 # pod-security.kubernetes.io/enforce: privileged, synced once with
 # team-namespace-guard-binding deleted and once with it restored, left

@@ -103,9 +103,13 @@
 #      pod-security.kubernetes.io/enforce: privileged against the
 #      EXISTING team namespace, with team-namespace-guard-binding
 #      deleted (the discovery), and one more of the SAME Application
-#      with the Binding restored (the fix verification) -- the
-#      assertion in both phases is that distai.dev/team and
-#      pod-security.kubernetes.io/enforce stay unchanged. A direct
+#      with the Binding restored (the fix verification). The
+#      discovery phase records its own outcome (did either label
+#      actually change?) without asserting a specific answer, since
+#      that is the fact under discovery; the fix-verification phase
+#      DOES assert that distai.dev/team and
+#      pod-security.kubernetes.io/enforce stay unchanged -- that is
+#      this check's own actual pass/fail condition. A direct
 #      kubectl overwrite of the protected pod-security.kubernetes.io/enforce
 #      label itself (not an unprotected key) confirms the Binding is
 #      actually deleted and inactive before the discovery sync runs. A
@@ -113,11 +117,12 @@
 #      sync specifically (ruling out "the sync's own
 #      managedNamespaceMetadata step never ran at all" as an
 #      explanation for "nothing changed" on THAT phase), then removed
-#      before the fix-verification phase and read again afterward
-#      without a specific pass/fail expectation either way -- present
-#      or absent are both consistent with the two protected labels
-#      staying correct; see that read's own comment for what it does
-#      and does not distinguish. The fix verification reads the
+#      before the fix-verification phase and read again afterward,
+#      this time combined with the guard's own message (not read in
+#      isolation) into a three-way classification -- admitted, denied,
+#      or inconclusive -- that fails loudly on the third outcome; see
+#      that read's own comment for what the marker alone does and does
+#      not distinguish. The fix verification reads the
 #      Namespace's own labels directly, not operationState.phase: there
 #      is no Namespace entry in this Application's own manifest at
 #      all, only syncPolicy's own field, and Argo CD's own
@@ -129,11 +134,12 @@
 #      own labels, not the phase, are what this check actually relies
 #      on. On two real-hardware runs of an
 #      earlier form of this check (before this exact wording and the
-#      marker-clearing fix above, not re-run since), Argo CD's own
-#      managedNamespaceMetadata reconciliation did not visibly attempt
-#      to overwrite either pre-existing label, with or without the
-#      guard -- those two runs did not exercise the guard's own
-#      denial either time, which is what check 11 below is for.
+#      marker-clearing fix above, not re-run since -- tracked in #67),
+#      Argo CD's own managedNamespaceMetadata reconciliation did not
+#      visibly attempt to overwrite either pre-existing label, with or
+#      without the guard -- those two runs did not exercise the
+#      guard's own denial either time, which is what check 11 below is
+#      for.
 #  11. (mutation check, decouples the guard's own correctness from
 #      check 10's own finding that two prior runs of it never showed
 #      Argo CD actually attempting the overwrite): three attempts --
@@ -1117,7 +1123,14 @@ read_version_label() {
   rc=$?
   set -e
   if [[ ${rc} -ne 0 ]]; then
-    fail "read_version_label: kubectl get namespace ${TEAM} failed (exit ${rc}): $(cat "${err}")"
+    # Every caller of this function invokes it inside "$(...)" -- the
+    # shared fail() helper prints to stdout (e2e-lib.sh's own log()),
+    # which that same "$(...)" would capture and discard on the exit
+    # below rather than show it. Printed to stderr directly instead,
+    # so the diagnostic is actually visible when this aborts the
+    # script (a round 5 review finding).
+    echo "FAIL read_version_label: kubectl get namespace ${TEAM} failed (exit ${rc}): $(cat "${err}")" >&2
+    exit 1
   fi
   rm -f "${err}"
   echo -n "${out}"
@@ -1153,7 +1166,12 @@ sync_result_for_namespace() {
   rc=$?
   set -e
   if [[ ${rc} -ne 0 ]]; then
-    fail "sync_result_for_namespace: kubectl get application team-a-nsmeta-strip failed (exit ${rc}): $(cat "${err}")"
+    # Same reasoning as read_version_label's own comment: printed to
+    # stderr directly, not through fail() (which prints to stdout and
+    # would be captured and discarded by this function's own callers,
+    # all of which invoke it inside "$(...)").
+    echo "FAIL sync_result_for_namespace: kubectl get application team-a-nsmeta-strip failed (exit ${rc}): $(cat "${err}")" >&2
+    exit 1
   fi
   rm -f "${err}"
   echo -n "${out}"
@@ -1219,8 +1237,10 @@ info "discovery (team-namespace-guard-binding absent, sync phase $(operation_pha
 [[ "${DISCOVERY_MARKER_LABEL}" == "1" ]] \
   || fail "distai.dev/nsmeta-probe-marker is '${DISCOVERY_MARKER_LABEL}', not '1', even with team-namespace-guard-binding deleted -- managedNamespaceMetadata did not add a brand-new label either, which would mean this Application's own namespace-metadata step did not run at all (a different finding from 'it ran and chose not to overwrite'); the syncResult entry just logged is the evidence for which one this run showed"
 if [[ "${DISCOVERY_TEAM_LABEL}" != "${ORIG_TEAM_LABEL}" || "${DISCOVERY_PSA_LABEL}" != "${ORIG_PSA_LABEL}" ]]; then
+  DISCOVERY_OUTCOME="at least one label CHANGED (distai.dev/team='${DISCOVERY_TEAM_LABEL}', pod-security.kubernetes.io/enforce='${DISCOVERY_PSA_LABEL}') -- the bypass PR #66's own caveat described is real on this run"
   info "CONFIRMED on real hardware: without team-namespace-guard, a team's own Application's managedNamespaceMetadata (CreateNamespace=true, against the EXISTING team namespace) changes at least one of these labels -- the bypass PR #66's own caveat described is real"
 else
+  DISCOVERY_OUTCOME="both labels unchanged (distai.dev/team='${DISCOVERY_TEAM_LABEL}', pod-security.kubernetes.io/enforce='${DISCOVERY_PSA_LABEL}')"
   info "on this run, Argo CD's own managedNamespaceMetadata reconciliation added the brand-new marker label but did not change either pre-existing one, even with team-namespace-guard absent -- team-namespace-guard.yaml is still applied as a stated, defense-in-depth boundary against this surface regardless"
 fi
 # Restore the correct values directly (this script's own state, not
@@ -1277,18 +1297,21 @@ AFTER_FIX_MARKER_LABEL="$(read_marker_label)"
 # The marker label was removed just before this retry (not left over
 # from the discovery phase -- a round 2 review finding, the earlier
 # version of this check read discovery's own leftover here and
-# asserted nothing about this phase at all). What it reads now is
-# informative either way, not a pass/fail signal by itself: present
-# means this UPDATE as a whole was not rejected (consistent with
-# either "the guard evaluated it and had nothing to deny this time"
-# or "Argo CD did not attempt the protected fields but did add this
-# one"); absent is consistent with either "the API server rejected
-# this UPDATE as a whole" (CEL admission denies the entire write, not
-# field-by-field, so a denial on the protected fields would also keep
-# an unrelated new key from landing in the same request) or "Argo CD
-# never sends this request at all" -- this script cannot tell those
-# two apart from this read alone, which is exactly why check 11 tests
-# the policy directly instead of inferring it from this marker.
+# asserted nothing about this phase at all). Read alone, present means
+# this UPDATE as a whole was not rejected (consistent with either "the
+# guard evaluated it and had nothing to deny this time" or "Argo CD
+# did not attempt the protected fields but did add this one"); absent
+# is consistent with either "the API server rejected this UPDATE as a
+# whole" (CEL admission denies the entire write, not field-by-field,
+# so a denial on the protected fields would also keep an unrelated new
+# key from landing in the same request) or "Argo CD never sends this
+# request at all" -- this read alone cannot tell those two apart,
+# which is exactly why check 11 tests the policy directly instead of
+# relying on this marker in isolation. Combined with
+# NSMETA_PROBE_MESSAGE below, though, it IS a pass/fail signal: the
+# classification right after this line fails loudly if neither
+# expected combination holds, rather than treating every reading as
+# equally fine.
 info "distai.dev/nsmeta-probe-marker (removed before this retry) reads '${AFTER_FIX_MARKER_LABEL}' after it -- see the comment above for what that does and does not establish by itself"
 # Classify this retry into exactly one of three outcomes, rather than
 # reporting a single "closed" claim the code only sometimes actually
@@ -1296,7 +1319,9 @@ info "distai.dev/nsmeta-probe-marker (removed before this retry) reads '${AFTER_
 # guard was not exercised this run); the guard's own message appearing
 # in NSMETA_PROBE_MESSAGE means the write was denied; neither is
 # inconclusive, not a silent PASS, since that combination is not one
-# this script can currently explain.
+# this script can currently explain -- the fail() two lines below
+# treats that combination as a real failure, not an edge case to wave
+# through.
 if [[ "${AFTER_FIX_MARKER_LABEL}" == "1" ]]; then
   RETRY_OUTCOME="admitted (marker present) -- the guard was NOT exercised by this particular retry"
 elif [[ "${NSMETA_PROBE_MESSAGE}" == *"may not be removed or"* ]]; then
@@ -1304,7 +1329,7 @@ elif [[ "${NSMETA_PROBE_MESSAGE}" == *"may not be removed or"* ]]; then
 else
   fail "team-a-nsmeta-strip's retried sync (team-namespace-guard restored) is inconclusive: the marker is '${AFTER_FIX_MARKER_LABEL}' (not '1') and NSMETA_PROBE_MESSAGE ('${NSMETA_PROBE_MESSAGE}') does not contain the guard's own message -- this script cannot currently explain this combination; the Namespace's own two protected labels are still confirmed correct above, but this retry's own evidence about WHY is not"
 fi
-pass "CHECK 10/13 (PR #66's own first remaining caveat, addressed): one sync with team-namespace-guard-binding absent and one with it restored, both against a team's own Application using syncPolicy.managedNamespaceMetadata (CreateNamespace=true, against the EXISTING team namespace ${TEAM}) to omit distai.dev/team and set pod-security.kubernetes.io/enforce: privileged -- both runs left distai.dev/team=${TEAM} and pod-security.kubernetes.io/enforce=restricted unchanged (retried-sync phase ${NSMETA_RETRY_PHASE}); the retry's own outcome: ${RETRY_OUTCOME}. Check 11 below tests team-namespace-guard.yaml's own denial directly either way"
+pass "CHECK 10/13 (PR #66's own first remaining caveat, addressed): one sync with team-namespace-guard-binding absent and one with it restored, both against a team's own Application using syncPolicy.managedNamespaceMetadata (CreateNamespace=true, against the EXISTING team namespace ${TEAM}) to omit distai.dev/team and set pod-security.kubernetes.io/enforce: privileged -- the discovery's own outcome (Binding absent): ${DISCOVERY_OUTCOME}; the retry's own outcome (Binding restored, phase ${NSMETA_RETRY_PHASE}): ${RETRY_OUTCOME}; the Namespace's own labels after the retry are confirmed distai.dev/team=${TEAM} and pod-security.kubernetes.io/enforce=restricted regardless of either outcome above. Check 11 below tests team-namespace-guard.yaml's own denial directly either way"
 kubectl delete application team-a-nsmeta-strip -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 
 # ------------------------------------------------------- 8b. team-namespace-guard,
