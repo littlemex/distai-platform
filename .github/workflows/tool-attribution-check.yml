@@ -10,13 +10,18 @@ name: Tool Attribution Check
 # Trust boundary: the checker script and the denylist are read from the
 # pull request's base branch (github.event.pull_request.base.sha), not from
 # the pull request's own head, so a pull request cannot pass this check by
-# editing the script or the denylist in the same pull request. The one
-# exception is the pull request that first introduces these two files
-# (this repository has none yet on main before that merges): until they
-# exist on the base branch, the base checkout step below finds nothing and
-# the job falls back to the head's own copy, which is unavoidable for a
-# bootstrapping change and is logged as such in the job's own output. Every
-# later pull request runs the base branch's trusted copy.
+# editing the script or the denylist in the same pull request. This holds
+# for any pull request whose base branch already carries both files (which
+# is every pull request once this change is on `main`, but also, for
+# example, a pull request stacked on another feature branch that already
+# has them). The only pull request that falls back to its own head copy is
+# one whose base has NEITHER file yet (today, only this introducing pull
+# request against `main`); that fallback is unavoidable for a bootstrapping
+# change and is logged as a warning in the job's own output. A base branch
+# with exactly one of the two files is treated as neither trusted nor a
+# normal bootstrap case and fails the job outright (see the step below) --
+# that split state should not occur, and silently guessing which copy to
+# use would be worse than stopping.
 #
 # This still does not stop someone with write access to this repository
 # from weakening the check itself in the same pull request that also
@@ -62,14 +67,19 @@ jobs:
         id: source
         run: |
           set -euo pipefail
-          if [ -f base-ref/.github/scripts/check_tool_attribution.py ] && [ -f base-ref/.github/tool-attribution-denylist.txt ]; then
+          HAS_CHECKER=0; [ -f base-ref/.github/scripts/check_tool_attribution.py ] && HAS_CHECKER=1
+          HAS_DENYLIST=0; [ -f base-ref/.github/tool-attribution-denylist.txt ] && HAS_DENYLIST=1
+          if [ "$HAS_CHECKER" -eq 1 ] && [ "$HAS_DENYLIST" -eq 1 ]; then
             echo "checker=base-ref/.github/scripts/check_tool_attribution.py" >> "$GITHUB_OUTPUT"
             echo "denylist=base-ref/.github/tool-attribution-denylist.txt" >> "$GITHUB_OUTPUT"
             echo "::notice::using the base branch's own trusted copy of the checker and denylist"
-          else
+          elif [ "$HAS_CHECKER" -eq 0 ] && [ "$HAS_DENYLIST" -eq 0 ]; then
             echo "checker=.github/scripts/check_tool_attribution.py" >> "$GITHUB_OUTPUT"
             echo "denylist=.github/tool-attribution-denylist.txt" >> "$GITHUB_OUTPUT"
             echo "::warning::base branch has no checker or denylist yet (bootstrapping pull request); using this pull request's own head copy this one time"
+          else
+            echo "::error::base branch has exactly one of the checker and the denylist (checker present: ${HAS_CHECKER}, denylist present: ${HAS_DENYLIST}); refusing to guess which copy to trust"
+            exit 1
           fi
 
       - name: Check the pull request title and description
