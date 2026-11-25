@@ -8,6 +8,28 @@ clusterQueue:
   # name is cell-specific.
   resourceFlavor: ""
   cpuQuota: "32"
+  # Nominal memory quota on the flavor above. Size this to a small, fixed
+  # canary footprint, independent of the pool's own total capacity (#63,
+  # filed as #56; an earlier version of this comment said to size it "to
+  # the pool's real capacity ... for example a reserved pool's own
+  # reservation size", which invites double-counting the moment any other
+  # ClusterQueue also draws on the same ResourceFlavor - this chart's
+  # whole job is proving Kueue admission works on this cell at all, not
+  # reserving meaningful capacity).
+  memQuota: "64Gi"
+  # Optional: the accelerator resource name (for example aws.amazon.com/neuron,
+  # nvidia.com/gpu) this cell's own accelerator-tainted ResourceFlavor
+  # advertises, with a matching nominalQuota. Unset (the default) renders
+  # no accelerator resourceGroup at all - correct for a cell whose
+  # resourceFlavor above is not accelerator-tainted. Set both whenever
+  # resourceFlavor does carry an accelerator taint (#56): without this,
+  # Kueue still applies that flavor's own toleration to any pod admitted
+  # through it regardless of what resource the pod requests, so a
+  # CPU-only canary would ride onto a tainted accelerator node for free,
+  # and no accelerator request would ever be admitted through Kueue to
+  # prove quota/borrow/reclaim actually works for it (#22 Decision 4).
+  acceleratorResource: ""
+  acceleratorQuota: "0"
 
 localQueue:
   name: smoke

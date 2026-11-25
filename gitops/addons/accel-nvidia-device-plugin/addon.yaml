@@ -1,0 +1,113 @@
+# NVIDIA's device plugin: advertises nvidia.com/gpu as an extended resource
+# (a Layer 1 request, #19 Decision 1) on every node whose NodePool opts into
+# the device-plugin method. One of four accelerator add-ons in the
+# "accelerators" step, one chart release per (vendor, method) - #25
+# Decision 5's unit, #28 section A.
+#
+# Opt-in by method label only (#19 Decision 2): a capacity-pool NodePool
+# sets distai.dev/nvidia-gpu-method=device-plugin through
+# accelerator.methodLabel (gitops/charts/capacity-pool, #17's own shape),
+# and this release selects exactly that label. A node labeled for the DRA
+# method is never selected here, so the
+# same GPU is never advertised by two advertisers at once - #19 E1 showed
+# that a double advertisement silently double-allocates.
+#
+# affinity is replaced, not left at the chart default: the chart's default
+# required node affinity matches only NFD- or GPU-Operator-set labels
+# (feature.node.kubernetes.io/pci-10de.present, nvidia.com/gpu.present and
+# so on - chart values.yaml, tag v0.20.2), and this platform runs neither,
+# so a Karpenter-launched GPU node might carry none of them and the
+# DaemonSet would schedule nothing. nodeSelectorTerms is a list, and Helm
+# replaces lists rather than merging them, so the term below is the only
+# one left: the method label is the single opt-in (#28 section A, "or
+# equivalent chart key"). nodeSelector carries the same label as well, the
+# key #28's Interface table names.
+#
+# Tolerations stay at the chart default (CriticalAddonsOnly,
+# nvidia.com/gpu:NoSchedule), so a GPU NodePool that adds the usual
+# nvidia.com/gpu taint later still gets its advertiser.
+#
+# Chart source: https://github.com/NVIDIA/k8s-device-plugin (tag v0.20.2),
+# classic Helm repository (index.yaml, not OCI), install section of the
+# upstream README, confirmed 2026-11-19 (#28, Facts checked). Default
+# state (AGENTS.md section 4): always present, targets empty by default -
+# with no NodePool carrying the label, the DaemonSet schedules nothing.
+addon: accel-nvidia-device-plugin
+# RFC #41 Decision 1: gitops/addons/ is delivered unconditionally to
+# every cell, no opt-out, and check_addon_tiers.py requires every
+# addon.yaml here to say so explicitly.
+tier: core
+chart: nvidia-device-plugin
+repoURL: https://nvidia.github.io/k8s-device-plugin
+version: "0.20.2"
+wave: accelerators
+namespace: nvidia-device-plugin
+values:
+  nodeSelector:
+    distai.dev/nvidia-gpu-method: device-plugin
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: distai.dev/nvidia-gpu-method
+                operator: In
+                values: ["device-plugin"]
+  # GPU sub-device sharing via NVIDIA's own MPS control daemon (this
+  # chart's `sharing.mps` config block, confirmed against the upstream
+  # README's "With CUDA MPS" section, tag v0.20.2, fetched 2026-11-22; MPS
+  # is marked experimental upstream since v0.15.0). One named config per
+  # replica count this platform has actually measured; "whole" (no
+  # sharing block at all) is config.default, so a node without
+  # capacity-pool's new accelerator.sharingLabel keeps today's unchanged
+  # behavior -- exactly one nvidia.com/gpu per physical device. A pool
+  # that sets accelerator.sharingLabel = {key:
+  # "nvidia.com/device-plugin.config", value: "mps-N"} (capacity-pool
+  # chart, additive to accelerator.methodLabel) gets that many
+  # nvidia.com/gpu resources advertised per physical GPU instead, each
+  # backed by the device plugin's own MPS control daemon.
+  #
+  # What this config actually buys, stated precisely rather than
+  # overclaimed (upstream README, same section): the MPS control daemon
+  # splits BOTH compute and device memory into N EQUAL shares per
+  # physical GPU -- there is no separate, independently settable
+  # CUDA_MPS_ACTIVE_THREAD_PERCENTAGE or per-client memory-limit value in
+  # this config schema. The only tunable this mechanism exposes is the
+  # replica count itself (one named config per count below); an unequal
+  # split (for example one client reserved 70% of a GPU's compute, a
+  # second capped at 30%) is not something sharing.mps.resources[].replicas
+  # can express -- it would need either several non-uniform MPS pinned
+  # per-process CUDA_MPS_ACTIVE_THREAD_PERCENTAGE exports set directly in
+  # each Pod's own environment (outside what this device-plugin
+  # mechanism manages, and unconfirmed to interact safely with its own
+  # equal-share accounting) or the separate DRA GPU driver's own MPS
+  # claim shape, not used by this platform today (#19 Decision 2 chose
+  # device-plugin as the opt-in default method).
+  config:
+    default: whole
+    map:
+      whole: |-
+        version: v1
+        flags:
+          migStrategy: none
+      mps-2: |-
+        version: v1
+        sharing:
+          mps:
+            resources:
+            - name: nvidia.com/gpu
+              replicas: 2
+      mps-3: |-
+        version: v1
+        sharing:
+          mps:
+            resources:
+            - name: nvidia.com/gpu
+              replicas: 3
+      mps-4: |-
+        version: v1
+        sharing:
+          mps:
+            resources:
+            - name: nvidia.com/gpu
+              replicas: 4

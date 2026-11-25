@@ -1,0 +1,41 @@
+# Parameter file for cells.ApplicationSet.yaml's Git file generator
+# (RFC #25 Decision 2/3/9), same shape as
+# gitops/cells/example-cell/smoke/queue.yaml and
+# gitops/cells/dp-a19-gpu-r3/smoke/queue.yaml. Requests the "trn"
+# ResourceFlavor this cell's own capacity-pool/trn.yaml creates (#28
+# section D). clusterQueue.acceleratorResource/acceleratorQuota (#63,
+# filed as #56) now cover aws.amazon.com/neuron too, matching trn.yaml's
+# own taint on that resource. A review of an earlier version of
+# this fix found that covering the resource here alone does not close
+# #56: Kueue applies a ResourceFlavor's own tolerations to every Workload
+# admitted through it regardless of what that Workload requests, so a
+# CPU-only canary was still landing on the tainted node for free, and no
+# accelerator request ever reached Kueue's own admission path either
+# way. 1.e2e.sh's own admin smoke canary (step 11) now discovers this
+# ClusterQueue's own covered resources live and, when one besides cpu/
+# memory exists, requests exactly its nominalQuota too -- the canary
+# itself becomes the real, Kueue-admitted accelerator request this cell's
+# own quota/admission path was missing, closing #56 end to end rather
+# than only at the chart/render level. This file still has to exist,
+# matching gitops/cells/dp-a19-gpu-r3/'s own pair, because Kueue's
+# install docs (#25 Facts checked) have
+# ClusterQueue/LocalQueue admission depend on a Healthy webhook
+# cluster-wide regardless of whether this specific cell's own queue is
+# ever used, and because a future, unmodified run of 1.e2e.sh's base
+# (non-#28) flow against NAME=dp-a19-trn-r3 would need it the same way
+# gitops/cells/example-cell/ needs its own.
+addon: smoke
+wave: capacity
+dir: gitops/charts/smoke
+namespace: distai-smoke
+values:
+  clusterQueue:
+    resourceFlavor: trn
+    # #63/#56: trn.yaml's own ResourceFlavor now carries an
+    # aws.amazon.com/neuron taint/toleration. acceleratorQuota: "1" is
+    # both the ClusterQueue's own nominal quota for this resource and
+    # the exact amount 1.e2e.sh's own admin smoke canary now requests
+    # (discovered live, not hardcoded in the test) - this pool's single
+    # instance type carries exactly one neuron device per node.
+    acceleratorResource: aws.amazon.com/neuron
+    acceleratorQuota: "1"

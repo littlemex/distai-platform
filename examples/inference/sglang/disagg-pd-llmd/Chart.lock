@@ -1,0 +1,6 @@
+dependencies:
+- name: llm-d-router-gateway
+  repository: oci://ghcr.io/llm-d/charts
+  version: v1.0.0
+digest: sha256:60e5c0ff2bfc004bb89680dfa37a3515f4b3cc832bde02c0e32eb44f4be14e33
+generated: "2026-11-23T17:20:53.593278248Z"

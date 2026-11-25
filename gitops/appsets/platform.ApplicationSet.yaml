@@ -1,8 +1,9 @@
 # RFC #25 Decision 2/3/4. One Application per gitops/addons/<name>/addon.yaml,
 # per registered cluster (Matrix: Cluster generator x Git FILE generator).
-# This PR ships only the "crds" and "controllers" steps (karpenter-crd,
-# karpenter, kueue); "accelerators" and "extras" are later PRs' (#19, #18,
-# #23) and simply have no addon.yaml yet, so they generate nothing today.
+# Steps shipped: "crds" (karpenter-crd), "controllers" (karpenter, kueue)
+# and "accelerators" (the four accel-* advertisers and accel-device-classes,
+# #28); "extras" is a later PR's (#18, #23) and simply has no addon.yaml
+# yet, so it generates nothing today.
 #
 # goTemplate is on (a decision this PR makes, not spelled out by the RFC's
 # own prose, which quotes the legacy fasttemplate form for a single field):
@@ -74,6 +75,10 @@ spec:
             - key: distai.dev/wave
               operator: In
               values: ["controllers"]
+        - matchExpressions:
+            - key: distai.dev/wave
+              operator: In
+              values: ["accelerators"]
   template:
     metadata:
       name: "{{ .name }}-{{ .addon }}"
@@ -104,9 +109,52 @@ spec:
   # Always rendered as a Go template (sprig included), regardless of
   # spec.goTemplate above - the only way Decision 2's per-add-on values
   # (karpenter's settings.clusterName and so on) avoid being forced into
-  # every other add-on's template.
+  # every other add-on's template. See the {{- if .dir }} branch below
+  # for the dir-only (accel-device-classes and similar) source shape,
+  # and why it sets chart: null explicitly rather than leaving it unset.
   templatePatch: |
     spec:
+      {{- if .dir }}
+      # #28: a local, platform-owned chart (accel-device-classes), never
+      # an upstream registry - same "dir" shape cells.ApplicationSet.yaml
+      # already uses for capacity-pool/smoke (#25 Decision 2), applied
+      # here because this one addon.yaml has no chart/repoURL/version.
+      # This branch is merged onto the base template's own source above
+      # by templatePatch's own merge-patch semantics (same mechanism the
+      # syncOptions block below this one relies on), not a replacement of
+      # it - which otherwise renders repoURL/chart/targetRevision all
+      # empty for a dir-only addon.yaml, an invalid Application with no
+      # repoURL.
+      #
+      # chart: null below is explicit, NOT harmless to omit (#63, found
+      # independently a second time and corrected here): the base
+      # template's own chart value does not render as an empty string
+      # for a dir-only addon.yaml's missing chart key (not written with
+      # the live template braces here on purpose - this whole block is
+      # itself rendered as a Go template, and writing them literally
+      # would evaluate rather than describe). goTemplateOptions
+      # missingkey=zero returns the zero value of the map's value type,
+      # and for a map[string]interface{} (what a parsed addon.yaml's own
+      # params decode to) that zero value is a nil interface{}, which Go's
+      # text/template engine prints as the literal string "<no value>",
+      # not "". A non-empty "chart: <no value>" alongside "path:" would
+      # make Argo CD treat this as a (broken) Helm chart source instead of
+      # a Git path source, and this Application would never sync. A JSON
+      # Merge Patch "null" removes the key entirely, which is what this
+      # branch actually needs. The "<no value>" half of this is confirmed
+      # by reproducing Go's own text/template missingkey=zero behavior for
+      # an untyped map (documented Go quirk, golang/go#24963 and widely
+      # reported); the merge-patch-removes-the-key half is Argo CD's own
+      # documented JSON Merge Patch semantics, not independently re-run
+      # against a live Application - verify this on a real cluster before
+      # relying on it (same caveat as goTemplate itself, this file's own
+      # header comment).
+      source:
+        repoURL: https://github.com/littlemex/distai-platform.git
+        path: "{{ .dir }}"
+        chart: null
+        targetRevision: '{{ index $.metadata.annotations "distai.dev.annotations/revision" }}'
+      {{- else }}
       source:
         helm:
           {{- if .skipCrds }}
@@ -127,6 +175,7 @@ spec:
             {{- end }}
           {{- end }}
           {{- end }}
+      {{- end }}
       {{- if .syncOptions }}
       # templatePatch is applied as a JSON merge patch over the rendered
       # base template above (goTemplate's own semantics): a present key

@@ -1,0 +1,16 @@
+# Static-check input (0.static.sh), expected to FAIL `helm template`: a
+# reserved pool with no reservation tags. A selector term carrying only
+# instanceMatchCriteria would select every targeted reservation in the
+# account, so the chart must refuse to render it. Identical to
+# reserved.yaml except for the empty tags, so a failure here can only come
+# from that one value.
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: cpu-rsv
+  capacityType: reserved
+  limits:
+    cpu: "2"
+    memory: 8192Mi
+reservation:
+  tags: {}

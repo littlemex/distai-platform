@@ -1,0 +1,69 @@
+# The Neuron DRA driver: publishes each Neuron device as a DRA device
+# (ResourceSlice, driver neuron.aws.com) on every node whose NodePool opts
+# into the DRA method. One of four accelerator add-ons in the
+# "accelerators" step (#25 Decision 5, #28 section A).
+#
+# Same chart and version as accel-neuron-device-plugin/addon.yaml, opposite
+# toggles:
+#   - devicePlugin.enabled: false and draDriver.enabled: true. The Neuron
+#     DRA docs: "Do not install the Neuron device plugin on the cluster!"
+#     when the DRA driver runs, and the chart's values say the two "cannot
+#     run on the same node".
+#   - draDriver.nodeSelector selects distai.dev/neuron-method=dra (#19
+#     Decision 2); the chart's own default affinity (Neuron instance types)
+#     stays and the method label narrows it.
+#   - scheduler, npd and observer are all off: the device-plugin release
+#     owns the single copy of each (#25 Decision 5).
+#
+# The chart creates its own DeviceClass neuron.aws.com, which has no
+# extendedResourceName, so a Layer 1 pod (resources.limits
+# aws.amazon.com/neuron) would not reach a DRA node through it alone. The
+# platform's DeviceClass neuron-extended-resource
+# (accel-device-classes/addon.yaml) adds that mapping (#19 Decision 1(c),
+# E4b).
+#
+# draDriver.namespaceOverride: neuron-dra, not the chart's own default
+# (neuron-dra-driver): without this override, confirmed by `helm template`
+# against this exact pinned version, the kubelet plugin DaemonSet and its
+# ServiceAccount render into neuron-dra-driver while this Application's
+# own destination namespace (below) stays neuron-dra, empty. The real-
+# machine e2e's "no second advertiser" check (1.e2e.sh's
+# check_accel_layer1) reads each release's namespace from its own
+# Application object (`.spec.destination.namespace`), so a mismatch here
+# would make that check compare against a namespace the DRA pods never
+# actually run in -- it would find no DaemonSet pod there and pass even
+# if a real double advertisement happened. The chart creates this
+# namespace itself (a Namespace object in its own templates), so Argo
+# CD's CreateNamespace=true is redundant here but harmless.
+#
+# Not launched on a real node in #28: #19 E4c showed a dynamically
+# provisioned DRA pool never initializes a Neuron node
+# (ResourceNotRegistered); a static NodePool for DRA is #19 Decision 4's
+# and #27's scope. This file is statically checked only (#28, Acceptance
+# criteria).
+#
+# Chart source: see accel-neuron-device-plugin/addon.yaml.
+addon: accel-neuron-dra
+# RFC #41 Decision 1: gitops/addons/ is delivered unconditionally to
+# every cell, no opt-out, and check_addon_tiers.py requires every
+# addon.yaml here to say so explicitly.
+tier: core
+chart: neuron-helm-chart
+repoURL: public.ecr.aws/neuron
+version: "1.11.2"
+wave: accelerators
+namespace: neuron-dra
+values:
+  devicePlugin:
+    enabled: false
+  draDriver:
+    enabled: true
+    namespaceOverride: neuron-dra
+    nodeSelector:
+      distai.dev/neuron-method: dra
+  scheduler:
+    enabled: false
+  npd:
+    enabled: false
+  observer:
+    enabled: false

@@ -1,0 +1,33 @@
+# Parameter file for cells.ApplicationSet.yaml's Git file generator
+# (RFC #25 Decision 2/3/9), same shape as
+# gitops/cells/example-cell/smoke/queue.yaml. Requests the "gpu"
+# ResourceFlavor this cell's own capacity-pool/gpu.yaml creates (#28
+# section D) - needed so #25's own e2e steps (the admin smoke canary
+# through Kueue and Karpenter) still pass on this cell name, independent
+# of #28's own accelerator-specific checks, which use a separate bare pod
+# requesting nvidia.com/gpu directly. clusterQueue.acceleratorResource/
+# acceleratorQuota (#63, filed as #56) now cover that resource too,
+# matching gpu.yaml's own taint on it. A review of an earlier
+# version of this fix found that covering the resource here alone does
+# not close #56: Kueue applies a ResourceFlavor's own tolerations to
+# every Workload admitted through it regardless of what that Workload
+# requests, so a CPU-only canary was still landing on the tainted node
+# for free, and no accelerator request ever reached Kueue's own
+# admission path either way. 1.e2e.sh's own admin smoke canary (step 11)
+# now discovers this ClusterQueue's own covered resources live and, when
+# one besides cpu/memory exists, requests exactly its nominalQuota too -
+# closing #56 end to end, not only at the chart/render level.
+addon: smoke
+wave: capacity
+dir: gitops/charts/smoke
+namespace: distai-smoke
+values:
+  clusterQueue:
+    resourceFlavor: gpu
+    # #63/#56: gpu.yaml's own ResourceFlavor now carries an
+    # nvidia.com/gpu taint/toleration. acceleratorQuota: "1" is both the
+    # ClusterQueue's own nominal quota for this resource and the exact
+    # amount 1.e2e.sh's own admin smoke canary now requests (discovered
+    # live, not hardcoded in the test).
+    acceleratorResource: nvidia.com/gpu
+    acceleratorQuota: "1"

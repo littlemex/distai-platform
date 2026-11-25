@@ -11,9 +11,26 @@
 #      1, 2, 3, 4, 6 and 8 of the issue (check_gitops_contract.py);
 #   5. `helm lint` and `helm template` of charts/capacity-pool and
 #      charts/smoke, each against one real cells/*/{capacity-pool,smoke}/*.yaml
-#      parameter file's own `values:`;
-#   6. kubeconform of the rendered chart output, both ApplicationSets and
-#      the root Application, against pinned upstream + CRD-catalog schemas;
+#      parameter file's own `values:`; charts/accel-device-classes (#28)
+#      against its own chart defaults, since nothing in it varies per cell;
+#   5b. issue #27's values shapes, from tests/fixtures/<chart>/*.yaml:
+#      `helm lint` and `helm template` of each fixture; seven fixtures
+#      that must be refused (a reserved pool with no reservation tags, an
+#      unknown pool.capacityType, a capacity-type entry inside
+#      pool.requirements, an invalid instanceMatchCriteria, an invalid
+#      taint effect, a duplicate taint key+effect, an empty tag value)
+#      fail `helm template`; and the rendered objects' own fields checked
+#      by check_chart_renders.py, including the unchanged `on-demand`
+#      default pool and default smoke queue, whose fields must be
+#      identical to this chart's pre-#27 shape at the field level (not a
+#      byte-level comparison: a checked-in golden file breaks on an
+#      unrelated base-branch rebase or a different Helm version, neither
+#      of which is a field regression, with no way to tell the two apart
+#      from a byte diff alone; the field-level check below asserts what
+#      the acceptance criterion actually cares about instead);
+#   6. kubeconform of the rendered chart output (including every 5b
+#      fixture), both ApplicationSets and the root Application, against
+#      pinned upstream + CRD-catalog schemas;
 #   7. every pinned add-on's own exact chart version (never a generic,
 #      multi-version schema catalog) is `helm template`-d fresh and its
 #      real CustomResourceDefinitions extracted, to check that the
@@ -92,7 +109,15 @@ required_files=(
   "addons/karpenter-crd/addon.yaml"
   "addons/karpenter/addon.yaml"
   "addons/kueue/addon.yaml"
+  "addons/accel-nvidia-device-plugin/addon.yaml"
+  "addons/accel-nvidia-dra/addon.yaml"
+  "addons/accel-neuron-device-plugin/addon.yaml"
+  "addons/accel-neuron-dra/addon.yaml"
+  "addons/accel-device-classes/addon.yaml"
+  "addons/accel-efa-device-plugin-nvidia/addon.yaml"
+  "addons/accel-efa-device-plugin-neuron/addon.yaml"
   "charts/capacity-pool/Chart.yaml"
+  "charts/accel-device-classes/Chart.yaml"
   "charts/smoke/Chart.yaml"
 )
 missing=()
@@ -143,6 +168,7 @@ mapfile -t literal_yaml_files < <(
     find "${GITOPS_ROOT}/appsets" -name '*.yaml'
     find "${GITOPS_ROOT}/bootstrap" -name '*.yaml'
     find "${GITOPS_ROOT}/charts" -maxdepth 2 -name 'Chart.yaml' -o -maxdepth 2 -name 'values.yaml'
+    find "${SCRIPT_DIR}/fixtures" -name '*.yaml'
   } 2>/dev/null | sort -u
 )
 if [[ "${#literal_yaml_files[@]}" -eq 0 ]]; then
@@ -165,6 +191,100 @@ fi
 run_check "gitops contract (check_gitops_contract.py)" \
   "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
   python3 "${SCRIPT_DIR}/check_gitops_contract.py" "${REPO_ROOT}"
+
+# -------------------------------------- 4b. issue #27's contract checks
+#
+# The tracked tree ships no reserved pool and no cell with two queues, so
+# the reserved/duplicate-addon checks added for issue #27 never run against
+# real content above (confirmed: a dead check still prints PASS on an empty
+# input). Each case below copies the real repo into a throwaway directory,
+# adds exactly one cell parameter file exercising one rule, and runs
+# check_gitops_contract.py against the copy -- never against the tracked
+# tree, so nothing here is committed.
+
+contract_copy_with() {
+  # contract_copy_with DEST REL_PATH CONTENT: copies REPO_ROOT into DEST,
+  # writes CONTENT to DEST/REL_PATH (parent directories created).
+  local dest="$1" rel="$2" content="$3"
+  rm -rf "${dest}"
+  mkdir -p "${dest}"
+  cp -r "${REPO_ROOT}/gitops" "${dest}/gitops"
+  mkdir -p "$(dirname "${dest}/${rel}")"
+  printf '%s' "${content}" >"${dest}/${rel}"
+}
+run_contract_check_on() {
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+    python3 "${SCRIPT_DIR}/check_gitops_contract.py" "$1"
+}
+
+RESERVED_OK_DIR="${WORK_DIR}/contract-reserved-ok"
+contract_copy_with "${RESERVED_OK_DIR}" "gitops/cells/contract-check/capacity-pool/cpu-rsv.yaml" \
+'addon: capacity-pool-cpu-rsv
+wave: capacity
+dir: gitops/charts/capacity-pool
+namespace: kube-system
+values:
+  pool:
+    name: cpu-rsv
+    capacityType: reserved
+  reservation:
+    tags:
+      distai-platform-contract-check: "1"
+'
+if run_contract_check_on "${RESERVED_OK_DIR}" >"${WORK_DIR}/contract-reserved-ok.log" 2>&1; then
+  if grep -q "values.pool.capacityType is one of" "${WORK_DIR}/contract-reserved-ok.log" \
+    && grep -q "sets a non-empty values.reservation.tags" "${WORK_DIR}/contract-reserved-ok.log" \
+    && grep -q "instanceMatchCriteria is 'targeted'" "${WORK_DIR}/contract-reserved-ok.log"; then
+    echo "PASS check_gitops_contract.py's reserved-pool checks ran and passed against a valid -rsv cell file"
+  else
+    echo "FAIL check_gitops_contract.py passed but did not print the issue #27 reserved-pool checks (still dead code)"
+    failures=$((failures + 1))
+  fi
+else
+  echo "FAIL check_gitops_contract.py rejected a valid reserved pool: $(cat "${WORK_DIR}/contract-reserved-ok.log")"
+  failures=$((failures + 1))
+fi
+
+contract_bad_cases=(
+  "empty-tags|values:\n  pool:\n    name: cpu-rsv\n    capacityType: reserved\n  reservation:\n    tags: {}\n|sets a non-empty values.reservation.tags"
+  "open-match|values:\n  pool:\n    name: cpu-rsv\n    capacityType: reserved\n  reservation:\n    tags: {k: v}\n    instanceMatchCriteria: open\n|instanceMatchCriteria is .targeted."
+  "bad-enum|values:\n  pool:\n    name: cpu-rsv\n    capacityType: spot\n|values.pool.capacityType is one of"
+)
+for case in "${contract_bad_cases[@]}"; do
+  IFS='|' read -r case_name case_values case_pattern <<<"${case}"
+  dest="${WORK_DIR}/contract-${case_name}"
+  contract_copy_with "${dest}" "gitops/cells/contract-check/capacity-pool/cpu-rsv.yaml" \
+    "$(printf 'addon: capacity-pool-cpu-rsv\nwave: capacity\ndir: gitops/charts/capacity-pool\nnamespace: kube-system\n%b' "${case_values}")"
+  if run_contract_check_on "${dest}" >"${WORK_DIR}/contract-${case_name}.log" 2>&1; then
+    echo "FAIL check_gitops_contract.py passed a cell file that must fail (${case_name})"
+    failures=$((failures + 1))
+  elif grep -qE "^FAIL gitops/cells/contract-check/capacity-pool/cpu-rsv\.yaml.*${case_pattern}" "${WORK_DIR}/contract-${case_name}.log"; then
+    echo "PASS check_gitops_contract.py rejected the ${case_name} cell file on the expected check"
+  else
+    echo "FAIL check_gitops_contract.py rejected the ${case_name} cell file, but not on the expected check (pattern: ${case_pattern}): $(cat "${WORK_DIR}/contract-${case_name}.log")"
+    failures=$((failures + 1))
+  fi
+done
+
+DUP_ADDON_DIR="${WORK_DIR}/contract-dup-addon"
+contract_copy_with "${DUP_ADDON_DIR}" "gitops/cells/example-cell/smoke/second.yaml" \
+'addon: smoke
+wave: capacity
+dir: gitops/charts/smoke
+namespace: distai-smoke
+values:
+  clusterQueue:
+    resourceFlavor: cpu
+'
+if run_contract_check_on "${DUP_ADDON_DIR}" >"${WORK_DIR}/contract-dup-addon.log" 2>&1; then
+  echo "FAIL check_gitops_contract.py passed two parameter files with the same addon value in one cell"
+  failures=$((failures + 1))
+elif grep -q "unique addon values" "${WORK_DIR}/contract-dup-addon.log"; then
+  echo "PASS check_gitops_contract.py rejected two parameter files with the same addon value in one cell"
+else
+  echo "FAIL check_gitops_contract.py rejected the duplicate-addon cell, but not on the expected check: $(cat "${WORK_DIR}/contract-dup-addon.log")"
+  failures=$((failures + 1))
+fi
 
 # ----------------------------------------------- 5. helm lint and template
 
@@ -210,20 +330,122 @@ with open(out, "w", encoding="utf-8") as f:
 PY
 }
 
+# #28: loop over every cells/*/capacity-pool/*.yaml and cells/*/smoke/*.yaml
+# parameter file, not only the first in sorted order -- issue #28 added a
+# second and third pair (dp-a19-gpu-r3, dp-a19-trn-r3) whose own values
+# (accelerator.methodLabel, a widened pool.requirements) are exactly the
+# content a single-file check would never render or kubeconform. Each file's own
+# cell/pool name keeps its rendered output from colliding with another's
+# in RENDERED_DIR.
 if [[ "${#cell_capacity_pool_files[@]}" -ge 1 ]]; then
   run_check "helm lint charts/capacity-pool" "${HELM}" lint "${GITOPS_ROOT}/charts/capacity-pool"
-  CP_VALUES="${WORK_DIR}/capacity-pool-values.yaml"
-  extract_values "${cell_capacity_pool_files[0]}" "${CP_VALUES}"
-  run_check "helm template charts/capacity-pool (values from $(basename "${cell_capacity_pool_files[0]}"))" \
-    bash -c "'${HELM}' template capacity-pool-e2e '${GITOPS_ROOT}/charts/capacity-pool' -f '${CP_VALUES}' > '${RENDERED_DIR}/capacity-pool.yaml'"
+  for cp_file in "${cell_capacity_pool_files[@]}"; do
+    cp_label="$(basename "$(dirname "$(dirname "${cp_file}")")")-$(basename "${cp_file}" .yaml)"
+    CP_VALUES="${WORK_DIR}/capacity-pool-values-${cp_label}.yaml"
+    extract_values "${cp_file}" "${CP_VALUES}"
+    run_check "helm template charts/capacity-pool (values from ${cp_label}/$(basename "${cp_file}"))" \
+      bash -c "'${HELM}' template capacity-pool-e2e '${GITOPS_ROOT}/charts/capacity-pool' -f '${CP_VALUES}' > '${RENDERED_DIR}/capacity-pool-${cp_label}.yaml'"
+  done
 fi
 if [[ "${#cell_smoke_files[@]}" -ge 1 ]]; then
   run_check "helm lint charts/smoke" "${HELM}" lint "${GITOPS_ROOT}/charts/smoke"
-  SMOKE_VALUES="${WORK_DIR}/smoke-values.yaml"
-  extract_values "${cell_smoke_files[0]}" "${SMOKE_VALUES}"
-  run_check "helm template charts/smoke (values from $(basename "${cell_smoke_files[0]}"))" \
-    bash -c "'${HELM}' template smoke-e2e '${GITOPS_ROOT}/charts/smoke' -f '${SMOKE_VALUES}' > '${RENDERED_DIR}/smoke.yaml'"
+  for smoke_file in "${cell_smoke_files[@]}"; do
+    smoke_label="$(basename "$(dirname "$(dirname "${smoke_file}")")")-$(basename "${smoke_file}" .yaml)"
+    SMOKE_VALUES="${WORK_DIR}/smoke-values-${smoke_label}.yaml"
+    extract_values "${smoke_file}" "${SMOKE_VALUES}"
+    run_check "helm template charts/smoke (values from ${smoke_label}/$(basename "${smoke_file}"))" \
+      bash -c "'${HELM}' template smoke-e2e '${GITOPS_ROOT}/charts/smoke' -f '${SMOKE_VALUES}' > '${RENDERED_DIR}/smoke-${smoke_label}.yaml'"
+  done
 fi
+
+# charts/accel-device-classes (#28) has no cell-specific values (one
+# cluster-scoped DeviceClass, nothing varies per cell) and no
+# cells/*/*.yaml parameter file to extract values from -- helm lint/
+# template run against the chart's own defaults only.
+if [[ -f "${GITOPS_ROOT}/charts/accel-device-classes/Chart.yaml" ]]; then
+  run_check "helm lint charts/accel-device-classes" "${HELM}" lint "${GITOPS_ROOT}/charts/accel-device-classes"
+  run_check "helm template charts/accel-device-classes" \
+    bash -c "'${HELM}' template accel-device-classes-e2e '${GITOPS_ROOT}/charts/accel-device-classes' > '${RENDERED_DIR}/accel-device-classes.yaml'"
+fi
+
+# --------------------------------- 5b. issue #27 values shapes (fixtures)
+#
+# tests/fixtures/<chart>/<name>.yaml are plain Helm values files, one per
+# values shape issue #27 adds (pool.capacityType on-demand/reserved/flex,
+# reservation.*, accelerator.*, tenancy.teamTaint, clusterQueue.memQuota).
+# Each is linted and rendered to RENDERED_DIR/fixture-<chart>-<name>.yaml,
+# so section 6's kubeconform and section 7's pinned-CRD check see every new
+# shape too, then check_chart_renders.py checks the rendered fields.
+
+FIXTURES_DIR="${SCRIPT_DIR}/fixtures"
+
+# Fixtures `helm template` must refuse. Each differs from a fixture that
+# renders (reserved.yaml, flex.yaml) in exactly the one value under test,
+# so a failure can only come from that value.
+expect_render_failure=(
+  "capacity-pool/reserved-no-tags"
+  "capacity-pool/unknown-capacity-type"
+  "capacity-pool/capacity-type-in-requirements"
+  "capacity-pool/invalid-instance-match-criteria"
+  "capacity-pool/invalid-taint-effect"
+  "capacity-pool/duplicate-taint"
+  "capacity-pool/empty-tag-value"
+  "capacity-pool/team-taint-no-value"
+)
+must_fail() {
+  local key="$1" f
+  for f in "${expect_render_failure[@]}"; do
+    [[ "${f}" == "${key}" ]] && return 0
+  done
+  return 1
+}
+
+# Which charts get fixture-based render checks is derived from
+# tests/fixtures/ itself, not a hand-typed chart list (#63, filed as #55
+# item 3): a hardcoded "capacity-pool smoke" here would need a matching
+# edit on any PR adding tests/fixtures/<new-chart>/, the same hardcoded-
+# set problem check_gitops_contract.py's own addon_dirs already hit once
+# independently.
+mapfile -t fixture_charts < <(find "${FIXTURES_DIR}" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)
+# A review found the derive-from-filesystem change above
+# silently inverted a guarantee: the old hardcoded "for chart in
+# capacity-pool smoke" meant a missing tests/fixtures/smoke/ directory
+# (Git does not track empty directories) produced no failure here at
+# all - this script, run on a checkout missing that directory, would
+# simply iterate zero charts and report success, where the loop body's
+# own "no fixtures found" FAIL was unreachable. Failing on zero charts
+# here, before the loop, restores the original fail-closed guarantee
+# without reintroducing a hand-typed chart list.
+[[ "${#fixture_charts[@]}" -ge 1 ]] || { echo "FAIL no chart directories found under tests/fixtures/"; failures=$((failures + 1)); }
+for chart in "${fixture_charts[@]}"; do
+  mapfile -t chart_fixtures < <(find "${FIXTURES_DIR}/${chart}" -name '*.yaml' 2>/dev/null | sort)
+  if [[ "${#chart_fixtures[@]}" -eq 0 ]]; then
+    echo "FAIL no fixtures found under tests/fixtures/${chart}/"
+    failures=$((failures + 1))
+    continue
+  fi
+  for fixture in "${chart_fixtures[@]}"; do
+    name="$(basename "${fixture}" .yaml)"
+    if must_fail "${chart}/${name}"; then
+      if "${HELM}" template "fixture-${name}" "${GITOPS_ROOT}/charts/${chart}" -f "${fixture}" \
+        >"${WORK_DIR}/must-fail-${chart}-${name}.out" 2>"${WORK_DIR}/must-fail-${chart}-${name}.err"; then
+        echo "FAIL helm template charts/${chart} -f fixtures/${chart}/${name}.yaml rendered, but must be refused"
+        failures=$((failures + 1))
+      else
+        echo "PASS helm template charts/${chart} -f fixtures/${chart}/${name}.yaml is refused: $(tr '\n' ' ' <"${WORK_DIR}/must-fail-${chart}-${name}.err")"
+      fi
+      continue
+    fi
+    run_check "helm lint charts/${chart} (fixtures/${chart}/${name}.yaml)" \
+      "${HELM}" lint "${GITOPS_ROOT}/charts/${chart}" -f "${fixture}"
+    run_check "helm template charts/${chart} (fixtures/${chart}/${name}.yaml)" \
+      bash -c "'${HELM}' template 'fixture-${name}' '${GITOPS_ROOT}/charts/${chart}' -f '${fixture}' > '${RENDERED_DIR}/fixture-${chart}-${name}.yaml'"
+  done
+done
+
+run_check "chart render fields (check_chart_renders.py)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_chart_renders.py" "${FIXTURES_DIR}" "${RENDERED_DIR}"
 
 # ------------------------------------------------------- 6. kubeconform
 
@@ -263,6 +485,9 @@ KUBECONFORM_ARGS=(
 # else ever writes into it, so the glob cannot pick up anything this
 # script did not itself render).
 kubeconform_targets=("${GITOPS_ROOT}/appsets/platform.ApplicationSet.yaml" "${GITOPS_ROOT}/appsets/cells.ApplicationSet.yaml" "${GITOPS_ROOT}/bootstrap/root-application.yaml")
+# #28: every rendered output under RENDERED_DIR, not a fixed list of
+# names -- the capacity-pool/smoke loop above now writes one file per
+# cell, and #27's own fixture loop writes one file per fixture.
 while IFS= read -r -d '' rendered_file; do
   kubeconform_targets+=("${rendered_file}")
 done < <(find "${RENDERED_DIR}" -maxdepth 1 -name '*.yaml' -print0 | sort -z)

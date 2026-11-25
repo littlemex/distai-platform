@@ -1,0 +1,14 @@
+# Static-check input (0.static.sh): a taint with no value renders
+# operator: Exists on the mirrored ResourceFlavor toleration, never
+# operator: Equal with an empty value (the two are not equivalent to
+# Kubernetes). A minimal accelerator.taint-only fixture (not a copy of
+# accelerator-tenancy.yaml, which also sets resourceName and
+# methodLabel), so a failure here can only come from the omitted value.
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: accel-no-value
+accelerator:
+  taint:
+    key: aws.amazon.com/neuron
+    effect: NoSchedule
