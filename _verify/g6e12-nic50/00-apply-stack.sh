@@ -217,23 +217,25 @@ echo "ls /sys/class/infiniband | wc -l = ${IB_COUNT}"
 [ "${IB_COUNT}" = "1" ] && echo "PASS: 1 real EFA (RDMA) device visible in the guest OS" \
   || echo "FAIL: ${IB_COUNT} RDMA devices visible, expected 1"
 
-echo "network interfaces by driver (a node also carries non-EC2NodeClass netdevs -- the VPC CNI's own dynamically-attached secondary ENI and the EKS Pod Identity Agent's synthetic pod-id-link0 -- so raw /sys/class/net count alone is not the right assertion; classify by /sys/class/net/<if>/device/driver instead):"
+echo "network interfaces by driver and operstate (attempt 1 found that an efa-only secondary ENI's netdev also reports driver=ena, same as the real primary -- AWS's combined ena/efa model: every ENI, EFA-capable or not, is an 'ena' netdev, and only the EFA-capable one additionally gets a /sys/class/infiniband entry. A node also carries netdevs this PR's own chart never created -- the VPC CNI's own dynamically-attached secondary ENI and the EKS Pod Identity Agent's synthetic pod-id-link0 -- so neither a raw count nor a driver name alone distinguishes 'the one ENA interface the node actually uses' from 'the EFA-capable secondary that happens to share the same driver name'. operstate does: an efa-only ENI carries no IP and is never brought administratively up by the OS, unlike the primary.)"
 kubectl exec efa-check -- sh -c '
 for IFACE in $(ls /host-sys/class/net | grep -v "^lo$"); do
   DRV_LINK="$(readlink "/host-sys/class/net/${IFACE}/device/driver" 2>/dev/null || true)"
   DRV="$(basename "${DRV_LINK}" 2>/dev/null || true)"
   [ -z "${DRV}" ] && DRV="(no PCI device -- software interface)"
-  echo "${IFACE} driver=${DRV}"
+  STATE="$(cat "/host-sys/class/net/${IFACE}/operstate" 2>/dev/null || echo unknown)"
+  echo "${IFACE} driver=${DRV} operstate=${STATE}"
 done
 ' | tee /tmp/efa-check-drivers.txt
-ENA_COUNT="$(grep -c 'driver=ena$' /tmp/efa-check-drivers.txt || true)"
-EFA_NET_COUNT="$(grep -c 'driver=efa$' /tmp/efa-check-drivers.txt || true)"
-OTHER_COUNT="$(grep -vc 'driver=ena$\|driver=efa$' /tmp/efa-check-drivers.txt || true)"
-echo "ena-driver interfaces = ${ENA_COUNT}, efa-driver interfaces = ${EFA_NET_COUNT}, other (non-EC2NodeClass) = ${OTHER_COUNT}"
-[ "${ENA_COUNT}" = "1" ] && echo "PASS: exactly 1 ena-driver network interface (the primary card's deviceIndex 0 ENI); no stray secondary ENA device" \
-  || echo "FAIL: ${ENA_COUNT} ena-driver network interfaces, expected 1"
-[ "${EFA_NET_COUNT}" = "1" ] && echo "PASS: exactly 1 efa-driver network interface, consistent with the 1 EFA RDMA device above (AWS's EFA kernel driver registers both a /sys/class/infiniband entry and its own netdev for the same physical EFA ENI -- this is the same device counted twice by two different kernel subsystems, not two EFA devices)" \
-  || echo "WARN: ${EFA_NET_COUNT} efa-driver network interfaces (expected 1, matching the RDMA count above)"
+ENA_UP_COUNT="$(grep -c 'driver=ena operstate=up$' /tmp/efa-check-drivers.txt || true)"
+ENA_TOTAL_COUNT="$(grep -c 'driver=ena ' /tmp/efa-check-drivers.txt || true)"
+OTHER_COUNT="$(grep -vc 'driver=ena ' /tmp/efa-check-drivers.txt || true)"
+echo "ena-driver interfaces (any operstate) = ${ENA_TOTAL_COUNT}, of which operstate=up = ${ENA_UP_COUNT}; other (non-EC2NodeClass) netdevs = ${OTHER_COUNT}"
+[ "${ENA_UP_COUNT}" = "1" ] && echo "PASS: exactly 1 ena-driver network interface is administratively up -- the real, in-use ENA interface (the primary card's deviceIndex 0 ENI); the efa-only secondary ENI shares the ena driver but is never brought up for ordinary IP traffic" \
+  || echo "FAIL: ${ENA_UP_COUNT} ena-driver network interfaces are up, expected exactly 1"
+EXPECTED_ENA_TOTAL=2
+[ "${ENA_TOTAL_COUNT}" = "${EXPECTED_ENA_TOTAL}" ] && echo "PASS: ${ENA_TOTAL_COUNT} ena-driver netdevs total, matching this PR's committed g6e.12xlarge fixture's own entry count (1 primary interface + 1 efa-only secondary == 2 ENIs on the one network card)" \
+  || echo "WARN: ${ENA_TOTAL_COUNT} ena-driver netdevs total, expected ${EXPECTED_ENA_TOTAL} (the fixture's own entry count)"
 rm -f /tmp/efa-check-drivers.txt
 
 echo "=== all substantive checks printed above; cleanup runs next via EXIT trap ==="
