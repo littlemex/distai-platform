@@ -70,12 +70,20 @@
 #        - apiGroups: "" (core), "apps", "batch", "policy",
 #          "networking.k8s.io"
 #        - resources: serviceaccounts, configmaps, pods, services,
-#          endpoints, endpointslices, deployments, statefulsets,
-#          daemonsets, jobs, cronjobs, poddisruptionbudgets,
-#          networkpolicies -- the ordinary namespaced workload kinds a
-#          team's own chart ships, matching the namespaced-workload
-#          side of gitops/bootstrap/team-onboard.sh's own AppProject
-#          namespaceResourceWhitelist
+#          deployments, statefulsets, daemonsets, jobs, cronjobs,
+#          poddisruptionbudgets, networkpolicies -- the ordinary
+#          namespaced workload kinds a team's own chart ships, matching
+#          the namespaced-workload side of gitops/bootstrap/team-onboard.sh's
+#          own AppProject namespaceResourceWhitelist exactly (minus
+#          Role/RoleBinding, which rule 1 governs instead). endpoints
+#          and endpointslices were considered and left off: a flat verb
+#          list means allowing "get" also allows "create"/"patch"/
+#          "delete", and upstream Kubernetes itself removed Endpoints
+#          write from the built-in edit/admin ClusterRoles over
+#          CVE-2021-25740 (Endpoints write enabling a man-in-the-middle
+#          of Service traffic) -- add them deliberately, narrowed to
+#          read-only verbs, if a real chart needs them, rather than by
+#          default.
 #        - verbs: get, list, watch, create, update, patch, delete
 #      Widening any of the three lists (for example, if a real chart
 #      this guard is meant to allow needs a resource not on it) is a
@@ -95,7 +103,17 @@
 # "restricted", which is what actually stops a privileged DaemonSet or
 # a hostNetwork Pod -- neither is an RBAC question, so no rule in this
 # file could reach either one regardless of how complete the allow-list
-# above is.
+# above is. Secrets are not confidential from a Role holder even though
+# this allow-list denies granting permission on the Secret resource
+# directly: "create" on "pods" (allowed) already lets its holder mount
+# any Secret already present in the namespace as a volume, and run as
+# any ServiceAccount in the namespace via the Pod's own
+# serviceAccountName field -- a team's own chart can already reach both
+# through the ordinary workload kinds this guard allows, with or
+# without this guard's own Secret-resource rule, so that rule is a
+# defense against a team granting itself DIRECT API read/write on
+# Secrets (listing every Secret's own data via `kubectl get secret`),
+# not a boundary around what a Pod this guard allows can mount.
 #
 # Scope: matchConstraints.namespaceSelector matches only namespaces
 # carrying the distai.dev/team label (gitops/bootstrap/team-onboard.sh's
@@ -133,10 +151,10 @@ spec:
         request.resource.resource != 'roles' || !has(object.rules) ||
         object.rules.all(r,
           r.apiGroups.all(g, g in ['', 'apps', 'batch', 'policy', 'networking.k8s.io']) &&
-          r.resources.all(x, x in ['serviceaccounts', 'configmaps', 'pods', 'services', 'endpoints', 'endpointslices', 'deployments', 'statefulsets', 'daemonsets', 'jobs', 'cronjobs', 'poddisruptionbudgets', 'networkpolicies']) &&
+          r.resources.all(x, x in ['serviceaccounts', 'configmaps', 'pods', 'services', 'deployments', 'statefulsets', 'daemonsets', 'jobs', 'cronjobs', 'poddisruptionbudgets', 'networkpolicies']) &&
           r.verbs.all(v, v in ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'])
         )
-      message: "a Role in a team namespace may grant only {get,list,watch,create,update,patch,delete} on {serviceaccounts,configmaps,pods,services,endpoints,endpointslices,deployments,statefulsets,daemonsets,jobs,cronjobs,poddisruptionbudgets,networkpolicies} in {core,apps,batch,policy,networking.k8s.io} -- this rule granted something outside that allow-list (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
+      message: "a Role in a team namespace may grant only {get,list,watch,create,update,patch,delete} on {serviceaccounts,configmaps,pods,services,deployments,statefulsets,daemonsets,jobs,cronjobs,poddisruptionbudgets,networkpolicies} in {core,apps,batch,policy,networking.k8s.io} -- this rule granted something outside that allow-list (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

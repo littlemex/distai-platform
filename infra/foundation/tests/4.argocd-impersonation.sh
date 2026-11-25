@@ -85,7 +85,8 @@
 #      not evidence of it, and why checks 2-3 instead rest on
 #      team-rbac-guard.yaml, not on narrowing a Role nobody's sync
 #      actually uses.
-#   8. each of team-rbac-guard.yaml's own six validation rules, applied
+#   8. team-rbac-guard.yaml's own two rules (RoleBinding->ClusterRole,
+#      and the Role-content allow-list), applied
 #      directly with kubectl (the same cluster-admin-equivalent identity
 #      this whole script runs as, not Argo CD) -- decouples each denial
 #      from Argo CD's own sync behavior entirely, which check 3 already
@@ -725,7 +726,7 @@ pass "restored ${TEAM}-deployer-role to its original rules before teardown"
 # script already runs as -- ADMIN_PRINCIPAL_ARN's own access entry, not
 # a lesser identity), against eight distinct shapes a review round
 # found were not all covered by this guard's own first (deny-list)
-# design: escalate verb, rbac.authorization.k8s.io group, a bare "*"
+# design: impersonate verb, rbac.authorization.k8s.io group, a bare "*"
 # wildcard, Secrets, serviceaccounts/token, pods/exec, a
 # wildcard-subresource form ("*/exec", which a bare-"*" check alone
 # does not catch), and -- the shape that settled the allow-list
@@ -804,6 +805,27 @@ rules:
 RBAC
 )" "${ALLOWLIST_MSG}"
 
+# Isolates the apiGroups clause specifically: resources ("pods") and
+# verbs ("get") are both otherwise-allowed, so this case only fails
+# because apiGroups is "*" -- guard-check-wildcard above instead
+# combines an allowed apiGroups with a wildcard resources, which does
+# not independently confirm the apiGroups clause itself denies a
+# wildcard (a review round's own finding: deleting the apiGroups clause
+# from the allow-list expression would still pass every other case in
+# this check).
+assert_rbac_denied role guard-check-apigroups "$(cat <<RBAC
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: guard-check-apigroups
+  namespace: ${TEAM}
+rules:
+  - apiGroups: ["*"]
+    resources: ["pods"]
+    verbs: ["get"]
+RBAC
+)" "${ALLOWLIST_MSG}"
+
 assert_rbac_denied role guard-check-secrets "$(cat <<RBAC
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -868,7 +890,7 @@ rules:
     verbs: ["get", "patch"]
 RBAC
 )" "${ALLOWLIST_MSG}"
-pass "CHECK 8/9: eight distinct shapes (escalate verb, rbac.authorization.k8s.io group, bare wildcard, Secrets, serviceaccounts/token, pods/exec, a wildcard-subresource form, and 'patch' on namespaces itself) plus the RoleBinding->ClusterRole case are all denied by a direct kubectl apply (no Argo CD) by the cluster-admin-equivalent identity this script runs as, each naming the guard's own rule in the refusal; no object was created for any of the nine"
+pass "CHECK 8/9: ten distinct shapes (RoleBinding->ClusterRole; a Role granting the impersonate verb, the rbac.authorization.k8s.io group, a wildcard resources with an allowed apiGroups, a wildcard apiGroups with allowed resources/verbs [isolating that clause specifically], Secrets, serviceaccounts/token, pods/exec, a wildcard-subresource form, or 'patch' on namespaces itself) are all denied by a direct kubectl apply (no Argo CD) by the cluster-admin-equivalent identity this script runs as, each naming the guard's own rule in the refusal; no object was created for any of the ten"
 
 # ------------------------------------------------- 7. mutation check: delete
 # -------------------------------------------------    the guard's own
@@ -895,7 +917,16 @@ pass "CHECK 8/9: eight distinct shapes (escalate verb, rbac.authorization.k8s.io
 # an immediate retry as a possible race.
 kubectl delete validatingadmissionpolicybinding team-rbac-guard-binding \
   || fail "kubectl delete validatingadmissionpolicybinding team-rbac-guard-binding"
+# Deletes the Role before every single attempt, inside the retried
+# function itself: a plain retry-until-success here would let a first
+# attempt that happens to land right as the Binding is torn down create
+# the Role, after which every later attempt is a no-op UPDATE against
+# an object that already matches -- a review round's own finding, to
+# guard against regardless of whether such a no-op is actually
+# re-validated by this API server version. Deleting first makes every
+# attempt a clean CREATE.
 mutation_role_succeeds() {
+  kubectl delete role guard-check-wildcard-mutation -n "${TEAM}" --ignore-not-found >/dev/null 2>&1
   kubectl apply -n "${TEAM}" -f - <<EOF >/dev/null 2>&1
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -916,12 +947,32 @@ kubectl delete role guard-check-wildcard-mutation -n "${TEAM}" --ignore-not-foun
   || fail "kubectl delete role guard-check-wildcard-mutation"
 kubectl apply -f "${REPO_ROOT}/gitops/bootstrap/team-rbac-guard.yaml" \
   || fail "kubectl apply gitops/bootstrap/team-rbac-guard.yaml (restore the Binding)"
-mutation_role_denied_again() { ! mutation_role_succeeds; }
-wait_until 60 3 "guard-check-wildcard-mutation to be denied again once the Binding is restored" mutation_role_denied_again \
-  || fail "guard-check-wildcard-mutation still succeeds 60s after restoring team-rbac-guard-binding -- the restore did not actually re-enable the guard"
+# Matches the guard's own message specifically, not just any non-zero
+# exit (a plain authorization or validation error unrelated to this
+# guard would also make the apply fail, which an "any failure counts"
+# check could not tell apart from the guard itself).
+mutation_role_denied_again() {
+  local err
+  kubectl delete role guard-check-wildcard-mutation -n "${TEAM}" --ignore-not-found >/dev/null 2>&1
+  err="$(kubectl apply -n "${TEAM}" -f - <<EOF 2>&1
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: guard-check-wildcard-mutation
+  namespace: ${TEAM}
+rules:
+  - apiGroups: [""]
+    resources: ["*"]
+    verbs: ["get"]
+EOF
+)" && return 1
+  [[ "${err}" == *"${ALLOWLIST_MSG}"* ]]
+}
+wait_until 60 3 "guard-check-wildcard-mutation to be denied again (by team-rbac-guard specifically) once the Binding is restored" mutation_role_denied_again \
+  || fail "guard-check-wildcard-mutation was not denied by team-rbac-guard's own message within 60s of restoring team-rbac-guard-binding -- the restore did not actually re-enable the guard, or a different gate (not team-rbac-guard) is now the reason"
 kubectl get role guard-check-wildcard-mutation -n "${TEAM}" >/dev/null 2>&1 \
   && fail "guard-check-wildcard-mutation was actually created on the post-restore attempt despite mutation_role_denied_again reporting denial" || true
-pass "CHECK 9/9 (mutation check): the SAME wildcard-granting Role check 8 showed denied SUCCEEDS once team-rbac-guard-binding is deleted, and is DENIED AGAIN once the Binding is restored -- confirms the guard itself, not an unrelated cluster behavior, was responsible for check 8's own denials, in both directions"
+pass "CHECK 9/9 (mutation check): the SAME wildcard-granting Role check 8 showed denied SUCCEEDS once team-rbac-guard-binding is deleted, and is DENIED AGAIN, by the guard's own message, once the Binding is restored -- confirms the guard itself, not an unrelated cluster behavior, was responsible for check 8's own denials, in both directions"
 
 # ------------------------------------------------------- 8. teardown
 

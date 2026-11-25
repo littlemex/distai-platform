@@ -32,12 +32,12 @@
 # every Role/RoleBinding write in a team namespace regardless of who
 # the caller is -- including Argo CD's own cluster-admin-equivalent sync
 # identity, since admission runs after authorization already let the
-# request through, independent of the caller's own RBAC. It denies the
-# specific shapes that would otherwise let a team's own chart grant
-# itself (or anyone) more than intended: a RoleBinding referencing a
-# ClusterRole (cluster-admin among them), and a Role granting
-# escalate/bind/impersonate, any rbac.authorization.k8s.io permission, a
-# wildcard apiGroup/resource/verb, or any permission on Secrets. With
+# request through, independent of the caller's own RBAC. It denies a
+# RoleBinding referencing a ClusterRole (cluster-admin among them), and
+# denies a Role unless every apiGroup, resource and verb it grants is
+# drawn from a fixed allow-list (that file's own header has the exact
+# set and why it is an allow-list, not a deny-list, after two review
+# rounds each found a shape an earlier deny-list version missed). With
 # that guard in place, Role and RoleBinding are back in the team
 # AppProject's own namespaceResourceWhitelist (step 4) -- issue #57's
 # own goal is restored, on an admission-based boundary instead of an
@@ -295,6 +295,19 @@ kubectl apply -f "${SCRIPT_DIR}/team-rbac-guard.yaml" \
 echo "applied gitops/bootstrap/team-rbac-guard.yaml (ValidatingAdmissionPolicy team-rbac-guard + its Binding)" >&2
 
 # --- 2. the team's own Namespace ------------------------------------------
+# Refuses to adopt a pre-existing Namespace this script did not itself
+# create: one that exists but was never labeled distai.dev/team by this
+# script may already carry Roles/RoleBindings team-rbac-guard.yaml never
+# reviewed (that guard assumes every Role in a namespace it governs was
+# itself created under this same policy -- its own header), or Pods
+# whose own ServiceAccount already holds more than this script's own
+# team identity would grant. A namespace this script created earlier
+# (already carrying the label) is fine to re-apply onto, idempotently.
+EXISTING_LABEL="$(kubectl get namespace "${TEAM}" -o jsonpath='{.metadata.labels.distai\.dev/team}' 2>/dev/null || true)"
+if kubectl get namespace "${TEAM}" >/dev/null 2>&1 && [[ "${EXISTING_LABEL}" != "${TEAM}" ]]; then
+  echo "Namespace ${TEAM} already exists and was not created by this script (missing or mismatched distai.dev/team label: got '${EXISTING_LABEL}'); refusing to adopt it. Delete it first, or choose a different --team, if this namespace is safe to replace." >&2
+  exit 1
+fi
 # pod-security.kubernetes.io/enforce: restricted (a built-in Kubernetes
 # Pod Security Admission label, no extra controller needed) closes a
 # gap team-rbac-guard.yaml's own RBAC-content rules do not reach at all:
