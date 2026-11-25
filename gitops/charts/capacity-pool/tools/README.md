@@ -34,8 +34,13 @@ the live AWS call actually happens.
 If a describe JSON carries `_source.instanceType`, the generator refuses when
 it does not match `--instance-type` (a fixture captured for one instance type
 accidentally passed for another is a refusal, not a silently wrong layout).
-The field is optional; a describe JSON without it (for example a synthetic one
-built for a test) is accepted as before.
+At the generator's own command line the field is optional, so a synthetic or
+ad hoc `--describe-json` built for a test can still omit it. A *committed*
+fixture under `fixtures/` is held to a higher bar: `gitops/tests/0.static.sh`
+fails if any committed `*.describe.json` has no `_source.instanceType`, or one
+that does not match its own file name, so every onboarded instance type here
+carries a capture record whether or not a caller ever passes a mismatched
+`--instance-type` at the generator directly.
 
 ## Layout rules
 

@@ -24,8 +24,13 @@ Checks, each printing one PASS or FAIL line:
      missing from GROUND_TRUTH (shipping a new E == C fixture is a
      deliberate GROUND_TRUTH edit, not something the generator's own
      exceptions.json-style allowlist covers -- see tools/README.md). Every
-     describe.json that carries a _source.instanceType (this platform's own
-     fixtures all do) must match its own file name.
+     committed describe.json must carry a _source.instanceType, and it must
+     match its own file name (required here, even though
+     render-network-interfaces.py's own CLI treats the field as optional for
+     a synthetic or ad hoc --describe-json that is never committed -- see
+     tools/README.md): a committed fixture with no _source at all, or with
+     one copied from a different instance type's capture, both fail this
+     check instead of passing silently.
   2. drift: for every pair, the generator's stdout for that describe.json
      and the committed exceptions.json is byte-identical to the committed
      .networkInterfaces.yaml (nothing is stripped or normalized: the fixture
@@ -43,10 +48,11 @@ Checks, each printing one PASS or FAIL line:
      E == C - 1 for a family with no exceptions.json entry, and E neither C
      nor C - 1; and, as positive controls proving the synthetic shape is
      accepted at all, it prints the expected layout for E == C, C == 1, and
-     E == C - 1 under the p6-b300 family name. A separate case passes a
-     committed describe.json completely unchanged (its own _source and all)
-     under a different --instance-type: its real (C, E) is E == C, which the
-     algorithm alone would accept, so a refusal here is caused only by the
+     E == C - 1 under the p6-b300 family name. A separate, self-contained
+     case builds its own (C, E) = E == C document (not read from any
+     committed fixture) carrying a _source.instanceType for one instance
+     type and passes a different --instance-type: the algorithm alone would
+     accept this shape, so a refusal here is caused only by the
      _source.instanceType mismatch (review round 2).
   5. exceptions.json: a p6-b300 entry, its `confirmed` is the JSON boolean
      false, and its `source` is a non-empty string naming
@@ -252,19 +258,26 @@ def check_pairs(fixtures_dir: str) -> list[str]:
     check("nic-layout fixtures: no fixture pair exists for an instance type missing from GROUND_TRUTH "
           "(add an entry here, deliberately, before shipping a new fixture)", not extra, f"extra: {extra}")
     # render-network-interfaces.py's own _source.instanceType cross-check (review round 1) only
-    # fires at run time, against whatever --instance-type a caller happens to pass; this checks the
-    # committed fixtures themselves line up with their own file names, so a fixture copied from one
-    # instance type to another's file name (and never run through the generator with a mismatched
-    # --instance-type, which would have caught it) does not pass silently.
+    # fires at run time, against whatever --instance-type a caller happens to pass, and only when
+    # a _source is present at all (the generator's own CLI treats it as optional, for a synthetic
+    # or ad hoc --describe-json that is never committed). A *committed* fixture is held to a higher
+    # bar decided after review rounds 1-3 kept re-raising it: every committed fixture must carry
+    # provenance, so this check requires _source.instanceType on every pair here and fails if it is
+    # missing or does not match the fixture's own file name, catching both a hand-written fixture
+    # with no capture record and one copied from a different instance type's capture.
+    missing = []
     mismatched = []
     for t in pairs:
         with open(os.path.join(fixtures_dir, t + DESCRIBE_SUFFIX), encoding="utf-8") as f:
             ni = find_network_info(json.load(f))
         source = (ni or {}).get("_source")
-        if isinstance(source, dict) and "instanceType" in source and source["instanceType"] != t:
+        if not isinstance(source, dict) or "instanceType" not in source:
+            missing.append(f"{t}{DESCRIBE_SUFFIX} has no _source.instanceType")
+        elif source["instanceType"] != t:
             mismatched.append(f"{t}{DESCRIBE_SUFFIX} has _source.instanceType={source['instanceType']!r}")
-    check("nic-layout fixtures: every describe.json's _source.instanceType (when present) matches its own file name",
-          not mismatched, "; ".join(mismatched))
+    check("nic-layout fixtures: every committed describe.json has a _source.instanceType, "
+          "required, matching its own file name",
+          not missing and not mismatched, "; ".join(missing + mismatched))
     return pairs
 
 
@@ -510,10 +523,10 @@ def _baseline(root: str, stub: str) -> str:
     fixtures = os.path.join(tools, "fixtures")
     os.makedirs(fixtures)
     for t, (c, e) in GROUND_TRUTH.items():
-        # A real _source.instanceType (check 1's own matching-file-name check needs this to be
-        # non-trivially present somewhere in the baseline, and check_refusals()'s "source
-        # mismatch" case needs a real instance type here to mismatch SYNTHETIC_UNKNOWN_TYPE
-        # against), matching this fixture's own file name so the baseline itself passes.
+        # A real _source.instanceType, matching this fixture's own file name, so check 1's own
+        # now-required _source check passes on the baseline. check_refusals()'s "source mismatch"
+        # case does not read this at all -- it builds its own self-contained synthetic document --
+        # so no fixture here needs to mismatch SYNTHETIC_UNKNOWN_TYPE for that case to work.
         with open(os.path.join(fixtures, t + DESCRIBE_SUFFIX), "w", encoding="utf-8") as f:
             json.dump(dict(_describe(c, e), _source={"instanceType": t}), f)
         with open(os.path.join(fixtures, t + LAYOUT_SUFFIX), "w", encoding="utf-8") as f:
@@ -609,7 +622,24 @@ def selftest() -> int:
             lambda r, fx: write(fx, p5en + LAYOUT_SUFFIX, _layout_yaml(expected_layout(p5en, 16, 16)).replace("deviceIndex: 1", 'deviceIndex: "1"')),
             [f"layout: {p5en}", f"drift: {p5en}"],
         ),
-        ("p5en describe.json drifted to 15 cards", _oracle(), lambda r, fx: write(fx, p5en + DESCRIBE_SUFFIX, json.dumps(_describe(15, 15))), [f"layout: {p5en}", f"drift: {p5en}"]),
+        (
+            "p5en describe.json drifted to 15 cards",
+            _oracle(),
+            lambda r, fx: write(fx, p5en + DESCRIBE_SUFFIX, json.dumps(dict(_describe(15, 15), _source={"instanceType": p5en}))),
+            [f"layout: {p5en}", f"drift: {p5en}"],
+        ),
+        (
+            "p5en describe.json missing _source entirely (review round 3, repeat of round 2)",
+            _oracle(),
+            lambda r, fx: write(fx, p5en + DESCRIBE_SUFFIX, json.dumps(_describe(16, 16))),
+            ["has no _source.instanceType"],
+        ),
+        (
+            "p5en describe.json's _source.instanceType names a different committed type",
+            _oracle(),
+            lambda r, fx: write(fx, p5en + DESCRIBE_SUFFIX, json.dumps(dict(_describe(16, 16), _source={"instanceType": "p5.48xlarge"}))),
+            ["has _source.instanceType='p5.48xlarge'", f"drift: {p5en}"],
+        ),
         (
             "missing g7.48xlarge pair",
             _oracle(),
@@ -620,7 +650,7 @@ def selftest() -> int:
         (
             "extra fixture pair for an instance type missing from GROUND_TRUTH (an E == C family nobody confirmed)",
             _oracle(),
-            lambda r, fx: (write(fx, "zz9.99xlarge" + DESCRIBE_SUFFIX, json.dumps(_describe(2, 2))),
+            lambda r, fx: (write(fx, "zz9.99xlarge" + DESCRIBE_SUFFIX, json.dumps(dict(_describe(2, 2), _source={"instanceType": "zz9.99xlarge"}))),
                            write(fx, "zz9.99xlarge" + LAYOUT_SUFFIX, _layout_yaml(expected_layout("zz9.99xlarge", 2, 2)))),
             ["add an entry here, deliberately"],
         ),
