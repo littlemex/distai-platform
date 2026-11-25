@@ -1,0 +1,23 @@
+# Case-insensitive terms that must not appear in a commit message, a pull
+# request title, or a pull request description. Checked by
+# .github/workflows/tool-attribution-check.yml, which looks only at the
+# commits new to a pull request and at that pull request's own title and
+# body, never at history already on main.
+#
+# This file is the single place to add or remove a term; the check script
+# (.github/scripts/check_tool_attribution.py) reads it and does not keep
+# its own copy of the list.
+Claude
+Anthropic
+Fable
+Opus
+Sonnet
+Haiku
+GPT
+ChatGPT
+OpenAI
+Copilot
+Codex
+Gemini
+independent model
+explainers

@@ -1,0 +1,56 @@
+name: Tool Attribution Check
+
+# Fails a pull request whose own title, own description, or whose commits
+# new to this pull request name a specific AI coding tool or AI vendor
+# (the list lives in .github/tool-attribution-denylist.txt, not here).
+# Looks only at commits new to the pull request (via the pulls/.../commits
+# API, which lists exactly those), never at commits already on main.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Check the pull request title and description
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$PR_TITLE" > "$RUNNER_TEMP/pr_title.txt"
+          printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/pr_body.txt"
+          python3 .github/scripts/check_tool_attribution.py \
+            --denylist .github/tool-attribution-denylist.txt \
+            --label "the pull request title" \
+            "$RUNNER_TEMP/pr_title.txt"
+          python3 .github/scripts/check_tool_attribution.py \
+            --denylist .github/tool-attribution-denylist.txt \
+            --label "the pull request description" \
+            "$RUNNER_TEMP/pr_body.txt"
+
+      - name: Check commit messages new to this pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --jq '.[] | .commit.message' \
+            > "$RUNNER_TEMP/commit_messages.txt"
+          python3 .github/scripts/check_tool_attribution.py \
+            --denylist .github/tool-attribution-denylist.txt \
+            --label "a commit message new to this pull request" \
+            "$RUNNER_TEMP/commit_messages.txt"
