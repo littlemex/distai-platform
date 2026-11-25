@@ -136,15 +136,22 @@
 #      denial either time, which is what check 11 below is for.
 #  11. (mutation check, decouples the guard's own correctness from
 #      check 10's own finding that two prior runs of it never showed
-#      Argo CD actually attempting the overwrite): the same two attempts as check 10 --
+#      Argo CD actually attempting the overwrite): three attempts --
 #      overwriting pod-security.kubernetes.io/enforce to privileged,
-#      and removing distai.dev/team outright -- applied directly with
-#      kubectl (no Argo CD, same cluster-admin-equivalent identity this
-#      script runs as), same pattern as checks 8-9. Both are denied by
-#      team-namespace-guard.yaml's own message; deleting
-#      team-namespace-guard-binding makes the SAME two attempts
-#      succeed; restoring the Binding denies them again.
-#  12. (PR #66's own second remaining caveat, now closed): the real
+#      removing distai.dev/team outright, and introducing
+#      pod-security.kubernetes.io/enforce-version (rule 3) -- applied
+#      directly with kubectl (no Argo CD, same cluster-admin-equivalent
+#      identity this script runs as), same pattern as checks 8-9. All
+#      three are denied by team-namespace-guard.yaml's own message;
+#      deleting team-namespace-guard-binding makes the SAME three
+#      attempts succeed; restoring the Binding denies them again. A
+#      scope check on OTHER_NS (no distai.dev/team, but a Pod Security
+#      label for an unrelated reason) is included here too, confirming
+#      it is NOT constrained.
+#  12. (PR #66's own second remaining caveat, addressed; an earlier
+#      form of this exact check already passed on real hardware, this
+#      revised form has not itself been re-run -- the real-hardware
+#      budget for this PR is exhausted): the real
 #      chart issue #57 item 1 named
 #      (examples/inference/vllm/disagg-pd-llmd, pinned at
 #      feat/disagg-pd-reference's own commit) self-syncs through the
@@ -1100,6 +1107,22 @@ pass "CHECK 9/13 (mutation check): the SAME wildcard-granting Role check 8 showe
 # brackets, so this follows it instead of inventing a second form.
 read_team_label() { kubectl get namespace "${TEAM}" -o jsonpath='{.metadata.labels.distai\.dev/team}' 2>/dev/null; }
 read_psa_label() { kubectl get namespace "${TEAM}" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null; }
+# Loud on error, not folded into 2>/dev/null the way the three direct
+# reads of this label used to be (a round 3 review finding: an API
+# error would otherwise read identically to "the label is absent").
+read_version_label() {
+  local out err rc
+  err="$(mktemp)"
+  set +e
+  out="$(kubectl get namespace "${TEAM}" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce-version}' 2>"${err}")"
+  rc=$?
+  set -e
+  if [[ ${rc} -ne 0 ]]; then
+    fail "read_version_label: kubectl get namespace ${TEAM} failed (exit ${rc}): $(cat "${err}")"
+  fi
+  rm -f "${err}"
+  echo -n "${out}"
+}
 
 ORIG_TEAM_LABEL="$(read_team_label)"
 ORIG_PSA_LABEL="$(read_psa_label)"
@@ -1118,9 +1141,18 @@ read_marker_label() { kubectl get namespace "${TEAM}" -o jsonpath='{.metadata.la
 sync_result_for_namespace() {
   local out err rc
   err="$(mktemp)"
+  # set +e around this one assignment: under this script's own set -e
+  # (active even inside this function, which a caller always invokes
+  # inside a "$(...)" subshell), a failing command on the right-hand
+  # side of "out=$(...)" would abort this subshell immediately, before
+  # the next line ever reads $? -- the loud fail() below would never
+  # run, and the caller would just see an empty, silent failure (a
+  # round 3 review finding).
+  set +e
   out="$(kubectl get application team-a-nsmeta-strip -n "${ARGOCD_NAMESPACE}" \
     -o jsonpath="{.status.operationState.syncResult.resources[?(@.kind=='Namespace')]}" 2>"${err}")"
   rc=$?
+  set -e
   if [[ ${rc} -ne 0 ]]; then
     fail "sync_result_for_namespace: kubectl get application team-a-nsmeta-strip failed (exit ${rc}): $(cat "${err}")"
   fi
@@ -1320,20 +1352,21 @@ assert_nsguard_denied "direct kubectl: removing the distai.dev/team label" "${RE
   kubectl label namespace "${TEAM}" "distai.dev/team-"
 [[ "$(read_team_label)" == "${TEAM}" ]] \
   || fail "SECURITY: after the direct, denied kubectl label-removal attempt, distai.dev/team is '$(read_team_label)', not '${TEAM}'"
-# Rule 3 (added in response to a review finding that rule 2's earlier,
-# state-based form would have denied every future UPDATE once this
-# key was ever present): introducing pod-security.kubernetes.io/enforce-version
-# where it was absent must also be denied.
+# Rule 3 (a review round found its own earlier, state-based form
+# would have denied every future UPDATE once this key was ever
+# present, fixed to a transition check): introducing
+# pod-security.kubernetes.io/enforce-version where it was absent must
+# also be denied.
 assert_nsguard_denied "direct kubectl: introducing pod-security.kubernetes.io/enforce-version" "${VERSION_MSG}" \
   kubectl label namespace "${TEAM}" "pod-security.kubernetes.io/enforce-version=v1.28"
-[[ -z "$(kubectl get namespace "${TEAM}" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce-version}' 2>/dev/null)" ]] \
+[[ -z "$(read_version_label)" ]] \
   || fail "SECURITY: after the direct, denied kubectl label attempt, pod-security.kubernetes.io/enforce-version is set"
-pass "direct kubectl (no Argo CD): team-namespace-guard denies both an explicit value override of pod-security.kubernetes.io/enforce and an outright removal of distai.dev/team; neither label changed"
+pass "direct kubectl (no Argo CD): team-namespace-guard denies an explicit value override of pod-security.kubernetes.io/enforce, an outright removal of distai.dev/team, and introducing pod-security.kubernetes.io/enforce-version; none of the three changed anything"
 
 # Mutation check, same shape as check 9: delete team-namespace-guard-binding,
-# show both of the SAME two direct attempts now succeed (the guard, not
+# show all three of the SAME direct attempts now succeed (the guard, not
 # something else, was what denied them), restore the correct label
-# values, then restore the Binding and show both are denied again.
+# values, then restore the Binding and show all three are denied again.
 # wait_until (not an immediate attempt) covers the gap between the
 # Binding's own deletion completing and the API server's in-process
 # admission-policy cache noticing it is gone, same reasoning check 9
@@ -1357,7 +1390,7 @@ kubectl get namespace "${TEAM}" >/dev/null 2>&1 \
 introduce_version_label_succeeds() { kubectl label namespace "${TEAM}" "pod-security.kubernetes.io/enforce-version=v1.28" >/dev/null 2>&1; }
 wait_until 60 3 "direct kubectl label (enforce-version) to succeed once team-namespace-guard-binding is deleted" introduce_version_label_succeeds \
   || fail "direct kubectl label (enforce-version) did not succeed within 60s of deleting team-namespace-guard-binding -- something else (not team-namespace-guard) was the reason it was denied above"
-[[ "$(kubectl get namespace "${TEAM}" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce-version}' 2>/dev/null)" == "v1.28" ]] \
+[[ "$(read_version_label)" == "v1.28" ]] \
   || fail "pod-security.kubernetes.io/enforce-version did not actually get set to v1.28 even though the kubectl label command reported success"
 pass "mutation check (guard absent): the SAME three direct attempts check 11 showed denied all SUCCEED once team-namespace-guard-binding is deleted -- confirms the guard itself, not an unrelated cluster behavior, was responsible"
 kubectl label namespace "${TEAM}" --overwrite \
@@ -1376,7 +1409,7 @@ assert_nsguard_denied "direct kubectl (Binding restored): introducing pod-securi
   kubectl label namespace "${TEAM}" "pod-security.kubernetes.io/enforce-version=v1.28"
 [[ "$(read_team_label)" == "${TEAM}" && "$(read_psa_label)" == "restricted" ]] \
   || fail "after restoring team-namespace-guard-binding, labels are distai.dev/team='$(read_team_label)' pod-security.kubernetes.io/enforce='$(read_psa_label)', expected ${TEAM}/restricted"
-[[ -z "$(kubectl get namespace "${TEAM}" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce-version}' 2>/dev/null)" ]] \
+[[ -z "$(read_version_label)" ]] \
   || fail "after restoring team-namespace-guard-binding, pod-security.kubernetes.io/enforce-version is still set"
 
 # Scope check (round 2 review item 1): a namespace that carries a Pod
@@ -1385,7 +1418,7 @@ assert_nsguard_denied "direct kubectl (Binding restored): introducing pod-securi
 # must NOT be constrained by team-namespace-guard -- the earlier,
 # OR-based matchConditions would have constrained it; the current,
 # distai.dev/team-only gate must not.
-kubectl label namespace "${OTHER_NS}" "pod-security.kubernetes.io/enforce=baseline" \
+kubectl label namespace "${OTHER_NS}" --overwrite "pod-security.kubernetes.io/enforce=baseline" \
   || fail "kubectl label namespace ${OTHER_NS} (give it an unrelated Pod Security label for the scope check)"
 kubectl label namespace "${OTHER_NS}" --overwrite "pod-security.kubernetes.io/enforce=privileged" \
   || fail "SCOPE: relabeling pod-security.kubernetes.io/enforce on ${OTHER_NS} (which carries no distai.dev/team) was denied with team-namespace-guard-binding present -- this guard's own matchConditions is constraining a namespace it should not"

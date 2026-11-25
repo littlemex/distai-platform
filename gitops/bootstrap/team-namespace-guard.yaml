@@ -60,11 +60,12 @@
 # chart feature). Check 11 tests this policy directly with
 # `kubectl label` (no Argo CD at all), the same delete-the-Binding /
 # restore-the-Binding mutation-check shape checks 8-9 already use for
-# team-rbac-guard.yaml, and confirms the policy itself denies both an
-# explicit value override of
-# pod-security.kubernetes.io/enforce and an outright removal of
-# distai.dev/team, regardless of whether Argo CD's own reconciliation
-# ever reaches for either.
+# team-rbac-guard.yaml, and confirms the policy itself denies an
+# explicit value override of pod-security.kubernetes.io/enforce, an
+# outright removal of distai.dev/team, and an introduction of
+# pod-security.kubernetes.io/enforce-version (rule 3 below),
+# regardless of whether Argo CD's own reconciliation ever reaches for
+# any of the three.
 #
 # The fix is the same shape as team-rbac-guard.yaml's own: a
 # ValidatingAdmissionPolicy that runs on every UPDATE of a Namespace
@@ -138,19 +139,17 @@
 # policy says nothing about annotations, or about any OTHER label a
 # team's own managedNamespaceMetadata might set or remove -- only these
 # three specific, security-relevant keys. resourceRules below also
-# names the Namespace's own status and finalize subresources,
-# defensively and unverified: whether either subresource's own update
-# strategy on this Kubernetes version lets a client change ObjectMeta
-# (labels included) through --subresource=status or
-# --subresource=finalize is not checked against a real API server
-# (this PR's own real-hardware budget was spent on checks 10-11
-# instead, and the two reviewers of this exact point disagreed with
-# each other on which fields each strategy resets, from memory, which
-# is itself a reason not to assert either behavior here) -- matched
-# anyway because the cost of matching a request that may never
-# actually be able to change a label is zero, and leaving either
-# subresource out on an untested assumption that it is safe to is not
-# a defensible default for a security control.
+# names the Namespace's own status and finalize subresources -- both
+# needed, confirmed on a real Kubernetes 1.30 API server (etcd +
+# kube-apiserver via envtest, no containers, run on the repo's own CI
+# runner, not EKS): a plain `Status().Update` and a plain
+# `SubResource("finalize").Update` BOTH change metadata.labels when
+# nothing blocks them (an update strategy resetting ObjectMeta for
+# either subresource, which an earlier draft of this comment assumed
+# from memory, is not what Kubernetes 1.30 actually does), and this
+# policy's own validations correctly deny the same label change
+# through the status subresource that check 11's own direct kubectl
+# probe already confirmed through the main resource.
 #
 # Scope: matchConstraints.resourceRules matches UPDATE on the core/v1
 # Namespace resource and its status and finalize subresources, all

@@ -95,16 +95,20 @@
 # was checked against the two real charts issue #57 item 1 named
 # (examples/inference/vllm/disagg-pd-llmd and
 # examples/inference/sglang/disagg-pd-llmd, both at
-# feat/disagg-pd-reference@246b7ef) with a real sync through this exact
-# script's own AppProject, not merely a server-side dry run
-# (infra/foundation/tests/4.argocd-impersonation.sh's own checks 12-13):
-# both charts' own sidecar Role, and their shared llm-d-router-gateway
-# dependency chart's own namespaced Role, fit the allow-list once it
-# was widened to include inferencepools (inference.networking.k8s.io)
-# and inferenceobjectives/inferencemodelrewrites (llm-d.ai) -- see
-# team-rbac-guard.yaml's own comment on that widening for exactly which
-# rule needed which resource, and why no chart-side change was needed
-# instead. The AppProject's own namespaceResourceWhitelist below (step
+# feat/disagg-pd-reference@246b7ef): an EARLIER form of
+# infra/foundation/tests/4.argocd-impersonation.sh's own checks 12-13
+# synced both charts through this exact script's own AppProject on
+# real hardware and found both charts' own sidecar Role, and their
+# shared llm-d-router-gateway dependency chart's own namespaced Role,
+# fit the allow-list once it was widened to include inferencepools
+# (inference.networking.k8s.io) and inferenceobjectives/inferencemodelrewrites
+# (llm-d.ai). Checks 12-13 were since revised (scoped lookups, a Pod
+# check) and have not themselves been re-run against real hardware --
+# stated plainly rather than implied, since the real-hardware budget
+# for this PR is exhausted. See team-rbac-guard.yaml's own comment on
+# the widening for exactly which rule needed which resource, and why
+# no chart-side change was needed instead. The AppProject's own
+# namespaceResourceWhitelist below (step
 # 4) was widened the same way, for the two actual object KINDS (not
 # merely RBAC content) those charts render that were missing before:
 # InferencePool (inference.networking.k8s.io) and HTTPRoute
@@ -516,9 +520,12 @@ spec:
     # values -- that chart's own README states the Gateway, its
     # GatewayClass, the Gateway implementation and the Gateway API CRDs
     # themselves are cluster-scoped and administrator-installed, never
-    # rendered by this chart). Confirmed by a real sync, not merely a
-    # dry run: infra/foundation/tests/4.argocd-impersonation.sh's own
-    # checks 12-13. Caveat (not checked by that real sync, which
+    # rendered by this chart). An EARLIER form of
+    # infra/foundation/tests/4.argocd-impersonation.sh's own checks
+    # 12-13 confirmed this with a real sync, not merely a dry run;
+    # that form has since been revised and not re-run (the real-hardware
+    # budget for this PR is exhausted) -- stated plainly, not implied.
+    # Caveat (not checked by that real sync, which
     # installed no Gateway at all): whether a team's own HTTPRoute can
     # claim a hostname another team also expects depends entirely on
     # the shared, admin-installed Gateway's own listeners and
