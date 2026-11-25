@@ -81,6 +81,7 @@ GROUND_TRUTH: dict[str, tuple[int, int]] = {
     "g6e.48xlarge": (4, 4),
     "g6e.12xlarge": (1, 1),
     "g7.48xlarge": (2, 2),
+    "trn2.3xlarge": (1, 1),
 }
 
 # Issue #50 case 4 (E == C - 1): the facts DescribeInstanceTypes does not
@@ -229,6 +230,18 @@ def check_pairs(fixtures_dir: str) -> list[str]:
     check("nic-layout fixtures: every describe.json has a networkInterfaces.yaml and the reverse", not orphans, f"orphans: {orphans}")
     missing = sorted(set(GROUND_TRUTH) - set(pairs))
     check(f"nic-layout fixtures: all {len(GROUND_TRUTH)} issue #50 instance types have a fixture pair", not missing, f"missing: {missing}")
+    # The reverse direction matters too: generator.py's own E == C path (unlike
+    # E == C - 1, which exceptions.json already gates) renders for ANY family
+    # whose numbers happen to fit, with no per-family allowlist of its own
+    # (render-network-interfaces.py's module docstring explains why). GROUND_TRUTH
+    # is this platform's own record of which instance types it has actually
+    # reviewed and confirmed enough to ship a fixture for (trn2.48xlarge is the
+    # named counterexample: same E == C shape, deliberately not here). An extra
+    # fixture pair with no GROUND_TRUTH entry would otherwise pass every other
+    # check in this file silently, so it is refused here instead.
+    extra = sorted(set(pairs) - set(GROUND_TRUTH))
+    check("nic-layout fixtures: no fixture pair exists for an instance type missing from GROUND_TRUTH "
+          "(add an entry here, deliberately, before shipping a new fixture)", not extra, f"extra: {extra}")
     return pairs
 
 
@@ -543,6 +556,13 @@ def selftest() -> int:
             ["have a fixture pair"],
         ),
         ("orphan describe.json", _oracle(), lambda r, fx: write(fx, "x1.large" + DESCRIBE_SUFFIX, json.dumps(_describe(2, 2))), ["and the reverse"]),
+        (
+            "extra fixture pair for an instance type missing from GROUND_TRUTH (an E == C family nobody confirmed)",
+            _oracle(),
+            lambda r, fx: (write(fx, "zz9.99xlarge" + DESCRIBE_SUFFIX, json.dumps(_describe(2, 2))),
+                           write(fx, "zz9.99xlarge" + LAYOUT_SUFFIX, _layout_yaml(expected_layout("zz9.99xlarge", 2, 2)))),
+            ["add an entry here, deliberately"],
+        ),
         ("exceptions confirmed true", _oracle(), lambda r, fx: write_exc(r, json.dumps({"p6-b300": {"confirmed": True, "source": "awsome-distributed-ai"}})), ["confirmed is"]),
         ("exceptions confirmed as the string false", _oracle(), lambda r, fx: write_exc(r, json.dumps({"p6-b300": {"confirmed": "false", "source": "awsome-distributed-ai"}})), ["confirmed is"]),
         ("exceptions source missing", _oracle(), lambda r, fx: write_exc(r, json.dumps({"p6-b300": {"confirmed": False}})), ["source is"]),

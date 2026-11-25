@@ -1,162 +1,168 @@
 {
-    "NetworkPerformance": "6400 Gigabit",
-    "MaximumNetworkInterfaces": 68,
-    "MaximumNetworkCards": 17,
-    "DefaultNetworkCardIndex": 0,
-    "NetworkCards": [
-        {
-            "NetworkCardIndex": 0,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 350.0,
-            "PeakBandwidthInGbps": 350.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        },
-        {
-            "NetworkCardIndex": 1,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 400.0,
-            "PeakBandwidthInGbps": 400.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        },
-        {
-            "NetworkCardIndex": 2,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 400.0,
-            "PeakBandwidthInGbps": 400.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        },
-        {
-            "NetworkCardIndex": 3,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 400.0,
-            "PeakBandwidthInGbps": 400.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        },
-        {
-            "NetworkCardIndex": 4,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 400.0,
-            "PeakBandwidthInGbps": 400.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        },
-        {
-            "NetworkCardIndex": 5,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 400.0,
-            "PeakBandwidthInGbps": 400.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        },
-        {
-            "NetworkCardIndex": 6,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 400.0,
-            "PeakBandwidthInGbps": 400.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        },
-        {
-            "NetworkCardIndex": 7,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 400.0,
-            "PeakBandwidthInGbps": 400.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        },
-        {
-            "NetworkCardIndex": 8,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 400.0,
-            "PeakBandwidthInGbps": 400.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        },
-        {
-            "NetworkCardIndex": 9,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 400.0,
-            "PeakBandwidthInGbps": 400.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        },
-        {
-            "NetworkCardIndex": 10,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 400.0,
-            "PeakBandwidthInGbps": 400.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        },
-        {
-            "NetworkCardIndex": 11,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 400.0,
-            "PeakBandwidthInGbps": 400.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        },
-        {
-            "NetworkCardIndex": 12,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 400.0,
-            "PeakBandwidthInGbps": 400.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        },
-        {
-            "NetworkCardIndex": 13,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 400.0,
-            "PeakBandwidthInGbps": 400.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        },
-        {
-            "NetworkCardIndex": 14,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 400.0,
-            "PeakBandwidthInGbps": 400.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        },
-        {
-            "NetworkCardIndex": 15,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 400.0,
-            "PeakBandwidthInGbps": 400.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        },
-        {
-            "NetworkCardIndex": 16,
-            "NetworkPerformance": "400 Gigabit",
-            "MaximumNetworkInterfaces": 4,
-            "BaselineBandwidthInGbps": 400.0,
-            "PeakBandwidthInGbps": 400.0,
-            "DefaultEnaQueueCountPerInterface": 32
-        }
-    ],
-    "Ipv4AddressesPerInterface": 50,
-    "Ipv6AddressesPerInterface": 50,
-    "Ipv6Supported": true,
-    "EnaSupport": "required",
-    "EfaSupported": true,
-    "EfaInfo": {
-        "MaximumEfaInterfaces": 16
+  "_source": {
+    "instanceType": "p6-b300.48xlarge",
+    "region": "us-east-1",
+    "capturedUtc": "2026-11-25",
+    "command": "aws ec2 describe-instance-types --instance-types p6-b300.48xlarge --query 'InstanceTypes[0].NetworkInfo' --output json"
+  },
+  "NetworkPerformance": "6400 Gigabit",
+  "MaximumNetworkInterfaces": 68,
+  "MaximumNetworkCards": 17,
+  "DefaultNetworkCardIndex": 0,
+  "NetworkCards": [
+    {
+      "NetworkCardIndex": 0,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 350.0,
+      "PeakBandwidthInGbps": 350.0,
+      "DefaultEnaQueueCountPerInterface": 32
     },
-    "EncryptionInTransitSupported": true,
-    "EnaSrdSupported": true,
-    "FlexibleEnaQueuesSupport": "unsupported",
-    "ConnectionTrackingConfiguration": {
-        "DefaultTcpEstablishedTimeout": 350,
-        "DefaultUdpTimeout": 30,
-        "DefaultUdpStreamTimeout": 180
+    {
+      "NetworkCardIndex": 1,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 400.0,
+      "PeakBandwidthInGbps": 400.0,
+      "DefaultEnaQueueCountPerInterface": 32
     },
-    "SecondaryNetworkSupported": false,
-    "Ipv4AddressesPerSecondaryInterface": 0
+    {
+      "NetworkCardIndex": 2,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 400.0,
+      "PeakBandwidthInGbps": 400.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 3,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 400.0,
+      "PeakBandwidthInGbps": 400.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 4,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 400.0,
+      "PeakBandwidthInGbps": 400.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 5,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 400.0,
+      "PeakBandwidthInGbps": 400.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 6,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 400.0,
+      "PeakBandwidthInGbps": 400.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 7,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 400.0,
+      "PeakBandwidthInGbps": 400.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 8,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 400.0,
+      "PeakBandwidthInGbps": 400.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 9,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 400.0,
+      "PeakBandwidthInGbps": 400.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 10,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 400.0,
+      "PeakBandwidthInGbps": 400.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 11,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 400.0,
+      "PeakBandwidthInGbps": 400.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 12,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 400.0,
+      "PeakBandwidthInGbps": 400.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 13,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 400.0,
+      "PeakBandwidthInGbps": 400.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 14,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 400.0,
+      "PeakBandwidthInGbps": 400.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 15,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 400.0,
+      "PeakBandwidthInGbps": 400.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    },
+    {
+      "NetworkCardIndex": 16,
+      "NetworkPerformance": "400 Gigabit",
+      "MaximumNetworkInterfaces": 4,
+      "BaselineBandwidthInGbps": 400.0,
+      "PeakBandwidthInGbps": 400.0,
+      "DefaultEnaQueueCountPerInterface": 32
+    }
+  ],
+  "Ipv4AddressesPerInterface": 50,
+  "Ipv6AddressesPerInterface": 50,
+  "Ipv6Supported": true,
+  "EnaSupport": "required",
+  "EfaSupported": true,
+  "EfaInfo": {
+    "MaximumEfaInterfaces": 16
+  },
+  "EncryptionInTransitSupported": true,
+  "EnaSrdSupported": true,
+  "FlexibleEnaQueuesSupport": "unsupported",
+  "ConnectionTrackingConfiguration": {
+    "DefaultTcpEstablishedTimeout": 350,
+    "DefaultUdpTimeout": 30,
+    "DefaultUdpStreamTimeout": 180
+  },
+  "SecondaryNetworkSupported": false,
+  "Ipv4AddressesPerSecondaryInterface": 0
 }

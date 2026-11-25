@@ -27,6 +27,26 @@ Karpenter's EC2NodeClass requires the primary `interface` entry on
 networkCardIndex 0, deviceIndex 0, and accepts only `interface` and `efa-only`
 as interfaceType, which is why card 0 is always split into two entries.
 
+The E == C path is NOT gated by an exceptions.json-style per-family allowlist:
+it renders for any instance type whose own C and E happen to match, including
+one this platform has not independently confirmed the deviceIndex convention
+for (trn2.48xlarge is exactly this case -- see tools/README.md's Known
+issues). Only E == C - 1 is refused for an unlisted family, because the API
+gives no signal at all for that shape (see the module docstring's case 2
+above); E == C needs no such table because every family this generator has
+onboarded so far agrees on deviceIndex 1, but that is an empirical pattern
+across the onboarded set, not something this script derives or enforces. The
+actual safeguard for an unconfirmed E == C family is that nobody commits a
+fixture for it until a named source or a real node confirms it -- a review
+discipline, not a check this script performs.
+
+If the describe JSON carries an optional `_source.instanceType` field (this
+platform's own fixtures do, recording where the capture came from), it is
+cross-checked against --instance-type and a mismatch is refused: this stops
+an exceptions.json entry meant for one family from being applied to a
+different --describe-json/--instance-type pairing by mistake. The field is
+optional and ignored for a describe JSON that lacks it.
+
 Output goes to stdout as a YAML list, byte-for-byte deterministic for the same
 inputs; errors go to stderr with a non-zero exit and nothing on stdout.
 """
@@ -44,6 +64,11 @@ def layout(network_info, instance_type, exceptions):
     """Return (header comment lines, [(networkCardIndex, deviceIndex, interfaceType)])."""
     if not isinstance(network_info, dict):
         raise Refused(f"{instance_type}: the describe JSON must be the NetworkInfo object itself")
+    source = network_info.get("_source")
+    if isinstance(source, dict) and "instanceType" in source and source["instanceType"] != instance_type:
+        raise Refused(f"{instance_type}: --describe-json was captured for instance type "
+                      f"{source['instanceType']!r} (its own _source.instanceType), not {instance_type!r}; "
+                      "pass the fixture captured for this instance type, not a borrowed one")
     cards = network_info.get("MaximumNetworkCards")
     efa_info = network_info.get("EfaInfo")
     efa = efa_info.get("MaximumEfaInterfaces", 0) if isinstance(efa_info, dict) else 0
@@ -69,8 +94,12 @@ def layout(network_info, instance_type, exceptions):
         excluded = entry.get("excludedCard")
         secondary = entry.get("secondaryDeviceIndex")
         if type(excluded) is not int or excluded != 0:
-            raise Refused(f"exceptions.json[{family!r}].excludedCard is {excluded!r}; only 0 is supported, "
-                          "because Karpenter requires the primary interface on networkCardIndex 0")
+            raise Refused(f"exceptions.json[{family!r}].excludedCard is {excluded!r}; only 0 is supported. "
+                          "This code always puts the primary interface on the excluded card, which Karpenter "
+                          "only accepts on networkCardIndex 0 -- that is correct for p6-b300, where card 0 "
+                          "happens to be both the excluded one and the primary one, but would need different "
+                          "code (not just a different value here) for a family where those two were not the "
+                          "same card, so this refuses rather than emitting a layout Karpenter would reject")
         if type(secondary) is not int or secondary < 0:
             raise Refused(f"exceptions.json[{family!r}].secondaryDeviceIndex must be a non-negative integer")
         entries = [(excluded, 0, "interface")]

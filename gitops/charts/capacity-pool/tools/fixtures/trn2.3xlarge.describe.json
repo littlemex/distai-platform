@@ -1,0 +1,40 @@
+{
+  "_source": {
+    "instanceType": "trn2.3xlarge",
+    "region": "ap-southeast-4",
+    "capturedUtc": "2026-11-25",
+    "command": "aws ec2 describe-instance-types --instance-types trn2.3xlarge --query 'InstanceTypes[0].NetworkInfo' --output json"
+  },
+  "NetworkPerformance": "200 Gigabit",
+  "MaximumNetworkInterfaces": 2,
+  "MaximumNetworkCards": 1,
+  "DefaultNetworkCardIndex": 0,
+  "NetworkCards": [
+    {
+      "NetworkCardIndex": 0,
+      "NetworkPerformance": "50 Gigabit",
+      "MaximumNetworkInterfaces": 2,
+      "BaselineBandwidthInGbps": 50.0,
+      "PeakBandwidthInGbps": 50.0,
+      "DefaultEnaQueueCountPerInterface": 16
+    }
+  ],
+  "Ipv4AddressesPerInterface": 15,
+  "Ipv6AddressesPerInterface": 15,
+  "Ipv6Supported": true,
+  "EnaSupport": "required",
+  "EfaSupported": true,
+  "EfaInfo": {
+    "MaximumEfaInterfaces": 1
+  },
+  "EncryptionInTransitSupported": true,
+  "EnaSrdSupported": false,
+  "FlexibleEnaQueuesSupport": "unsupported",
+  "ConnectionTrackingConfiguration": {
+    "DefaultTcpEstablishedTimeout": 432000,
+    "DefaultUdpTimeout": 30,
+    "DefaultUdpStreamTimeout": 180
+  },
+  "SecondaryNetworkSupported": false,
+  "Ipv4AddressesPerSecondaryInterface": 0
+}
