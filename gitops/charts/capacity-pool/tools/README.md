@@ -16,9 +16,11 @@ result is committed under `fixtures/`. Issue #50 itself proposed a script that
 takes `--region`/`--instance-type` and calls `DescribeInstanceTypes` directly;
 this implementation instead takes `--describe-json` (a file holding the
 already-captured, trimmed response) so that `gitops/tests/0.static.sh`'s own
-check of this generator needs no AWS credentials and no network access,
-matching every other check in that file. The onboarding section below is the
-one place the live AWS call actually happens.
+check of this generator needs no AWS credentials, matching every check in
+that file (a few other sections do reach the network for a public OCI
+registry or schema catalog; none needs AWS credentials, which is the line
+this generator stays on too). The onboarding section below is the one place
+the live AWS call actually happens.
 
 ## Files
 
