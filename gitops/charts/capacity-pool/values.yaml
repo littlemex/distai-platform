@@ -78,6 +78,8 @@ pool:
   #     - networkCardIndex: 0
   #       deviceIndex: 1
   #       interfaceType: efa-only
+  # For a multi-card instance type, generate the list instead of writing it
+  # by hand: see tools/README.md (#50).
   networkInterfaces: []
 
 # Used only when pool.capacityType is "reserved": renders

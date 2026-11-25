@@ -73,7 +73,8 @@ match it "targeted" by default.
     networkCardIndex, since this chart's values are a flat list applied
     as-is - see values.yaml's own comment for the one-EFA-device shape
     this pairs with (networkCardIndex 0, deviceIndex 0 "interface" +
-    deviceIndex 1 "efa-only").
+    deviceIndex 1 "efa-only"). For every other shape, generate the list with
+    tools/render-network-interfaces.py (see tools/README.md, #50).
   */}}
   {{- with .Values.pool.networkInterfaces }}
   networkInterfaces:

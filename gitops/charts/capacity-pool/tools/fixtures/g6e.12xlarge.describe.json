@@ -1,0 +1,34 @@
+{
+    "NetworkPerformance": "100 Gigabit",
+    "MaximumNetworkInterfaces": 10,
+    "MaximumNetworkCards": 1,
+    "DefaultNetworkCardIndex": 0,
+    "NetworkCards": [
+        {
+            "NetworkCardIndex": 0,
+            "NetworkPerformance": "100 Gigabit",
+            "MaximumNetworkInterfaces": 10,
+            "BaselineBandwidthInGbps": 100.0,
+            "PeakBandwidthInGbps": 100.0,
+            "DefaultEnaQueueCountPerInterface": 32
+        }
+    ],
+    "Ipv4AddressesPerInterface": 30,
+    "Ipv6AddressesPerInterface": 30,
+    "Ipv6Supported": true,
+    "EnaSupport": "required",
+    "EfaSupported": true,
+    "EfaInfo": {
+        "MaximumEfaInterfaces": 1
+    },
+    "EncryptionInTransitSupported": true,
+    "EnaSrdSupported": true,
+    "FlexibleEnaQueuesSupport": "unsupported",
+    "ConnectionTrackingConfiguration": {
+        "DefaultTcpEstablishedTimeout": 432000,
+        "DefaultUdpTimeout": 30,
+        "DefaultUdpStreamTimeout": 180
+    },
+    "SecondaryNetworkSupported": false,
+    "Ipv4AddressesPerSecondaryInterface": 0
+}
