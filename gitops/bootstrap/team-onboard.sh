@@ -308,7 +308,7 @@ kubectl apply -f "${SCRIPT_DIR}/team-rbac-guard.yaml" \
   || { echo "kubectl apply gitops/bootstrap/team-rbac-guard.yaml" >&2; exit 1; }
 echo "applied gitops/bootstrap/team-rbac-guard.yaml (ValidatingAdmissionPolicy team-rbac-guard + its Binding)" >&2
 
-# --- 1b. the same boundary, for the Namespace object's own two
+# --- 1b. the same boundary, for the Namespace object's own
 # -------  security-relevant labels (cluster-wide, once) -----------------
 # team-rbac-guard.yaml's own namespaceSelector decides which namespaces
 # it constrains at all by checking whether the namespace carries

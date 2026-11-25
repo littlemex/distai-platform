@@ -103,30 +103,40 @@
 #      pod-security.kubernetes.io/enforce: privileged against the
 #      EXISTING team namespace, with team-namespace-guard-binding
 #      deleted (the discovery), and one more of the SAME Application
-#      with the Binding restored (the fix verification) -- both leave
-#      distai.dev/team and pod-security.kubernetes.io/enforce
-#      unchanged. A direct kubectl label confirms the Binding is
-#      actually deleted and inactive before the discovery sync runs,
-#      and a brand-new marker label (never protected by anything) is
-#      asserted present after both syncs, so "both unchanged" is not
-#      explained away by "the sync never ran" or "the Binding never
-#      actually came off". The fix verification reads the Namespace's own
-#      labels directly, not operationState.phase: a real-hardware run
-#      found a denied managedNamespaceMetadata patch does not fail the
-#      Application's own overall sync phase the way a denied
-#      Role/RoleBinding does in checks 2-3 (there is no Namespace
-#      entry in this Application's own manifest at all, only
-#      syncPolicy's own field, and Argo CD's own namespace-metadata
-#      reconciliation is not an ordinary synced resource) -- the
-#      Namespace's own labels are the only signal that actually says
-#      whether the write landed. On real hardware, the discovery
-#      found Argo CD's own managedNamespaceMetadata reconciliation
-#      never actually attempts to overwrite either pre-existing label
-#      at all (with or without the guard) -- so check 10 alone never
-#      exercises the guard's own denial; check 11 below closes that.
+#      with the Binding restored (the fix verification) -- the
+#      assertion in both phases is that distai.dev/team and
+#      pod-security.kubernetes.io/enforce stay unchanged. A direct
+#      kubectl overwrite of the protected pod-security.kubernetes.io/enforce
+#      label itself (not an unprotected key) confirms the Binding is
+#      actually deleted and inactive before the discovery sync runs. A
+#      brand-new marker label is asserted present after the discovery
+#      sync specifically (ruling out "the sync's own
+#      managedNamespaceMetadata step never ran at all" as an
+#      explanation for "nothing changed" on THAT phase), then removed
+#      before the fix-verification phase and read again afterward
+#      without a specific pass/fail expectation either way -- present
+#      or absent are both consistent with the two protected labels
+#      staying correct; see that read's own comment for what it does
+#      and does not distinguish. The fix verification reads the
+#      Namespace's own labels directly, not operationState.phase: there
+#      is no Namespace entry in this Application's own manifest at
+#      all, only syncPolicy's own field, and Argo CD's own
+#      namespace-metadata reconciliation is not an ordinary synced
+#      resource the way a denied Role/RoleBinding is in checks 2-3 --
+#      whether a denial there would even surface as a non-Succeeded
+#      phase is untested (the two real-hardware runs below never
+#      produced a denial to observe either way), so the Namespace's
+#      own labels, not the phase, are what this check actually relies
+#      on. On two real-hardware runs of an
+#      earlier form of this check (before this exact wording and the
+#      marker-clearing fix above, not re-run since), Argo CD's own
+#      managedNamespaceMetadata reconciliation did not visibly attempt
+#      to overwrite either pre-existing label, with or without the
+#      guard -- those two runs did not exercise the guard's own
+#      denial either time, which is what check 11 below is for.
 #  11. (mutation check, decouples the guard's own correctness from
-#      check 10's finding that Argo CD's own reconciliation never
-#      attempts the overwrite): the same two attempts as check 10 --
+#      check 10's own finding that two prior runs of it never showed
+#      Argo CD actually attempting the overwrite): the same two attempts as check 10 --
 #      overwriting pod-security.kubernetes.io/enforce to privileged,
 #      and removing distai.dev/team outright -- applied directly with
 #      kubectl (no Argo CD, same cluster-admin-equivalent identity this
@@ -250,7 +260,6 @@ cleanup() {
       if kubectl get nodes >/dev/null 2>&1; then
         local argons; argons="$(tf_out argocd_namespace 2>/dev/null || echo argocd)"
         kubectl delete application team-a-chart team-a-rbac-probe team-a-clusteradmin-probe team-a-cross-ns team-a-clusterrole team-a-nsmeta-strip team-a-vllm-disagg team-a-sglang-disagg -n "${argons}" --ignore-not-found --wait=false >/dev/null 2>&1
-        kubectl delete validatingadmissionpolicybinding team-namespace-guard-binding --ignore-not-found >/dev/null 2>&1
         kubectl apply -f "${REPO_ROOT}/gitops/bootstrap/team-namespace-guard.yaml" >/dev/null 2>&1 || true
         kubectl delete appproject "${TEAM}" -n "${argons}" --ignore-not-found --wait=false >/dev/null 2>&1
         kubectl delete namespace "${TEAM}" "${OTHER_NS}" --ignore-not-found --wait=false >/dev/null 2>&1
@@ -961,7 +970,23 @@ rules:
     verbs: ["get", "patch"]
 RBAC
 )" "${ALLOWLIST_MSG}"
-pass "CHECK 8/13: ten distinct shapes (RoleBinding->ClusterRole; a Role granting the impersonate verb, the rbac.authorization.k8s.io group, a wildcard resources with an allowed apiGroups, a wildcard apiGroups with allowed resources/verbs [isolating that clause specifically], Secrets, serviceaccounts/token, pods/exec, a wildcard-subresource form, or 'patch' on namespaces itself) are all denied by a direct kubectl apply (no Argo CD) by the cluster-admin-equivalent identity this script runs as, each naming the guard's own rule in the refusal; no object was created for any of the ten"
+
+# Verb-narrowing for the three resources this PR's own allow-list
+# widening added (issue #57 item 1): inferencepools, read-only in both
+# real charts' own Role, must not also grant delete.
+assert_rbac_denied role guard-check-inferencepools-delete "$(cat <<RBAC
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: guard-check-inferencepools-delete
+  namespace: ${TEAM}
+rules:
+  - apiGroups: ["inference.networking.k8s.io"]
+    resources: ["inferencepools"]
+    verbs: ["get", "delete"]
+RBAC
+)" "${ALLOWLIST_MSG}"
+pass "CHECK 8/13: eleven distinct shapes (RoleBinding->ClusterRole; a Role granting the impersonate verb, the rbac.authorization.k8s.io group, a wildcard resources with an allowed apiGroups, a wildcard apiGroups with allowed resources/verbs [isolating that clause specifically], Secrets, serviceaccounts/token, pods/exec, a wildcard-subresource form, 'patch' on namespaces itself, or 'delete' on inferencepools [verb-narrowing for the three resources this allow-list's own widening added]) are all denied by a direct kubectl apply (no Argo CD) by the cluster-admin-equivalent identity this script runs as, each naming the guard's own rule in the refusal; no object was created for any of the eleven"
 
 # ------------------------------------------------- 7. mutation check: delete
 # -------------------------------------------------    the guard's own
@@ -1050,10 +1075,8 @@ pass "CHECK 9/13 (mutation check): the SAME wildcard-granting Role check 8 showe
 # -------------------------------------------------------    first remaining
 # -------------------------------------------------------    caveat:
 # -------------------------------------------------------    managedNamespaceMetadata
-# -------------------------------------------------------    cannot strip or
-# -------------------------------------------------------    weaken the
+# -------------------------------------------------------    and the
 # -------------------------------------------------------    Namespace's own
-# -------------------------------------------------------    two
 # -------------------------------------------------------    security-relevant
 # -------------------------------------------------------    labels
 
@@ -1086,9 +1109,23 @@ ORIG_PSA_LABEL="$(read_psa_label)"
   || fail "namespace ${TEAM} does not carry pod-security.kubernetes.io/enforce=restricted before the managedNamespaceMetadata probe (got '${ORIG_PSA_LABEL}')"
 
 read_marker_label() { kubectl get namespace "${TEAM}" -o jsonpath='{.metadata.labels.distai\.dev/nsmeta-probe-marker}' 2>/dev/null; }
+# Captures stderr separately and fails loudly on it, rather than
+# folding it into 2>/dev/null the way an earlier version of
+# read_ns_label did (the bug this file's own check 10 comment already
+# describes) -- an empty result from THIS function means "the
+# Namespace is genuinely absent from syncResult.resources", not "the
+# jsonpath itself errored and this masked it".
 sync_result_for_namespace() {
-  kubectl get application team-a-nsmeta-strip -n "${ARGOCD_NAMESPACE}" \
-    -o jsonpath="{.status.operationState.syncResult.resources[?(@.kind=='Namespace')]}" 2>/dev/null
+  local out err rc
+  err="$(mktemp)"
+  out="$(kubectl get application team-a-nsmeta-strip -n "${ARGOCD_NAMESPACE}" \
+    -o jsonpath="{.status.operationState.syncResult.resources[?(@.kind=='Namespace')]}" 2>"${err}")"
+  rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    fail "sync_result_for_namespace: kubectl get application team-a-nsmeta-strip failed (exit ${rc}): $(cat "${err}")"
+  fi
+  rm -f "${err}"
+  echo -n "${out}"
 }
 
 apply_nsmeta_strip_app() {
@@ -1126,12 +1163,18 @@ kubectl delete validatingadmissionpolicybinding team-namespace-guard-binding \
 # CD attempted a write", so this test's own later finding about Argo CD's
 # own behavior cannot be explained by a Binding-deletion propagation delay
 # instead.
-DIRECT_PROBE_LABEL="pre-sync-direct-probe"
-kubectl label namespace "${TEAM}" --overwrite "distai.dev/${DIRECT_PROBE_LABEL}=1" \
-  || fail "direct kubectl label (${DIRECT_PROBE_LABEL}) did not succeed right after deleting team-namespace-guard-binding -- the Binding's own deletion has not actually taken effect yet"
-kubectl label namespace "${TEAM}" "distai.dev/${DIRECT_PROBE_LABEL}-" \
-  || fail "kubectl label namespace ${TEAM} (remove the ${DIRECT_PROBE_LABEL} marker before the discovery sync)"
-pass "confirmed team-namespace-guard-binding is deleted and inactive (a plain kubectl label succeeded) before triggering the discovery sync below"
+# A probe on a key the policy does NOT protect would succeed whether
+# the Binding is active or not, and prove nothing -- this overwrites
+# pod-security.kubernetes.io/enforce itself (the same key check 11's
+# own overwrite_psa_succeeds uses), the one write this policy's own
+# rule 2 actually exists to deny, then restores it.
+kubectl label namespace "${TEAM}" --overwrite "pod-security.kubernetes.io/enforce=pre-sync-direct-probe" \
+  || fail "direct kubectl label (pod-security.kubernetes.io/enforce=pre-sync-direct-probe) did not succeed right after deleting team-namespace-guard-binding -- the Binding's own deletion has not actually taken effect yet"
+[[ "$(read_psa_label)" == "pre-sync-direct-probe" ]] \
+  || fail "pod-security.kubernetes.io/enforce is '$(read_psa_label)', not 'pre-sync-direct-probe', even though the direct kubectl label reported success"
+kubectl label namespace "${TEAM}" --overwrite "pod-security.kubernetes.io/enforce=restricted" \
+  || fail "kubectl label namespace ${TEAM} (restore pod-security.kubernetes.io/enforce before the discovery sync)"
+pass "confirmed team-namespace-guard-binding is deleted and inactive (a plain kubectl overwrite of the protected pod-security.kubernetes.io/enforce label itself succeeded) before triggering the discovery sync below"
 apply_nsmeta_strip_app || fail "kubectl apply Application team-a-nsmeta-strip (first attempt, guard absent)"
 trigger_sync team-a-nsmeta-strip || fail "trigger team-a-nsmeta-strip's first sync (guard absent)"
 wait_until 120 5 "team-a-nsmeta-strip's first sync operation to finish" nsmeta_strip_op_done \
@@ -1152,10 +1195,15 @@ fi
 # Argo CD's), independent of whichever way the discovery above went, so
 # the rest of this script -- and the fix-verification attempt right
 # below -- starts from the same known-good labels every other check
-# already assumed.
+# already assumed. Also removes the marker label discovery just added:
+# without this, the fix-verification phase's own read of that marker
+# would be satisfied by discovery's own leftover regardless of what
+# happens in that phase, proving nothing (a round 2 review finding).
 kubectl label namespace "${TEAM}" --overwrite \
   "distai.dev/team=${TEAM}" "pod-security.kubernetes.io/enforce=restricted" \
   || fail "kubectl label namespace ${TEAM} (restore distai.dev/team and pod-security.kubernetes.io/enforce after the discovery attempt)"
+kubectl label namespace "${TEAM}" "distai.dev/nsmeta-probe-marker-" \
+  || fail "kubectl label namespace ${TEAM} (remove discovery's own marker label before the fix-verification phase)"
 kubectl apply -f "${REPO_ROOT}/gitops/bootstrap/team-namespace-guard.yaml" \
   || fail "kubectl apply gitops/bootstrap/team-namespace-guard.yaml (restore the Binding)"
 
@@ -1176,11 +1224,12 @@ wait_until 120 5 "team-a-nsmeta-strip's retried sync operation to finish" nsmeta
 # The decisive assertion is the Namespace's own labels, not
 # operationState.phase: Argo CD's own namespace-metadata management is
 # not an ordinary synced resource (there is no Namespace entry in this
-# Application's own manifest at all, only syncPolicy's own field) --
-# a real-hardware run found it does not fail the Application's overall
-# sync phase the way a denied Role/RoleBinding does in checks 2-3
-# above, even when the Namespace PATCH underneath it was itself
-# refused. Logged as info, not asserted on, for exactly that reason.
+# Application's own manifest at all, only syncPolicy's own field), and
+# whether a denial on it would even surface as a non-Succeeded phase
+# the way a denied Role/RoleBinding does in checks 2-3 above is
+# untested here (neither real-hardware run of this check produced a
+# denial on this specific field to observe). Logged as info, not
+# asserted on, for exactly that reason.
 NSMETA_RETRY_PHASE="$(operation_phase team-a-nsmeta-strip)"
 NSMETA_PROBE_MESSAGE="$(kubectl get application team-a-nsmeta-strip -n "${ARGOCD_NAMESPACE}" \
   -o jsonpath='{.status.conditions[*].message}{.status.operationState.message}{.status.operationState.syncResult.resources[*].message}' 2>/dev/null)"
@@ -1193,12 +1242,22 @@ AFTER_FIX_MARKER_LABEL="$(read_marker_label)"
   || fail "SECURITY: after the retried team-a-nsmeta-strip sync (team-namespace-guard restored, phase ${NSMETA_RETRY_PHASE}), namespace ${TEAM}'s own distai.dev/team label is '${AFTER_FIX_TEAM_LABEL}', not '${TEAM}'"
 [[ "${AFTER_FIX_PSA_LABEL}" == "restricted" ]] \
   || fail "SECURITY: after the retried team-a-nsmeta-strip sync (team-namespace-guard restored, phase ${NSMETA_RETRY_PHASE}), namespace ${TEAM}'s own pod-security.kubernetes.io/enforce label is '${AFTER_FIX_PSA_LABEL}', not 'restricted'"
-# The marker label (not a key team-namespace-guard protects) is
-# expected to still be addable with the guard present -- confirms this
-# policy only ever blocks the two protected keys, not
-# managedNamespaceMetadata in general (its own header's own claim).
-[[ "${AFTER_FIX_MARKER_LABEL}" == "1" ]] \
-  || info "distai.dev/nsmeta-probe-marker is '${AFTER_FIX_MARKER_LABEL}', not '1', with team-namespace-guard-binding restored -- not a failure of this check (that label is not protected), but worth noting alongside the discovery phase's own same reading"
+# The marker label was removed just before this retry (not left over
+# from the discovery phase -- a round 2 review finding, the earlier
+# version of this check read discovery's own leftover here and
+# asserted nothing about this phase at all). What it reads now is
+# informative either way, not a pass/fail signal by itself: present
+# means this UPDATE as a whole was not rejected (consistent with
+# either "the guard evaluated it and had nothing to deny this time"
+# or "Argo CD did not attempt the protected fields but did add this
+# one"); absent is consistent with either "the API server rejected
+# this UPDATE as a whole" (CEL admission denies the entire write, not
+# field-by-field, so a denial on the protected fields would also keep
+# an unrelated new key from landing in the same request) or "Argo CD
+# never sends this request at all" -- this script cannot tell those
+# two apart from this read alone, which is exactly why check 11 tests
+# the policy directly instead of inferring it from this marker.
+info "distai.dev/nsmeta-probe-marker (removed before this retry) reads '${AFTER_FIX_MARKER_LABEL}' after it -- see the comment above for what that does and does not establish by itself"
 pass "CHECK 10/13 (PR #66's own first remaining caveat, closed): one sync with team-namespace-guard-binding absent and one with it restored, both against a team's own Application using syncPolicy.managedNamespaceMetadata (CreateNamespace=true, against the EXISTING team namespace ${TEAM}) to omit distai.dev/team and set pod-security.kubernetes.io/enforce: privileged -- both runs left distai.dev/team=${TEAM} and pod-security.kubernetes.io/enforce=restricted unchanged (retried-sync phase ${NSMETA_RETRY_PHASE}); check 11 below tests team-namespace-guard.yaml's own denial directly, since neither run here shows Argo CD actually attempting the overwrite"
 kubectl delete application team-a-nsmeta-strip -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 
@@ -1242,21 +1301,33 @@ kubectl delete application team-a-nsmeta-strip -n "${ARGOCD_NAMESPACE}" --wait=f
 # proven-equivalent other shape would not exercise a different code
 # path.
 
+# expected_substr lets this cover rule 3's own message text too (does
+# not share rule 1-2's "may not be removed or" wording).
 assert_nsguard_denied() {
-  local desc="$1"; shift
+  local desc="$1" expected_substr="$2"; shift 2
   local err
   err="$("$@" 2>&1)" && fail "${desc} SUCCEEDED -- team-namespace-guard did not deny it"
-  [[ "${err}" == *"may not be removed or"* ]] \
-    || fail "${desc} was refused, but not with team-namespace-guard's own message: ${err}"
+  [[ "${err}" == *"${expected_substr}"* ]] \
+    || fail "${desc} was refused, but not with team-namespace-guard's own message ('${expected_substr}'): ${err}"
 }
-assert_nsguard_denied "direct kubectl: overwriting pod-security.kubernetes.io/enforce to privileged" \
+REMOVED_MSG="may not be removed or"
+VERSION_MSG="may not introduce or change"
+assert_nsguard_denied "direct kubectl: overwriting pod-security.kubernetes.io/enforce to privileged" "${REMOVED_MSG}" \
   kubectl label namespace "${TEAM}" --overwrite "pod-security.kubernetes.io/enforce=privileged"
 [[ "$(read_psa_label)" == "restricted" ]] \
   || fail "SECURITY: after the direct, denied kubectl label attempt, pod-security.kubernetes.io/enforce is '$(read_psa_label)', not 'restricted'"
-assert_nsguard_denied "direct kubectl: removing the distai.dev/team label" \
+assert_nsguard_denied "direct kubectl: removing the distai.dev/team label" "${REMOVED_MSG}" \
   kubectl label namespace "${TEAM}" "distai.dev/team-"
 [[ "$(read_team_label)" == "${TEAM}" ]] \
   || fail "SECURITY: after the direct, denied kubectl label-removal attempt, distai.dev/team is '$(read_team_label)', not '${TEAM}'"
+# Rule 3 (added in response to a review finding that rule 2's earlier,
+# state-based form would have denied every future UPDATE once this
+# key was ever present): introducing pod-security.kubernetes.io/enforce-version
+# where it was absent must also be denied.
+assert_nsguard_denied "direct kubectl: introducing pod-security.kubernetes.io/enforce-version" "${VERSION_MSG}" \
+  kubectl label namespace "${TEAM}" "pod-security.kubernetes.io/enforce-version=v1.28"
+[[ -z "$(kubectl get namespace "${TEAM}" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce-version}' 2>/dev/null)" ]] \
+  || fail "SECURITY: after the direct, denied kubectl label attempt, pod-security.kubernetes.io/enforce-version is set"
 pass "direct kubectl (no Argo CD): team-namespace-guard denies both an explicit value override of pod-security.kubernetes.io/enforce and an outright removal of distai.dev/team; neither label changed"
 
 # Mutation check, same shape as check 9: delete team-namespace-guard-binding,
@@ -1283,20 +1354,45 @@ kubectl get namespace "${TEAM}" >/dev/null 2>&1 \
   || fail "namespace ${TEAM} no longer exists -- an empty label read below would misread as 'removed by the guard-absent attempt' rather than 'namespace gone'"
 [[ -z "$(read_team_label)" ]] \
   || fail "distai.dev/team is still '$(read_team_label)' after a reportedly successful removal"
-pass "mutation check (guard absent): the SAME two direct attempts check 11 showed denied both SUCCEED once team-namespace-guard-binding is deleted -- confirms the guard itself, not an unrelated cluster behavior, was responsible"
+introduce_version_label_succeeds() { kubectl label namespace "${TEAM}" "pod-security.kubernetes.io/enforce-version=v1.28" >/dev/null 2>&1; }
+wait_until 60 3 "direct kubectl label (enforce-version) to succeed once team-namespace-guard-binding is deleted" introduce_version_label_succeeds \
+  || fail "direct kubectl label (enforce-version) did not succeed within 60s of deleting team-namespace-guard-binding -- something else (not team-namespace-guard) was the reason it was denied above"
+[[ "$(kubectl get namespace "${TEAM}" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce-version}' 2>/dev/null)" == "v1.28" ]] \
+  || fail "pod-security.kubernetes.io/enforce-version did not actually get set to v1.28 even though the kubectl label command reported success"
+pass "mutation check (guard absent): the SAME three direct attempts check 11 showed denied all SUCCEED once team-namespace-guard-binding is deleted -- confirms the guard itself, not an unrelated cluster behavior, was responsible"
 kubectl label namespace "${TEAM}" --overwrite \
   "distai.dev/team=${TEAM}" "pod-security.kubernetes.io/enforce=restricted" \
   || fail "kubectl label namespace ${TEAM} (restore after the mutation check's own guard-absent attempts)"
+kubectl label namespace "${TEAM}" "pod-security.kubernetes.io/enforce-version-" \
+  || fail "kubectl label namespace ${TEAM} (remove the enforce-version label introduced during the mutation check's own guard-absent attempts)"
 kubectl apply -f "${REPO_ROOT}/gitops/bootstrap/team-namespace-guard.yaml" \
   || fail "kubectl apply gitops/bootstrap/team-namespace-guard.yaml (restore the Binding, second time)"
 sleep 10
-assert_nsguard_denied "direct kubectl (Binding restored): overwriting pod-security.kubernetes.io/enforce to privileged" \
+assert_nsguard_denied "direct kubectl (Binding restored): overwriting pod-security.kubernetes.io/enforce to privileged" "${REMOVED_MSG}" \
   kubectl label namespace "${TEAM}" --overwrite "pod-security.kubernetes.io/enforce=privileged"
-assert_nsguard_denied "direct kubectl (Binding restored): removing the distai.dev/team label" \
+assert_nsguard_denied "direct kubectl (Binding restored): removing the distai.dev/team label" "${REMOVED_MSG}" \
   kubectl label namespace "${TEAM}" "distai.dev/team-"
+assert_nsguard_denied "direct kubectl (Binding restored): introducing pod-security.kubernetes.io/enforce-version" "${VERSION_MSG}" \
+  kubectl label namespace "${TEAM}" "pod-security.kubernetes.io/enforce-version=v1.28"
 [[ "$(read_team_label)" == "${TEAM}" && "$(read_psa_label)" == "restricted" ]] \
   || fail "after restoring team-namespace-guard-binding, labels are distai.dev/team='$(read_team_label)' pod-security.kubernetes.io/enforce='$(read_psa_label)', expected ${TEAM}/restricted"
-pass "CHECK 11/13 (mutation check, team-namespace-guard tested directly): both direct attempts are denied again, by the guard's own message, once team-namespace-guard-binding is restored -- confirms check 10's own discovery (Argo CD's managedNamespaceMetadata never attempting the overwrite) does not leave the guard itself unverified"
+[[ -z "$(kubectl get namespace "${TEAM}" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce-version}' 2>/dev/null)" ]] \
+  || fail "after restoring team-namespace-guard-binding, pod-security.kubernetes.io/enforce-version is still set"
+
+# Scope check (round 2 review item 1): a namespace that carries a Pod
+# Security label for a reason that has nothing to do with this guard
+# (OTHER_NS, never onboarded as a team, carries no distai.dev/team)
+# must NOT be constrained by team-namespace-guard -- the earlier,
+# OR-based matchConditions would have constrained it; the current,
+# distai.dev/team-only gate must not.
+kubectl label namespace "${OTHER_NS}" "pod-security.kubernetes.io/enforce=baseline" \
+  || fail "kubectl label namespace ${OTHER_NS} (give it an unrelated Pod Security label for the scope check)"
+kubectl label namespace "${OTHER_NS}" --overwrite "pod-security.kubernetes.io/enforce=privileged" \
+  || fail "SCOPE: relabeling pod-security.kubernetes.io/enforce on ${OTHER_NS} (which carries no distai.dev/team) was denied with team-namespace-guard-binding present -- this guard's own matchConditions is constraining a namespace it should not"
+[[ "$(kubectl get namespace "${OTHER_NS}" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null)" == "privileged" ]] \
+  || fail "pod-security.kubernetes.io/enforce on ${OTHER_NS} did not actually change to privileged even though the kubectl label command reported success"
+pass "scope check: team-namespace-guard did not constrain ${OTHER_NS} (a namespace with a Pod Security label but no distai.dev/team) even with team-namespace-guard-binding present"
+pass "CHECK 11/13 (mutation check, team-namespace-guard tested directly): all three direct attempts are denied again, by the guard's own message, once team-namespace-guard-binding is restored -- exercises the guard's own denial directly, independent of whether any particular Argo CD sync ever reaches for the fields it protects"
 
 # ------------------------------------------------------- 9. PR #66's own
 # -------------------------------------------------------    second
@@ -1369,14 +1465,24 @@ EOF
   # The llm-d-router-gateway dependency chart's own "non-sa" Role is the
   # one that actually needed this PR's own allow-list widening
   # (inferencepools/inferenceobjectives/inferencemodelrewrites) -- its
-  # own labels carry no app.kubernetes.io/instance (confirmed by reading
-  # charts/router/templates/_helpers.tpl's own llm-d-router.labels, unlike
-  # this chart's own disagg.labels), so it is checked by its own exact,
-  # computed name instead: llm-d-router.name renders
-  # "<release-name>-epp" (lowercased, truncated to 40 chars), and rbac.yaml
-  # appends "-non-sa" -- correct for every app name this script itself
-  # chooses (already lowercase, well under 40 characters), not a general
-  # name-derivation helper.
+  # own labels carry no app.kubernetes.io/instance (that chart's own
+  # llm-d-router.labels sets only app.kubernetes.io/name and
+  # app.kubernetes.io/version, unlike this chart's own disagg.labels),
+  # so it is checked by its own exact, computed name instead:
+  # llm-d-router.name renders "<release-name>-epp" (lowercased,
+  # truncated to 40 chars), and templates/rbac.yaml appends "-non-sa".
+  # Every name in this function (this one, and the InferencePool and
+  # HTTPRoute names below) was confirmed by running `helm template`
+  # against both charts at this exact commit on the EC2 runner (not
+  # just read from the templates) -- for vllm:
+  # team-a-vllm-disagg-epp-non-sa, team-a-vllm-disagg-epp-sa,
+  # team-a-vllm-disagg-vllm-disagg-pd-llmd-routing-sidecar; for sglang:
+  # team-a-sglang-disagg-epp-non-sa, team-a-sglang-disagg-epp-sa,
+  # team-a-sglang-disagg-sglang-disagg-pd-llmd-routing-sidecar; both
+  # charts' own InferencePool and HTTPRoute are named exactly the
+  # release name, with no suffix. Every name below is correct for
+  # every app name this script itself chooses (already lowercase, well
+  # under 40 characters) -- not a general name-derivation helper.
   kubectl get role "${app}-epp-non-sa" -n "${TEAM}" >/dev/null 2>&1 \
     || fail "${app}: no Role named ${app}-epp-non-sa (the llm-d-router-gateway dependency chart's own Role, the one that needed team-rbac-guard.yaml's own inferencepools/inferenceobjectives/inferencemodelrewrites widening) was created in ${TEAM} despite a Succeeded sync"
   kubectl get inferencepool "${app}" -n "${TEAM}" >/dev/null 2>&1 \
@@ -1387,9 +1493,18 @@ EOF
   # (restricted, set by team-onboard.sh) did not reject the Pod objects
   # outright, without requiring them to reach Running -- no GPU/EFA is
   # available on this foundation-only cluster, so they are expected to
-  # stay Pending.
-  kubectl get pods -n "${TEAM}" -l "app.kubernetes.io/instance=${app}" --no-headers 2>/dev/null | grep -q . \
-    || fail "${app}: no Pod with label app.kubernetes.io/instance=${app} was created in ${TEAM} despite a Succeeded sync -- Pod Security Admission (restricted) may have rejected it"
+  # stay Pending. wait_until (not an immediate read) covers the gap
+  # between the Deployment/ReplicaSet controllers noticing the Succeeded
+  # sync and actually creating their own Pod objects. "At least one"
+  # does not rule out one compliant Pod (e.g. the prefill or decode
+  # Deployment's own) masking a different one PSA actually rejected --
+  # this chart's own values.yaml sets the same restricted-compliant
+  # securityContext shape on every container it renders, so that is a
+  # stated, accepted gap, not a claim every Pod this chart could ever
+  # render was individually checked.
+  pod_for_release_exists() { kubectl get pods -n "${TEAM}" -l "app.kubernetes.io/instance=${app}" --no-headers 2>/dev/null | grep -q .; }
+  wait_until 60 3 "at least one Pod with label app.kubernetes.io/instance=${app} to exist in ${TEAM}" pod_for_release_exists \
+    || fail "${app}: no Pod with label app.kubernetes.io/instance=${app} was created in ${TEAM} within 60s of a Succeeded sync -- Pod Security Admission (restricted) may have rejected it. (A rejected Pod would fail this check the same way a slow-to-create one would -- if this fails, confirm which by reading the ReplicaSet's own events before assuming either.)"
   pass "${check_label}: ${chart_path} (pinned at feat/disagg-pd-reference@${DISAGG_PD_REVISION}) self-synced through the SAME team project ${TEAM} with no admin pre-creating anything -- its own sidecar Role, its llm-d-router-gateway dependency chart's own namespaced Role, its InferencePool, its HTTPRoute and at least one Pod (not rejected by Pod Security Admission) were all admitted and created (phase $(operation_phase "${app}"))"
   kubectl delete application "${app}" -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 }

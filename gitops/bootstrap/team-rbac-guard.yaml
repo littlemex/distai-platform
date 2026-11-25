@@ -95,7 +95,9 @@
 #          feat/disagg-pd-reference@246b7ef): their shared sidecar
 #          Role (templates/sidecar-rbac.yaml) and the llm-d-router-gateway
 #          dependency chart's own namespaced Role
-#          (charts/router/templates/_rbac.yaml's "non-sa" Role) both
+#          (templates/rbac.yaml's "non-sa" Role; charts/router/templates/_rbac.yaml
+#          defines a separate "sa" Role, get/watch/list on pods only,
+#          already covered by the allow-list before this PR) both
 #          grant only get/watch/list on these three resources, to watch
 #          this release's own InferencePool and the InferenceObjective/
 #          InferenceModelRewrite CRs llm-d.ai defines -- all three are
