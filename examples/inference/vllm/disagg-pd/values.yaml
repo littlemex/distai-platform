@@ -1,0 +1,369 @@
+# Defaults are the safe shape: prefill and decode on different nodes, KV
+# transfer over libfabric on EFA, libfabric's own same-host behavior left
+# untouched, every Service cluster-internal.
+
+image:
+  repository: vllm/vllm-openai
+  # The -efa variant of the vLLM release image is built with vLLM's KV
+  # connectors (NIXL) and the AWS EFA userspace (libfabric) that NIXL's
+  # LIBFABRIC backend loads. Pinned by tag and by digest (multi-arch index).
+  tag: v0.34.0-efa
+  digest: sha256:c5248ff7ce6296602c730c646e8d53a42bea62bd43d60541c7076ba795ec975a
+  pullPolicy: IfNotPresent
+
+model:
+  # Hugging Face model repository id. No default: the engines refuse to start
+  # (with a message saying so) until it is set.
+  name: ""
+  # Commit or tag of the model repository; empty means the default branch.
+  # Pin it for any measurement, so two runs serve the same weights.
+  revision: ""
+  # Name clients send as "model"; empty means model.name.
+  servedModelName: ""
+  # Secret holding a Hugging Face token, for gated models. Empty: no token.
+  hfTokenSecret:
+    name: ""
+    key: token
+
+# Extended resource the accelerator device plugin advertises.
+accelerator:
+  resourceName: nvidia.com/gpu
+
+placement:
+  # Node label key that tells prefill nodes from decode nodes. Each role
+  # selects nodes where this key equals its own nodeSelectorValue, unless
+  # sameNodeMeasurement overrides both to sharedPoolValue (below).
+  nodeSelectorKey: distai.dev/pd-role
+  # false (default): both roles keep their own nodeSelectorValue (prefill,
+  # decode), so they can never land on the same node (two different pools).
+  # true: both roles' nodeSelector instead targets sharedPoolValue, a single
+  # shared pool. Pair with a pool whose NodePool.spec.limits is sized to fit
+  # both roles' combined request on exactly one instance, so Karpenter cannot
+  # launch a second node for it; combined with enforceAntiAffinity below,
+  # this is what makes the fault-injection and same-node measurement cells
+  # possible at all.
+  sameNodeMeasurement: false
+  sharedPoolValue: shared
+  # true (default): a required pod anti-affinity rule on kubernetes.io/hostname,
+  # rendered on the decode Deployment only (never on both roles - a required
+  # term on both can leave neither schedulable, each waiting on a peer that
+  # is itself waiting), keeps decode off any node running a prefill pod of
+  # this release. false: that rule is dropped. If sameNodeMeasurement is also
+  # true, a required pod affinity (toward prefill) is rendered on decode
+  # instead, to actively pull it onto prefill's own node rather than merely
+  # permitting it.
+  enforceAntiAffinity: true
+  tolerations: []
+
+transport:
+  # NIXL backend for the KV transfer: LIBFABRIC (EFA) or UCX.
+  backend: LIBFABRIC
+  # With LIBFABRIC, FI_PROVIDER=efa and FI_EFA_USE_DEVICE_RDMA=1 are always
+  # set. libfabric's EFA provider still moves a same-host transfer over its
+  # shared-memory path by default. true sets FI_EFA_ENABLE_SHM_TRANSFER=0 on
+  # prefill and decode, which forces even a same-host transfer onto the EFA
+  # device. false sets it to 1 explicitly, matching the library default
+  # (stated rather than left unset).
+  #
+  # Observed on real hardware (g7.48xlarge, 2026-11-20, placement.sameNodeMeasurement,
+  # each role's Pod already holding its own distinct physical EFA interface):
+  # both values moved identical, nonzero EFA traffic - a measurement, not a
+  # theory. The likely reason (not separately confirmed) is that Kubernetes'
+  # EFA device plugin never lets two Pods share one physical interface, and
+  # libfabric's shm bypass is keyed to both endpoints resolving to the SAME
+  # device; a difference in IPC/shared-memory namespace between two separate
+  # Pods was not ruled out either. See the disagg-pd chart's own README,
+  # "Known issues", before relying on this value for a shm-vs-EFA comparison.
+  forceEfaSameNode: false
+  # Extended resource the EFA device plugin advertises.
+  efaResourceName: vpc.amazonaws.com/efa
+  # NIXL handshake port (VLLM_NIXL_SIDE_CHANNEL_PORT); the pod IP is the host.
+  sideChannelPort: 5600
+  # What a decode engine does when it cannot load a transferred KV cache:
+  # "fail" returns an error, "recompute" silently runs the prefill again on
+  # decode (and hides a broken transfer from every measurement).
+  kvLoadFailurePolicy: fail
+  # Merged into kv_connector_extra_config next to "backends".
+  extraConnectorConfig: {}
+  # Only read with backend=UCX. NIXL's own UCX backend builds its UCX worker
+  # config by calling UCX's ucp_config_read() with the prefix "NIXL"
+  # (confirmed against ai-dynamo/nixl @52df750, src/plugins/ucx/config.cpp),
+  # which is UCX's own standard precedence: NIXL_UCX_<X> first, falling
+  # back to the plain UCX_<X> this chart sets below. UCX_TCP_PORT_RANGE
+  # ("<first>-<last>", confirmed against openucx/ucx @bcf0a63's own
+  # src/uct/tcp/tcp_iface.c PORT_RANGE config entry) fixes the TCP port
+  # UCX's own TCP transport listens on for the actual KV connection -- with
+  # this at its default of "0" (any ephemeral port the OS picks,
+  # net.ipv4.ip_local_port_range, 32768-60999 on this image's base OS), a
+  # default-deny NetworkPolicy can never name that port in advance (found
+  # on real hardware -- see this chart's own README, "Known issues", for
+  # the exact log). Rendered as an ingress port range (port/endPort) on the
+  # peer role's NetworkPolicy, from the peer role only -- disagg.validate
+  # (_helpers.tpl) rejects any range wider than 4096 ports, so this can
+  # never become 1024-65535. A real range (not a single port) on purpose:
+  # tcp_iface.c's own uct_tcp_iface_server_init only retries bind() on
+  # EADDRINUSE when first < last (or when both are unset, 0); a single
+  # fixed, nonzero port (first == last) never retries. A Pod with
+  # prefill.gpusPerEngine (or decode's) above 1 opens one UCX worker per
+  # GPU rank in the same Pod network namespace, so more than one port can
+  # be needed inside one Pod. Picked below the kernel's own default
+  # ephemeral floor (32768) so the OS never hands this same block to an
+  # unrelated outbound connection from the same Pod.
+  ucx:
+    tcpPortRange: "20000-20063"
+
+# One engine is one vLLM server process with gpusPerEngine GPUs (tensor
+# parallel degree). Total GPUs = prefill.replicas x prefill.gpusPerEngine +
+# decode.replicas x decode.gpusPerEngine; the ratio is free.
+prefill:
+  replicas: 1
+  gpusPerEngine: 1
+  # EFA devices per engine pod. Required by the LIBFABRIC backend.
+  efaDevices: 1
+  nodeSelectorValue: prefill
+  extraNodeSelector: {}
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+  extraArgs: []
+  extraEnv: []
+  # Set mps.enabled when this role's own nodeSelectorValue targets a pool
+  # whose nodes are MPS-split (capacity-pool's own accelerator.sharingLabel,
+  # e.g. "mps-2" -> mps.replicas: 2 here must match). On real hardware
+  # (#37), this chart's own un-fixed default (gpuMemoryUtilization unset)
+  # crashed repeatedly on an MPS-split node (vLLM's own startup memory
+  # check, a desired fraction near 0.92 against a reported free share of
+  # about half the physical device) -- confirmed for THIS chart, not shown
+  # to be a universal rule every vLLM chart under MPS hits the same way
+  # (../agg-baseline's own un-fixed default did not crash under the same
+  # MPS split; why the two differ is open, see
+  # examples/inference/README.md's own MPS investigation).
+  # gpuMemoryUtilization: ""
+  # (default) computes a safe fraction from mps.replicas when mps.enabled is
+  # true, and leaves vLLM's own default alone (the flag is not passed at
+  # all) when mps.enabled is false, matching this chart's behavior before
+  # this field existed. An explicit gpuMemoryUtilization is always honored,
+  # but rendering fails if it exceeds the safe ceiling this role's own
+  # mps.replicas implies -- see examples/inference/README.md's own MPS
+  # investigation for the real-hardware numbers this ceiling is based on.
+  mps:
+    enabled: false
+    replicas: 2
+  gpuMemoryUtilization: ""
+
+decode:
+  replicas: 1
+  gpusPerEngine: 1
+  efaDevices: 1
+  nodeSelectorValue: decode
+  extraNodeSelector: {}
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+  extraArgs: []
+  extraEnv: []
+  # Same shape as prefill.mps/prefill.gpuMemoryUtilization above, set
+  # independently: in the 2-node disaggregated shape this investigation
+  # tried (form (c)), only prefill's own pool was MPS-split; in the
+  # same-node colocate shape (form (b), placement.sameNodeMeasurement),
+  # both roles land on the same MPS-split pool and both needed mps.enabled
+  # for round 4's own fix to work. The two roles' nodeSelector values can
+  # point at any pool, MPS-split or not, so neither shape is assumed.
+  mps:
+    enabled: false
+    replicas: 2
+  gpuMemoryUtilization: ""
+
+engine:
+  port: 8000
+  # Shared memory for tensor-parallel workers (/dev/shm, memory-backed).
+  shmSizeLimit: 16Gi
+  # Model download cache. emptyDir re-downloads on every pod start; replace
+  # with a persistent volume source to keep the weights across restarts.
+  cacheVolume:
+    emptyDir: {}
+  # Model download and load time allowed before the engine is restarted.
+  startupTimeoutSeconds: 1800
+  # The vLLM image provides a non-root "vllm" user (UID 2000, GID 0) for
+  # exactly this; its home and cache directories are group-writable.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 2000
+    runAsGroup: 0
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+
+proxy:
+  replicas: 1
+  port: 8000
+  # How often the proxy re-resolves the prefill and decode pod addresses.
+  resolveIntervalSeconds: 5
+  resources:
+    requests:
+      cpu: "2"
+      memory: 2Gi
+    limits:
+      memory: 2Gi
+  nodeSelector: {}
+  tolerations: []
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 2000
+    runAsGroup: 0
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+
+# The client-facing Service, in front of the proxy. ClusterIP: reachable only
+# from inside the cluster. The engines have no authentication of their own.
+service:
+  type: ClusterIP
+  port: 8000
+
+metrics:
+  # Adds the vllm-metrics=true pod label and the prometheus.io/* annotations
+  # that the "vllm" scrape job in examples/inference/_shared/dashboards/
+  # scrape-configs.yaml selects on. vLLM serves /metrics on the engine port.
+  enabled: true
+
+networkPolicy:
+  # Default deny, name the exception (#63, filed as a private report
+  # "SA2"): with this off, any Pod in the cluster, in any namespace, can
+  # call an engine's HTTP port or its NIXL side channel directly, skipping
+  # the proxy the README calls the boundary. On by default.
+  enabled: true
+  # metrics.enabled's own scrape is on the SAME port as engine.port
+  # (vLLM serves /metrics there) -- unlike gitops/charts/dcgm-exporter
+  # (where nothing scrapes it yet), this chart's own default already
+  # ships the prometheus.io/* annotations and a matching scrape job
+  # (examples/inference/_shared/dashboards/scrape-configs.yaml) that
+  # discovers Pods cluster-wide via the Kubernetes API and connects
+  # straight to the Pod IP, from whatever namespace that collector
+  # itself runs in -- not necessarily this release's own namespace or
+  # this chart's own proxy/load-replay selectors above (found by a
+  # review: enabling networkPolicy with no further
+  # configuration silently stops that collector's scrapes, a benchmark
+  # chart going dark with no error anywhere). Set this to the
+  # NetworkPolicy ingress peer(s) (namespaceSelector/podSelector, same
+  # shape as a real NetworkPolicy's own spec.ingress[].from list) your
+  # own collector's Pods match, for example:
+  #   metricsScrapeFrom:
+  #     - namespaceSelector:
+  #         matchLabels:
+  #           kubernetes.io/metadata.name: monitoring
+  # Left empty by default (no collector is deployed by this platform
+  # today), which means metrics are NOT reachable while networkPolicy
+  # is enabled until this is set -- stated here rather than assumed
+  # harmless, since this chart's own default already claims the opposite.
+  #
+  # NetworkPolicy's own ports[] matches at L4 (port number), not the
+  # HTTP path -- opening engine.port for a peer opens the whole engine
+  # API to it, not only /metrics, the same way the proxy's own ingress
+  # rule above does. Scope the peer as narrowly as the real collector's
+  # own Pods allow (a podSelector naming the collector specifically,
+  # not only a namespaceSelector for its whole namespace) if anything
+  # else also runs in that namespace.
+  metricsScrapeFrom: []
+
+# Skeleton only (values and rendering, not built or measured on real
+# hardware in this chart yet): where the KV cache lives, as three tiers that
+# stack, not three exclusive choices. A disagg-pd release always needs
+# NixlConnector for the mandatory prefill-to-decode handshake (Decision 6),
+# so a tier beyond "gpu-only" here means stacking LMCacheMPConnector onto
+# that same MultiConnector list (vLLM's own confirmed stacking shape,
+# docs.vllm.ai "disaggregated prefilling", fetched 2026-11-21), never
+# replacing NixlConnector. "LMCacheMPConnector" (not "LMCacheConnector") is
+# the confirmed registered connector name for LMCache's current "mp server"
+# integration (vLLM's own vllm/distributed/kv_transfer/kv_connector/factory.py
+# register_connector calls, fetched 2026-11-21; that file also registers a
+# separate, older "LMCacheConnectorV1" this chart does not use).
+#   gpu-only (default): no change from today - NixlConnector only, no
+#     cache tiering, vLLM's own GPU-resident KV cache only.
+#   local / remote: both add LMCacheMPConnector, pointed at ONE LMCache
+#     "mp server" endpoint via kv_connector_extra_config's
+#     "lmcache.mp.host"/"lmcache.mp.port" (confirmed,
+#     docs.lmcache.ai/mp/configuration.html, fetched 2026-11-21). This
+#     chart's own vLLM-side rendering is IDENTICAL for local and remote,
+#     and mode does NOT actually select between a node-local and an
+#     off-node backend: kvCacheTier.lmcache.mpServerEndpoint is a single
+#     static value, rendered the same way into every prefill and decode
+#     Pod, which by Decision 3 run on DIFFERENT nodes - so this chart does
+#     not deploy, detect or enforce any particular topology for that
+#     endpoint, it renders the exact same value everywhere either way.
+#     Whichever backend that one mp server's own adapter configuration (its own CLI
+#     flags, e.g. --l2-adapter, not rendered here) actually uses - genuinely
+#     node-local storage, or something off-node like Amazon ElastiCache -
+#     is entirely that external process's own property, invisible to and
+#     unenforced by this chart. "local"/"remote" are kept as two words of
+#     this directory's own measurement vocabulary (matching the names
+#     used elsewhere for SGLang HiCache's genuinely distinct L1/L2/L3), to
+#     be recorded by hand alongside whichever backend the mp server was
+#     actually given for that run - not as a value this chart's rendering
+#     can tell apart or enforce.
+#
+# NOT built here, stated rather than silently assumed: (1) whether the
+# pinned vllm/vllm-openai:v0.34.0-efa image's own bundled LMCache version
+# actually speaks this "mp server" shape, or an older, different config
+# shape some other LMCache integration write-ups describe (chunk_size,
+# remote_url, remote_serde and similar in-process fields) - follow-up issue
+# B's own first real-machine check, before trusting the shape above.
+# (2) whether LMCache's current RESP (Redis/Valkey) adapter's TLS behavior
+# is compatible with what Amazon ElastiCache's distributed KV caching
+# feature needs - that adapter's own docs do not mention TLS at all
+# (checked 2026-11-21). (3) vLLM's own KV-event publisher (consumed by
+# llm-d-kv-cache-manager's indexer for cross-node routing, Decision 11)
+# describes vLLM's own GPU-resident block pool only, confirmed by reading
+# vLLM's KV-event code path - it has no visibility into anything
+# LMCacheMPConnector holds. Since the remote tier above is one shared
+# endpoint every Pod can already reach directly, this gap does not block
+# a hit on that tier (no "the node that holds it" to route to); what it
+# actually causes is the indexer/EPP's own reuse scoring under-counting
+# what is reusable at all (it only ever sees GPU-resident hits, never an
+# LMCache one), and it would block routing outright for a genuinely
+# node-local tier, if one is ever actually built (see the local/remote
+# paragraph above - this chart does not build or detect one today). Not
+# solved here either way. (4) SGLang
+# has no confirmed Redis/ElastiCache L3 backend as of this writing
+# (docs.sglang.io/advanced_features/hicache_design.html lists Mooncake,
+# DeepSeek 3FS, NIXL, AIBrix KVCache, file/fast_file - no RESP/Redis entry),
+# even though AWS's own ElastiCache announcement names SGLang as a
+# supported engine via a LMCache connector - this chart does not reconcile
+# that discrepancy, and treats SGLang's own upstream docs as the more
+# specific, more current source for what SGLang itself actually ships;
+# this tiering is vLLM-only here until that changes or is otherwise
+# confirmed.
+#
+# Prerequisite this chart does not provide: an LMCache mp server already
+# running and reachable at kvCacheTier.lmcache.mpServerEndpoint. If that
+# server's own L2 adapter points at Amazon ElastiCache (or anything else
+# off-node), that deployment's own endpoint, VPC/subnet-count and TLS
+# requirements are this prerequisite's own responsibility, not this
+# chart's - no ElastiCache (or other backing store) Terraform ships here.
+kvCacheTier:
+  mode: gpu-only
+  lmcache:
+    # host:port of LMCache's own separate "mp server" process (see this
+    # block's own comment above), for example "10.0.1.23:5555" (5555 is
+    # LMCache's own confirmed default mp port). No scheme: the chart
+    # prepends tcp:// itself (LMCache's own mp.host requires one -
+    # docs.lmcache.ai/mp/configuration.html) and fails to render if this
+    # value already has one, rather than silently mis-parsing it. Required
+    # whenever mode != gpu-only, for BOTH local and remote - this chart's
+    # own rendering does not change between them beyond that requirement.
+    # Empty: mode != gpu-only fails to render rather than silently running
+    # with no connector at all.
+    mpServerEndpoint: ""
+    # Merged into kv_connector_extra_config as-is. Unconfirmed beyond
+    # lmcache.mp.host/lmcache.mp.port above - see (1) in this block's own
+    # comment before relying on any key here.
+    extraConfig: {}

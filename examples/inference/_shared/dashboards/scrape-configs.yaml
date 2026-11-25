@@ -1,0 +1,188 @@
+# Prometheus scrape jobs that feed vllm-pd.json and sglang-pd.json. They
+# follow the shape of the sglang job in awslabs/awsome-distributed-ai
+# observability/prometheus-grafana/eks-managed-observability/scrape-configs/,
+# so they can be appended to the same collector's scrape_configs list. Keep
+# $$1/$$2 as written: that collector unescapes $$ to $. For a plain
+# Prometheus configuration, write $1/$2 instead.
+#
+# The efa-exporter job the EFA panels read comes from that same directory.
+
+# vLLM engine metrics. Scrapes pods labeled vllm-metrics=true and annotated
+# prometheus.io/scrape=true (both charts in examples/inference/vllm/ set
+# them). The pod's app.kubernetes.io/component label (prefill, decode or
+# aggregated) becomes the component label the dashboard groups by.
+- job_name: 'vllm'
+  scrape_interval: 10s
+  metrics_path: /metrics
+  kubernetes_sd_configs:
+  - role: pod
+  relabel_configs:
+  - source_labels: [__meta_kubernetes_pod_label_vllm_metrics]
+    action: keep
+    regex: "true"
+  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+    action: keep
+    regex: "true"
+  - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+    action: replace
+    regex: ([^:]+)(?::\d+)?;(\d+)
+    replacement: $$1:$$2
+    target_label: __address__
+  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+    action: replace
+    regex: (.+)
+    target_label: __metrics_path__
+  - source_labels: [__meta_kubernetes_pod_node_name]
+    action: replace
+    target_label: kubernetes_node
+  - source_labels: [__meta_kubernetes_pod_name]
+    action: replace
+    target_label: pod
+  - source_labels: [__meta_kubernetes_namespace]
+    action: replace
+    target_label: namespace
+  - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+    action: replace
+    target_label: component
+  - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+    action: replace
+    target_label: release
+
+# SGLang engine metrics (--enable-metrics). Takes the place of the upstream
+# awsome-distributed-ai "sglang" job (scrape-configs/sglang.yaml at
+# 25d5723cb62ab1f83b0f4307c28c8f3496bfaa53): the same job name and the same
+# keep rules (pods labeled sglang-metrics=true and annotated
+# prometheus.io/scrape=true), so the upstream sglang-pd.json keeps working,
+# plus the release label sglang-pd.json filters on. Append this job instead
+# of the upstream one, not next to it: Prometheus rejects two jobs with one
+# name. Both charts in examples/inference/sglang/ set these labels; the
+# role comes from app.kubernetes.io/component (prefill, decode or
+# aggregated), which the charts also copy into the plain "component" label
+# the upstream job reads.
+- job_name: 'sglang'
+  scrape_interval: 10s
+  metrics_path: /metrics
+  kubernetes_sd_configs:
+  - role: pod
+  relabel_configs:
+  - source_labels: [__meta_kubernetes_pod_label_sglang_metrics]
+    action: keep
+    regex: "true"
+  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+    action: keep
+    regex: "true"
+  - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+    action: replace
+    regex: ([^:]+)(?::\d+)?;(\d+)
+    replacement: $$1:$$2
+    target_label: __address__
+  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+    action: replace
+    regex: (.+)
+    target_label: __metrics_path__
+  - source_labels: [__meta_kubernetes_pod_node_name]
+    action: replace
+    target_label: kubernetes_node
+  - source_labels: [__meta_kubernetes_pod_name]
+    action: replace
+    target_label: pod
+  - source_labels: [__meta_kubernetes_namespace]
+    action: replace
+    target_label: namespace
+  - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+    action: replace
+    target_label: component
+  - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+    action: replace
+    target_label: release
+
+# llm-d Endpoint Picker (EPP) metrics, for examples/inference/vllm/
+# disagg-pd-llmd: llm_d_epp_* counters, including
+# llm_d_epp_disagg_decision_total{decision_type="prefill-decode"|"decode-only"},
+# one increment per routed request. Keeps pods carrying the label llm-d's
+# router chart (llm-d-router-gateway v1.0.0) puts on every EPP pod, with the
+# prometheus.io/* annotations that chart's values set. The EPP serves
+# /metrics without a token there (monitoring.prometheus.auth.enabled=false).
+- job_name: 'llm-d-epp'
+  scrape_interval: 10s
+  metrics_path: /metrics
+  kubernetes_sd_configs:
+  - role: pod
+  relabel_configs:
+  - source_labels: [__meta_kubernetes_pod_labelpresent_llm_d_router_gateway]
+    action: keep
+    regex: "true"
+  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+    action: keep
+    regex: "true"
+  - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+    action: replace
+    regex: ([^:]+)(?::\d+)?;(\d+)
+    replacement: $$1:$$2
+    target_label: __address__
+  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+    action: replace
+    regex: (.+)
+    target_label: __metrics_path__
+  - source_labels: [__meta_kubernetes_pod_name]
+    action: replace
+    target_label: pod
+  - source_labels: [__meta_kubernetes_namespace]
+    action: replace
+    target_label: namespace
+
+# Scores pushed by examples/inference/_shared/scorer/to_prom.py. The
+# Pushgateway keeps the last push of each run, so the joint-SLO goodput panel
+# shows one step per scored run. honor_labels keeps the run's own labels.
+- job_name: 'distai-pd-score'
+  scrape_interval: 30s
+  honor_labels: true
+  static_configs:
+  - targets: ['pushgateway.monitoring.svc:9091']
+
+# GPU utilization and memory, from NVIDIA's own dcgm-exporter DaemonSet -
+# either the standalone chart (helm repo
+# https://nvidia.github.io/dcgm-exporter/helm-charts, installed with
+# --set serviceMonitor.enabled=false) or the NVIDIA GPU Operator's own
+# bundled copy, whichever the cluster actually runs (see this directory's
+# own README). This platform's own metrics pipeline is the ADOT Collector
+# -> Amazon Managed Prometheus path the RFC's own Decision 7 (issue #37)
+# already names, not a Prometheus Operator, so there is no ServiceMonitor
+# CRD for either path's own default ServiceMonitor to attach to; this job
+# is this pipeline's own discovery path instead. The two paths label their
+# Pods differently (confirmed against each project's own source,
+# 2026-11-21): the standalone chart's own `dcgm-exporter.labels` helper
+# sets `app.kubernetes.io/name: dcgm-exporter`; the GPU Operator's own
+# bundled DaemonSet (assets/state-dcgm-exporter/0800_daemonset.yaml) sets
+# `app: nvidia-dcgm-exporter` instead, with no `app.kubernetes.io/name` at
+# all - the OR below matches either label alone, not both at once. A
+# different workload entirely from this directory's vllm-metrics label,
+# one per node rather than one per engine pod. The GPU Operator's own
+# DaemonSet also runs a port-less init container ("toolkit-validation")
+# in the same Pod; kubernetes_sd_configs emits one target per declared
+# port, not per container, so a second relabel keeps only the port
+# actually named "metrics" (both distributions' own exporter container
+# names its port "metrics", confirmed from each project's own source,
+# 2026-11-21) rather than scraping whatever other port a Pod happens to
+# expose.
+- job_name: 'dcgm-gpu'
+  scrape_interval: 10s
+  metrics_path: /metrics
+  kubernetes_sd_configs:
+  - role: pod
+  relabel_configs:
+  - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_label_app]
+    action: keep
+    regex: "dcgm-exporter;.*|.*;nvidia-dcgm-exporter"
+  - source_labels: [__meta_kubernetes_pod_container_port_name]
+    action: keep
+    regex: "metrics"
+  - source_labels: [__meta_kubernetes_pod_node_name]
+    action: replace
+    target_label: kubernetes_node
+  - source_labels: [__meta_kubernetes_pod_name]
+    action: replace
+    target_label: pod
+  - source_labels: [__meta_kubernetes_namespace]
+    action: replace
+    target_label: namespace

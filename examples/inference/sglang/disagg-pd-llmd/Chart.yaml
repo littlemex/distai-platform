@@ -1,0 +1,28 @@
+apiVersion: v2
+name: sglang-disagg-pd-llmd
+description: >-
+  SGLang prefill/decode disaggregated serving routed by the llm-d router:
+  the same prefill and decode engines as the disagg-pd chart (SGLang's own
+  NIXL/Mooncake transfer backend, the same placement and transport values),
+  but behind a Gateway API HTTPRoute, an InferencePool and llm-d's Endpoint
+  Picker (EPP) instead of sgl-model-gateway. The EPP picks a prefill and a
+  decode endpoint for every request; a routing sidecar in each decode pod
+  injects SGLang's bootstrap_host/bootstrap_port/bootstrap_room into the
+  prefill call so the two engines run their own bootstrap handshake.
+type: application
+version: 0.1.0
+appVersion: "v0.5.23"
+home: https://github.com/littlemex/distai-platform
+sources:
+  - https://github.com/littlemex/distai-platform
+  - https://github.com/llm-d/llm-d-router/tree/v1.0.0/config/charts/llm-d-router-gateway
+  - https://github.com/llm-d/llm-d-router/blob/v1.0.0/pkg/sidecar/proxy/connector_sglang.go
+  - https://github.com/llm-d/llm-d/tree/v1.0.0/guides/pd-disaggregation/modelserver/gpu/sglang
+  - https://github.com/kubernetes-sigs/gateway-api-inference-extension/tree/v1.6.2
+dependencies:
+  # Same dependency, same version, same reason as ../../vllm/disagg-pd-llmd:
+  # llm-d's own router chart, used by reference rather than rewritten.
+  - name: llm-d-router-gateway
+    version: v1.0.0
+    repository: oci://ghcr.io/llm-d/charts
+    alias: llmdRouter
