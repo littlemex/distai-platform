@@ -23,14 +23,22 @@ name: Tool Attribution Check
 # that split state should not occur, and silently guessing which copy to
 # use would be worse than stopping.
 #
-# This still does not stop someone with write access to this repository
-# from weakening the check itself in the same pull request that also
-# weakens the thing it is checking (nothing in GitHub Actions can, since
-# a required status check only re-reports the result of whatever workflow
-# version is present at the time it runs) -- the boundary for a *deliberate*
-# edit to .github/** is #53's code-owner review requirement, not this
-# check. This check catches an accidental lapse, which is what it was
-# asked to do.
+# This still does not stop a pull request (from a fork or otherwise) from
+# weakening this workflow file itself in the same pull request that also
+# weakens the thing it is checking: a plain `pull_request` trigger always
+# runs the workflow version at the pull request's own merge ref. GitHub
+# Actions does have mechanisms that would close that specific gap
+# (`pull_request_target`, which takes the workflow definition from the
+# base branch; a ruleset's required workflow, pinned to a ref) -- they are
+# not used here, deliberately: `pull_request_target` runs with a token
+# that can write to the base repository and executes the base branch's
+# code against event data from the head, which is the shape of risk this
+# repository's own stated rule against `pull_request_target` exists to
+# avoid, and a required workflow needs Administration permission on the
+# repository that this automation does not have. The boundary this
+# repository actually relies on for a *deliberate* edit to `.github/**` is
+# #53's code-owner review requirement, not this check. This check catches
+# an accidental lapse, which is what it was asked to do.
 
 on:
   pull_request:
@@ -115,7 +123,7 @@ jobs:
             > "$RUNNER_TEMP/commit_messages.txt"
           listed_count=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/commits" --jq '.[] | .sha' | wc -l | tr -d ' ')
           if [ "$listed_count" != "$PR_COMMIT_COUNT" ]; then
-            if [ "$PR_COMMIT_COUNT" -gt 250 ]; then
+            if [ "$PR_COMMIT_COUNT" -gt 250 ] && [ "$listed_count" -eq 250 ]; then
               echo "::warning::this pull request has ${PR_COMMIT_COUNT} commits; the commits API lists at most 250, so ${listed_count} of them were checked and the rest were not"
             else
               echo "::error::expected ${PR_COMMIT_COUNT} commits from the pull request event, the commits API listed ${listed_count}; refusing to pass with an incomplete list"
