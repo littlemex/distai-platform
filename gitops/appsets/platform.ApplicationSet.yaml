@@ -109,36 +109,51 @@ spec:
   # Always rendered as a Go template (sprig included), regardless of
   # spec.goTemplate above - the only way Decision 2's per-add-on values
   # (karpenter's settings.clusterName and so on) avoid being forced into
-  # every other add-on's template.
-  #
-  # The {{- if .dir }} branch below (#28: a local, platform-owned chart,
-  # accel-device-classes, never an upstream registry - same "dir" shape
-  # cells.ApplicationSet.yaml already uses for capacity-pool/smoke, #25
-  # Decision 2, applied here because this one addon.yaml has no
-  # chart/repoURL/version) fully replaces the base template's source,
-  # which otherwise renders repoURL/chart/targetRevision all empty for a
-  # dir-only addon.yaml - an invalid Application with no repoURL. Its own
-  # "chart: null" is explicit, not left to whatever the base template's
-  # own "{{ .chart }}" happens to render for a missing key: with
-  # goTemplateOptions missingkey=zero, a map value of static type
-  # interface{} (what a parsed addon.yaml's own params decode to) still
-  # prints the literal string "<no value>" for a missing key in the
-  # text/template engine Argo CD uses, not the empty string "zero" might
-  # suggest - left unset, a non-empty "chart: <no value>" alongside
-  # "path:" would make Argo CD treat this as a Helm chart source instead
-  # of a Git path source, and this Application would never sync. A JSON
-  # Merge Patch null removes the key entirely, which is what a dir-only
-  # addon.yaml actually needs. Verify this on a real cluster before
-  # relying on it (same caveat as goTemplate itself, #25's own header
-  # comment on this file).
+  # every other add-on's template. See the {{- if .dir }} branch below
+  # for the dir-only (accel-device-classes and similar) source shape,
+  # and why it sets chart: null explicitly rather than leaving it unset.
   templatePatch: |
     spec:
       {{- if .dir }}
+      # #28: a local, platform-owned chart (accel-device-classes), never
+      # an upstream registry - same "dir" shape cells.ApplicationSet.yaml
+      # already uses for capacity-pool/smoke (#25 Decision 2), applied
+      # here because this one addon.yaml has no chart/repoURL/version.
+      # This branch is merged onto the base template's own source above
+      # by templatePatch's own merge-patch semantics (same mechanism the
+      # syncOptions block below this one relies on), not a replacement of
+      # it - which otherwise renders repoURL/chart/targetRevision all
+      # empty for a dir-only addon.yaml, an invalid Application with no
+      # repoURL.
+      #
+      # chart: null below is explicit, NOT harmless to omit (#63, found
+      # independently a second time and corrected here): the base
+      # template's own chart value does not render as an empty string
+      # for a dir-only addon.yaml's missing chart key (not written with
+      # the live template braces here on purpose - this whole block is
+      # itself rendered as a Go template, and writing them literally
+      # would evaluate rather than describe). goTemplateOptions
+      # missingkey=zero returns the zero value of the map's value type,
+      # and for a map[string]interface{} (what a parsed addon.yaml's own
+      # params decode to) that zero value is a nil interface{}, which Go's
+      # text/template engine prints as the literal string "<no value>",
+      # not "". A non-empty "chart: <no value>" alongside "path:" would
+      # make Argo CD treat this as a (broken) Helm chart source instead of
+      # a Git path source, and this Application would never sync. A JSON
+      # Merge Patch "null" removes the key entirely, which is what this
+      # branch actually needs. The "<no value>" half of this is confirmed
+      # by reproducing Go's own text/template missingkey=zero behavior for
+      # an untyped map (documented Go quirk, golang/go#24963 and widely
+      # reported); the merge-patch-removes-the-key half is Argo CD's own
+      # documented JSON Merge Patch semantics, not independently re-run
+      # against a live Application - verify this on a real cluster before
+      # relying on it (same caveat as goTemplate itself, this file's own
+      # header comment).
       source:
         repoURL: https://github.com/littlemex/distai-platform.git
         path: "{{ .dir }}"
-        targetRevision: '{{ index $.metadata.annotations "distai.dev.annotations/revision" }}'
         chart: null
+        targetRevision: '{{ index $.metadata.annotations "distai.dev.annotations/revision" }}'
       {{- else }}
       source:
         helm:

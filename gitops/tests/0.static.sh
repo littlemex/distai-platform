@@ -114,6 +114,8 @@ required_files=(
   "addons/accel-neuron-device-plugin/addon.yaml"
   "addons/accel-neuron-dra/addon.yaml"
   "addons/accel-device-classes/addon.yaml"
+  "addons/accel-efa-device-plugin-nvidia/addon.yaml"
+  "addons/accel-efa-device-plugin-neuron/addon.yaml"
   "charts/capacity-pool/Chart.yaml"
   "charts/accel-device-classes/Chart.yaml"
   "charts/smoke/Chart.yaml"
