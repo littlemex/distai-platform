@@ -1,0 +1,145 @@
+name: Tool Attribution Check
+
+# Fails a pull request whose own title, own description, or whose commits
+# new to this pull request name a specific AI coding tool or AI vendor
+# (the list lives in .github/tool-attribution-denylist.txt, not here).
+# Looks only at commits new to the pull request (via the pulls/.../commits
+# API, which lists only those -- at most the first 250 of them, the
+# endpoint's own cap; see the commit step below), never at commits already on
+# main.
+#
+# Trust boundary: the checker script and the denylist are read from the
+# pull request's base branch (github.event.pull_request.base.sha), not from
+# the pull request's own head, so a pull request cannot pass this check by
+# editing the script or the denylist in the same pull request. This holds
+# for any pull request whose base branch already carries both files (which
+# is every pull request against `main` once this change is on `main`, and
+# also, for example, a pull request stacked on another feature branch
+# that already has them). A pull request falls back to its own head copy
+# only when its base has NEITHER file. Today that is only this introducing
+# pull request against `main`; after this change merges it can still
+# happen for a pull request whose base is another branch lacking both
+# files (for example, one stacked on a feature branch cut before this
+# change merged), and there the head copy is self-editable exactly as it
+# is for the introducing pull request. The fallback is unavoidable for a
+# bootstrapping change and is logged as a warning in the job's own output.
+# A base branch
+# with exactly one of the two files is treated as neither trusted nor a
+# normal bootstrap case and fails the job outright (see the step below) --
+# that split state should not occur, and silently guessing which copy to
+# use would be worse than stopping.
+#
+# This still does not stop a pull request (from a fork or otherwise) from
+# weakening this workflow file itself in the same pull request that also
+# weakens the thing it is checking: a plain `pull_request` trigger always
+# runs the workflow version at the pull request's own merge ref. GitHub
+# Actions does have mechanisms that would close that specific gap
+# (`pull_request_target`, which takes the workflow definition from the
+# base branch; a ruleset's required workflow, pinned to a ref) -- they are
+# not used here, deliberately: `pull_request_target` runs with a token
+# that CAN be granted write access to the base repository and secrets
+# (this workflow's own permissions would still keep it read-only, but the
+# trigger itself carries that capability) while executing the base
+# branch's code against event data that comes from the head, which is the
+# shape of risk this repository's own stated rule against
+# `pull_request_target` exists to avoid, and a required workflow needs
+# Administration permission on the
+# repository that this automation does not have. The boundary this
+# repository actually relies on for a *deliberate* edit to `.github/**` is
+# #53's code-owner review requirement, not this check. This check catches
+# an accidental lapse, which is what it was asked to do.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout the pull request head (fallback copy only; the commit list below comes from the API)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout the trusted checker and denylist from the base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: base-ref
+          sparse-checkout: |
+            .github/scripts/check_tool_attribution.py
+            .github/tool-attribution-denylist.txt
+          sparse-checkout-cone-mode: false
+
+      - name: Pick the checker and denylist source (base branch, or head only if the base has neither yet)
+        id: source
+        run: |
+          set -euo pipefail
+          HAS_CHECKER=0; [ -f base-ref/.github/scripts/check_tool_attribution.py ] && HAS_CHECKER=1
+          HAS_DENYLIST=0; [ -f base-ref/.github/tool-attribution-denylist.txt ] && HAS_DENYLIST=1
+          if [ "$HAS_CHECKER" -eq 1 ] && [ "$HAS_DENYLIST" -eq 1 ]; then
+            echo "checker=base-ref/.github/scripts/check_tool_attribution.py" >> "$GITHUB_OUTPUT"
+            echo "denylist=base-ref/.github/tool-attribution-denylist.txt" >> "$GITHUB_OUTPUT"
+            echo "::notice::using the base branch's own trusted copy of the checker and denylist"
+          elif [ "$HAS_CHECKER" -eq 0 ] && [ "$HAS_DENYLIST" -eq 0 ]; then
+            echo "checker=.github/scripts/check_tool_attribution.py" >> "$GITHUB_OUTPUT"
+            echo "denylist=.github/tool-attribution-denylist.txt" >> "$GITHUB_OUTPUT"
+            echo "::warning::base branch has no checker or denylist yet (bootstrapping pull request); using this pull request's own head copy (this is the normal case only before this change itself merges; see the workflow's own header comment for when it can also occur afterward)"
+          else
+            echo "::error::base branch has exactly one of the checker and the denylist (checker present: ${HAS_CHECKER}, denylist present: ${HAS_DENYLIST}); refusing to guess which copy to trust"
+            exit 1
+          fi
+
+      - name: Check the pull request title and description
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          CHECKER: ${{ steps.source.outputs.checker }}
+          DENYLIST: ${{ steps.source.outputs.denylist }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$PR_TITLE" > "$RUNNER_TEMP/pr_title.txt"
+          printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/pr_body.txt"
+          python3 "$CHECKER" \
+            --denylist "$DENYLIST" \
+            --label "the pull request title" \
+            "$RUNNER_TEMP/pr_title.txt"
+          python3 "$CHECKER" \
+            --denylist "$DENYLIST" \
+            --label "the pull request description" \
+            "$RUNNER_TEMP/pr_body.txt"
+
+      - name: Check commit messages new to this pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_COMMIT_COUNT: ${{ github.event.pull_request.commits }}
+          CHECKER: ${{ steps.source.outputs.checker }}
+          DENYLIST: ${{ steps.source.outputs.denylist }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/commits" --jq '.[] | .commit.message' \
+            > "$RUNNER_TEMP/commit_messages.txt"
+          listed_count=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/commits" --jq '.[] | .sha' | wc -l | tr -d ' ')
+          if [ "$listed_count" != "$PR_COMMIT_COUNT" ]; then
+            if [ "$PR_COMMIT_COUNT" -gt 250 ] && [ "$listed_count" -eq 250 ]; then
+              echo "::warning::this pull request has ${PR_COMMIT_COUNT} commits; the commits API lists at most 250, so ${listed_count} of them were checked and the rest were not"
+            else
+              echo "::error::expected ${PR_COMMIT_COUNT} commits from the pull request event, the commits API listed ${listed_count}; refusing to pass with an incomplete list"
+              exit 1
+            fi
+          fi
+          python3 "$CHECKER" \
+            --denylist "$DENYLIST" \
+            --label "a commit message new to this pull request" \
+            "$RUNNER_TEMP/commit_messages.txt"

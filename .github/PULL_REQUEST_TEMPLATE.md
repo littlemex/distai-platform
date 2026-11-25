@@ -54,7 +54,7 @@ docs/
 - `infra/eks/` holds the platform; a new concern extends an existing file
   before adding a new one (see [AGENTS.md](https://github.com/littlemex/distai-platform/blob/main/AGENTS.md) for placement rules).
 - `docs/workshop/` holds the hands-on chapters and `docs/deep-dives/` the
-  long-form explainers; both provide English and Japanese.
+  long-form design write-ups; both provide English and Japanese.
 - Not all directories are touched by every change — include only the ones relevant to your change.
 
 ## Checklist
