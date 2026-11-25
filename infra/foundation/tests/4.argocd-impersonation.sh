@@ -1234,14 +1234,40 @@ DISCOVERY_PSA_LABEL="$(read_psa_label)"
 DISCOVERY_MARKER_LABEL="$(read_marker_label)"
 DISCOVERY_NS_SYNCRESULT="$(sync_result_for_namespace)"
 info "discovery (team-namespace-guard-binding absent, sync phase $(operation_phase team-a-nsmeta-strip)): distai.dev/team is now '${DISCOVERY_TEAM_LABEL}' (was '${ORIG_TEAM_LABEL}'), pod-security.kubernetes.io/enforce is now '${DISCOVERY_PSA_LABEL}' (was '${ORIG_PSA_LABEL}'), distai.dev/nsmeta-probe-marker (a key that never existed before, declared only in managedNamespaceMetadata, no 'once set' rule could explain it either way) is now '${DISCOVERY_MARKER_LABEL}'; the Application's own syncResult entry for kind Namespace: ${DISCOVERY_NS_SYNCRESULT:-<none; the Namespace never appears as a syncResult entry at all>}"
-[[ "${DISCOVERY_MARKER_LABEL}" == "1" ]] \
-  || fail "distai.dev/nsmeta-probe-marker is '${DISCOVERY_MARKER_LABEL}', not '1', even with team-namespace-guard-binding deleted -- managedNamespaceMetadata did not add a brand-new label either, which would mean this Application's own namespace-metadata step did not run at all (a different finding from 'it ran and chose not to overwrite'); the syncResult entry just logged is the evidence for which one this run showed"
-if [[ "${DISCOVERY_TEAM_LABEL}" != "${ORIG_TEAM_LABEL}" || "${DISCOVERY_PSA_LABEL}" != "${ORIG_PSA_LABEL}" ]]; then
+if [[ "${DISCOVERY_MARKER_LABEL}" != "1" && -z "${DISCOVERY_NS_SYNCRESULT}" ]]; then
+  # Both signals agree the Application's own namespace-metadata step
+  # never engaged at all (not "ran and chose not to overwrite"): no
+  # syncResult entry for kind Namespace, and not even the brand-new
+  # marker landed. Per Argo CD's own documented CreateNamespace /
+  # managedNamespaceMetadata adoption rule (sync-options.md's own
+  # "Namespace Metadata" section: management only engages on first
+  # sync "if the namespace doesn't already exist, or if it already
+  # exists and doesn't already have labels and/or annotations set on
+  # it" -- adopting a namespace that already carries labels/
+  # annotations from a client-side apply, which is exactly how
+  # team-onboard.sh creates ${TEAM}, requires upgrading that resource
+  # to server-side apply first, which this platform does not do), this
+  # is an expected, non-error outcome here, not a script defect to
+  # abort the whole run over -- confirmed identically on two earlier
+  # real-hardware runs of an earlier form of this check (recorded
+  # above) and now a third time, with the marker making the "never
+  # engaged" explanation decisive instead of merely consistent. This no
+  # longer hard-fails (round 6 fix, tracked in #67): a `fail` here
+  # used to abort the entire script under `set -e`, which meant one
+  # outcome of THIS discovery -- itself explicitly described in this
+  # check's own top comment as a possible, legitimate finding -- was
+  # silently preventing checks 11-13 below from ever running, on every
+  # real-hardware attempt of this script's current form.
+  DISCOVERY_OUTCOME="the managedNamespaceMetadata step did not engage at all (no syncResult entry for kind Namespace, marker never added) -- expected per Argo CD's own documented namespace-adoption rule, since ${TEAM} already carried labels from team-onboard.sh's own client-side apply before this Application's first sync; both pre-existing labels are necessarily unchanged (distai.dev/team='${DISCOVERY_TEAM_LABEL}', pod-security.kubernetes.io/enforce='${DISCOVERY_PSA_LABEL}')"
+  info "on this run, Argo CD's own managedNamespaceMetadata reconciliation did not engage with ${TEAM} at all (confirmed, not merely consistent: the brand-new marker label never landed and the Namespace never appears in this sync's own syncResult) -- team-namespace-guard.yaml is still applied as a stated, defense-in-depth boundary against this surface regardless, and check 11 below tests it directly"
+elif [[ "${DISCOVERY_TEAM_LABEL}" != "${ORIG_TEAM_LABEL}" || "${DISCOVERY_PSA_LABEL}" != "${ORIG_PSA_LABEL}" ]]; then
   DISCOVERY_OUTCOME="at least one label CHANGED (distai.dev/team='${DISCOVERY_TEAM_LABEL}', pod-security.kubernetes.io/enforce='${DISCOVERY_PSA_LABEL}') -- the bypass PR #66's own caveat described is real on this run"
   info "CONFIRMED on real hardware: without team-namespace-guard, a team's own Application's managedNamespaceMetadata (CreateNamespace=true, against the EXISTING team namespace) changes at least one of these labels -- the bypass PR #66's own caveat described is real"
-else
+elif [[ "${DISCOVERY_MARKER_LABEL}" == "1" ]]; then
   DISCOVERY_OUTCOME="both labels unchanged (distai.dev/team='${DISCOVERY_TEAM_LABEL}', pod-security.kubernetes.io/enforce='${DISCOVERY_PSA_LABEL}')"
   info "on this run, Argo CD's own managedNamespaceMetadata reconciliation added the brand-new marker label but did not change either pre-existing one, even with team-namespace-guard absent -- team-namespace-guard.yaml is still applied as a stated, defense-in-depth boundary against this surface regardless"
+else
+  fail "distai.dev/nsmeta-probe-marker is '${DISCOVERY_MARKER_LABEL}' and the Namespace's own syncResult entry is '${DISCOVERY_NS_SYNCRESULT}' -- this combination (a syncResult entry exists for kind Namespace, but the brand-new marker still did not land) is not one of the two explained outcomes above and this script cannot currently explain it; the pre-existing labels are distai.dev/team='${DISCOVERY_TEAM_LABEL}', pod-security.kubernetes.io/enforce='${DISCOVERY_PSA_LABEL}'"
 fi
 # Restore the correct values directly (this script's own state, not
 # Argo CD's), independent of whichever way the discovery above went, so
@@ -1326,8 +1352,20 @@ if [[ "${AFTER_FIX_MARKER_LABEL}" == "1" ]]; then
   RETRY_OUTCOME="admitted (marker present) -- the guard was NOT exercised by this particular retry"
 elif [[ "${NSMETA_PROBE_MESSAGE}" == *"may not be removed or"* ]]; then
   RETRY_OUTCOME="denied (guard's own message present in the sync result) -- the guard WAS exercised and did deny the write"
+elif [[ -z "${RETRY_NS_SYNCRESULT}" ]]; then
+  # Same "never engaged at all" signature as the discovery phase above
+  # (no syncResult entry for kind Namespace either), not a third,
+  # unexplained combination -- round 6 fix, tracked in #67, same
+  # reasoning as the discovery branch above: expected given ${TEAM}
+  # already carried labels from a client-side apply before this
+  # Application's first sync (Argo CD's own documented
+  # CreateNamespace/managedNamespaceMetadata adoption rule). The guard
+  # was not exercised here either, for the same reason it was not
+  # exercised during discovery: Argo CD never attempted the write that
+  # team-rbac-guard would otherwise have to evaluate.
+  RETRY_OUTCOME="not engaged at all (no syncResult entry for kind Namespace, marker still absent) -- same as the discovery outcome above, not a new or unexplained combination; the guard was not exercised because Argo CD never attempted the write"
 else
-  fail "team-a-nsmeta-strip's retried sync (team-namespace-guard restored) is inconclusive: the marker is '${AFTER_FIX_MARKER_LABEL}' (not '1') and NSMETA_PROBE_MESSAGE ('${NSMETA_PROBE_MESSAGE}') does not contain the guard's own message -- this script cannot currently explain this combination; the Namespace's own two protected labels are still confirmed correct above, but this retry's own evidence about WHY is not"
+  fail "team-a-nsmeta-strip's retried sync (team-namespace-guard restored) is inconclusive: the marker is '${AFTER_FIX_MARKER_LABEL}' (not '1'), NSMETA_PROBE_MESSAGE ('${NSMETA_PROBE_MESSAGE}') does not contain the guard's own message, and the Namespace's own syncResult entry is non-empty ('${RETRY_NS_SYNCRESULT}') -- this script cannot currently explain this combination; the Namespace's own two protected labels are still confirmed correct above, but this retry's own evidence about WHY is not"
 fi
 pass "CHECK 10/13 (PR #66's own first remaining caveat, addressed): one sync with team-namespace-guard-binding absent and one with it restored, both against a team's own Application using syncPolicy.managedNamespaceMetadata (CreateNamespace=true, against the EXISTING team namespace ${TEAM}) to omit distai.dev/team and set pod-security.kubernetes.io/enforce: privileged -- the discovery's own outcome (Binding absent): ${DISCOVERY_OUTCOME}; the retry's own outcome (Binding restored, phase ${NSMETA_RETRY_PHASE}): ${RETRY_OUTCOME}; the Namespace's own labels after the retry are confirmed distai.dev/team=${TEAM} and pod-security.kubernetes.io/enforce=restricted regardless of either outcome above. Check 11 below tests team-namespace-guard.yaml's own denial directly either way"
 kubectl delete application team-a-nsmeta-strip -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
