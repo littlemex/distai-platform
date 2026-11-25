@@ -66,13 +66,12 @@
 #      clusterResourceWhitelist. Also Argo CD's own project-level policy,
 #      independent of sync identity.
 #   6. the team's own ServiceAccount, asked directly (kubectl --as, no Argo
-#      CD involved) to create a Role granting a permission it does not
-#      itself hold (secrets, which gitops/bootstrap/team-onboard.sh's own
-#      Role never grants), is refused by the Kubernetes API server's own
-#      RBAC escalation check. This proves the escalation check works on
-#      this identity when IT is the one making the request directly -- it
-#      says nothing about whether Argo CD's own sync ever acts as this
-#      identity (that is check 7, next).
+#      CD involved) to create a Role granting 'secrets', is refused with
+#      a plain authorization denial -- this identity holds no permission
+#      on rbac.authorization.k8s.io resources at all (not merely a
+#      narrower one), so there is nothing for an RBAC-escalation check
+#      to even evaluate. Says nothing about whether Argo CD's own sync
+#      ever acts as this identity (that is check 7, next).
 #   7. (the differential check that actually distinguishes impersonated
 #      from non-impersonated sync, and the reason this script does not
 #      rely on RBAC-escalation checks for checks 2-3's own safety):
@@ -86,6 +85,17 @@
 #      not evidence of it, and why checks 2-3 instead rest on
 #      team-rbac-guard.yaml, not on narrowing a Role nobody's sync
 #      actually uses.
+#   8. each of team-rbac-guard.yaml's own six validation rules, applied
+#      directly with kubectl (the same cluster-admin-equivalent identity
+#      this whole script runs as, not Argo CD) -- decouples each denial
+#      from Argo CD's own sync behavior entirely, which check 3 already
+#      showed can obscure a clean deny message behind an unrelated
+#      internal crash.
+#   9. (mutation check): deleting only team-rbac-guard-binding (a
+#      ValidatingAdmissionPolicy with no Binding enforces nothing) and
+#      retrying check 8's own wildcard case shows it now succeeds --
+#      the closest proof available that the guard itself, not some
+#      other cluster behavior, was responsible for check 8's denials.
 #
 # This script builds only infra/foundation with var.argocd set (the
 # managed Argo CD capability) -- no Karpenter, no Kueue, no accelerator
@@ -358,7 +368,7 @@ pass "gitops/bootstrap/team-onboard.sh onboarded team ${TEAM}"
 # it would on a self-hosted install. This is a fact about the platform,
 # recorded here rather than asserted away: whether sync impersonation is
 # actually engaged without that flag ever being set by a customer is
-# exactly what checks 1-5 below determine empirically, not something
+# exactly what this script's own checks below determine empirically, not something
 # this script can confirm by reading a ConfigMap first.
 if kubectl get configmap argocd-cm -n "${ARGOCD_NAMESPACE}" >/dev/null 2>&1; then
   IMPERSONATION_FLAG="$(kubectl get configmap argocd-cm -n "${ARGOCD_NAMESPACE}" \
@@ -367,7 +377,7 @@ if kubectl get configmap argocd-cm -n "${ARGOCD_NAMESPACE}" >/dev/null 2>&1; the
     || fail "argocd-cm exists and its application.sync.impersonation.enabled is '${IMPERSONATION_FLAG}', expected true after team-onboard.sh"
   pass "argocd-cm exists in ${ARGOCD_NAMESPACE} and application.sync.impersonation.enabled is true"
 else
-  info "no argocd-cm ConfigMap in ${ARGOCD_NAMESPACE} (the managed capability's own control plane runs outside this cluster, confirmed by 'aws eks create-capability help'); proceeding without it, relying on checks 1-5 below to show empirically whether destinationServiceAccounts impersonates anyway"
+  info "no argocd-cm ConfigMap in ${ARGOCD_NAMESPACE} (the managed capability's own control plane runs outside this cluster, confirmed by 'aws eks create-capability help'); proceeding without it, relying on this script's own checks below to show empirically whether destinationServiceAccounts impersonates anyway"
 fi
 SA_IN_PROJECT="$(kubectl get appproject "${TEAM}" -n "${ARGOCD_NAMESPACE}" \
   -o jsonpath="{.spec.destinationServiceAccounts[?(@.namespace=='${TEAM}')].defaultServiceAccount}")"
@@ -417,7 +427,7 @@ kubectl get serviceaccount probe-sidecar -n "${TEAM}" >/dev/null 2>&1 \
   || fail "ServiceAccount probe-sidecar was not actually created in ${TEAM} despite a Succeeded sync"
 kubectl get configmap probe-config -n "${TEAM}" >/dev/null 2>&1 \
   || fail "ConfigMap probe-config was not actually created in ${TEAM} despite a Succeeded sync"
-pass "CHECK 1/7: team-a-chart (project ${TEAM}) self-synced an ordinary, non-RBAC workload chart (ServiceAccount+ConfigMap) into its own namespace ${TEAM} with no admin pre-creating it"
+pass "CHECK 1/9: team-a-chart (project ${TEAM}) self-synced an ordinary, non-RBAC workload chart (ServiceAccount+ConfigMap) into its own namespace ${TEAM} with no admin pre-creating it"
 
 # ------------------------------------------------ 4a2. issue #57's own goal:
 # ------------------------------------------------      a chart shipping its
@@ -452,7 +462,7 @@ kubectl get role probe-sidecar-role -n "${TEAM}" >/dev/null 2>&1 \
   || fail "Role probe-sidecar-role was not actually created in ${TEAM} despite a Succeeded sync"
 kubectl get rolebinding probe-sidecar-binding -n "${TEAM}" >/dev/null 2>&1 \
   || fail "RoleBinding probe-sidecar-binding was not actually created in ${TEAM} despite a Succeeded sync"
-pass "CHECK 2/7: team-a-rbac-probe (project ${TEAM}) self-synced its own benign, namespace-scoped Role/RoleBinding (#57 item 1's exact scenario) with no admin pre-creating it -- #57's own goal, restored, with gitops/bootstrap/team-rbac-guard.yaml (not Argo CD sync impersonation, confirmed not engaged -- check 7 below) as the real boundary"
+pass "CHECK 2/9: team-a-rbac-probe (project ${TEAM}) self-synced its own benign, namespace-scoped Role/RoleBinding (#57 item 1's exact scenario) with no admin pre-creating it -- #57's own goal, restored, with gitops/bootstrap/team-rbac-guard.yaml (not Argo CD sync impersonation, confirmed not engaged -- check 7 below) as the real boundary"
 
 # ------------------------------------------------ 4a3. team-rbac-guard.yaml
 # ------------------------------------------------      refuses the concrete
@@ -505,9 +515,9 @@ CLUSTERADMIN_PROBE_MESSAGE="$(clusteradmin_probe_message)"
 kubectl get rolebinding probe-escalation-binding -n "${TEAM}" >/dev/null 2>&1 \
   && fail "RoleBinding probe-escalation-binding (roleRef ClusterRole cluster-admin) was actually created in ${TEAM} despite team-rbac-guard's own refusal" || true
 if [[ "${CLUSTERADMIN_PROBE_MESSAGE}" == *"team-rbac-guard"* || "${CLUSTERADMIN_PROBE_MESSAGE}" == *"may not reference a ClusterRole"* ]]; then
-  pass "CHECK 3/7: a RoleBinding referencing the built-in cluster-admin ClusterRole, synced through the same team project ${TEAM} by Argo CD's own capability-wide (cluster-admin-equivalent) sync identity, was refused by the team-rbac-guard ValidatingAdmissionPolicy (phase ${CLUSTERADMIN_PROBE_PHASE}; message: ${CLUSTERADMIN_PROBE_MESSAGE}) -- admission runs regardless of the caller's own RBAC, closing the exact gap check 7 below shows RBAC-escalation checks leave open for this identity; no such RoleBinding was created"
+  pass "CHECK 3/9: a RoleBinding referencing the built-in cluster-admin ClusterRole, synced through the same team project ${TEAM} by Argo CD's own capability-wide (cluster-admin-equivalent) sync identity, was refused by the team-rbac-guard ValidatingAdmissionPolicy (phase ${CLUSTERADMIN_PROBE_PHASE}; message: ${CLUSTERADMIN_PROBE_MESSAGE}) -- admission runs regardless of the caller's own RBAC, closing the exact gap check 7 below shows RBAC-escalation checks leave open for this identity; no such RoleBinding was created"
 else
-  pass "CHECK 3/7: a RoleBinding referencing the built-in cluster-admin ClusterRole, synced through the same team project ${TEAM}, did NOT succeed (phase ${CLUSTERADMIN_PROBE_PHASE}) and no such RoleBinding was created in ${TEAM} -- team-rbac-guard's own deny message was not surfaced cleanly this time (Argo CD's own 'kubectl auth reconcile' RBAC-reconciliation path crashed with a nil pointer dereference instead of reporting it, message: ${CLUSTERADMIN_PROBE_MESSAGE}; an Argo CD-side defect worth tracking at #49, not evidence the guard itself failed to act -- the object's own confirmed absence is)"
+  pass "CHECK 3/9: a RoleBinding referencing the built-in cluster-admin ClusterRole, synced through the same team project ${TEAM}, did NOT succeed (phase ${CLUSTERADMIN_PROBE_PHASE}) and no such RoleBinding was created in ${TEAM} -- team-rbac-guard's own deny message was not surfaced cleanly this time (Argo CD's own 'kubectl auth reconcile' RBAC-reconciliation path crashed with a nil pointer dereference instead of reporting it, message: ${CLUSTERADMIN_PROBE_MESSAGE}; an Argo CD-side defect worth tracking at #49, not evidence the guard itself failed to act -- the object's own confirmed absence is)"
 fi
 kubectl delete application team-a-rbac-probe team-a-clusteradmin-probe -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 
@@ -542,7 +552,7 @@ wait_until 120 5 "team-a-cross-ns's own InvalidSpecError (destination not permit
   || fail "team-a-cross-ns was not refused for its destination namespace ${OTHER_NS}: $(kubectl get application team-a-cross-ns -n "${ARGOCD_NAMESPACE}" -o jsonpath='{.status.conditions}')"
 kubectl get configmap probe-config -n "${OTHER_NS}" >/dev/null 2>&1 \
   && fail "ConfigMap probe-config was actually created in ${OTHER_NS} despite the AppProject's own destination refusal" || true
-pass "CHECK 4/7: the same non-RBAC manifest, same team project ${TEAM}, aimed at ${OTHER_NS} instead of its own ${TEAM}, was refused by the AppProject's own destinations list before anything was written to ${OTHER_NS}"
+pass "CHECK 4/9: the same non-RBAC manifest, same team project ${TEAM}, aimed at ${OTHER_NS} instead of its own ${TEAM}, was refused by the AppProject's own destinations list before anything was written to ${OTHER_NS}"
 kubectl delete application team-a-cross-ns -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 
 # ------------------------------------------------- 4c. a team project denies
@@ -575,28 +585,38 @@ wait_until 120 5 "team-a-clusterrole refused (ClusterRole not permitted in proje
   || fail "team-a-clusterrole was not refused: conditions=$(kubectl get application team-a-clusterrole -n "${ARGOCD_NAMESPACE}" -o jsonpath='{.status.conditions}') operationState=$(operation_message team-a-clusterrole)"
 kubectl get clusterrole tenancy-probe-clusterrole-should-be-rejected >/dev/null 2>&1 \
   && fail "ClusterRole tenancy-probe-clusterrole-should-be-rejected was actually created despite the AppProject's own empty clusterResourceWhitelist" || true
-pass "CHECK 5/7: a bare ClusterRole, synced through the same team project ${TEAM}, was refused by the AppProject's own empty clusterResourceWhitelist; no ClusterRole was created"
+pass "CHECK 5/9: a bare ClusterRole, synced through the same team project ${TEAM}, was refused by the AppProject's own empty clusterResourceWhitelist; no ClusterRole was created"
 kubectl delete application team-a-clusterrole -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 
 # ------------------------------------------------- 4d. the team's own
 # -------------------------------------------------     ServiceAccount
-# -------------------------------------------------     cannot escalate
-# -------------------------------------------------     its own privileges
+# -------------------------------------------------     holds no
+# -------------------------------------------------     RBAC-management
+# -------------------------------------------------     permission at all
 
+# team-a-deployer-role (gitops/bootstrap/team-onboard.sh step 3) grants
+# nothing on rbac.authorization.k8s.io resources, so this is a plain
+# authorization denial (the API server refuses the request before any
+# RBAC-escalation check would even run, since that check only applies
+# to a caller who can already create/update the resource type at all),
+# not the nuanced "attempting to grant RBAC permissions not currently
+# held" escalation message -- a stronger, simpler guarantee than
+# escalation-limited access would have been, and the reason this check
+# does not require that specific message text.
 DEPLOYER="system:serviceaccount:${TEAM}:${TEAM}-deployer"
-CAN_I_SECRETS="$(kubectl auth can-i create secrets -n "${TEAM}" --as="${DEPLOYER}" || true)"
-[[ "${CAN_I_SECRETS}" == "no" ]] \
-  || fail "kubectl auth can-i create secrets --as=${DEPLOYER} returned '${CAN_I_SECRETS}', expected no (team-onboard.sh's own Role never grants secrets)"
-ESCALATE_ERR="$(kubectl create role escalate-attempt -n "${TEAM}" \
+CAN_I_CREATE_ROLES="$(kubectl auth can-i create roles.rbac.authorization.k8s.io -n "${TEAM}" --as="${DEPLOYER}" || true)"
+[[ "${CAN_I_CREATE_ROLES}" == "no" ]] \
+  || fail "kubectl auth can-i create roles.rbac.authorization.k8s.io --as=${DEPLOYER} returned '${CAN_I_CREATE_ROLES}', expected no (team-onboard.sh's own Role grants nothing on rbac.authorization.k8s.io)"
+DENY_ERR="$(kubectl create role escalate-attempt -n "${TEAM}" \
   --verb=get,list,watch,create,update,patch,delete --resource=secrets \
   --as="${DEPLOYER}" 2>&1)" && fail "kubectl create role escalate-attempt --as=${DEPLOYER} SUCCEEDED -- it should have been refused"
-[[ "${ESCALATE_ERR}" == *"attempting to grant RBAC permissions not currently held"* || "${ESCALATE_ERR}" == *"is forbidden"* ]] \
-  || fail "kubectl create role escalate-attempt --as=${DEPLOYER} failed, but not with the expected RBAC-escalation message: ${ESCALATE_ERR}"
-[[ "${ESCALATE_ERR}" == *"${DEPLOYER}"* ]] \
-  || fail "the escalation refusal did not name ${DEPLOYER} as the subject: ${ESCALATE_ERR}"
+[[ "${DENY_ERR}" == *"is forbidden"* ]] \
+  || fail "kubectl create role escalate-attempt --as=${DEPLOYER} failed, but not with 'is forbidden': ${DENY_ERR}"
+[[ "${DENY_ERR}" == *"${DEPLOYER}"* ]] \
+  || fail "the refusal did not name ${DEPLOYER} as the subject: ${DENY_ERR}"
 kubectl get role escalate-attempt -n "${TEAM}" >/dev/null 2>&1 \
   && fail "Role escalate-attempt was actually created in ${TEAM} despite the refusal" || true
-pass "CHECK 6/7: ${DEPLOYER}, asked to create a Role granting 'secrets' (a resource its own Role does not itself hold), was refused by the Kubernetes API server's own RBAC escalation check, naming ${DEPLOYER} in the refusal; no such Role was created"
+pass "CHECK 6/9: ${DEPLOYER}, which holds no permission on rbac.authorization.k8s.io resources at all, was refused when asked to create a Role granting 'secrets', naming ${DEPLOYER} in the refusal ('${DENY_ERR}'); no such Role was created"
 
 # ------------------------------------------------- 5. the differential
 # -------------------------------------------------    check: is
@@ -657,7 +677,7 @@ SECOND_MESSAGE="$(operation_message team-a-chart)"
   || fail "team-a-chart's second sync was ${SECOND_PHASE} (message: ${SECOND_MESSAGE}), expected Succeeded -- this would mean impersonation IS now engaged (a change from the confirmed 2026-11-25 behavior this test documents); if so, update this assertion and revisit #22 Decision 10 H11 Option A, do not just make this check pass again"
 kubectl get configmap probe-config -n "${TEAM}" >/dev/null 2>&1 \
   || fail "ConfigMap probe-config was not recreated in ${TEAM} despite a Succeeded second sync"
-pass "CHECK 7/7 (differential check, confirmed finding): even after ${DEPLOYER} itself lost the 'configmaps' permission, the SAME Application's resync still Succeeded and recreated probe-config -- sync impersonation is NOT actually engaged on this capability (tracked at #49; #22 Decision 10 H11 Option A is not viable as of 2026-11-25). Argo CD performed this sync with its own capability-wide identity throughout, not team-a-deployer's"
+pass "CHECK 7/9 (differential check, confirmed finding): even after ${DEPLOYER} itself lost the 'configmaps' permission, the SAME Application's resync still Succeeded and recreated probe-config -- sync impersonation is NOT actually engaged on this capability (tracked at #49; #22 Decision 10 H11 Option A is not viable as of 2026-11-25). Argo CD performed this sync with its own capability-wide identity throughout, not team-a-deployer's"
 
 # Restore team-a-deployer-role to its original rules regardless (leaves
 # the cell in the same state checks 1-4 left it in, for a clean
@@ -669,14 +689,9 @@ kind: Role
 metadata:
   name: ${TEAM}-deployer-role
   namespace: ${TEAM}
-  labels:
-    distai.dev/managed-by: team-onboard
 rules:
   - apiGroups: [""]
     resources: ["serviceaccounts", "configmaps", "pods", "services"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["roles", "rolebindings"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets"]
@@ -693,7 +708,151 @@ rules:
 EOF
 pass "restored ${TEAM}-deployer-role to its original rules before teardown"
 
-# ------------------------------------------------------- 6. teardown
+# ------------------------------------------------- 6. team-rbac-guard.yaml's
+# -------------------------------------------------    own six rules,
+# -------------------------------------------------    tested directly
+# -------------------------------------------------    (no Argo CD)
+
+# Checks 1-3 above went through Argo CD's own sync path, which check 3
+# showed can obscure a clean deny message behind an unrelated internal
+# crash (a reviewer's own finding). These assertions apply each of
+# team-rbac-guard.yaml's own six validation rules directly with kubectl
+# (the same cluster-admin-equivalent identity this whole script already
+# runs as -- ADMIN_PRINCIPAL_ARN's own access entry, not a lesser
+# identity), so each denial is attributed to the guard's own rule, by
+# its own message text, independent of Argo CD's own behavior.
+assert_rbac_denied() {
+  local resource="$1" name="$2" manifest="$3" expected_substr="$4"
+  local err
+  err="$(kubectl apply -n "${TEAM}" -f - <<<"${manifest}" 2>&1)" && \
+    fail "direct kubectl apply of ${resource}/${name} SUCCEEDED -- team-rbac-guard did not deny it"
+  [[ "${err}" == *"${expected_substr}"* ]] \
+    || fail "direct kubectl apply of ${resource}/${name} was refused, but not with the expected message ('${expected_substr}'): ${err}"
+  kubectl get "${resource}" "${name}" -n "${TEAM}" >/dev/null 2>&1 \
+    && fail "${resource}/${name} was actually created in ${TEAM} despite the refusal" || true
+}
+
+assert_rbac_denied rolebinding guard-check-clusterrolebind "$(cat <<RBAC
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guard-check-clusterrolebind
+  namespace: ${TEAM}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: probe-sidecar
+    namespace: ${TEAM}
+RBAC
+)" "may not reference a ClusterRole"
+
+assert_rbac_denied role guard-check-escalate "$(cat <<RBAC
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: guard-check-escalate
+  namespace: ${TEAM}
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    verbs: ["escalate"]
+RBAC
+)" "may not grant the escalate, bind or impersonate verbs"
+
+assert_rbac_denied role guard-check-rbacgroup "$(cat <<RBAC
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: guard-check-rbacgroup
+  namespace: ${TEAM}
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles"]
+    verbs: ["get"]
+RBAC
+)" "may not grant any permission on rbac.authorization.k8s.io resources"
+
+assert_rbac_denied role guard-check-wildcard "$(cat <<RBAC
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: guard-check-wildcard
+  namespace: ${TEAM}
+rules:
+  - apiGroups: [""]
+    resources: ["*"]
+    verbs: ["get"]
+RBAC
+)" "may not use a wildcard apiGroup, resource or verb"
+
+assert_rbac_denied role guard-check-secrets "$(cat <<RBAC
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: guard-check-secrets
+  namespace: ${TEAM}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+RBAC
+)" "may not grant any permission on Secrets or serviceaccounts/token"
+
+assert_rbac_denied role guard-check-podsexec "$(cat <<RBAC
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: guard-check-podsexec
+  namespace: ${TEAM}
+rules:
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+RBAC
+)" "may not grant any permission on pods/exec, pods/attach or pods/portforward"
+pass "CHECK 8/9: all six of team-rbac-guard.yaml's own validation rules independently deny a direct kubectl apply (no Argo CD) by the cluster-admin-equivalent identity this script runs as, each naming its own rule in the refusal; no object was created for any of the six"
+
+# ------------------------------------------------- 7. mutation check: delete
+# -------------------------------------------------    the guard's own
+# -------------------------------------------------    Binding, confirm the
+# -------------------------------------------------    SAME manifest now
+# -------------------------------------------------    succeeds, confirms
+# -------------------------------------------------    the guard -- not
+# -------------------------------------------------    something else --
+# -------------------------------------------------    was responsible
+
+# A ValidatingAdmissionPolicy with no ValidatingAdmissionPolicyBinding
+# enforces nothing (upstream Kubernetes's own documented behavior): the
+# Binding is what actually turns validationActions on. Deleting only
+# the Binding, retrying the SAME wildcard manifest check 8 already
+# proved denied, and seeing it succeed this time is the closest this
+# script comes to a proof-by-elimination that the guard itself, not an
+# unrelated cluster behavior, was what denied it the first time.
+kubectl delete validatingadmissionpolicybinding team-rbac-guard-binding \
+  || fail "kubectl delete validatingadmissionpolicybinding team-rbac-guard-binding"
+kubectl apply -n "${TEAM}" -f - <<EOF || fail "guard-check-wildcard-mutation should succeed once the guard's own Binding is gone"
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: guard-check-wildcard-mutation
+  namespace: ${TEAM}
+rules:
+  - apiGroups: [""]
+    resources: ["*"]
+    verbs: ["get"]
+EOF
+kubectl get role guard-check-wildcard-mutation -n "${TEAM}" >/dev/null 2>&1 \
+  || fail "guard-check-wildcard-mutation was not actually created even after the guard's own Binding was deleted -- something else (not team-rbac-guard) was the reason check 8's wildcard case was denied"
+pass "CHECK 9/9 (mutation check): the SAME wildcard-granting Role check 8 showed denied now SUCCEEDS once team-rbac-guard-binding is deleted -- confirms the guard itself, not an unrelated cluster behavior, was responsible for check 8's own denials"
+kubectl delete role guard-check-wildcard-mutation -n "${TEAM}" --ignore-not-found \
+  || fail "kubectl delete role guard-check-wildcard-mutation"
+kubectl apply -f "${REPO_ROOT}/gitops/bootstrap/team-rbac-guard.yaml" \
+  || fail "kubectl apply gitops/bootstrap/team-rbac-guard.yaml (restore the Binding before teardown)"
+
+# ------------------------------------------------------- 8. teardown
 
 kubectl delete application team-a-chart -n "${ARGOCD_NAMESPACE}" --wait=true --timeout=60s \
   || fail "kubectl delete application team-a-chart"

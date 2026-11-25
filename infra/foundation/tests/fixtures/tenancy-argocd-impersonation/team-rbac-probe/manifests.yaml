@@ -5,16 +5,18 @@
 # examples/inference/vllm/disagg-pd-llmd/templates/sidecar-rbac.yaml: a
 # ServiceAccount plus a same-namespace Role/RoleBinding for a sidecar).
 #
-# Used for the "a team project refuses this" check: gitops/bootstrap/team-onboard.sh's
-# own AppProject deliberately does NOT whitelist Role/RoleBinding
-# (#22 Decision 10 H11's original deny, restored after this test's own
-# real-hardware finding that Argo CD sync impersonation is not actually
-# engaged on the EKS managed Argo CD capability -- see
-# infra/foundation/tests/4.argocd-impersonation.sh's own header). A chart
-# shipping this exact shape is therefore expected to be refused by a
-# team's own project today; plain-workload-probe/manifests.yaml (no
-# RBAC) is the fixture used for the checks where a self-service sync is
-# expected to succeed.
+# Used for issue #57's own goal, restored (check 2 of
+# infra/foundation/tests/4.argocd-impersonation.sh): gitops/bootstrap/team-onboard.sh's
+# own AppProject DOES whitelist Role/RoleBinding, safe only because
+# gitops/bootstrap/team-rbac-guard.yaml (a ValidatingAdmissionPolicy)
+# constrains their content for every caller -- this fixture's own
+# content (a Role granting only "configmaps" verbs, nothing
+# rbac.authorization.k8s.io, escalate/bind/impersonate or wildcard) is
+# exactly the shape that guard allows, so this chart's own sync is
+# expected to SUCCEED. plain-workload-probe/manifests.yaml (no RBAC at
+# all) is used where a check needs a manifest with no Role/RoleBinding
+# content; malicious-clusteradmin-probe/manifests.yaml is the fixture
+# used for the check where a sync is expected to be refused.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

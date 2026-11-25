@@ -1,50 +1,79 @@
 # gitops/bootstrap/team-rbac-guard.yaml - RFC #22 Decision 10 H11.
 #
-# Why this exists (coordinator's own review of this PR, 2026-11-25): the
-# RBAC-escalation check Kubernetes itself runs when a Role/RoleBinding is
-# created (`attempting to grant RBAC permissions not currently held`)
-# only protects against a CALLER who does not already hold the
-# permissions it is trying to grant. infra/foundation/tests/4.argocd-impersonation.sh's
-# own real-hardware check already confirmed two separate facts that
-# combine into a real gap: (1) Argo CD sync impersonation is not engaged
-# on the EKS managed Argo CD capability (destinationServiceAccounts has
-# no observed effect -- check 6 there), so every sync runs as the
-# capability's own identity, not a team's; (2) that capability identity
-# is bound to AmazonEKSClusterAdminPolicy (infra/foundation/argocd.tf's
-# own comment on aws_eks_access_policy_association.argocd), i.e.
-# already holds every permission there is -- so the escalation check
-# trivially passes for ANY Role/RoleBinding that identity creates, no
-# matter what it grants. Narrowing the team's own impersonation
-# identity's Role (gitops/bootstrap/team-onboard.sh step 3) therefore
-# does not close this: that Role is never the identity actually
-# performing the write.
+# Why this exists: the RBAC-escalation check Kubernetes itself runs
+# when a Role/RoleBinding is created (`attempting to grant RBAC
+# permissions not currently held`) only protects against a CALLER who
+# does not already hold the permissions it is trying to grant.
+# infra/foundation/tests/4.argocd-impersonation.sh's own real-hardware
+# check confirmed two separate facts that combine into a real gap: (1)
+# Argo CD sync impersonation is not engaged on the EKS managed Argo CD
+# capability (destinationServiceAccounts has no observed effect --
+# check 7 there), so every sync runs as the capability's own identity,
+# not a team's; (2) that capability identity is bound to
+# AmazonEKSClusterAdminPolicy (infra/foundation/argocd.tf's own comment
+# on aws_eks_access_policy_association.argocd), i.e. already holds
+# every permission there is -- so the escalation check trivially passes
+# for ANY Role/RoleBinding that identity creates, no matter what it
+# grants. Narrowing a team's own identity Role
+# (gitops/bootstrap/team-onboard.sh step 3) does not close this: that
+# Role is never the identity actually performing the write, and (a
+# reviewer's own finding) making it the exception to this policy via a
+# label is itself attacker-controlled -- any object, team-authored or
+# not, can carry whatever label it likes, so a label-keyed exemption is
+# not a control at all. This policy has no exemption of any kind:
+# team-onboard.sh's own step 3 Role was changed instead, to grant
+# nothing on rbac.authorization.k8s.io at all, so there is nothing of
+# this script's own to exempt.
 #
-# The fix is a control that does not depend on who the writer is at all:
-# a ValidatingAdmissionPolicy runs for every matching request regardless
-# of the caller's own RBAC permissions (it is evaluated by the API
-# server's admission chain, after authorization already let the request
-# through). This restores issue #57's own actual goal -- a team's own
-# chart may ship its own namespaced Role/RoleBinding (H11's original
-# deny is lifted again once this guard exists, gitops/bootstrap/team-onboard.sh's
-# own AppProject whitelist) -- while closing the specific shapes that
-# would otherwise let a team's chart grant itself (or anyone) more than
-# the admin intended, independent of impersonation ever working:
+# The fix is a control that does not depend on who the writer is at
+# all: a ValidatingAdmissionPolicy runs for every matching request
+# regardless of the caller's own RBAC permissions (it is evaluated by
+# the API server's admission chain, after authorization already let the
+# request through). This restores issue #57's own actual goal -- a
+# team's own chart may ship its own namespaced Role/RoleBinding (H11's
+# original deny is lifted again once this guard exists,
+# gitops/bootstrap/team-onboard.sh's own AppProject whitelist) -- while
+# closing the specific shapes that would otherwise let a team's chart
+# grant itself (or anyone) more than the admin intended, independent of
+# impersonation ever working:
 #
 #   1. a RoleBinding may not reference a ClusterRole as its roleRef --
 #      every RoleBinding a team's own chart ships must bind to a Role
-#      already defined inside that same namespace (which rule 2-5 below
-#      also constrain), never an existing, possibly far more privileged,
-#      cluster-wide ClusterRole (cluster-admin among them).
+#      already defined inside that same namespace (which rules 2-6
+#      below also constrain), never an existing, possibly far more
+#      privileged, cluster-wide ClusterRole (cluster-admin among them).
 #   2. a Role may not grant the escalate, bind or impersonate verbs
 #      (the exact verbs that would otherwise let a team route around
-#      this guard's own rule 1/3-5 by minting a second, less-constrained
-#      Role later).
+#      this guard's own rules 1/3-6 by minting a second,
+#      less-constrained Role later).
 #   3. a Role may not grant any permission on rbac.authorization.k8s.io
 #      resources at all (a team's own chart managing its own RBAC's
 #      *content* is rule 1/2's job; a team's chart managing RBAC itself
 #      is not a workload concern).
 #   4. a Role may not use a wildcard ("*") apiGroup, resource or verb.
-#   5. a Role may not grant any permission on Secrets.
+#   5. a Role may not grant any permission on Secrets, or on the
+#      "serviceaccounts/token" subresource (TokenRequest) -- the latter
+#      lets its holder mint a live token for ANY ServiceAccount it can
+#      name, which is a second, separate way to impersonate another
+#      identity that the escalate/bind/impersonate verb check (rule 2)
+#      does not reach, since "serviceaccounts/token" is a resource
+#      string, not a verb.
+#   6. a Role may not grant any permission on "pods/exec", "pods/attach"
+#      or "pods/portforward" -- any one of these lets its holder run
+#      arbitrary commands inside, or reach a raw network path into, any
+#      Pod it can name in the namespace, which is a container-escape
+#      path no RBAC-content rule above otherwise reaches (none of rules
+#      1-5 are about Pods at all).
+#
+# Known, bounded scope: this is a deny-list of the shapes found while
+# designing this guard, not a derived allow-list of every safe
+# (apiGroup, resource, verb) triple -- a complete allow-list was not
+# attempted here (see gitops/bootstrap/team-onboard.sh's own header for
+# the stated residual). gitops/bootstrap/team-onboard.sh's own Namespace
+# object separately sets Pod Security Admission to "restricted", which
+# is what actually stops a privileged DaemonSet or a hostNetwork Pod --
+# neither is an RBAC question, so no rule in this file could reach
+# either one regardless of how complete the rule list above is.
 #
 # Scope: matchConstraints.namespaceSelector matches only namespaces
 # carrying the distai.dev/team label (gitops/bootstrap/team-onboard.sh's
@@ -65,25 +94,6 @@ metadata:
   name: team-rbac-guard
 spec:
   failurePolicy: Fail
-  # Exempts gitops/bootstrap/team-onboard.sh's own admin-created identity
-  # Role/RoleBinding/ServiceAccount (labeled distai.dev/managed-by:
-  # team-onboard by that script itself) from this policy's own
-  # validations below. Without this, the policy also denies
-  # team-onboard.sh's own step 3 Role, which legitimately needs
-  # roles/rolebindings verbs (granted to this script's own
-  # ServiceAccount, never to a team's chart) -- confirmed on real
-  # hardware: this script's own tenth real e2e attempt FAILed exactly
-  # this way before this matchConditions block existed. Team-authored
-  # content synced through Argo CD never carries this label (Argo CD
-  # does not add it, and no fixture in this repository sets it), so
-  # this exemption cannot be used by a team to bypass the policy for
-  # its own chart's Role/RoleBinding.
-  matchConditions:
-    - name: "exclude-team-onboard-managed"
-      expression: >-
-        !has(object.metadata.labels) ||
-        !('distai.dev/managed-by' in object.metadata.labels) ||
-        object.metadata.labels['distai.dev/managed-by'] != 'team-onboard'
   matchConstraints:
     namespaceSelector:
       matchExpressions:
@@ -97,14 +107,16 @@ spec:
   validations:
     - expression: "request.resource.resource != 'rolebindings' || object.roleRef.kind != 'ClusterRole'"
       message: "a RoleBinding in a team namespace may not reference a ClusterRole; define a namespace-scoped Role instead (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
-    - expression: "request.resource.resource != 'roles' || !object.rules.exists(r, r.verbs.exists(v, v in ['escalate', 'bind', 'impersonate']))"
+    - expression: "request.resource.resource != 'roles' || !has(object.rules) || !object.rules.exists(r, r.verbs.exists(v, v in ['escalate', 'bind', 'impersonate']))"
       message: "a Role in a team namespace may not grant the escalate, bind or impersonate verbs (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
-    - expression: "request.resource.resource != 'roles' || !object.rules.exists(r, 'rbac.authorization.k8s.io' in r.apiGroups)"
+    - expression: "request.resource.resource != 'roles' || !has(object.rules) || !object.rules.exists(r, 'rbac.authorization.k8s.io' in r.apiGroups)"
       message: "a Role in a team namespace may not grant any permission on rbac.authorization.k8s.io resources (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
-    - expression: "request.resource.resource != 'roles' || !object.rules.exists(r, '*' in r.apiGroups || '*' in r.resources || '*' in r.verbs)"
+    - expression: "request.resource.resource != 'roles' || !has(object.rules) || !object.rules.exists(r, '*' in r.apiGroups || '*' in r.resources || '*' in r.verbs)"
       message: "a Role in a team namespace may not use a wildcard apiGroup, resource or verb (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
-    - expression: "request.resource.resource != 'roles' || !object.rules.exists(r, '' in r.apiGroups && 'secrets' in r.resources)"
-      message: "a Role in a team namespace may not grant any permission on Secrets (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
+    - expression: "request.resource.resource != 'roles' || !has(object.rules) || !object.rules.exists(r, '' in r.apiGroups && r.resources.exists(x, x in ['secrets', 'serviceaccounts/token']))"
+      message: "a Role in a team namespace may not grant any permission on Secrets or serviceaccounts/token (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
+    - expression: "request.resource.resource != 'roles' || !has(object.rules) || !object.rules.exists(r, '' in r.apiGroups && r.resources.exists(x, x in ['pods/exec', 'pods/attach', 'pods/portforward']))"
+      message: "a Role in a team namespace may not grant any permission on pods/exec, pods/attach or pods/portforward (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

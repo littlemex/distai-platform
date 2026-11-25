@@ -1,13 +1,13 @@
 # Fixture for infra/foundation/tests/4.argocd-impersonation.sh: an
 # ordinary, non-RBAC chart shape (ServiceAccount + ConfigMap only), used
-# to confirm a team can still self-service a normal workload chart
-# through its own AppProject once Role/RoleBinding were removed from
-# that project's own namespaceResourceWhitelist (gitops/bootstrap/team-onboard.sh,
-# #22 Decision 10 H11's original deny, restored after this script's own
-# real-hardware finding that Argo CD sync impersonation is not actually
-# engaged on the EKS managed Argo CD capability). No metadata.namespace
-# is set, for the same reason as team-rbac-probe/manifests.yaml (reused
-# across two different Application destinations in the same test).
+# wherever a check needs a manifest with no Role/RoleBinding content at
+# all (check 1's own ordinary self-service case, check 4's own
+# destination-restriction case, and check 7's own differential case) --
+# keeping Role/RoleBinding content (team-rbac-probe/manifests.yaml) out
+# of those checks isolates each one to the single thing it is testing.
+# No metadata.namespace is set, for the same reason as
+# team-rbac-probe/manifests.yaml (reused across two different
+# Application destinations in the same test).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
