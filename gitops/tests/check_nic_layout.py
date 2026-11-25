@@ -3,8 +3,8 @@
 (issue #50) against committed data only: no AWS credentials, no network.
 
 The generator, gitops/charts/capacity-pool/tools/render-network-interfaces.py,
-is called as an external program with the contract issue #50's design
-decision pins:
+is called as an external program with the CLI contract this PR pins (see
+tools/README.md):
 
     render-network-interfaces.py --describe-json <path> \
         --instance-type <name> --exceptions <path to exceptions.json>
@@ -19,8 +19,13 @@ both caught.
 Checks, each printing one PASS or FAIL line:
 
   1. fixture pairs: every <type>.describe.json under tools/fixtures/ has a
-     <type>.networkInterfaces.yaml and the reverse, and every instance type
-     in GROUND_TRUTH below has a pair.
+     <type>.networkInterfaces.yaml and the reverse, every instance type in
+     GROUND_TRUTH below has a pair, and no pair exists for an instance type
+     missing from GROUND_TRUTH (shipping a new E == C fixture is a
+     deliberate GROUND_TRUTH edit, not something the generator's own
+     exceptions.json-style allowlist covers -- see tools/README.md). Every
+     describe.json that carries a _source.instanceType (this platform's own
+     fixtures all do) must match its own file name.
   2. drift: for every pair, the generator's stdout for that describe.json
      and the committed exceptions.json is byte-identical to the committed
      .networkInterfaces.yaml (nothing is stripped or normalized: the fixture
@@ -38,9 +43,13 @@ Checks, each printing one PASS or FAIL line:
      E == C - 1 for a family with no exceptions.json entry, and E neither C
      nor C - 1; and, as positive controls proving the synthetic shape is
      accepted at all, it prints the expected layout for E == C, C == 1, and
-     E == C - 1 under the p6-b300 family name.
-  5. exceptions.json: exactly one p6-b300 entry, its `confirmed` is the JSON
-     boolean false, and its `source` is a non-empty string naming
+     E == C - 1 under the p6-b300 family name. A separate case passes a
+     committed describe.json completely unchanged (its own _source and all)
+     under a different --instance-type: its real (C, E) is E == C, which the
+     algorithm alone would accept, so a refusal here is caused only by the
+     _source.instanceType mismatch (review round 2).
+  5. exceptions.json: a p6-b300 entry, its `confirmed` is the JSON boolean
+     false, and its `source` is a non-empty string naming
      awsome-distributed-ai.
 
 Usage: check_nic_layout.py <repo_root> | check_nic_layout.py --selftest
@@ -242,6 +251,20 @@ def check_pairs(fixtures_dir: str) -> list[str]:
     extra = sorted(set(pairs) - set(GROUND_TRUTH))
     check("nic-layout fixtures: no fixture pair exists for an instance type missing from GROUND_TRUTH "
           "(add an entry here, deliberately, before shipping a new fixture)", not extra, f"extra: {extra}")
+    # render-network-interfaces.py's own _source.instanceType cross-check (review round 1) only
+    # fires at run time, against whatever --instance-type a caller happens to pass; this checks the
+    # committed fixtures themselves line up with their own file names, so a fixture copied from one
+    # instance type to another's file name (and never run through the generator with a mismatched
+    # --instance-type, which would have caught it) does not pass silently.
+    mismatched = []
+    for t in pairs:
+        with open(os.path.join(fixtures_dir, t + DESCRIBE_SUFFIX), encoding="utf-8") as f:
+            ni = find_network_info(json.load(f))
+        source = (ni or {}).get("_source")
+        if isinstance(source, dict) and "instanceType" in source and source["instanceType"] != t:
+            mismatched.append(f"{t}{DESCRIBE_SUFFIX} has _source.instanceType={source['instanceType']!r}")
+    check("nic-layout fixtures: every describe.json's _source.instanceType (when present) matches its own file name",
+          not mismatched, "; ".join(mismatched))
     return pairs
 
 
@@ -370,6 +393,22 @@ def check_refusals(generator: str, fixtures_dir: str, exceptions: str, cwd: str,
                 continue
             diff = compare_layout(expected, got)
             check(f"nic-layout {desc}", not diff, diff)
+
+        # Unlike every case above (which goes through synthetic(), stripping _source so the
+        # shape under test is isolated from it -- see synthetic()'s own docstring), this one
+        # passes base_doc completely unchanged, _source and all: base_doc's own (C, E) is
+        # E == C (review round 1's fixtures all are except p6-b300), which synthetic.main()'s
+        # algorithm alone would happily render, so a refusal here is caused by nothing but the
+        # _source.instanceType mismatch below -- the one path review round 2 found untested.
+        mismatch_path = os.path.join(tmp, f"source-mismatch{DESCRIBE_SUFFIX}")
+        with open(mismatch_path, "w", encoding="utf-8") as f:
+            json.dump(base_doc, f, indent=2)
+        rc, out, err = run_generator(generator, mismatch_path, SYNTHETIC_UNKNOWN_TYPE, exceptions, cwd)
+        check(
+            f"nic-layout refusal: _source.instanceType ({base_type}) does not match --instance-type ({SYNTHETIC_UNKNOWN_TYPE})",
+            rc != 0 and out == b"",
+            f"expected non-zero exit and empty stdout, got exit {rc}, stdout {out.decode(errors='replace')[:200]!r}",
+        )
     finally:
         import shutil
 
