@@ -4,7 +4,28 @@ name: Tool Attribution Check
 # new to this pull request name a specific AI coding tool or AI vendor
 # (the list lives in .github/tool-attribution-denylist.txt, not here).
 # Looks only at commits new to the pull request (via the pulls/.../commits
-# API, which lists exactly those), never at commits already on main.
+# API, which lists exactly those, paginated), never at commits already on
+# main.
+#
+# Trust boundary: the checker script and the denylist are read from the
+# pull request's base branch (github.event.pull_request.base.sha), not from
+# the pull request's own head, so a pull request cannot pass this check by
+# editing the script or the denylist in the same pull request. The one
+# exception is the pull request that first introduces these two files
+# (this repository has none yet on main before that merges): until they
+# exist on the base branch, the base checkout step below finds nothing and
+# the job falls back to the head's own copy, which is unavoidable for a
+# bootstrapping change and is logged as such in the job's own output. Every
+# later pull request runs the base branch's trusted copy.
+#
+# This still does not stop someone with write access to this repository
+# from weakening the check itself in the same pull request that also
+# weakens the thing it is checking (nothing in GitHub Actions can, since
+# a required status check only re-reports the result of whatever workflow
+# version is present at the time it runs) -- the boundary for a *deliberate*
+# edit to .github/** is #53's code-owner review requirement, not this
+# check. This check catches an accidental lapse, which is what it was
+# asked to do.
 
 on:
   pull_request:
@@ -19,25 +40,54 @@ jobs:
     name: check
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout
+      - name: Checkout the pull request (for its own commit list only)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout the trusted checker and denylist from the base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: base-ref
+          sparse-checkout: |
+            .github/scripts/check_tool_attribution.py
+            .github/tool-attribution-denylist.txt
+          sparse-checkout-cone-mode: false
+
+      - name: Pick the checker and denylist source (base branch, or head only if the base has neither yet)
+        id: source
+        run: |
+          set -euo pipefail
+          if [ -f base-ref/.github/scripts/check_tool_attribution.py ] && [ -f base-ref/.github/tool-attribution-denylist.txt ]; then
+            echo "checker=base-ref/.github/scripts/check_tool_attribution.py" >> "$GITHUB_OUTPUT"
+            echo "denylist=base-ref/.github/tool-attribution-denylist.txt" >> "$GITHUB_OUTPUT"
+            echo "::notice::using the base branch's own trusted copy of the checker and denylist"
+          else
+            echo "checker=.github/scripts/check_tool_attribution.py" >> "$GITHUB_OUTPUT"
+            echo "denylist=.github/tool-attribution-denylist.txt" >> "$GITHUB_OUTPUT"
+            echo "::warning::base branch has no checker or denylist yet (bootstrapping pull request); using this pull request's own head copy this one time"
+          fi
 
       - name: Check the pull request title and description
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
+          CHECKER: ${{ steps.source.outputs.checker }}
+          DENYLIST: ${{ steps.source.outputs.denylist }}
         run: |
           set -euo pipefail
           printf '%s\n' "$PR_TITLE" > "$RUNNER_TEMP/pr_title.txt"
           printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/pr_body.txt"
-          python3 .github/scripts/check_tool_attribution.py \
-            --denylist .github/tool-attribution-denylist.txt \
+          python3 "$CHECKER" \
+            --denylist "$DENYLIST" \
             --label "the pull request title" \
             "$RUNNER_TEMP/pr_title.txt"
-          python3 .github/scripts/check_tool_attribution.py \
-            --denylist .github/tool-attribution-denylist.txt \
+          python3 "$CHECKER" \
+            --denylist "$DENYLIST" \
             --label "the pull request description" \
             "$RUNNER_TEMP/pr_body.txt"
 
@@ -46,11 +96,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_COMMIT_COUNT: ${{ github.event.pull_request.commits }}
+          CHECKER: ${{ steps.source.outputs.checker }}
+          DENYLIST: ${{ steps.source.outputs.denylist }}
         run: |
           set -euo pipefail
-          gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --jq '.[] | .commit.message' \
+          gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/commits" --jq '.[] | .commit.message' \
             > "$RUNNER_TEMP/commit_messages.txt"
-          python3 .github/scripts/check_tool_attribution.py \
-            --denylist .github/tool-attribution-denylist.txt \
+          listed_count=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/commits" --jq '.[] | .sha' | wc -l | tr -d ' ')
+          if [ "$listed_count" != "$PR_COMMIT_COUNT" ]; then
+            if [ "$PR_COMMIT_COUNT" -gt 250 ]; then
+              echo "::warning::this pull request has ${PR_COMMIT_COUNT} commits; the commits API lists at most 250, so ${listed_count} of them were checked and the rest were not"
+            else
+              echo "::error::expected ${PR_COMMIT_COUNT} commits from the pull request event, the commits API listed ${listed_count}; refusing to pass with an incomplete list"
+              exit 1
+            fi
+          fi
+          python3 "$CHECKER" \
+            --denylist "$DENYLIST" \
             --label "a commit message new to this pull request" \
             "$RUNNER_TEMP/commit_messages.txt"
