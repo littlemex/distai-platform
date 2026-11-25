@@ -8,7 +8,10 @@ not derivable from the instance type name. Writing the resulting 17- or
 from the `NetworkInfo` block of one `aws ec2 describe-instance-types` response
 (issue #50). It never calls AWS: the response is captured once, by hand, when
 an instance type is onboarded (see README.md next to this file), and committed
-as a fixture.
+as a fixture. Issue #50 itself sketched a script that takes --region and
+--instance-type and calls DescribeInstanceTypes directly; this script takes
+--describe-json instead, so that gitops/tests/0.static.sh's own check of it
+needs no AWS credentials (see README.md for the deviation and why).
 
 With C = NetworkInfo.MaximumNetworkCards and
 E = NetworkInfo.EfaInfo.MaximumEfaInterfaces:
