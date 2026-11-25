@@ -84,20 +84,34 @@
 #      namespaceResourceWhitelist covering the namespaced workload kinds
 #      a team's own chart may ship, including Role and RoleBinding --
 #      safe because team-rbac-guard.yaml (step 1) constrains their
-#      content for every caller, with no exemption.
+#      content for every caller, with no exemption -- plus InferencePool
+#      and HTTPRoute, the two namespace-scoped object kinds (not RBAC)
+#      issue #57 item 1's own motivating charts render (checks 11-12).
 #
 # Known, bounded residual scope (not closed by this PR, stated so the
 # "safely" claim above does not overreach): team-rbac-guard.yaml's own
 # rule 2 is a fixed allow-list of (apiGroup, resource, verb) -- not a
 # derivation from what every real chart actually needs. The allow-list
-# was sized to cover the ordinary namespaced workload kinds this
-# script's own AppProject whitelist already permits (step 4); it was
-# not checked against examples/inference/vllm/disagg-pd-llmd's own real
-# sidecar-rbac.yaml with a server-side dry run, so whether that specific
-# chart's own Role fits the allow-list as shipped is not independently
-# confirmed. Widening the allow-list for a real chart that needs more is
-# a one-line, reviewed change to team-rbac-guard.yaml, not a new deny
-# rule to invent. A Role binding to a Role already present in the
+# was checked against the two real charts issue #57 item 1 named
+# (examples/inference/vllm/disagg-pd-llmd and
+# examples/inference/sglang/disagg-pd-llmd, both at
+# feat/disagg-pd-reference@246b7ef) with a real sync through this exact
+# script's own AppProject, not merely a server-side dry run
+# (infra/foundation/tests/4.argocd-impersonation.sh's own checks 11-12):
+# both charts' own sidecar Role, and their shared llm-d-router-gateway
+# dependency chart's own namespaced Role, fit the allow-list once it
+# was widened to include inferencepools (inference.networking.k8s.io)
+# and inferenceobjectives/inferencemodelrewrites (llm-d.ai) -- see
+# team-rbac-guard.yaml's own comment on that widening for exactly which
+# rule needed which resource, and why no chart-side change was needed
+# instead. The AppProject's own namespaceResourceWhitelist below (step
+# 4) was widened the same way, for the two actual object KINDS (not
+# merely RBAC content) those charts render that were missing before:
+# InferencePool (inference.networking.k8s.io) and HTTPRoute
+# (gateway.networking.k8s.io) -- both namespace-scoped, matching every
+# other entry already there. Widening either list for a future chart
+# that needs more is a one-line, reviewed change to this file or to
+# team-rbac-guard.yaml, not a new deny rule to invent. A Role binding to a Role already present in the
 # namespace from before team-rbac-guard.yaml existed (never reviewed
 # under this policy) is outside what rule 1's own roleRef.kind check
 # alone verifies -- this design assumes every Role in a namespace it
@@ -294,6 +308,21 @@ kubectl apply -f "${SCRIPT_DIR}/team-rbac-guard.yaml" \
   || { echo "kubectl apply gitops/bootstrap/team-rbac-guard.yaml" >&2; exit 1; }
 echo "applied gitops/bootstrap/team-rbac-guard.yaml (ValidatingAdmissionPolicy team-rbac-guard + its Binding)" >&2
 
+# --- 1b. the same boundary, for the Namespace object's own two
+# -------  security-relevant labels (cluster-wide, once) -----------------
+# team-rbac-guard.yaml's own namespaceSelector decides which namespaces
+# it constrains at all by checking whether the namespace carries
+# distai.dev/team -- a label a team's own Application can otherwise
+# strip or change through Argo CD's syncPolicy.managedNamespaceMetadata
+# (issue #57 item 1's own PR #66 caveat; see
+# gitops/bootstrap/team-namespace-guard.yaml's own header for the full
+# finding and infra/foundation/tests/4.argocd-impersonation.sh's own
+# check 10 for the real-hardware confirmation). Applied the same way as
+# team-rbac-guard.yaml, for the same reason.
+kubectl apply -f "${SCRIPT_DIR}/team-namespace-guard.yaml" \
+  || { echo "kubectl apply gitops/bootstrap/team-namespace-guard.yaml" >&2; exit 1; }
+echo "applied gitops/bootstrap/team-namespace-guard.yaml (ValidatingAdmissionPolicy team-namespace-guard + its Binding)" >&2
+
 # --- 2. the team's own Namespace ------------------------------------------
 # Refuses to adopt a pre-existing Namespace this script did not itself
 # create: one that exists but was never labeled distai.dev/team by this
@@ -474,6 +503,25 @@ spec:
       kind: PodDisruptionBudget
     - group: "networking.k8s.io"
       kind: NetworkPolicy
+    # InferencePool and HTTPRoute: not RBAC content (team-rbac-guard.yaml
+    # has no rule for either), namespace-scoped like every other kind on
+    # this list, and the two object kinds -- not merely RBAC -- that
+    # issue #57 item 1's own motivating charts
+    # (examples/inference/vllm/disagg-pd-llmd,
+    # examples/inference/sglang/disagg-pd-llmd) actually render through
+    # their llm-d-router-gateway dependency chart (an InferencePool
+    # grouping this release's own engine Pods, and an HTTPRoute
+    # attaching to an admin-installed Gateway named by the chart's own
+    # values -- that chart's own README states the Gateway, its
+    # GatewayClass, the Gateway implementation and the Gateway API CRDs
+    # themselves are cluster-scoped and administrator-installed, never
+    # rendered by this chart). Confirmed by a real sync, not merely a
+    # dry run: infra/foundation/tests/4.argocd-impersonation.sh's own
+    # checks 11-12.
+    - group: "inference.networking.k8s.io"
+      kind: InferencePool
+    - group: "gateway.networking.k8s.io"
+      kind: HTTPRoute
   # Note: inert today (destinationServiceAccounts has no observed
   # effect -- confirmed, infra/foundation/tests/4.argocd-impersonation.sh's
   # own check 7), kept only for forward compatibility. Whether "server"

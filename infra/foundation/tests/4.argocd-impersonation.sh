@@ -97,6 +97,38 @@
 #      retrying check 8's own wildcard case shows it now succeeds --
 #      the closest proof available that the guard itself, not some
 #      other cluster behavior, was responsible for check 8's denials.
+#  10. (PR #66's own first remaining caveat, now closed): an Application
+#      cannot use syncPolicy.managedNamespaceMetadata to strip or weaken
+#      the two Namespace labels team-rbac-guard.yaml and
+#      gitops/bootstrap/team-onboard.sh depend on
+#      (distai.dev/team, pod-security.kubernetes.io/enforce). Same
+#      before/after pattern as check 9: with
+#      team-namespace-guard-binding deleted, a managedNamespaceMetadata
+#      that omits distai.dev/team and explicitly sets
+#      pod-security.kubernetes.io/enforce: privileged against the
+#      EXISTING team namespace is attempted and its real effect
+#      recorded (the discovery); with the Binding restored, the SAME
+#      attempt must leave both labels unchanged (the fix verification).
+#  11. (PR #66's own second remaining caveat, now closed): the real
+#      chart issue #57 item 1 named
+#      (examples/inference/vllm/disagg-pd-llmd, pinned at
+#      feat/disagg-pd-reference's own commit) self-syncs through the
+#      SAME team project as every other check here, with no admin
+#      pre-creating anything -- its sidecar Role, and its
+#      llm-d-router-gateway dependency chart's own namespaced Role, both
+#      pass team-rbac-guard.yaml once that guard's own allow-list is
+#      widened (team-rbac-guard.yaml's own comment on the widening), and
+#      its InferencePool/HTTPRoute objects pass the AppProject's own
+#      namespaceResourceWhitelist once that list is widened the same
+#      way (gitops/bootstrap/team-onboard.sh's own comment). GPU/EFA/a
+#      real Gateway are not required: this only checks that every
+#      object the chart renders is admitted and the Application reaches
+#      Synced, not that the engine Pods reach Running.
+#  12. the same as check 11, for
+#      examples/inference/sglang/disagg-pd-llmd (an identical
+#      sidecar-rbac.yaml and the same router dependency, per that
+#      chart's own comment) -- confirms the fix generalizes across both
+#      charts issue #57 item 1 named, not just one.
 #
 # This script builds only infra/foundation with var.argocd set (the
 # managed Argo CD capability) -- no Karpenter, no Kueue, no accelerator
@@ -144,6 +176,13 @@ REPO_ROOT="$(cd "${ROOT}/../.." && pwd)"
 # PR is on, so "HEAD" fails every sync with "app path does not exist",
 # confirmed on real hardware).
 REVISION="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+# Checks 11-12's own real charts (examples/inference/{vllm,sglang}/disagg-pd-llmd)
+# live on a different, unmerged branch (PR #51, feat/disagg-pd-reference),
+# not on this PR's own branch -- Argo CD sources from any branch/commit of
+# the same repoURL, so this does not need to match REVISION above. Pinned
+# to that branch's own commit at the time these checks were written, same
+# reasoning as REVISION's own comment (never a branch name).
+DISAGG_PD_REVISION="246b7efac86945530c1dc0374ed523730663e37e"
 WORK_DIR="${E2E_WORK_DIR:-$(mktemp -d)}"
 mkdir -p "${WORK_DIR}"
 TFVARS="${WORK_DIR}/e2e.tfvars.json"
@@ -185,7 +224,9 @@ cleanup() {
       info "cleanup: the test did not reach a successful destroy; cleaning up"
       if kubectl get nodes >/dev/null 2>&1; then
         local argons; argons="$(tf_out argocd_namespace 2>/dev/null || echo argocd)"
-        kubectl delete application team-a-chart team-a-rbac-probe team-a-clusteradmin-probe team-a-cross-ns team-a-clusterrole -n "${argons}" --ignore-not-found --wait=false >/dev/null 2>&1
+        kubectl delete application team-a-chart team-a-rbac-probe team-a-clusteradmin-probe team-a-cross-ns team-a-clusterrole team-a-nsmeta-strip team-a-vllm-disagg team-a-sglang-disagg -n "${argons}" --ignore-not-found --wait=false >/dev/null 2>&1
+        kubectl delete validatingadmissionpolicybinding team-namespace-guard-binding --ignore-not-found >/dev/null 2>&1
+        kubectl apply -f "${REPO_ROOT}/gitops/bootstrap/team-namespace-guard.yaml" >/dev/null 2>&1 || true
         kubectl delete appproject "${TEAM}" -n "${argons}" --ignore-not-found --wait=false >/dev/null 2>&1
         kubectl delete namespace "${TEAM}" "${OTHER_NS}" --ignore-not-found --wait=false >/dev/null 2>&1
       fi
@@ -430,7 +471,7 @@ kubectl get serviceaccount probe-sidecar -n "${TEAM}" >/dev/null 2>&1 \
   || fail "ServiceAccount probe-sidecar was not actually created in ${TEAM} despite a Succeeded sync"
 kubectl get configmap probe-config -n "${TEAM}" >/dev/null 2>&1 \
   || fail "ConfigMap probe-config was not actually created in ${TEAM} despite a Succeeded sync"
-pass "CHECK 1/9: team-a-chart (project ${TEAM}) self-synced an ordinary, non-RBAC workload chart (ServiceAccount+ConfigMap) into its own namespace ${TEAM} with no admin pre-creating it"
+pass "CHECK 1/12: team-a-chart (project ${TEAM}) self-synced an ordinary, non-RBAC workload chart (ServiceAccount+ConfigMap) into its own namespace ${TEAM} with no admin pre-creating it"
 
 # ------------------------------------------------ 4a2. issue #57's own goal:
 # ------------------------------------------------      a chart shipping its
@@ -465,7 +506,7 @@ kubectl get role probe-sidecar-role -n "${TEAM}" >/dev/null 2>&1 \
   || fail "Role probe-sidecar-role was not actually created in ${TEAM} despite a Succeeded sync"
 kubectl get rolebinding probe-sidecar-binding -n "${TEAM}" >/dev/null 2>&1 \
   || fail "RoleBinding probe-sidecar-binding was not actually created in ${TEAM} despite a Succeeded sync"
-pass "CHECK 2/9: team-a-rbac-probe (project ${TEAM}) self-synced its own benign, namespace-scoped Role/RoleBinding (#57 item 1's exact scenario) with no admin pre-creating it -- #57's own goal, restored, with gitops/bootstrap/team-rbac-guard.yaml (not Argo CD sync impersonation, confirmed not engaged -- check 7 below) as the real boundary"
+pass "CHECK 2/12: team-a-rbac-probe (project ${TEAM}) self-synced its own benign, namespace-scoped Role/RoleBinding (#57 item 1's exact scenario) with no admin pre-creating it -- #57's own goal, restored, with gitops/bootstrap/team-rbac-guard.yaml (not Argo CD sync impersonation, confirmed not engaged -- check 7 below) as the real boundary"
 
 # ------------------------------------------------ 4a3. team-rbac-guard.yaml
 # ------------------------------------------------      refuses the concrete
@@ -515,12 +556,13 @@ CLUSTERADMIN_PROBE_MESSAGE="$(clusteradmin_probe_message)"
 # recorded, not hidden.
 [[ "${CLUSTERADMIN_PROBE_PHASE}" != "Succeeded" ]] \
   || fail "team-a-clusteradmin-probe's sync SUCCEEDED -- a RoleBinding to ClusterRole cluster-admin was created in ${TEAM}; team-rbac-guard.yaml did not block it"
-kubectl get rolebinding probe-escalation-binding -n "${TEAM}" >/dev/null 2>&1 \
-  && fail "RoleBinding probe-escalation-binding (roleRef ClusterRole cluster-admin) was actually created in ${TEAM} despite team-rbac-guard's own refusal" || true
+if kubectl get rolebinding probe-escalation-binding -n "${TEAM}" >/dev/null 2>&1; then
+  fail "RoleBinding probe-escalation-binding (roleRef ClusterRole cluster-admin) was actually created in ${TEAM} despite team-rbac-guard's own refusal"
+fi
 if [[ "${CLUSTERADMIN_PROBE_MESSAGE}" == *"team-rbac-guard"* || "${CLUSTERADMIN_PROBE_MESSAGE}" == *"may not reference a ClusterRole"* ]]; then
-  pass "CHECK 3/9: a RoleBinding referencing the built-in cluster-admin ClusterRole, synced through the same team project ${TEAM} by Argo CD's own capability-wide (cluster-admin-equivalent) sync identity, was refused by the team-rbac-guard ValidatingAdmissionPolicy (phase ${CLUSTERADMIN_PROBE_PHASE}; message: ${CLUSTERADMIN_PROBE_MESSAGE}) -- admission runs regardless of the caller's own RBAC, closing the exact gap check 7 below shows RBAC-escalation checks leave open for this identity; no such RoleBinding was created"
+  pass "CHECK 3/12: a RoleBinding referencing the built-in cluster-admin ClusterRole, synced through the same team project ${TEAM} by Argo CD's own capability-wide (cluster-admin-equivalent) sync identity, was refused by the team-rbac-guard ValidatingAdmissionPolicy (phase ${CLUSTERADMIN_PROBE_PHASE}; message: ${CLUSTERADMIN_PROBE_MESSAGE}) -- admission runs regardless of the caller's own RBAC, closing the exact gap check 7 below shows RBAC-escalation checks leave open for this identity; no such RoleBinding was created"
 else
-  pass "CHECK 3/9: a RoleBinding referencing the built-in cluster-admin ClusterRole, synced through the same team project ${TEAM}, did NOT succeed (phase ${CLUSTERADMIN_PROBE_PHASE}) and no such RoleBinding was created in ${TEAM} -- team-rbac-guard's own deny message was not surfaced cleanly this time (Argo CD's own 'kubectl auth reconcile' RBAC-reconciliation path crashed with a nil pointer dereference instead of reporting it, message: ${CLUSTERADMIN_PROBE_MESSAGE}; an Argo CD-side defect worth tracking at #49, not evidence the guard itself failed to act -- the object's own confirmed absence is)"
+  pass "CHECK 3/12: a RoleBinding referencing the built-in cluster-admin ClusterRole, synced through the same team project ${TEAM}, did NOT succeed (phase ${CLUSTERADMIN_PROBE_PHASE}) and no such RoleBinding was created in ${TEAM} -- team-rbac-guard's own deny message was not surfaced cleanly this time (Argo CD's own 'kubectl auth reconcile' RBAC-reconciliation path crashed with a nil pointer dereference instead of reporting it, message: ${CLUSTERADMIN_PROBE_MESSAGE}; an Argo CD-side defect worth tracking at #49, not evidence the guard itself failed to act -- the object's own confirmed absence is)"
 fi
 kubectl delete application team-a-rbac-probe team-a-clusteradmin-probe -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 
@@ -553,9 +595,10 @@ cross_ns_blocked() {
 }
 wait_until 120 5 "team-a-cross-ns's own InvalidSpecError (destination not permitted in project)" cross_ns_blocked \
   || fail "team-a-cross-ns was not refused for its destination namespace ${OTHER_NS}: $(kubectl get application team-a-cross-ns -n "${ARGOCD_NAMESPACE}" -o jsonpath='{.status.conditions}')"
-kubectl get configmap probe-config -n "${OTHER_NS}" >/dev/null 2>&1 \
-  && fail "ConfigMap probe-config was actually created in ${OTHER_NS} despite the AppProject's own destination refusal" || true
-pass "CHECK 4/9: the same non-RBAC manifest, same team project ${TEAM}, aimed at ${OTHER_NS} instead of its own ${TEAM}, was refused by the AppProject's own destinations list before anything was written to ${OTHER_NS}"
+if kubectl get configmap probe-config -n "${OTHER_NS}" >/dev/null 2>&1; then
+  fail "ConfigMap probe-config was actually created in ${OTHER_NS} despite the AppProject's own destination refusal"
+fi
+pass "CHECK 4/12: the same non-RBAC manifest, same team project ${TEAM}, aimed at ${OTHER_NS} instead of its own ${TEAM}, was refused by the AppProject's own destinations list before anything was written to ${OTHER_NS}"
 kubectl delete application team-a-cross-ns -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 
 # ------------------------------------------------- 4c. a team project denies
@@ -586,9 +629,10 @@ clusterrole_blocked() {
 trigger_sync team-a-clusterrole >/dev/null 2>&1 || true
 wait_until 120 5 "team-a-clusterrole refused (ClusterRole not permitted in project)" clusterrole_blocked \
   || fail "team-a-clusterrole was not refused: conditions=$(kubectl get application team-a-clusterrole -n "${ARGOCD_NAMESPACE}" -o jsonpath='{.status.conditions}') operationState=$(operation_message team-a-clusterrole)"
-kubectl get clusterrole tenancy-probe-clusterrole-should-be-rejected >/dev/null 2>&1 \
-  && fail "ClusterRole tenancy-probe-clusterrole-should-be-rejected was actually created despite the AppProject's own empty clusterResourceWhitelist" || true
-pass "CHECK 5/9: a bare ClusterRole, synced through the same team project ${TEAM}, was refused by the AppProject's own empty clusterResourceWhitelist; no ClusterRole was created"
+if kubectl get clusterrole tenancy-probe-clusterrole-should-be-rejected >/dev/null 2>&1; then
+  fail "ClusterRole tenancy-probe-clusterrole-should-be-rejected was actually created despite the AppProject's own empty clusterResourceWhitelist"
+fi
+pass "CHECK 5/12: a bare ClusterRole, synced through the same team project ${TEAM}, was refused by the AppProject's own empty clusterResourceWhitelist; no ClusterRole was created"
 kubectl delete application team-a-clusterrole -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 
 # ------------------------------------------------- 4d. the team's own
@@ -617,9 +661,10 @@ DENY_ERR="$(kubectl create role escalate-attempt -n "${TEAM}" \
   || fail "kubectl create role escalate-attempt --as=${DEPLOYER} failed, but not with 'is forbidden': ${DENY_ERR}"
 [[ "${DENY_ERR}" == *"${DEPLOYER}"* ]] \
   || fail "the refusal did not name ${DEPLOYER} as the subject: ${DENY_ERR}"
-kubectl get role escalate-attempt -n "${TEAM}" >/dev/null 2>&1 \
-  && fail "Role escalate-attempt was actually created in ${TEAM} despite the refusal" || true
-pass "CHECK 6/9: ${DEPLOYER}, which holds no permission on rbac.authorization.k8s.io resources at all, was refused when asked to create a Role granting 'secrets', naming ${DEPLOYER} in the refusal ('${DENY_ERR}'); no such Role was created"
+if kubectl get role escalate-attempt -n "${TEAM}" >/dev/null 2>&1; then
+  fail "Role escalate-attempt was actually created in ${TEAM} despite the refusal"
+fi
+pass "CHECK 6/12: ${DEPLOYER}, which holds no permission on rbac.authorization.k8s.io resources at all, was refused when asked to create a Role granting 'secrets', naming ${DEPLOYER} in the refusal ('${DENY_ERR}'); no such Role was created"
 
 # ------------------------------------------------- 5. the differential
 # -------------------------------------------------    check: is
@@ -680,7 +725,7 @@ SECOND_MESSAGE="$(operation_message team-a-chart)"
   || fail "team-a-chart's second sync was ${SECOND_PHASE} (message: ${SECOND_MESSAGE}), expected Succeeded -- this would mean impersonation IS now engaged (a change from the confirmed 2026-11-25 behavior this test documents); if so, update this assertion and revisit #22 Decision 10 H11 Option A, do not just make this check pass again"
 kubectl get configmap probe-config -n "${TEAM}" >/dev/null 2>&1 \
   || fail "ConfigMap probe-config was not recreated in ${TEAM} despite a Succeeded second sync"
-pass "CHECK 7/9 (differential check, confirmed finding): even after ${DEPLOYER} itself lost the 'configmaps' permission, the SAME Application's resync still Succeeded and recreated probe-config -- sync impersonation is NOT actually engaged on this capability (tracked at #49; #22 Decision 10 H11 Option A is not viable as of 2026-11-25). Argo CD performed this sync with its own capability-wide identity throughout, not team-a-deployer's"
+pass "CHECK 7/12 (differential check, confirmed finding): even after ${DEPLOYER} itself lost the 'configmaps' permission, the SAME Application's resync still Succeeded and recreated probe-config -- sync impersonation is NOT actually engaged on this capability (tracked at #49; #22 Decision 10 H11 Option A is not viable as of 2026-11-25). Argo CD performed this sync with its own capability-wide identity throughout, not team-a-deployer's"
 
 # Restore team-a-deployer-role to its original rules regardless (leaves
 # the cell in the same state checks 1-6 left it in, for a clean
@@ -743,8 +788,9 @@ assert_rbac_denied() {
     fail "direct kubectl apply of ${resource}/${name} SUCCEEDED -- team-rbac-guard did not deny it"
   [[ "${err}" == *"${expected_substr}"* ]] \
     || fail "direct kubectl apply of ${resource}/${name} was refused, but not with the expected message ('${expected_substr}'): ${err}"
-  kubectl get "${resource}" "${name}" -n "${TEAM}" >/dev/null 2>&1 \
-    && fail "${resource}/${name} was actually created in ${TEAM} despite the refusal" || true
+  if kubectl get "${resource}" "${name}" -n "${TEAM}" >/dev/null 2>&1; then
+    fail "${resource}/${name} was actually created in ${TEAM} despite the refusal"
+  fi
 }
 
 ALLOWLIST_MSG="may grant only"
@@ -890,7 +936,7 @@ rules:
     verbs: ["get", "patch"]
 RBAC
 )" "${ALLOWLIST_MSG}"
-pass "CHECK 8/9: ten distinct shapes (RoleBinding->ClusterRole; a Role granting the impersonate verb, the rbac.authorization.k8s.io group, a wildcard resources with an allowed apiGroups, a wildcard apiGroups with allowed resources/verbs [isolating that clause specifically], Secrets, serviceaccounts/token, pods/exec, a wildcard-subresource form, or 'patch' on namespaces itself) are all denied by a direct kubectl apply (no Argo CD) by the cluster-admin-equivalent identity this script runs as, each naming the guard's own rule in the refusal; no object was created for any of the ten"
+pass "CHECK 8/12: ten distinct shapes (RoleBinding->ClusterRole; a Role granting the impersonate verb, the rbac.authorization.k8s.io group, a wildcard resources with an allowed apiGroups, a wildcard apiGroups with allowed resources/verbs [isolating that clause specifically], Secrets, serviceaccounts/token, pods/exec, a wildcard-subresource form, or 'patch' on namespaces itself) are all denied by a direct kubectl apply (no Argo CD) by the cluster-admin-equivalent identity this script runs as, each naming the guard's own rule in the refusal; no object was created for any of the ten"
 
 # ------------------------------------------------- 7. mutation check: delete
 # -------------------------------------------------    the guard's own
@@ -970,11 +1016,191 @@ EOF
 }
 wait_until 60 3 "guard-check-wildcard-mutation to be denied again (by team-rbac-guard specifically) once the Binding is restored" mutation_role_denied_again \
   || fail "guard-check-wildcard-mutation was not denied by team-rbac-guard's own message within 60s of restoring team-rbac-guard-binding -- the restore did not actually re-enable the guard, or a different gate (not team-rbac-guard) is now the reason"
-kubectl get role guard-check-wildcard-mutation -n "${TEAM}" >/dev/null 2>&1 \
-  && fail "guard-check-wildcard-mutation was actually created on the post-restore attempt despite mutation_role_denied_again reporting denial" || true
-pass "CHECK 9/9 (mutation check): the SAME wildcard-granting Role check 8 showed denied SUCCEEDS once team-rbac-guard-binding is deleted, and is DENIED AGAIN, by the guard's own message, once the Binding is restored -- confirms the guard itself, not an unrelated cluster behavior, was responsible for check 8's own denials, in both directions"
+if kubectl get role guard-check-wildcard-mutation -n "${TEAM}" >/dev/null 2>&1; then
+  fail "guard-check-wildcard-mutation was actually created on the post-restore attempt despite mutation_role_denied_again reporting denial"
+fi
+pass "CHECK 9/12 (mutation check): the SAME wildcard-granting Role check 8 showed denied SUCCEEDS once team-rbac-guard-binding is deleted, and is DENIED AGAIN, by the guard's own message, once the Binding is restored -- confirms the guard itself, not an unrelated cluster behavior, was responsible for check 8's own denials, in both directions"
 
-# ------------------------------------------------------- 8. teardown
+# ------------------------------------------------------- 7. PR #66's own
+# -------------------------------------------------------    first remaining
+# -------------------------------------------------------    caveat:
+# -------------------------------------------------------    managedNamespaceMetadata
+# -------------------------------------------------------    cannot strip or
+# -------------------------------------------------------    weaken the
+# -------------------------------------------------------    Namespace's own
+# -------------------------------------------------------    two
+# -------------------------------------------------------    security-relevant
+# -------------------------------------------------------    labels
+
+# Same before/after shape as check 9: delete team-namespace-guard-binding,
+# attempt the exploit through an actual Argo CD sync (not a plain kubectl
+# apply, since what matters is whether Argo CD's own
+# managedNamespaceMetadata reconciliation -- not this script -- performs
+# the write), record exactly what happened (the discovery -- this script
+# does not presuppose which way Argo CD's own namespace-metadata
+# reconciliation behaves), then restore the Binding and require the SAME
+# attempt to leave both labels unchanged (the fix verification, which is
+# the assertion that actually fails this script if wrong).
+read_ns_label() { kubectl get namespace "${TEAM}" -o jsonpath="{.metadata.labels['$1']}" 2>/dev/null; }
+
+ORIG_TEAM_LABEL="$(read_ns_label 'distai.dev/team')"
+ORIG_PSA_LABEL="$(read_ns_label 'pod-security.kubernetes.io/enforce')"
+[[ "${ORIG_TEAM_LABEL}" == "${TEAM}" ]] \
+  || fail "namespace ${TEAM} does not carry distai.dev/team=${TEAM} before the managedNamespaceMetadata probe (got '${ORIG_TEAM_LABEL}')"
+[[ "${ORIG_PSA_LABEL}" == "restricted" ]] \
+  || fail "namespace ${TEAM} does not carry pod-security.kubernetes.io/enforce=restricted before the managedNamespaceMetadata probe (got '${ORIG_PSA_LABEL}')"
+
+apply_nsmeta_strip_app() {
+  kubectl apply -n "${ARGOCD_NAMESPACE}" -f - <<EOF
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: team-a-nsmeta-strip
+  namespace: ${ARGOCD_NAMESPACE}
+spec:
+  project: ${TEAM}
+  source:
+    repoURL: https://github.com/littlemex/distai-platform.git
+    targetRevision: ${REVISION}
+    path: infra/foundation/tests/fixtures/tenancy-argocd-impersonation/plain-workload-probe
+  destination:
+    name: "${CLUSTER}"
+    namespace: ${TEAM}
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+    managedNamespaceMetadata:
+      labels:
+        distai.dev/nsmeta-probe-marker: "1"
+        pod-security.kubernetes.io/enforce: privileged
+EOF
+}
+nsmeta_strip_op_done() { local p; p="$(operation_phase team-a-nsmeta-strip)"; [[ "${p}" == "Succeeded" || "${p}" == "Failed" || "${p}" == "Error" ]]; }
+
+kubectl delete validatingadmissionpolicybinding team-namespace-guard-binding \
+  || fail "kubectl delete validatingadmissionpolicybinding team-namespace-guard-binding"
+apply_nsmeta_strip_app || fail "kubectl apply Application team-a-nsmeta-strip (first attempt, guard absent)"
+trigger_sync team-a-nsmeta-strip || fail "trigger team-a-nsmeta-strip's first sync (guard absent)"
+wait_until 120 5 "team-a-nsmeta-strip's first sync operation to finish" nsmeta_strip_op_done \
+  || fail "team-a-nsmeta-strip's first sync did not finish within 120s (phase: $(operation_phase team-a-nsmeta-strip))"
+DISCOVERY_TEAM_LABEL="$(read_ns_label 'distai.dev/team')"
+DISCOVERY_PSA_LABEL="$(read_ns_label 'pod-security.kubernetes.io/enforce')"
+info "discovery (team-namespace-guard-binding absent, sync phase $(operation_phase team-a-nsmeta-strip)): distai.dev/team is now '${DISCOVERY_TEAM_LABEL}' (was '${ORIG_TEAM_LABEL}'), pod-security.kubernetes.io/enforce is now '${DISCOVERY_PSA_LABEL}' (was '${ORIG_PSA_LABEL}')"
+if [[ "${DISCOVERY_TEAM_LABEL}" != "${ORIG_TEAM_LABEL}" || "${DISCOVERY_PSA_LABEL}" != "${ORIG_PSA_LABEL}" ]]; then
+  info "CONFIRMED on real hardware: without team-namespace-guard, a team's own Application's managedNamespaceMetadata (CreateNamespace=true, against the EXISTING team namespace) changes at least one of these labels -- the bypass PR #66's own caveat described is real"
+else
+  info "on this run, Argo CD's own managedNamespaceMetadata reconciliation did not change either label even with team-namespace-guard absent -- team-namespace-guard.yaml is still applied as a stated, defense-in-depth boundary against this surface regardless"
+fi
+# Restore the correct values directly (this script's own state, not
+# Argo CD's), independent of whichever way the discovery above went, so
+# the rest of this script -- and the fix-verification attempt right
+# below -- starts from the same known-good labels every other check
+# already assumed.
+kubectl label namespace "${TEAM}" --overwrite \
+  "distai.dev/team=${TEAM}" "pod-security.kubernetes.io/enforce=restricted" \
+  || fail "kubectl label namespace ${TEAM} (restore distai.dev/team and pod-security.kubernetes.io/enforce after the discovery attempt)"
+kubectl apply -f "${REPO_ROOT}/gitops/bootstrap/team-namespace-guard.yaml" \
+  || fail "kubectl apply gitops/bootstrap/team-namespace-guard.yaml (restore the Binding)"
+
+# Fix verification: the SAME managedNamespaceMetadata, retried now that
+# team-namespace-guard is back. A fresh Application object (delete then
+# recreate, not merely resync) rules out any possibility that Argo CD
+# treats this as a no-op against its own prior, already-applied desired
+# state rather than a real write attempt.
+kubectl delete application team-a-nsmeta-strip -n "${ARGOCD_NAMESPACE}" --wait=true --timeout=60s >/dev/null 2>&1 || true
+# Gives the API server's in-process admission-policy cache a moment to
+# notice the Binding (re-applied just above) is back, same reasoning as
+# check 9's own mutation_role_denied_again, before the retry below.
+sleep 10
+apply_nsmeta_strip_app || fail "kubectl apply Application team-a-nsmeta-strip (retry, team-namespace-guard restored)"
+trigger_sync team-a-nsmeta-strip || fail "trigger team-a-nsmeta-strip's retried sync (team-namespace-guard restored)"
+wait_until 120 5 "team-a-nsmeta-strip's retried sync operation to finish" nsmeta_strip_op_done \
+  || fail "team-a-nsmeta-strip's retried sync did not finish within 120s (phase: $(operation_phase team-a-nsmeta-strip))"
+[[ "$(operation_phase team-a-nsmeta-strip)" != "Succeeded" ]] \
+  || fail "team-a-nsmeta-strip's managedNamespaceMetadata attempt SUCCEEDED even with team-namespace-guard-binding restored (phase Succeeded) -- the guard did not actually block the Namespace UPDATE"
+AFTER_FIX_TEAM_LABEL="$(read_ns_label 'distai.dev/team')"
+AFTER_FIX_PSA_LABEL="$(read_ns_label 'pod-security.kubernetes.io/enforce')"
+[[ "${AFTER_FIX_TEAM_LABEL}" == "${TEAM}" ]] \
+  || fail "SECURITY: after the retried team-a-nsmeta-strip sync (team-namespace-guard restored), namespace ${TEAM}'s own distai.dev/team label is '${AFTER_FIX_TEAM_LABEL}', not '${TEAM}'"
+[[ "${AFTER_FIX_PSA_LABEL}" == "restricted" ]] \
+  || fail "SECURITY: after the retried team-a-nsmeta-strip sync (team-namespace-guard restored), namespace ${TEAM}'s own pod-security.kubernetes.io/enforce label is '${AFTER_FIX_PSA_LABEL}', not 'restricted'"
+NSMETA_PROBE_MESSAGE="$(kubectl get application team-a-nsmeta-strip -n "${ARGOCD_NAMESPACE}" \
+  -o jsonpath='{.status.conditions[*].message}{.status.operationState.message}{.status.operationState.syncResult.resources[*].message}' 2>/dev/null)"
+pass "CHECK 10/12 (PR #66's own first remaining caveat, closed): a team's own Application using syncPolicy.managedNamespaceMetadata (CreateNamespace=true, against the EXISTING team namespace ${TEAM}) to omit distai.dev/team and set pod-security.kubernetes.io/enforce: privileged did NOT succeed once gitops/bootstrap/team-namespace-guard.yaml's own Binding was restored (phase $(operation_phase team-a-nsmeta-strip); message: ${NSMETA_PROBE_MESSAGE}); both labels remain distai.dev/team=${TEAM} and pod-security.kubernetes.io/enforce=restricted"
+kubectl delete application team-a-nsmeta-strip -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
+
+# ------------------------------------------------------- 8. PR #66's own
+# -------------------------------------------------------    second
+# -------------------------------------------------------    remaining
+# -------------------------------------------------------    caveat: the
+# -------------------------------------------------------    real charts
+# -------------------------------------------------------    issue #57
+# -------------------------------------------------------    item 1 named
+# -------------------------------------------------------    self-sync
+# -------------------------------------------------------    through the
+# -------------------------------------------------------    SAME team
+# -------------------------------------------------------    project
+
+# Gateway API v1.6.2 and Gateway API Inference Extension v1.6.2 CRDs:
+# both charts render an HTTPRoute and an InferencePool (cluster-scoped
+# CRDs an administrator installs once, cluster-wide -- same split as
+# examples/inference/vllm/disagg-pd-llmd's own README, "Prerequisites").
+# No Gateway implementation, GatewayClass or Gateway object is installed
+# -- this script only checks that every object each chart renders is
+# admitted and the Application reaches Synced, not that its own
+# HTTPRoute is Accepted or that any engine Pod reaches Running (no GPU,
+# no EFA, no Gateway implementation on this foundation-only cluster).
+kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.2/standard-install.yaml \
+  || fail "kubectl apply --server-side gateway-api v1.6.2 standard-install.yaml"
+kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.6.2/v1-manifests.yaml \
+  || fail "kubectl apply --server-side gateway-api-inference-extension v1.6.2 v1-manifests.yaml"
+crds_ready() { kubectl get crd httproutes.gateway.networking.k8s.io inferencepools.inference.networking.k8s.io >/dev/null 2>&1; }
+wait_until 120 5 "Gateway API + Gateway API Inference Extension CRDs present" crds_ready \
+  || fail "httproutes.gateway.networking.k8s.io / inferencepools.inference.networking.k8s.io CRDs never appeared"
+pass "installed the Gateway API v1.6.2 and Gateway API Inference Extension v1.6.2 CRDs (cluster administrator's own step, same split as the charts' own README)"
+
+sync_real_chart() {
+  local app="$1" chart_path="$2" check_label="$3"
+  kubectl apply -n "${ARGOCD_NAMESPACE}" -f - <<EOF || fail "kubectl apply Application ${app}"
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ${app}
+  namespace: ${ARGOCD_NAMESPACE}
+spec:
+  project: ${TEAM}
+  source:
+    repoURL: https://github.com/littlemex/distai-platform.git
+    targetRevision: ${DISAGG_PD_REVISION}
+    path: ${chart_path}
+    helm:
+      parameters:
+        - name: model.name
+          value: "distai-platform-ci/tenancy-probe-not-a-real-model"
+  destination:
+    name: "${CLUSTER}"
+    namespace: ${TEAM}
+EOF
+  trigger_sync "${app}" || fail "trigger ${app}'s sync"
+  chart_op_done() { local p; p="$(operation_phase "${app}")"; [[ "${p}" == "Succeeded" || "${p}" == "Failed" || "${p}" == "Error" ]]; }
+  wait_until 300 10 "${app}'s sync operation to finish" chart_op_done \
+    || fail "${app}'s sync did not finish within 300s (phase: $(operation_phase "${app}"))"
+  [[ "$(operation_phase "${app}")" == "Succeeded" ]] \
+    || fail "${app}'s sync did not Succeed (phase $(operation_phase "${app}"), message: $(operation_message "${app}")) -- ${chart_path}'s own Role or one of its rendered object kinds does not fit team-rbac-guard.yaml's own allow-list or the AppProject's own namespaceResourceWhitelist as currently widened; the message above names which"
+  kubectl get role -n "${TEAM}" -l "app.kubernetes.io/component=routing-sidecar" --no-headers 2>/dev/null | grep -q . \
+    || fail "${app}: no Role with label app.kubernetes.io/component=routing-sidecar was created in ${TEAM} despite a Succeeded sync -- the sidecar RBAC (templates/sidecar-rbac.yaml) was not actually applied"
+  kubectl get inferencepool -n "${TEAM}" --no-headers 2>/dev/null | grep -q . \
+    || fail "${app}: no InferencePool was created in ${TEAM} despite a Succeeded sync"
+  kubectl get httproute -n "${TEAM}" --no-headers 2>/dev/null | grep -q . \
+    || fail "${app}: no HTTPRoute was created in ${TEAM} despite a Succeeded sync"
+  pass "${check_label}: ${chart_path} (pinned at feat/disagg-pd-reference@${DISAGG_PD_REVISION}) self-synced through the SAME team project ${TEAM} with no admin pre-creating anything -- its own sidecar Role, its llm-d-router-gateway dependency chart's own namespaced Role, its InferencePool and its HTTPRoute were all admitted and created (phase $(operation_phase "${app}"))"
+  kubectl delete application "${app}" -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
+}
+
+sync_real_chart team-a-vllm-disagg "examples/inference/vllm/disagg-pd-llmd" "CHECK 11/12"
+sync_real_chart team-a-sglang-disagg "examples/inference/sglang/disagg-pd-llmd" "CHECK 12/12"
+
+# ------------------------------------------------------- 9. teardown
 
 kubectl delete application team-a-chart -n "${ARGOCD_NAMESPACE}" --wait=true --timeout=60s \
   || fail "kubectl delete application team-a-chart"
