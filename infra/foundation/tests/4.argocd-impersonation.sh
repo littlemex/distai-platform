@@ -108,7 +108,17 @@
 #      pod-security.kubernetes.io/enforce: privileged against the
 #      EXISTING team namespace is attempted and its real effect
 #      recorded (the discovery); with the Binding restored, the SAME
-#      attempt must leave both labels unchanged (the fix verification).
+#      attempt must leave both labels unchanged (the fix
+#      verification). The fix verification reads the Namespace's own
+#      labels directly, not operationState.phase: a real-hardware run
+#      found a denied managedNamespaceMetadata patch does not fail the
+#      Application's own overall sync phase the way a denied
+#      Role/RoleBinding does in checks 2-3 (there is no Namespace
+#      entry in this Application's own manifest at all, only
+#      syncPolicy's own field, and Argo CD's own namespace-metadata
+#      reconciliation is not an ordinary synced resource) -- the
+#      Namespace's own labels are the only signal that actually says
+#      whether the write landed.
 #  11. (PR #66's own second remaining caveat, now closed): the real
 #      chart issue #57 item 1 named
 #      (examples/inference/vllm/disagg-pd-llmd, pinned at
@@ -1126,17 +1136,25 @@ apply_nsmeta_strip_app || fail "kubectl apply Application team-a-nsmeta-strip (r
 trigger_sync team-a-nsmeta-strip || fail "trigger team-a-nsmeta-strip's retried sync (team-namespace-guard restored)"
 wait_until 120 5 "team-a-nsmeta-strip's retried sync operation to finish" nsmeta_strip_op_done \
   || fail "team-a-nsmeta-strip's retried sync did not finish within 120s (phase: $(operation_phase team-a-nsmeta-strip))"
-[[ "$(operation_phase team-a-nsmeta-strip)" != "Succeeded" ]] \
-  || fail "team-a-nsmeta-strip's managedNamespaceMetadata attempt SUCCEEDED even with team-namespace-guard-binding restored (phase Succeeded) -- the guard did not actually block the Namespace UPDATE"
+# The decisive assertion is the Namespace's own labels, not
+# operationState.phase: Argo CD's own namespace-metadata management is
+# not an ordinary synced resource (there is no Namespace entry in this
+# Application's own manifest at all, only syncPolicy's own field) --
+# a real-hardware run found it does not fail the Application's overall
+# sync phase the way a denied Role/RoleBinding does in checks 2-3
+# above, even when the Namespace PATCH underneath it was itself
+# refused. Logged as info, not asserted on, for exactly that reason.
+NSMETA_RETRY_PHASE="$(operation_phase team-a-nsmeta-strip)"
+NSMETA_PROBE_MESSAGE="$(kubectl get application team-a-nsmeta-strip -n "${ARGOCD_NAMESPACE}" \
+  -o jsonpath='{.status.conditions[*].message}{.status.operationState.message}{.status.operationState.syncResult.resources[*].message}' 2>/dev/null)"
+info "team-a-nsmeta-strip's retried sync (team-namespace-guard restored) reached phase ${NSMETA_RETRY_PHASE} (message: ${NSMETA_PROBE_MESSAGE}); checking the Namespace's own labels directly rather than relying on this phase"
 AFTER_FIX_TEAM_LABEL="$(read_team_label)"
 AFTER_FIX_PSA_LABEL="$(read_psa_label)"
 [[ "${AFTER_FIX_TEAM_LABEL}" == "${TEAM}" ]] \
-  || fail "SECURITY: after the retried team-a-nsmeta-strip sync (team-namespace-guard restored), namespace ${TEAM}'s own distai.dev/team label is '${AFTER_FIX_TEAM_LABEL}', not '${TEAM}'"
+  || fail "SECURITY: after the retried team-a-nsmeta-strip sync (team-namespace-guard restored, phase ${NSMETA_RETRY_PHASE}), namespace ${TEAM}'s own distai.dev/team label is '${AFTER_FIX_TEAM_LABEL}', not '${TEAM}'"
 [[ "${AFTER_FIX_PSA_LABEL}" == "restricted" ]] \
-  || fail "SECURITY: after the retried team-a-nsmeta-strip sync (team-namespace-guard restored), namespace ${TEAM}'s own pod-security.kubernetes.io/enforce label is '${AFTER_FIX_PSA_LABEL}', not 'restricted'"
-NSMETA_PROBE_MESSAGE="$(kubectl get application team-a-nsmeta-strip -n "${ARGOCD_NAMESPACE}" \
-  -o jsonpath='{.status.conditions[*].message}{.status.operationState.message}{.status.operationState.syncResult.resources[*].message}' 2>/dev/null)"
-pass "CHECK 10/12 (PR #66's own first remaining caveat, closed): a team's own Application using syncPolicy.managedNamespaceMetadata (CreateNamespace=true, against the EXISTING team namespace ${TEAM}) to omit distai.dev/team and set pod-security.kubernetes.io/enforce: privileged did NOT succeed once gitops/bootstrap/team-namespace-guard.yaml's own Binding was restored (phase $(operation_phase team-a-nsmeta-strip); message: ${NSMETA_PROBE_MESSAGE}); both labels remain distai.dev/team=${TEAM} and pod-security.kubernetes.io/enforce=restricted"
+  || fail "SECURITY: after the retried team-a-nsmeta-strip sync (team-namespace-guard restored, phase ${NSMETA_RETRY_PHASE}), namespace ${TEAM}'s own pod-security.kubernetes.io/enforce label is '${AFTER_FIX_PSA_LABEL}', not 'restricted'"
+pass "CHECK 10/12 (PR #66's own first remaining caveat, closed): a team's own Application using syncPolicy.managedNamespaceMetadata (CreateNamespace=true, against the EXISTING team namespace ${TEAM}) to omit distai.dev/team and set pod-security.kubernetes.io/enforce: privileged did NOT change either label once gitops/bootstrap/team-namespace-guard.yaml's own Binding was restored (retried sync reached phase ${NSMETA_RETRY_PHASE}; both labels confirmed unchanged: distai.dev/team=${TEAM}, pod-security.kubernetes.io/enforce=restricted)"
 kubectl delete application team-a-nsmeta-strip -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 
 # ------------------------------------------------------- 8. PR #66's own
