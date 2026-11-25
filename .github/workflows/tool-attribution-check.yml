@@ -31,10 +31,13 @@ name: Tool Attribution Check
 # (`pull_request_target`, which takes the workflow definition from the
 # base branch; a ruleset's required workflow, pinned to a ref) -- they are
 # not used here, deliberately: `pull_request_target` runs with a token
-# that can write to the base repository and executes the base branch's
-# code against event data from the head, which is the shape of risk this
-# repository's own stated rule against `pull_request_target` exists to
-# avoid, and a required workflow needs Administration permission on the
+# that CAN be granted write access to the base repository and secrets
+# (this workflow's own permissions would still keep it read-only, but the
+# trigger itself carries that capability) while executing the base
+# branch's code against event data that comes from the head, which is the
+# shape of risk this repository's own stated rule against
+# `pull_request_target` exists to avoid, and a required workflow needs
+# Administration permission on the
 # repository that this automation does not have. The boundary this
 # repository actually relies on for a *deliberate* edit to `.github/**` is
 # #53's code-owner review requirement, not this check. This check catches
@@ -53,7 +56,7 @@ jobs:
     name: check
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout the pull request (for its own commit list only)
+      - name: Checkout the pull request head (fallback copy only; the commit list below comes from the API)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
@@ -84,7 +87,7 @@ jobs:
           elif [ "$HAS_CHECKER" -eq 0 ] && [ "$HAS_DENYLIST" -eq 0 ]; then
             echo "checker=.github/scripts/check_tool_attribution.py" >> "$GITHUB_OUTPUT"
             echo "denylist=.github/tool-attribution-denylist.txt" >> "$GITHUB_OUTPUT"
-            echo "::warning::base branch has no checker or denylist yet (bootstrapping pull request); using this pull request's own head copy this one time"
+            echo "::warning::base branch has no checker or denylist yet (bootstrapping pull request); using this pull request's own head copy (this is the normal case only before this change itself merges; see the workflow's own header comment for when it can also occur afterward)"
           else
             echo "::error::base branch has exactly one of the checker and the denylist (checker present: ${HAS_CHECKER}, denylist present: ${HAS_DENYLIST}); refusing to guess which copy to trust"
             exit 1
