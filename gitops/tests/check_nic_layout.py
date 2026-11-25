@@ -396,16 +396,19 @@ def check_refusals(generator: str, fixtures_dir: str, exceptions: str, cwd: str,
 
         # Unlike every case above (which goes through synthetic(), stripping _source so the
         # shape under test is isolated from it -- see synthetic()'s own docstring), this one
-        # passes base_doc completely unchanged, _source and all: base_doc's own (C, E) is
-        # E == C (review round 1's fixtures all are except p6-b300), which synthetic.main()'s
-        # algorithm alone would happily render, so a refusal here is caused by nothing but the
-        # _source.instanceType mismatch below -- the one path review round 2 found untested.
+        # builds its own self-contained doc (not read from fixtures_dir, which an earlier
+        # mutation in a selftest scenario may have changed) carrying a _source.instanceType
+        # that does NOT match the --instance-type passed below, with a (C, E) of E == C that
+        # synthetic.main()'s own algorithm would happily render on its own -- so a refusal here
+        # is caused by nothing but the _source mismatch, the one path review round 2 found
+        # untested.
+        mismatch_doc = {**_describe(2, 2), "_source": {"instanceType": SYNTHETIC_CASE4_TYPE}}
         mismatch_path = os.path.join(tmp, f"source-mismatch{DESCRIBE_SUFFIX}")
         with open(mismatch_path, "w", encoding="utf-8") as f:
-            json.dump(base_doc, f, indent=2)
+            json.dump(mismatch_doc, f, indent=2)
         rc, out, err = run_generator(generator, mismatch_path, SYNTHETIC_UNKNOWN_TYPE, exceptions, cwd)
         check(
-            f"nic-layout refusal: _source.instanceType ({base_type}) does not match --instance-type ({SYNTHETIC_UNKNOWN_TYPE})",
+            f"nic-layout refusal: _source.instanceType ({SYNTHETIC_CASE4_TYPE}) does not match --instance-type ({SYNTHETIC_UNKNOWN_TYPE})",
             rc != 0 and out == b"",
             f"expected non-zero exit and empty stdout, got exit {rc}, stdout {out.decode(errors='replace')[:200]!r}",
         )
@@ -507,8 +510,12 @@ def _baseline(root: str, stub: str) -> str:
     fixtures = os.path.join(tools, "fixtures")
     os.makedirs(fixtures)
     for t, (c, e) in GROUND_TRUTH.items():
+        # A real _source.instanceType (check 1's own matching-file-name check needs this to be
+        # non-trivially present somewhere in the baseline, and check_refusals()'s "source
+        # mismatch" case needs a real instance type here to mismatch SYNTHETIC_UNKNOWN_TYPE
+        # against), matching this fixture's own file name so the baseline itself passes.
         with open(os.path.join(fixtures, t + DESCRIBE_SUFFIX), "w", encoding="utf-8") as f:
-            json.dump(_describe(c, e), f)
+            json.dump(dict(_describe(c, e), _source={"instanceType": t}), f)
         with open(os.path.join(fixtures, t + LAYOUT_SUFFIX), "w", encoding="utf-8") as f:
             f.write(_layout_yaml(expected_layout(t, c, e)))
     with open(os.path.join(tools, EXCEPTIONS_NAME), "w", encoding="utf-8") as f:
@@ -526,6 +533,14 @@ sys.path.insert(0, {tests_dir!r})
 import check_nic_layout as c
 a = dict(zip(sys.argv[1::2], sys.argv[2::2]))
 ni = c.find_network_info(json.load(open(a["--describe-json"])))
+# Mirrors render-network-interfaces.py's own _source.instanceType cross-check (review round 1),
+# which check_refusals()'s "source mismatch" case (review round 2) exercises against whichever
+# generator main() is currently pointed at -- the real one in a normal run, this stub during
+# selftest -- so the stub has to implement the same refusal or that one case fails every
+# selftest scenario for a reason none of them name.
+source = (ni or {{}}).get("_source") if isinstance(ni, dict) else None
+if isinstance(source, dict) and "instanceType" in source and source["instanceType"] != a["--instance-type"]:
+    sys.exit(1)
 layout = c.expected_layout(a["--instance-type"], *c.cards_and_efa(ni)) if ni else None
 if layout is None:
     sys.exit(1)
