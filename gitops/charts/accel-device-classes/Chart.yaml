@@ -1,0 +1,15 @@
+apiVersion: v2
+name: accel-device-classes
+description: >-
+  The platform's own DRA DeviceClass catalog (#19 Decision 1(c), #28
+  section B). Today one DeviceClass, neuron-extended-resource, mapping the
+  Neuron DRA driver's devices to the extended resource
+  aws.amazon.com/neuron, so a Layer 1 pod reaches a Neuron DRA node. Not
+  cell-specific: delivered once per cell by platform.ApplicationSet.yaml
+  from gitops/addons/accel-device-classes/addon.yaml.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+home: https://github.com/littlemex/distai-platform
+sources:
+  - https://github.com/littlemex/distai-platform

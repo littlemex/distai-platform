@@ -1,0 +1,83 @@
+# Parameter file for cells.ApplicationSet.yaml's Git file generator
+# (RFC #25 Decision 2/3), same shape as
+# cells/example-cell/capacity-pool/cpu.yaml. The NVIDIA GPU light-tier
+# pool #28 section D verifies the device-plugin method on (a Layer 1 pod
+# requesting nvidia.com/gpu: 1, then nvidia-smi).
+#
+# accelerator.methodLabel opts this pool's nodes into
+# accel-nvidia-device-plugin and nothing else (#19 Decision 2; the chart's
+# own values.yaml renders it as a label on the NodePool's node template,
+# capacity-pool/templates/nodepool.yaml). accelerator.resourceName is
+# provenance only (the chart's own README): no template branches on it.
+# The pool stays dynamically provisioned and device-plugin method: #19 E2
+# showed a dynamic DRA pool never initializes.
+#
+# pool.capacityType: flex (#17's own enum has no spot-only option: flex is
+# ["spot", "on-demand"], the chart's own capacity-pool.requirements helper
+# fails the render if pool.requirements itself names
+# karpenter.sh/capacity-type -- #17 owns this chart's shape, see
+# fix/capacity-pool-root-volume). #28's own acceptance criteria 2/3 named a
+# spot node explicitly when this pool had no on-demand fallback to fall
+# back to; with flex, 1.e2e.sh's check_accel_layer1 accepts spot or
+# on-demand on the node Karpenter actually launched, the same way the
+# capacity-type e2e already does for the chart's own flex fixture.
+#
+# pool.requirements replaces the chart default as a whole (Helm replaces
+# lists): the chart's instance-category/instance-generation terms describe
+# CPU families and are dropped; instance-family names the GPU families
+# directly.
+#
+# pool.disruption.consolidateAfter: 15m, same as cells/dp-a19-trn-r3's own
+# pool, for the same reason (root caused there on a real run: Karpenter's
+# WhenEmptyOrUnderutilized consolidation does not know a Pending,
+# still-image-pulling pod is spoken for, and the chart's own 60s default
+# is shorter than a multi-gigabyte verification image can pull on a
+# freshly launched node). This pool's own lean CUDA test image has not
+# shown the failure, but GPU and Neuron take the same shape here on
+# purpose, not a per-vendor tuning.
+addon: capacity-pool-gpu
+wave: capacity
+dir: gitops/charts/capacity-pool
+namespace: kube-system
+values:
+  pool:
+    name: gpu
+    capacityType: flex
+    requirements:
+      - key: kubernetes.io/arch
+        operator: In
+        values: ["amd64"]
+      - key: karpenter.k8s.aws/instance-family
+        operator: In
+        values: ["g7", "g6e", "g5"]
+    disruption:
+      consolidationPolicy: WhenEmptyOrUnderutilized
+      consolidateAfter: 15m
+    # Same shape as cells/dp-a19-trn-r3's own pool (#28): this pool's own
+    # lean CUDA test image has not needed the room, but GPU and Neuron
+    # take the same shape here on purpose, not a per-vendor tuning.
+    rootVolumeSizeGi: "100Gi"
+  accelerator:
+    resourceName: nvidia.com/gpu
+    # #63/#56: this pool previously set resourceName/methodLabel only,
+    # with no taint - nothing stopped an ordinary CPU-only pod from
+    # landing on this GPU node for free, stranding its GPU(s) at no
+    # Kueue quota cost (#22 Decision 10 H4). key matches resourceName
+    # itself: any pod actually requesting the device, from whichever
+    # team, may use it; #22's own per-team exclusivity is a separate
+    # taint (tenancy.teamTaint), not this one.
+    taint:
+      key: nvidia.com/gpu
+      value: "true"
+      effect: NoSchedule
+    methodLabel:
+      key: distai.dev/nvidia-gpu-method
+      value: device-plugin
+valuesFrom:
+  # The Cluster generator's own "name" field: this cell's cluster_name.
+  - helmKey: clusterName
+    param: name
+  # infra/foundation output karpenter_node_role_name, carried by the
+  # registration Secret (RFC #25 Decision 1/2).
+  - helmKey: nodeRole
+    annotationKey: distai.dev.annotations/karpenter-node-role
