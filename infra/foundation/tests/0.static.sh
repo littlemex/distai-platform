@@ -68,6 +68,9 @@ run_check "network guard unit tests (scripted fake AWS CLI)" bash "${SCRIPT_DIR}
 # way gitops/tests/0.static.sh does would make this check start failing
 # on that unrelated, pre-existing pair, which this PR does not fix.
 run_check "shellcheck 3.tenancy-primitive.sh" "${SHELLCHECK}" -x "${SCRIPT_DIR}/3.tenancy-primitive.sh"
+# Issue #22/#57: same reasoning as 3.tenancy-primitive.sh's own line
+# above -- this new file's own static check only, not a widened glob.
+run_check "shellcheck 4.argocd-impersonation.sh" "${SHELLCHECK}" -x "${SCRIPT_DIR}/4.argocd-impersonation.sh"
 
 echo
 if [[ "${failures}" -eq 0 ]]; then

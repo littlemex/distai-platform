@@ -1,0 +1,27 @@
+# Fixture for infra/foundation/tests/4.argocd-impersonation.sh: the
+# concrete exploit shape gitops/bootstrap/team-rbac-guard.yaml exists to
+# stop. A RoleBinding whose roleRef is the built-in "cluster-admin"
+# ClusterRole, bound to this namespace's own team identity. A
+# namespace-scoped RoleBinding always scopes what it binds to its own
+# namespace, even when roleRef is a ClusterRole (standard Kubernetes
+# RBAC semantics) -- so this would NOT grant cluster-admin cluster-wide.
+# It would still grant "*" on "*"/"*" (cluster-admin's own rules)
+# WITHIN this one namespace, which is already far more than any team
+# identity should ever hold there -- e.g. reading every Secret in its
+# own namespace, which team-onboard.sh's own Role deliberately never
+# grants, plus every other resource/verb in the namespace with no
+# exception. No Role object needed: this fixture exercises
+# team-rbac-guard.yaml's RoleBinding/roleRef.kind rule specifically,
+# independent of the Role-content rules the other probe fixtures and
+# team-onboard.sh's own Role already cover.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: probe-escalation-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: probe-sidecar
