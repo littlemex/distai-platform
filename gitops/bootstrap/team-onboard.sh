@@ -463,14 +463,14 @@ spec:
       kind: NetworkPolicy
   # Note: inert today (destinationServiceAccounts has no observed
   # effect -- confirmed, infra/foundation/tests/4.argocd-impersonation.sh's
-  # own check 7), kept only for forward compatibility. Whether `server`
+  # own check 7), kept only for forward compatibility. Whether "server"
   # here should actually be CLUSTER_NAME (matching this AppProject's own
-  # `destinations[].name`, which the cell-registration Secret names the
+  # destinations[].name, which the cell-registration Secret names the
   # cluster by, and which this script's own checks confirm Argo CD does
-  # match) or the cluster's ARN (what that same Secret's own `server`
+  # match) or the cluster's ARN (what that same Secret's own "server"
   # field holds, Object 1 in gitops/bootstrap/bootstrap.sh) is itself
   # unverified -- upstream Argo CD's own documented convention for
-  # `destinationServiceAccounts[].server` predates this capability's
+  # destinationServiceAccounts[].server predates this capability's
   # name-based destination matching, so neither value has been checked
   # against a real impersonated sync (which cannot happen on this
   # capability today to check it against). A second reason this field's
