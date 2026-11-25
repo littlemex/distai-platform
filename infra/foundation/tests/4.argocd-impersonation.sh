@@ -1041,10 +1041,20 @@ pass "CHECK 9/12 (mutation check): the SAME wildcard-granting Role check 8 showe
 # reconciliation behaves), then restore the Binding and require the SAME
 # attempt to leave both labels unchanged (the fix verification, which is
 # the assertion that actually fails this script if wrong).
-read_ns_label() { kubectl get namespace "${TEAM}" -o jsonpath="{.metadata.labels['$1']}" 2>/dev/null; }
+# Dedicated functions (not one parameterized by key): kubectl's own
+# jsonpath implementation splits a bare field path on ".", so a label
+# key containing "." must escape every dot -- the exact form
+# team-onboard.sh's own EXISTING_LABEL check already uses successfully
+# for distai.dev/team. A bracket-with-quotes form
+# ({.metadata.labels['key']}) was tried first and silently returned
+# empty instead of erroring (2>/dev/null hid the parse failure) --
+# this file's own working precedent is escaped dots, not quoted
+# brackets, so this follows it instead of inventing a second form.
+read_team_label() { kubectl get namespace "${TEAM}" -o jsonpath='{.metadata.labels.distai\.dev/team}' 2>/dev/null; }
+read_psa_label() { kubectl get namespace "${TEAM}" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null; }
 
-ORIG_TEAM_LABEL="$(read_ns_label 'distai.dev/team')"
-ORIG_PSA_LABEL="$(read_ns_label 'pod-security.kubernetes.io/enforce')"
+ORIG_TEAM_LABEL="$(read_team_label)"
+ORIG_PSA_LABEL="$(read_psa_label)"
 [[ "${ORIG_TEAM_LABEL}" == "${TEAM}" ]] \
   || fail "namespace ${TEAM} does not carry distai.dev/team=${TEAM} before the managedNamespaceMetadata probe (got '${ORIG_TEAM_LABEL}')"
 [[ "${ORIG_PSA_LABEL}" == "restricted" ]] \
@@ -1083,8 +1093,8 @@ apply_nsmeta_strip_app || fail "kubectl apply Application team-a-nsmeta-strip (f
 trigger_sync team-a-nsmeta-strip || fail "trigger team-a-nsmeta-strip's first sync (guard absent)"
 wait_until 120 5 "team-a-nsmeta-strip's first sync operation to finish" nsmeta_strip_op_done \
   || fail "team-a-nsmeta-strip's first sync did not finish within 120s (phase: $(operation_phase team-a-nsmeta-strip))"
-DISCOVERY_TEAM_LABEL="$(read_ns_label 'distai.dev/team')"
-DISCOVERY_PSA_LABEL="$(read_ns_label 'pod-security.kubernetes.io/enforce')"
+DISCOVERY_TEAM_LABEL="$(read_team_label)"
+DISCOVERY_PSA_LABEL="$(read_psa_label)"
 info "discovery (team-namespace-guard-binding absent, sync phase $(operation_phase team-a-nsmeta-strip)): distai.dev/team is now '${DISCOVERY_TEAM_LABEL}' (was '${ORIG_TEAM_LABEL}'), pod-security.kubernetes.io/enforce is now '${DISCOVERY_PSA_LABEL}' (was '${ORIG_PSA_LABEL}')"
 if [[ "${DISCOVERY_TEAM_LABEL}" != "${ORIG_TEAM_LABEL}" || "${DISCOVERY_PSA_LABEL}" != "${ORIG_PSA_LABEL}" ]]; then
   info "CONFIRMED on real hardware: without team-namespace-guard, a team's own Application's managedNamespaceMetadata (CreateNamespace=true, against the EXISTING team namespace) changes at least one of these labels -- the bypass PR #66's own caveat described is real"
@@ -1118,8 +1128,8 @@ wait_until 120 5 "team-a-nsmeta-strip's retried sync operation to finish" nsmeta
   || fail "team-a-nsmeta-strip's retried sync did not finish within 120s (phase: $(operation_phase team-a-nsmeta-strip))"
 [[ "$(operation_phase team-a-nsmeta-strip)" != "Succeeded" ]] \
   || fail "team-a-nsmeta-strip's managedNamespaceMetadata attempt SUCCEEDED even with team-namespace-guard-binding restored (phase Succeeded) -- the guard did not actually block the Namespace UPDATE"
-AFTER_FIX_TEAM_LABEL="$(read_ns_label 'distai.dev/team')"
-AFTER_FIX_PSA_LABEL="$(read_ns_label 'pod-security.kubernetes.io/enforce')"
+AFTER_FIX_TEAM_LABEL="$(read_team_label)"
+AFTER_FIX_PSA_LABEL="$(read_psa_label)"
 [[ "${AFTER_FIX_TEAM_LABEL}" == "${TEAM}" ]] \
   || fail "SECURITY: after the retried team-a-nsmeta-strip sync (team-namespace-guard restored), namespace ${TEAM}'s own distai.dev/team label is '${AFTER_FIX_TEAM_LABEL}', not '${TEAM}'"
 [[ "${AFTER_FIX_PSA_LABEL}" == "restricted" ]] \
