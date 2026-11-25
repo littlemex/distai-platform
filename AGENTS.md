@@ -115,6 +115,7 @@ judgment alone.
 | `gitops/` | Manifests and Helm charts the managed Argo CD capability delivers to cells: `bootstrap/` (run once per cell), `appsets/` (the two `ApplicationSet`s), `addons/` (platform-wide add-ons), `charts/` (shared chart templates), `cells/<cluster-name>/` (per-cell parameter files). Layout and ordering in [`gitops/README.md`](./gitops/README.md); mechanism in [#25](https://github.com/littlemex/distai-platform/issues/25) |
 | `docs/workshop/` | Hands-on workshop chapters, English and Japanese |
 | `docs/deep-dives/` | Self-contained explainer pages `NNNNN-<slug>.html` (numbered from `00000`), English and Japanese |
+| `examples/` | References and tools outside the delivery mechanism: nothing in `infra/foundation/` or `gitops/` depends on anything under `examples/`, and nothing it contains is itself delivered to a cell by Argo CD. Each subtree is self-contained (its own README, its own tests) and held to a lower review bar than `infra/foundation/`/`gitops/` - a bug here cannot break what a cell runs, only the example itself. `examples/tools/<name>/` for a standalone script or CLI (`run-board`); `examples/inference/<engine>/<variant>/` for a reference Helm chart exercising a specific serving pattern. A subtree whose own failure *could* affect a cell (anything `infra/foundation`/`gitops` would need to depend on) does not belong here - it belongs in `gitops/` under the review bar that implies |
 | `.github/` | Issue and pull request templates, workflows |
 
 Placement rules:
