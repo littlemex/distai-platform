@@ -1,0 +1,320 @@
+{{- include "disagg.validate" . -}}
+{{- $fullname := include "disagg.fullname" . -}}
+{{- $t := .Values.transport -}}
+{{- $extra := merge (dict "backends" (list $t.backend)) (deepCopy $t.extraConnectorConfig) -}}
+{{- $nixlConn := dict "kv_connector" "NixlConnector" "kv_role" "kv_both" "kv_load_failure_policy" $t.kvLoadFailurePolicy "kv_connector_extra_config" $extra -}}
+{{- /*
+  gpu-only (default): NixlConnector alone, unchanged from before kvCacheTier
+  existed. local/remote: NixlConnector's own mandatory PD handshake (Decision
+  6) stays first in the list, LMCacheMPConnector's cache tiering stacks after
+  it - MultiConnector never replaces the connector a disagg-pd release needs
+  to function, it only adds to it (see values.yaml's own kvCacheTier comment
+  for the confirmed MultiConnector shape and what is not yet confirmed about
+  LMCacheMPConnector's own config keys). kv_load_failure_policy is set at
+  the top level too, not only inside nixlConn's own entry: it is documented
+  as a KVTransferConfig-level field (vllm/config/kv_transfer.py), and
+  whether MultiConnector also honors a copy nested inside one connector's
+  own entry is unconfirmed - set both rather than risk the engine silently
+  falling back to its own default when wrapped.
+*/}}
+{{- $kvConfig := $nixlConn -}}
+{{- if ne .Values.kvCacheTier.mode "gpu-only" }}
+{{- $lmcacheConn := fromJson (include "disagg.lmcacheConnector" $) }}
+{{- $kvConfig = dict "kv_connector" "MultiConnector" "kv_role" "kv_both" "kv_load_failure_policy" $t.kvLoadFailurePolicy "kv_connector_extra_config" (dict "connectors" (list $nixlConn $lmcacheConn)) }}
+{{- end }}
+{{- range $role := list "prefill" "decode" }}
+{{- $r := index $.Values $role }}
+{{- $limits := dict $.Values.accelerator.resourceName (int $r.gpusPerEngine) }}
+{{- if gt (int $r.efaDevices) 0 }}
+{{- $_ := set $limits $t.efaResourceName (int $r.efaDevices) }}
+{{- end }}
+{{- $resources := deepCopy (default (dict) $r.resources) }}
+{{- $_ := set $resources "limits" (merge $limits (default (dict) $resources.limits)) }}
+---
+# Headless: the proxy resolves it to the ready {{ $role }} pod addresses and
+# balances per request, not per TCP connection.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-{{ $role }}
+  labels:
+    {{- include "disagg.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $.Values.engine.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-{{ $role }}
+  labels:
+    {{- include "disagg.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  replicas: {{ $r.replicas }}
+  # Kubernetes marks the rollout ProgressDeadlineExceeded once this many
+  # seconds pass with no pod turning Available, independently of the
+  # probes' own budget. The default is 600s; the top-level
+  # examples/inference/README.md's own Known issues #2 entry hit that
+  # class of failure on real hardware with this chart: on a fresh
+  # g7.48xlarge node, a slow image pull alone exceeded 600s before any
+  # probe even started (this margin covers the startupProbe's own budget,
+  # not necessarily a slow pull on top of it - still open there, and only
+  # matters to tooling that gates on `kubectl rollout status`'s own exit
+  # code (Kubernetes itself keeps pulling and starting the pods either
+  # way; `helm install/upgrade --wait` is bounded by Helm's own separate
+  # `--timeout`, not by this field, and needs that flag raised on its
+  # own if used here). The startupProbe here is budgeted to run for
+  # engine.startupTimeoutSeconds (1800s by default, well above the 600s
+  # default deadline). `max 600` never shortens the Kubernetes default,
+  # even for a release with a very small startupTimeoutSeconds.
+  progressDeadlineSeconds: {{ max 600 (add (int $.Values.engine.startupTimeoutSeconds) 300) }}
+  {{- /*
+    sameNodeMeasurement packs both roles onto one Karpenter-capped node with
+    no spare GPU/EFA capacity (placement.sharedPoolValue, limits sized to
+    fit exactly one instance - see values.yaml). The default RollingUpdate
+    strategy then deadlocks any later `helm upgrade` in this mode: Kubernetes
+    tries to schedule a surge pod for the new ReplicaSet before deleting the
+    old one, but the node has no free nvidia.com/gpu or vpc.amazonaws.com/efa
+    for it to land on, since the old pod is still holding them (confirmed on
+    real hardware, g7.48xlarge, 2026-11-20 - a transport.forceEfaSameNode
+    toggle via `helm upgrade` hung forever until the old ReplicaSet was
+    scaled to 0 by hand). Recreate accepts a short gap instead: the old pod
+    is deleted (freeing the node's GPU/EFA) before the new one is created.
+    Confirmed on real hardware again (g7.8xlarge x2, 2026-11-23, sibling
+    chart sglang/disagg-pd-llmd, outside sameNodeMeasurement): the same
+    deadlock happens whenever a role's own dedicated pool is sized to fit
+    exactly one node (limits.cpu set to that instance type's own vCPU
+    count) -- this chart's own README's shape, not only the shared-pool
+    case. Recreate is rendered unconditionally for both roles for this
+    reason.
+  */}}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "disagg.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: {{ $role }}
+        {{- if $.Values.metrics.enabled }}
+        vllm-metrics: "true"
+        {{- end }}
+      {{- if $.Values.metrics.enabled }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ $.Values.engine.port | quote }}
+        prometheus.io/path: /metrics
+      {{- end }}
+    spec:
+      nodeSelector:
+        {{- with $r.extraNodeSelector }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{ $.Values.placement.nodeSelectorKey }}: {{ ternary $.Values.placement.sharedPoolValue $r.nodeSelectorValue $.Values.placement.sameNodeMeasurement | quote }}
+      {{- /*
+        Required affinity/anti-affinity is rendered on decode only, never on
+        both roles: a required term on both can leave neither schedulable,
+        each waiting on a peer that is itself waiting. Prefill always
+        schedules unconstrained; decode either avoids prefill's node
+        (default) or is pulled onto it (sameNodeMeasurement, anti-affinity
+        off) - never both, never neither silently.
+      */}}
+      {{- if eq $role "decode" }}
+      {{- /*
+        EFA traffic cannot cross an Availability Zone or a VPC (AWS EFA
+        docs, "EFA limitations"). The hostname anti-affinity below only
+        keeps decode off prefill's own node; on its own, a NodePool whose
+        EC2NodeClass spans several AZs (the usual shape, so Karpenter is
+        not stuck if one AZ lacks capacity) is free to satisfy that rule
+        with a decode node in a different AZ from prefill's, and the NIXL
+        LIBFABRIC transfer then has no EFA path between the two pods at
+        all - a silent same-cluster, cross-zone hang rather than a
+        same-node fallback, and a different failure from the one
+        forceEfaSameNode addresses. Required (not preferred) because a
+        cross-zone pair is not a degraded-but-working placement here, it
+        is a non-functional one. Gated on either role actually requesting
+        an EFA device (the default), not on transport.backend, since a
+        config that requests EFA devices with a non-LIBFABRIC backend
+        still needs them in the same zone to be reachable at all.
+      */}}
+      {{- $wantsEfa := or (gt (int $.Values.prefill.efaDevices) 0) (gt (int $.Values.decode.efaDevices) 0) }}
+      {{- if $.Values.placement.enforceAntiAffinity }}
+      affinity:
+        podAntiAffinity:
+          # Never on a node that runs a prefill pod of this release.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "disagg.selector" (dict "root" $ "component" "prefill") | nindent 18 }}
+        {{- if $wantsEfa }}
+        podAffinity:
+          # Same zone as a prefill pod of this release (never required to
+          # be the same zone as any specific, hardcoded zone - whichever
+          # zone Karpenter actually placed prefill's node in).
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: topology.kubernetes.io/zone
+              labelSelector:
+                matchLabels:
+                  {{- include "disagg.selector" (dict "root" $ "component" "prefill") | nindent 18 }}
+        {{- end }}
+      {{- else if $.Values.placement.sameNodeMeasurement }}
+      affinity:
+        podAffinity:
+          # Actively pulled onto the same node as a prefill pod of this
+          # release, not merely left free to land there by chance.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "disagg.selector" (dict "root" $ "component" "prefill") | nindent 18 }}
+      {{- end }}
+      {{- end }}
+      {{- with $.Values.placement.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $.Values.engine.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: vllm
+          image: {{ include "disagg.image" $ }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              if [ -z "$MODEL_ID" ]; then
+                echo "model.name is not set: install with --set model.name=MODEL_ID, a Hugging Face model id" >&2
+                exit 1
+              fi
+              set -- --host 0.0.0.0 --port "$ENGINE_PORT" \
+                --tensor-parallel-size "$GPUS_PER_ENGINE" \
+                --kv-transfer-config "$KV_TRANSFER_CONFIG" "$@"
+              [ -z "$GPU_MEMORY_UTILIZATION" ] || set -- --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" "$@"
+              [ -z "$MODEL_REVISION" ] || set -- --revision "$MODEL_REVISION" "$@"
+              [ -z "$SERVED_MODEL_NAME" ] || set -- --served-model-name "$SERVED_MODEL_NAME" "$@"
+              exec vllm serve "$MODEL_ID" "$@"
+            - vllm-{{ $role }}
+          {{- with $r.extraArgs }}
+          args:
+            {{- range . }}
+            - {{ . | toString | quote }}
+            {{- end }}
+          {{- end }}
+          env:
+            - name: MODEL_ID
+              value: {{ $.Values.model.name | quote }}
+            - name: MODEL_REVISION
+              value: {{ $.Values.model.revision | quote }}
+            - name: SERVED_MODEL_NAME
+              value: {{ $.Values.model.servedModelName | quote }}
+            - name: ENGINE_PORT
+              value: {{ $.Values.engine.port | quote }}
+            - name: GPUS_PER_ENGINE
+              value: {{ $r.gpusPerEngine | quote }}
+            - name: GPU_MEMORY_UTILIZATION
+              value: {{ include "disagg.gpuMemoryUtilization" $r | quote }}
+            - name: KV_TRANSFER_CONFIG
+              value: {{ toJson $kvConfig | quote }}
+            # The address the other role's engines use for the NIXL handshake.
+            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+              value: {{ $t.sideChannelPort | quote }}
+            {{- if eq $t.backend "UCX" }}
+            # Fixes the TCP port UCX's own TCP transport listens on for the
+            # actual KV connection, so the NetworkPolicy below can name it
+            # (see values.yaml's own transport.ucx.tcpPortRange comment).
+            - name: UCX_TCP_PORT_RANGE
+              value: {{ $t.ucx.tcpPortRange | quote }}
+            {{- end }}
+            {{- if eq $t.backend "LIBFABRIC" }}
+            - name: FI_PROVIDER
+              value: efa
+            - name: FI_EFA_USE_DEVICE_RDMA
+              value: "1"
+            {{- end }}
+            {{- if eq $t.backend "LIBFABRIC" }}
+            # Always set explicitly, never left to the library's own default:
+            # 0 forces even a same-host transfer onto the EFA device instead
+            # of libfabric's own shared-memory provider; 1 matches that
+            # library default, stated rather than omitted. Observed on real
+            # hardware (g7.48xlarge, 2026-11-20, two Pods each already
+            # holding their own distinct physical EFA interface): both
+            # values produced identical, nonzero EFA counter traffic -
+            # a measurement, not a theory. The likely explanation (not
+            # separately confirmed on this run) is that libfabric's
+            # same-host shm bypass is keyed to both endpoints resolving to
+            # the SAME device, which the Kubernetes device plugin's
+            # exclusive-per-unit allocation never gives two Pods; a
+            # difference in IPC/shared-memory namespace between two
+            # separate Pods was not ruled out as a contributing factor
+            # either. See "Known issues" in this chart's README before
+            # relying on this value for a shm-vs-EFA comparison.
+            - name: FI_EFA_ENABLE_SHM_TRANSFER
+              value: {{ if $t.forceEfaSameNode }}"0"{{ else }}"1"{{ end }}
+            {{- end }}
+            - name: HF_HOME
+              value: /cache/huggingface
+            {{- if $.Values.model.hfTokenSecret.name }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.model.hfTokenSecret.name }}
+                  key: {{ $.Values.model.hfTokenSecret.key }}
+            {{- end }}
+            {{- with $r.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $.Values.engine.port }}
+            - name: nixl
+              containerPort: {{ $t.sideChannelPort }}
+          resources:
+            {{- toYaml $resources | nindent 12 }}
+          securityContext:
+            {{- toYaml $.Values.engine.containerSecurityContext | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: {{ div (int $.Values.engine.startupTimeoutSeconds) 10 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            failureThreshold: 5
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: cache
+              mountPath: /cache
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ $.Values.engine.shmSizeLimit }}
+        - name: cache
+          {{- toYaml $.Values.engine.cacheVolume | nindent 10 }}
+{{- end }}

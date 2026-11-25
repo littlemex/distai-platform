@@ -1,0 +1,11 @@
+{
+  "apiVersion": "kueue.x-k8s.io/v1beta1",
+  "kind": "Workload",
+  "metadata": {"name": "example-abcde", "namespace": "run-board-sample"},
+  "status": {
+    "conditions": [
+      {"type": "QuotaReserved", "status": "True", "lastTransitionTime": "2026-11-20T20:44:00Z"},
+      {"type": "Admitted", "status": "True", "lastTransitionTime": "2026-11-20T20:45:00Z"}
+    ]
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {"name": "example", "namespace": "run-board-sample"},
+  "status": {
+    "startTime": "2026-11-20T17:30:00Z",
+    "completionTime": "2026-11-20T19:20:00Z",
+    "succeeded": 1,
+    "conditions": [
+      {"type": "Complete", "status": "True", "lastTransitionTime": "2026-11-20T19:20:00Z"}
+    ]
+  }
+}
