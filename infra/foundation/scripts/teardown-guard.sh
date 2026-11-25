@@ -1,43 +1,27 @@
 #!/usr/bin/env bash
-# Destroy-time guard of infra/foundation (called from teardown.tf).
+# Destroy-time guard of infra/foundation (called from teardown.tf,
+# terraform_data.teardown_guard).
 #
 # Terminates every EC2 instance that Karpenter launched for one cluster, waits
 # until they are terminated, then deletes what they leave behind: detached VPC
 # CNI network interfaces in the cell's VPC, Karpenter launch templates and the
-# instance profiles that hold the Karpenter node role.
+# instance profiles that hold the Karpenter node role. network-guard.sh runs
+# later in the same destroy, after the cluster is gone, and removes what is
+# left in the VPC after that (see teardown.tf).
 #
 # Required environment: CLUSTER_NAME, ACCOUNT_ID, AWS_REGION, VPC_ID, NODE_ROLE_NAME.
 # Requires the AWS CLI v2 and the credentials that run terraform destroy.
 set -euo pipefail
 
 : "${CLUSTER_NAME:?}" "${ACCOUNT_ID:?}" "${AWS_REGION:?}" "${VPC_ID:?}" "${NODE_ROLE_NAME:?}"
-export AWS_REGION AWS_PAGER=""
+
+LOG_PREFIX="teardown-guard"
+# shellcheck source=SCRIPTDIR/guard-common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/guard-common.sh"
 
 MAX_ROUNDS=5
 
-log() { echo "[teardown-guard] $*"; }
-
-# The AWS CLI must act on the account Terraform manages. If the CLI resolves
-# other credentials (for example when the provider assumes a role), every
-# lookup below would come back empty and the guard would pass without
-# removing anything.
-caller_account="$(aws sts get-caller-identity --query Account --output text)"
-if [ "$caller_account" != "$ACCOUNT_ID" ]; then
-  log "the AWS CLI uses account ${caller_account}, but the cell is in account ${ACCOUNT_ID}; set AWS_PROFILE or credentials for the cell's account" >&2
-  exit 1
-fi
-
-# Delete calls tolerate resources that disappeared since they were listed
-# (the VPC CNI or Karpenter may remove them at the same time).
-tolerate_not_found() {
-  local out
-  if ! out="$("$@" 2>&1)"; then
-    case "$out" in
-      *NotFound* | *NoSuchEntity*) log "already gone: $*" ;;
-      *) echo "$out" >&2; return 1 ;;
-    esac
-  fi
-}
+require_cell_account
 
 list_instances() {
   aws ec2 describe-instances \
@@ -78,17 +62,10 @@ while :; do
   fi
 done
 
-# 2. Network interfaces that the VPC CNI attached and that were not deleted
-#    with their instance. Any detached interface the VPC CNI created in this
-#    cell's VPC belongs to this cluster.
-enis="$(aws ec2 describe-network-interfaces \
-  --filters "Name=vpc-id,Values=${VPC_ID}" "Name=status,Values=available" \
-  "Name=description,Values=aws-K8S-*" \
-  --query 'NetworkInterfaces[].NetworkInterfaceId' --output text)"
-for eni in $enis; do
-  log "deleting detached network interface ${eni}"
-  tolerate_not_found aws ec2 delete-network-interface --network-interface-id "$eni"
-done
+# 2. Network interfaces that the VPC CNI attached to those instances and that
+#    were not deleted with them. Removing them now lets EKS delete its cluster
+#    security group itself when the cluster is destroyed.
+delete_detached_cni_interfaces
 
 # 3. Launch templates Karpenter created for this cluster. Karpenter v1 tags
 #    them with eks:eks-cluster-name (v1.EKSClusterNameTagKey, which its own
@@ -107,12 +84,46 @@ done
 #    with the tag Karpenter puts on its own (kubernetes.io/cluster/<name> =
 #    owned, the same tag its IAM policy requires) are removed; any other
 #    profile that holds the role is left alone and reported.
-profiles="$(aws iam list-instance-profiles-for-role \
+#
+#    Both list calls below read a target (the node role, then each profile)
+#    that something else can delete between being listed and being read
+#    again: another destroy of the same cell racing this one, or an operator
+#    cleaning up by hand. Under set -e a plain "var=$(...)" assignment aborts
+#    the script on any failure of the command it runs, including a
+#    NoSuchEntity that only means "nothing to clean here", so each call below
+#    is guarded explicitly rather than left as a bare assignment (seen for
+#    real: exit 254 on list-instance-profiles-for-role after the node role
+#    had already been deleted by another process, right after this guard had
+#    just finished terminating every instance - see issue #26). stderr is
+#    captured to its own temp file, not merged into the variable with 2>&1:
+#    merging them would make a CLI warning on an otherwise successful call
+#    become part of the profile name list below.
+profiles_err="$(mktemp)"
+if profiles="$(aws iam list-instance-profiles-for-role \
   --role-name "$NODE_ROLE_NAME" \
-  --query 'InstanceProfiles[].InstanceProfileName' --output text)"
+  --query 'InstanceProfiles[].InstanceProfileName' --output text 2>"${profiles_err}")"; then
+  rm -f "${profiles_err}"
+else
+  profiles_err_text="$(cat "${profiles_err}")"
+  rm -f "${profiles_err}"
+  case "$profiles_err_text" in
+    *NoSuchEntity*) log "already gone: node role ${NODE_ROLE_NAME}, nothing to clean"; profiles="" ;;
+    *) echo "$profiles_err_text" >&2; exit 1 ;;
+  esac
+fi
 for p in $profiles; do
-  owner="$(aws iam list-instance-profile-tags --instance-profile-name "$p" \
-    --query "Tags[?Key=='kubernetes.io/cluster/${CLUSTER_NAME}'].Value" --output text)"
+  tags_err="$(mktemp)"
+  if owner="$(aws iam list-instance-profile-tags --instance-profile-name "$p" \
+    --query "Tags[?Key=='kubernetes.io/cluster/${CLUSTER_NAME}'].Value" --output text 2>"${tags_err}")"; then
+    rm -f "${tags_err}"
+  else
+    tags_err_text="$(cat "${tags_err}")"
+    rm -f "${tags_err}"
+    case "$tags_err_text" in
+      *NoSuchEntity*) log "already gone: instance profile ${p}"; continue ;;
+      *) echo "$tags_err_text" >&2; exit 1 ;;
+    esac
+  fi
   if [ "$owner" != "owned" ]; then
     log "keeping instance profile ${p}: not tagged as owned by cluster ${CLUSTER_NAME}" >&2
     continue

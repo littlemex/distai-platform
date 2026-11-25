@@ -4,17 +4,25 @@ Two scripts check `infra/foundation` against the acceptance criteria of
 [issue #20](https://github.com/littlemex/distai-platform/issues/20), including
 the multi-tenancy acceptance criteria added to that issue (IMDS, CNI
 permissions, NetworkPolicy, Argo CD role mappings). They use only the
-variables and outputs that the issue defines.
+variables and outputs that the issue defines. A third script is the
+regression test for
+[issue #26](https://github.com/littlemex/distai-platform/issues/26): destroy
+after an apply that failed part-way.
 
 | Script | What it checks | Needs AWS | Duration |
 | --- | --- | --- | --- |
-| `0.static.sh` | `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`, `tflint`, and `terraform test` with `variables.tftest.hcl` (input validation against a mocked AWS provider: accepted and rejected `argocd` role mappings and public endpoint CIDRs) | No | About 1 minute |
+| `0.static.sh` | `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`, `tflint`, `terraform test` with `variables.tftest.hcl` (input validation against a mocked AWS provider: accepted and rejected `argocd` role mappings and public endpoint CIDRs), and `guard-unit-tests.sh`/`network-guard-unit-tests.sh` (`scripts/teardown-guard.sh`/`scripts/network-guard.sh` against a scripted fake `aws` CLI) | No | About 1 minute |
 | `1.e2e.sh` | State is empty before apply, cluster shape, IMDS hop limit, CNI permissions, NetworkPolicy enforcement, Karpenter from the outputs, spot launch, interruption handling, destroy with Karpenter still running, nothing left behind | Yes | About 30 to 35 minutes |
+| `2.e2e-partial-apply.sh` | An apply forced to fail after the cluster and the system node group exist, then `terraform destroy` of that partial state with nothing left behind (issue #26) | Yes | About 20 to 30 minutes |
+
+`e2e-lib.sh` is not run on its own: both end-to-end scripts source it. It
+holds the shared helpers and is the one place that defines which AWS
+resources count as "left behind" after a destroy.
 
 ## Prerequisites
 
 - Terraform `>= 1.14.0` and [TFLint](https://github.com/terraform-linters/tflint) for `0.static.sh`.
-- For `1.e2e.sh` also the AWS CLI v2, `kubectl`, and Helm `>= 3.8` (OCI charts).
+- For `1.e2e.sh` also the AWS CLI v2, `kubectl`, and Helm `>= 3.8` (OCI charts). `2.e2e-partial-apply.sh` needs only Terraform and the AWS CLI v2.
 - An S3 bucket for the Terraform state.
 - The EC2 Spot service-linked role in the account. It exists once spot has been used in the account; otherwise create it once with `aws iam create-service-linked-role --aws-service-name spot.amazonaws.com`.
 - An IAM principal that can create a VPC, an EKS cluster, IAM roles, an SQS queue and EventBridge rules, and send messages to SQS. The test passes this principal as the cluster admin, so `ADMIN_PRINCIPAL_ARN` must be the principal that runs the test (for an assumed role, the IAM role ARN).
@@ -73,9 +81,91 @@ PASS terraform validate
 PASS tflint init
 PASS tflint
 PASS terraform test (input validation, mocked provider)
+PASS node role already gone (issue #26): exit 0
+PASS node role already gone (issue #26): logs it
+PASS node role already gone (issue #26): deletes nothing
+PASS instance profile already gone: exit 0
+PASS instance profile already gone: logs it
+PASS instance profile already gone: deletes nothing
+PASS owned instance profile still deleted: exit 0
+PASS owned instance profile still deleted: calls remove-role-from-instance-profile
+PASS owned instance profile still deleted: calls delete-instance-profile
+PASS other IAM error stays fatal (list-instance-profiles-for-role): exit non-zero
+PASS other IAM error stays fatal (list-instance-profiles-for-role): does not claim already gone
+PASS other IAM error stays fatal (list-instance-profiles-for-role): deletes nothing
+PASS other IAM error stays fatal (list-instance-profile-tags): exit non-zero
+PASS other IAM error stays fatal (list-instance-profile-tags): does not claim already gone
+PASS other IAM error stays fatal (list-instance-profile-tags): deletes nothing
+RESULT PASS: all guard unit tests passed
+PASS guard unit tests (scripted fake AWS CLI)
+PASS cluster still exists: exit 1
+PASS cluster still exists: refuses
+PASS cluster still exists: deletes nothing
+PASS ordinary path: exit 0
+PASS ordinary path: logs done
+PASS ordinary path: calls delete-security-group once
+PASS interfaces never settle: exit non-zero
+PASS interfaces never settle: logs the IDs still present
+PASS interfaces never settle: never reaches delete-security-group
+PASS security group retried: exit 0
+PASS security group retried: retries after DependencyViolation
+PASS security group retried: calls delete-security-group twice
+PASS security group already gone: exit 0
+PASS security group already gone: logs already gone
+PASS security group never released: exit non-zero
+PASS security group never released: logs who still uses it
+PASS security group never released: retried more than once
+PASS describe-cluster itself fails: exit non-zero
+PASS describe-cluster itself fails: does not claim refusing
+PASS describe-cluster itself fails: deletes nothing
+RESULT PASS: all network guard unit tests passed
+PASS network guard unit tests (scripted fake AWS CLI)
 
 RESULT PASS: all static checks passed
 ```
+
+`guard-unit-tests.sh` and `network-guard-unit-tests.sh` (run as part of
+`0.static.sh`, or on their own) run `scripts/teardown-guard.sh` and
+`scripts/network-guard.sh` against a scripted fake `aws` on the `PATH`
+instead of the real AWS CLI, plus a no-op `sleep` so the guards' own real
+waits cost nothing here: no credentials or network calls, each case well
+under a second. They share their assertion helper and the fake `sleep`
+through `guard-unit-test-lib.sh`. They exist for error handling and
+ordering the real end-to-end tests cannot reach on demand, because each
+needs a specific AWS API response, or absence of one, at a specific moment.
+
+`guard-unit-tests.sh`: the node role or one of its instance profiles being
+deleted by something else (another destroy of the same cell racing this
+one, an operator cleaning up by hand) between the guard listing it and
+reading it again. Seen for real: `list-instance-profiles-for-role` returned
+`NoSuchEntity` after the node role had already been deleted, right after
+the guard had just finished terminating every instance (`us-east-1`,
+2026-11-20), and `set -e` turned that into an aborted destroy (exit 254)
+instead of "nothing to clean" (issue #26). Five cases, each checked against
+both the guard's log output and, through a call log the fake `aws` writes,
+whether it actually called `remove-role-from-instance-profile` /
+`delete-instance-profile`: the node role already gone, an instance profile
+already gone, the ordinary path (a profile Karpenter owns, both logged and
+actually deleted), and a non-`NoSuchEntity` error (`AccessDenied`) at each
+of the two list calls, confirming the guard still aborts and still deletes
+nothing - the first three cases alone could not tell this fix from a
+version that treats every IAM error, not only `NoSuchEntity`, as nothing to
+clean.
+
+`network-guard-unit-tests.sh`, seven cases: refusing while a cluster with
+this name still exists (the safety property that keeps the guard from
+touching a cluster it does not own the teardown of, checked with a real
+interface and a real security group present, so "deletes nothing" is not
+true only because there was nothing to delete), the ordinary path, waiting
+out and timing out on interfaces that never become detached (likewise with
+a real security group present), retrying the security group delete on
+`DependencyViolation` and succeeding, treating `NotFound` on it as already
+gone, timing out when it never stops being in use, and `describe-cluster`
+itself failing with something other than `ResourceNotFoundException`
+(plausible: `eks:DescribeCluster` is a permission this guard newly needs),
+which must stay fatal and not be read as "the cluster is gone" - none of
+which the real end-to-end tests can force on demand, since none of them
+happens in a normal run.
 
 ## End-to-end test
 
@@ -178,6 +268,94 @@ PASS Argo CD capability lists the EDITOR role mapping (...)
 
 The script exits with status 0 only when every check passed. On the first failed check it prints `FAIL` with the reason, deletes the test Deployment, NodePool, the IMDS check pod and the NetworkPolicy namespace, runs `terraform destroy`, lists anything that is left, and exits non-zero.
 
+## Partial-apply test (issue #26)
+
+`2.e2e-partial-apply.sh` checks that `terraform destroy` removes a cell
+whose `terraform apply` failed part-way, without manual steps. It uses the
+test-only variable `test_invalid_karpenter_node_principal_arn`: set to an
+IAM role ARN that does not exist, it makes `aws_eks_access_entry.karpenter_node`
+fail after the VPC, the EKS cluster and the system node group were created.
+`terraform_data.teardown_guard` `depends_on` that access entry (`teardown.tf`),
+so this is not only a late failure: it forces the exact state issue #26 is
+about (the cluster and the node group exist, the guard does not) by
+construction, because the access entry is the guard's own dependency and
+not a sibling of it that merely happens to run around the same time.
+Outside this test the variable stays `null`; `1.e2e.sh` never sets it, so
+the normal run is not affected.
+
+It takes the same environment as `1.e2e.sh` (Karpenter, Argo CD and
+`kubectl` are not used). Run it after `1.e2e.sh` has finished, or with a
+different `NAME`, since both use the state key
+`distai-platform/${AWS_REGION}/${NAME}/foundation`:
+
+```bash
+export AWS_PROFILE=default
+export AWS_REGION=us-east-2
+export NAME=dp-e2e
+export STATE_BUCKET=my-terraform-state-bucket
+export STATE_REGION=us-east-1
+export ADMIN_PRINCIPAL_ARN=arn:aws:iam::111122223333:role/Admin
+export MY_CIDR="$(curl -fsS https://checkip.amazonaws.com)/32"
+cd infra/foundation/tests
+./2.e2e-partial-apply.sh 2>&1 | tee "/tmp/foundation-e2e-partial-$(date +%Y%m%d%H%M%S).log"
+```
+
+Optional variables:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `TERRAFORM` | `terraform` | Terraform binary |
+| `E2E_INVALID_KARPENTER_NODE_PRINCIPAL_ARN` | `arn:aws:iam::<account>:role/<NAME>-test-only-does-not-exist` | Value passed as `test_invalid_karpenter_node_principal_arn`; must be a well-formed IAM role ARN in the cell's own account that names a role that does not exist |
+| `E2E_WORK_DIR` | a new `mktemp -d` directory | Generated tfvars, the apply log and the Terraform data directory |
+| `E2E_KEEP_ON_FAILURE` | `0` | `1` leaves the cell in place after a failure, for debugging; the script prints the destroy command |
+| `E2E_LEFTOVER_GRACE_SECONDS` | `600` | How long to wait for each kind of leftover to disappear after destroy |
+
+### What the partial-apply test does
+
+1. Writes a tfvars file like `1.e2e.sh` (with `argocd = null`) plus `test_invalid_karpenter_node_principal_arn`, runs `terraform init` with the S3 backend and checks that the state at that key has no resources yet.
+2. Runs `terraform apply` and requires it to fail.
+3. Requires that it failed where intended, not earlier: the apply output has an error diagnostic for `aws_eks_access_entry.karpenter_node` specifically (`with aws_eks_access_entry.karpenter_node,`, not merely the plan or a "Creating..." line mentioning that address), `aws eks describe-cluster` reports the cluster `ACTIVE`, `aws eks describe-nodegroup` reports the system node group `ACTIVE`, `aws eks describe-access-entry` for the real Karpenter node role ARN returns `ResourceNotFoundException`, and `terraform state list` does not contain `terraform_data.teardown_guard`. An apply that failed before the cluster and the node group existed fails the test, since it would not exercise issue #26. It also finds the VPC by the run tag, checks the cluster runs in it, and records the cluster security group that EKS created. For information only, it prints how many resources the partial state holds and which `terraform_data` resources are among them.
+4. Plants a detached network interface (description `aws-K8S-i-issue26testonly`, carrying the recorded cluster security group) in one of the cell's private subnets, and confirms it carries that security group. Whether the system node group's own deletion leaves a real one behind, holding that group, is a race this test does not depend on (observed: in this minimal environment, with no pod load and no Karpenter running, it does not); planting one directly creates the exact artifact issue #26 describes, in the shape a Karpenter instance's own leftover interface takes once that instance is terminated outside the normal node group lifecycle - both halves of the symptom (the interface, and the security group it keeps in use), not only the interface.
+5. Runs `terraform destroy` with the same tfvars file (so the same `test_invalid_karpenter_node_principal_arn`) and requires it to succeed.
+6. Requires that nothing is left: the same kinds as `1.e2e.sh` (instance, ENI, NAT gateway, EBS volume, launch template), plus no detached VPC CNI interface in the VPC (`description` `aws-K8S-*`, `status` `available` — including the planted one) and no security group tagged `aws:eks:cluster-name = NAME`, tagged for the cell, or other than `default` in the VPC. Then the recorded cluster security group, the cluster and the VPC must be gone. As in `1.e2e.sh`, a failed AWS call is never read as "nothing left".
+
+Expected output (abridged, IDs redacted):
+
+```text
+PASS preflight: tools present, credentials valid
+PASS terraform init with the S3 backend, key distai-platform/us-east-2/dp-e2e/foundation
+PASS state at key distai-platform/us-east-2/dp-e2e/foundation has no resources before apply
+PASS terraform apply failed as intended (...s)
+PASS after the failed apply the EKS cluster exists and is ACTIVE
+PASS after the failed apply the system node group system exists and is ACTIVE
+PASS no access entry for the real Karpenter node role exists
+PASS terraform_data.teardown_guard is absent from the partial state, as issue #26 requires
+PASS the cluster runs in this run's VPC, with the EKS-created cluster security group
+INFO partial state holds ... resources; terraform_data in it: ...
+INFO VPC CNI (aws-K8S-*) network interfaces in the VPC before destroy: ...
+PASS planted a detached network interface (..., aws-K8S-* description) in subnet-..., carrying the cluster security group sg-...
+PASS terraform destroy after a partial apply completed without manual steps (...s)
+PASS no instance tagged for the cluster remains
+PASS no eni tagged for the cluster remains
+PASS no nat tagged for the cluster remains
+PASS no volume tagged for the cluster remains
+PASS no launch-template tagged for the cluster remains
+PASS no cni-eni remains in the cell's VPC
+PASS no security-group remains in the cell's VPC
+PASS EKS cluster security group removed
+PASS EKS cluster removed
+PASS VPC removed
+
+RESULT PASS: all checks passed (run e2e-partial-..., work dir ...)
+```
+
+It creates the same billable resources as the first half of `1.e2e.sh`
+(EKS control plane, two `m7i.large` system nodes, one NAT gateway), for
+about half an hour. On a failed check it runs `terraform destroy`; if that
+destroy fails, it deletes the detached `aws-K8S-*` interfaces and the EKS
+cluster security group in the cell's VPC (the leftovers of issue #26),
+retries the destroy, lists anything that is left, and exits non-zero.
+
 ## Assumptions behind the multi-tenancy checks
 
 - The Argo CD role mapping check assumes that `var.argocd.role_mappings[].group_ids` becomes, in the real AWS API, a list of identities of type `SSO_GROUP` (one per group ID) under `rbacRoleMappings[].identities` — the only identity source the Terraform variable exposes. It checks the role name and the set of `SSO_GROUP` identity IDs under it; it does not separately assert the `type` field of each identity, since the test's inputs cannot distinguish an `SSO_GROUP` from an `SSO_USER` with the same ID.
@@ -189,5 +367,6 @@ The script exits with status 0 only when every check passed. On the first failed
 ## Known issues
 
 - Spot capacity can be unavailable for all types in `E2E_INSTANCE_TYPES`; the launch step then times out. Add more types and run again.
+- Terraform keeps creating resources that do not depend on the failed access entry, so which other resources the partial state holds (beyond the asserted absence of `terraform_data.teardown_guard`) depends on the configuration; the partial-apply test prints them but does not assert them.
 - The log contains instance IDs, node names and the queue name of the test account. Redact them before pasting the log into an issue or pull request.
 - The IMDS and NetworkPolicy checks pull third-party images (see "Pinned images" above) through the cell's NAT gateway; if the account or Region blocks that egress, both checks fail at the `kubectl apply` or pod-scheduling step rather than at the behavior they are meant to check.
