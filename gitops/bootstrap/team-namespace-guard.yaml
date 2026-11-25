@@ -80,9 +80,10 @@
 # distai.dev/team: removing or changing the VALUE of distai.dev/team
 # itself; removing or changing the VALUE of
 # pod-security.kubernetes.io/enforce once that namespace carries it;
-# and introducing pod-security.kubernetes.io/enforce-version at all
-# (rule 3's own comment below explains why that one is an outright
-# ban, not a "once set" check). A namespace that does not yet carry
+# and introducing, removing or changing
+# pod-security.kubernetes.io/enforce-version (rule 3's own comment
+# below explains why its own "absent" branch, unlike rules 1-2's,
+# covers the common case rather than a corner one). A namespace that does not yet carry
 # distai.dev/team is unaffected by any rule here (matchConditions below
 # gates all three on that one fact), and this policy's own CREATE path
 # is never reached at all (a Namespace is created once, by
@@ -100,8 +101,9 @@
 #      control that actually stops a privileged DaemonSet or a
 #      hostNetwork Pod.
 #   3. pod-security.kubernetes.io/enforce-version may not be
-#      introduced where it was absent, or changed where it already had
-#      a value -- the same "compare against the OLD object" shape as
+#      introduced where it was absent, or removed or changed where it
+#      already had a value -- the same "compare against the OLD
+#      object" shape as
 #      rules 1-2, with one difference: rules 1-2 anchor on a value
 #      team-onboard.sh always sets (so the "absent in oldObject" branch
 #      never actually matters in practice); this key is never set by
@@ -225,7 +227,7 @@ spec:
            'pod-security.kubernetes.io/enforce-version' in object.metadata.labels &&
            object.metadata.labels['pod-security.kubernetes.io/enforce-version'] == oldObject.metadata.labels['pod-security.kubernetes.io/enforce-version'])
         : (!has(object.metadata.labels) || !('pod-security.kubernetes.io/enforce-version' in object.metadata.labels))
-      message: "a team namespace may not introduce or change pod-security.kubernetes.io/enforce-version -- team-onboard.sh never sets it (the Kubernetes default already resolves to the latest Pod Security Standard definitions), and pinning it to an older version could relax what 'restricted' disallows without changing the enforce label's own value (RFC #22 Decision 10 H11, issue #57 item 1, gitops/bootstrap/team-namespace-guard.yaml); delete team-namespace-guard-binding first if this change is intentional"
+      message: "a team namespace may not introduce, remove or change pod-security.kubernetes.io/enforce-version -- team-onboard.sh never sets it (the Kubernetes default already resolves to the latest Pod Security Standard definitions), and pinning it to an older version could relax what 'restricted' disallows without changing the enforce label's own value (RFC #22 Decision 10 H11, issue #57 item 1, gitops/bootstrap/team-namespace-guard.yaml); delete team-namespace-guard-binding first if this change is intentional"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

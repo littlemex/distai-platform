@@ -1200,10 +1200,11 @@ kubectl delete validatingadmissionpolicybinding team-namespace-guard-binding \
 # pod-security.kubernetes.io/enforce itself (the same key check 11's
 # own overwrite_psa_succeeds uses), the one write this policy's own
 # rule 2 actually exists to deny, then restores it.
-kubectl label namespace "${TEAM}" --overwrite "pod-security.kubernetes.io/enforce=pre-sync-direct-probe" \
-  || fail "direct kubectl label (pod-security.kubernetes.io/enforce=pre-sync-direct-probe) did not succeed right after deleting team-namespace-guard-binding -- the Binding's own deletion has not actually taken effect yet"
-[[ "$(read_psa_label)" == "pre-sync-direct-probe" ]] \
-  || fail "pod-security.kubernetes.io/enforce is '$(read_psa_label)', not 'pre-sync-direct-probe', even though the direct kubectl label reported success"
+overwrite_psa_to_baseline_succeeds() { kubectl label namespace "${TEAM}" --overwrite "pod-security.kubernetes.io/enforce=baseline" >/dev/null 2>&1; }
+wait_until 60 3 "direct kubectl label (baseline) to succeed right after deleting team-namespace-guard-binding" overwrite_psa_to_baseline_succeeds \
+  || fail "direct kubectl label (pod-security.kubernetes.io/enforce=baseline) did not succeed within 60s of deleting team-namespace-guard-binding -- the Binding's own deletion has not actually taken effect yet"
+[[ "$(read_psa_label)" == "baseline" ]] \
+  || fail "pod-security.kubernetes.io/enforce is '$(read_psa_label)', not 'baseline', even though the direct kubectl label reported success"
 kubectl label namespace "${TEAM}" --overwrite "pod-security.kubernetes.io/enforce=restricted" \
   || fail "kubectl label namespace ${TEAM} (restore pod-security.kubernetes.io/enforce before the discovery sync)"
 pass "confirmed team-namespace-guard-binding is deleted and inactive (a plain kubectl overwrite of the protected pod-security.kubernetes.io/enforce label itself succeeded) before triggering the discovery sync below"
@@ -1290,30 +1291,50 @@ AFTER_FIX_MARKER_LABEL="$(read_marker_label)"
 # two apart from this read alone, which is exactly why check 11 tests
 # the policy directly instead of inferring it from this marker.
 info "distai.dev/nsmeta-probe-marker (removed before this retry) reads '${AFTER_FIX_MARKER_LABEL}' after it -- see the comment above for what that does and does not establish by itself"
-pass "CHECK 10/13 (PR #66's own first remaining caveat, closed): one sync with team-namespace-guard-binding absent and one with it restored, both against a team's own Application using syncPolicy.managedNamespaceMetadata (CreateNamespace=true, against the EXISTING team namespace ${TEAM}) to omit distai.dev/team and set pod-security.kubernetes.io/enforce: privileged -- both runs left distai.dev/team=${TEAM} and pod-security.kubernetes.io/enforce=restricted unchanged (retried-sync phase ${NSMETA_RETRY_PHASE}); check 11 below tests team-namespace-guard.yaml's own denial directly, since neither run here shows Argo CD actually attempting the overwrite"
+# Classify this retry into exactly one of three outcomes, rather than
+# reporting a single "closed" claim the code only sometimes actually
+# checked: the marker reading "1" means the write was admitted (the
+# guard was not exercised this run); the guard's own message appearing
+# in NSMETA_PROBE_MESSAGE means the write was denied; neither is
+# inconclusive, not a silent PASS, since that combination is not one
+# this script can currently explain.
+if [[ "${AFTER_FIX_MARKER_LABEL}" == "1" ]]; then
+  RETRY_OUTCOME="admitted (marker present) -- the guard was NOT exercised by this particular retry"
+elif [[ "${NSMETA_PROBE_MESSAGE}" == *"may not be removed or"* ]]; then
+  RETRY_OUTCOME="denied (guard's own message present in the sync result) -- the guard WAS exercised and did deny the write"
+else
+  fail "team-a-nsmeta-strip's retried sync (team-namespace-guard restored) is inconclusive: the marker is '${AFTER_FIX_MARKER_LABEL}' (not '1') and NSMETA_PROBE_MESSAGE ('${NSMETA_PROBE_MESSAGE}') does not contain the guard's own message -- this script cannot currently explain this combination; the Namespace's own two protected labels are still confirmed correct above, but this retry's own evidence about WHY is not"
+fi
+pass "CHECK 10/13 (PR #66's own first remaining caveat, addressed): one sync with team-namespace-guard-binding absent and one with it restored, both against a team's own Application using syncPolicy.managedNamespaceMetadata (CreateNamespace=true, against the EXISTING team namespace ${TEAM}) to omit distai.dev/team and set pod-security.kubernetes.io/enforce: privileged -- both runs left distai.dev/team=${TEAM} and pod-security.kubernetes.io/enforce=restricted unchanged (retried-sync phase ${NSMETA_RETRY_PHASE}); the retry's own outcome: ${RETRY_OUTCOME}. Check 11 below tests team-namespace-guard.yaml's own denial directly either way"
 kubectl delete application team-a-nsmeta-strip -n "${ARGOCD_NAMESPACE}" --wait=false >/dev/null 2>&1 || true
 
 # ------------------------------------------------------- 8b. team-namespace-guard,
 # -------------------------------------------------------     tested directly
 # -------------------------------------------------------     (no Argo CD):
-# -------------------------------------------------------     check 10's own
-# -------------------------------------------------------     discovery found
-# -------------------------------------------------------     Argo CD's own
+# -------------------------------------------------------     on the two
+# -------------------------------------------------------     real-hardware
+# -------------------------------------------------------     runs of check
+# -------------------------------------------------------     10's own
+# -------------------------------------------------------     discovery,
+# -------------------------------------------------------     neither
+# -------------------------------------------------------     showed Argo
+# -------------------------------------------------------     CD's own
 # -------------------------------------------------------     managedNamespaceMetadata
 # -------------------------------------------------------     reconciliation
-# -------------------------------------------------------     never actually
-# -------------------------------------------------------     attempted to
+# -------------------------------------------------------     visibly
+# -------------------------------------------------------     attempting to
 # -------------------------------------------------------     overwrite
 # -------------------------------------------------------     either
 # -------------------------------------------------------     pre-existing
-# -------------------------------------------------------     label, with or
-# -------------------------------------------------------     without the
-# -------------------------------------------------------     guard -- so
-# -------------------------------------------------------     check 10 alone
-# -------------------------------------------------------     never actually
-# -------------------------------------------------------     exercised the
+# -------------------------------------------------------     label -- so
+# -------------------------------------------------------     check 10
+# -------------------------------------------------------     alone did not
+# -------------------------------------------------------     exercise the
 # -------------------------------------------------------     guard's own
-# -------------------------------------------------------     denial. Same
+# -------------------------------------------------------     denial on
+# -------------------------------------------------------     either of
+# -------------------------------------------------------     those two
+# -------------------------------------------------------     runs. Same
 # -------------------------------------------------------     reasoning as
 # -------------------------------------------------------     checks 8-9
 # -------------------------------------------------------     (team-rbac-guard):
@@ -1343,7 +1364,7 @@ assert_nsguard_denied() {
     || fail "${desc} was refused, but not with team-namespace-guard's own message ('${expected_substr}'): ${err}"
 }
 REMOVED_MSG="may not be removed or"
-VERSION_MSG="may not introduce or change"
+VERSION_MSG="may not introduce, remove or change"
 assert_nsguard_denied "direct kubectl: overwriting pod-security.kubernetes.io/enforce to privileged" "${REMOVED_MSG}" \
   kubectl label namespace "${TEAM}" --overwrite "pod-security.kubernetes.io/enforce=privileged"
 [[ "$(read_psa_label)" == "restricted" ]] \
