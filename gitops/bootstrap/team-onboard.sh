@@ -87,19 +87,25 @@
 #      content for every caller, with no exemption.
 #
 # Known, bounded residual scope (not closed by this PR, stated so the
-# "safely" claim above does not overreach): team-rbac-guard.yaml denies
-# five/seven named shapes (its own header), not every way a Role could
-# grant more than intended -- for example a Role granting "pods/exec",
-# "pods/attach" or "serviceaccounts/token" (token-minting, a form of
-# impersonation this policy's escalate/bind/impersonate-verb rule does
-# not reach, since those are resource strings, not verbs) is denied by
-# name (team-rbac-guard.yaml's own sensitive-resources rule), but a
-# complete allow-list of every safe (apiGroup, resource, verb) triple
-# is not attempted here. A team's own ServiceAccount can also still be
-# reached by a Pod/Deployment the team's own chart ships
-# (serviceAccountName) or a RoleBinding naming it -- bounded today to
-# this identity's own, now-empty-of-RBAC Role, but worth tracking if
-# this identity's own Role is ever widened later.
+# "safely" claim above does not overreach): team-rbac-guard.yaml's own
+# rule 2 is a fixed allow-list of (apiGroup, resource, verb) -- not a
+# derivation from what every real chart actually needs. The allow-list
+# was sized to cover the ordinary namespaced workload kinds this
+# script's own AppProject whitelist already permits (step 4); it was
+# not checked against examples/inference/vllm/disagg-pd-llmd's own real
+# sidecar-rbac.yaml with a server-side dry run, so whether that specific
+# chart's own Role fits the allow-list as shipped is not independently
+# confirmed. Widening the allow-list for a real chart that needs more is
+# a one-line, reviewed change to team-rbac-guard.yaml, not a new deny
+# rule to invent. A Role binding to a Role already present in the
+# namespace from before team-rbac-guard.yaml existed (never reviewed
+# under this policy) is outside what rule 1's own roleRef.kind check
+# alone verifies -- this design assumes every Role in a namespace it
+# governs was itself created under this same policy. A team's own
+# ServiceAccount can also still be reached by a Pod/Deployment the
+# team's own chart ships (serviceAccountName) or a RoleBinding naming
+# it -- bounded today to this identity's own, now-empty-of-RBAC Role,
+# but worth tracking if this identity's own Role is ever widened later.
 #
 # Deliberately NOT created here (left to a later PR, so this one stays
 # checkable against what it actually claims):
@@ -180,8 +186,8 @@ done
 # though destinationServiceAccounts/the namespace whitelist stay narrow.
 [[ "${#SOURCE_REPOS[@]}" -gt 0 ]] || { echo "at least one --source-repo <git-url> is required (the repo(s) this team's own Applications may source from)" >&2; exit 1; }
 for repo in "${SOURCE_REPOS[@]}"; do
-  [[ "${repo}" != "*" ]] \
-    || { echo "--source-repo '*' is rejected explicitly (the comment above explains why: it would let this team's AppProject source from any repository)" >&2; exit 1; }
+  [[ "${repo}" != *"*"* ]] \
+    || { echo "--source-repo '${repo}' contains a wildcard and is rejected (the comment above explains why: a wildcard would let this team's AppProject source from any repository)" >&2; exit 1; }
 done
 # RFC 1123 label: lowercase alphanumeric and "-", must start/end
 # alphanumeric, <=63 chars -- the same rule a Kubernetes Namespace name
@@ -238,7 +244,7 @@ echo "onboarding team '${TEAM}' on cluster ${CLUSTER_NAME} (namespace ${TEAM}, S
 # API documentation states the capability's own infrastructure (the
 # application-controller, repo-server, and therefore argocd-cm itself)
 # runs "outside of your cluster" -- confirmed on a real capability
-# (infra/foundation/tests/4.argocd-impersonation.sh's own first real run):
+# (infra/foundation/tests/4.argocd-impersonation.sh's own real-hardware run):
 # the only ConfigMap present in the capability's namespace was the
 # built-in kube-root-ca.crt; no argocd-cm, argocd-rbac-cm or argocd-secret
 # exists for a customer to read or patch. The `aws eks create-capability`/
@@ -247,17 +253,18 @@ echo "onboarding team '${TEAM}' on cluster ${CLUSTER_NAME} (namespace ${TEAM}, S
 # four fields -- namespace, awsIdc, rbacRoleMappings, networkAccess -- and
 # none of them is an impersonation switch either.
 #
-# This step is therefore best-effort, not a hard requirement: it attempts
-# the patch (in case a future capability version, or a self-hosted
-# install this script is also pointed at, does expose argocd-cm), and
-# continues with a clear, loud warning instead of failing outright when
-# the ConfigMap genuinely does not exist -- because whether sync
-# impersonation actually engages on the managed capability without this
-# flag ever being set by a customer is exactly the open question
-# infra/foundation/tests/4.argocd-impersonation.sh's own differential
-# check (narrow the team's Role, force a resync, see whether it is
-# impersonation-enforced) is designed to answer; failing here would
-# make that check impossible to ever run.
+# This step is therefore best-effort, not a hard requirement: it
+# attempts the patch (in case a future capability version, or a
+# self-hosted install this script is also pointed at, does expose
+# argocd-cm), and continues with a clear, loud warning instead of
+# failing outright when the ConfigMap genuinely does not exist. Whether
+# sync impersonation actually engages on the managed capability without
+# this flag is no longer open: infra/foundation/tests/4.argocd-impersonation.sh's
+# own differential check (narrow the team's Role, force a resync)
+# already confirmed it does not, on real hardware. This step is kept
+# anyway so onboarding starts working with no further change if AWS
+# ever exposes a way to set this flag; nothing in this script currently
+# depends on it succeeding.
 if kubectl get configmap argocd-cm -n "${ARGOCD_NAMESPACE}" >/dev/null 2>&1; then
   IMPERSONATION_ALREADY_ON="$(kubectl get configmap argocd-cm -n "${ARGOCD_NAMESPACE}" \
     -o jsonpath='{.data.application\.sync\.impersonation\.enabled}' 2>/dev/null || true)"
@@ -270,7 +277,7 @@ if kubectl get configmap argocd-cm -n "${ARGOCD_NAMESPACE}" >/dev/null 2>&1; the
     echo "set argocd-cm application.sync.impersonation.enabled: \"true\"" >&2
   fi
 else
-  echo "WARNING: no argocd-cm ConfigMap exists in namespace ${ARGOCD_NAMESPACE} -- this looks like the EKS managed Argo CD capability, whose own control plane (and therefore argocd-cm) runs outside this cluster and is not customer-reachable; continuing WITHOUT being able to confirm this cluster-wide flag is set. Whether destinationServiceAccounts below actually impersonates without it is unconfirmed by this script alone." >&2
+  echo "WARNING: no argocd-cm ConfigMap exists in namespace ${ARGOCD_NAMESPACE} -- this looks like the EKS managed Argo CD capability, whose own control plane (and therefore argocd-cm) runs outside this cluster and is not customer-reachable; continuing WITHOUT being able to set this cluster-wide flag. destinationServiceAccounts below does not impersonate without it (confirmed on real hardware, infra/foundation/tests/4.argocd-impersonation.sh's own differential check) -- this is not what makes Role/RoleBinding safe to sync for this team; team-rbac-guard.yaml is." >&2
 fi
 
 # --- 1a. the real boundary: team-rbac-guard (cluster-wide, once) ---------
@@ -403,7 +410,7 @@ spec:
   # capability's own namespace, Argo CD refuses every Application here
   # with "is not permitted to use project ${TEAM}" even though the
   # Application lives in that very namespace (confirmed on real
-  # hardware -- this script's own second real e2e attempt FAILed on
+  # hardware -- an earlier real e2e attempt FAILed on
   # exactly this before this field was added).
   sourceNamespaces:
     - "${ARGOCD_NAMESPACE}"
@@ -454,6 +461,21 @@ spec:
       kind: PodDisruptionBudget
     - group: "networking.k8s.io"
       kind: NetworkPolicy
+  # Note: inert today (destinationServiceAccounts has no observed
+  # effect -- confirmed, infra/foundation/tests/4.argocd-impersonation.sh's
+  # own check 7), kept only for forward compatibility. Whether `server`
+  # here should actually be CLUSTER_NAME (matching this AppProject's own
+  # `destinations[].name`, which the cell-registration Secret names the
+  # cluster by, and which this script's own checks confirm Argo CD does
+  # match) or the cluster's ARN (what that same Secret's own `server`
+  # field holds, Object 1 in gitops/bootstrap/bootstrap.sh) is itself
+  # unverified -- upstream Argo CD's own documented convention for
+  # `destinationServiceAccounts[].server` predates this capability's
+  # name-based destination matching, so neither value has been checked
+  # against a real impersonated sync (which cannot happen on this
+  # capability today to check it against). A second reason this field's
+  # own correctness does not currently matter, on top of impersonation
+  # not engaging at all.
   destinationServiceAccounts:
     - server: "${CLUSTER_NAME}"
       namespace: "${TEAM}"
