@@ -132,10 +132,22 @@
 #      phase is untested (the two real-hardware runs below never
 #      produced a denial to observe either way), so the Namespace's
 #      own labels, not the phase, are what this check actually relies
-#      on. On two real-hardware runs of an
+#      on. Confirmed on real EKS, re-run against this exact wording
+#      (issue #67, closed): the managedNamespaceMetadata step does not
+#      engage at all with the team namespace, on either the discovery
+#      or the fix-verification attempt -- no syncResult entry for kind
+#      Namespace, the brand-new marker label never lands either way.
+#      Argo CD's own documented CreateNamespace/managedNamespaceMetadata
+#      adoption rule explains why: management only engages on first
+#      sync if the namespace doesn't already exist, or already exists
+#      with no labels/annotations set; team-onboard.sh creates the team
+#      namespace via a client-side kubectl apply with labels already
+#      set, which needs upgrading to server-side apply first (not done
+#      on this platform) before Argo CD will adopt it. Earlier, on two
+#      real-hardware runs of an
 #      earlier form of this check (before this exact wording and the
-#      marker-clearing fix above, not re-run since -- tracked in #67),
-#      Argo CD's own managedNamespaceMetadata reconciliation did not
+#      marker-clearing fix above), Argo CD's own managedNamespaceMetadata
+#      reconciliation did not
 #      visibly attempt to overwrite either pre-existing label, with or
 #      without the guard -- those two runs did not exercise the
 #      guard's own denial either time, which is what check 11 below is
@@ -156,7 +168,8 @@
 #      it is NOT constrained.
 #  12. (PR #66's own second remaining caveat, addressed; an earlier
 #      form of this exact check already passed on real hardware, this
-#      revised form has not itself been re-run -- tracked in #67): the real
+#      revised form has since been re-run on real EKS and confirmed
+#      PASS -- issue #67, closed): the real
 #      chart issue #57 item 1 named
 #      (examples/inference/vllm/disagg-pd-llmd, pinned at
 #      feat/disagg-pd-reference's own commit) self-syncs through the
