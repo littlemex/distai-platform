@@ -86,7 +86,7 @@
 #      safe because team-rbac-guard.yaml (step 1) constrains their
 #      content for every caller, with no exemption -- plus InferencePool
 #      and HTTPRoute, the two namespace-scoped object kinds (not RBAC)
-#      issue #57 item 1's own motivating charts render (checks 11-12).
+#      issue #57 item 1's own motivating charts render (checks 12-13).
 #
 # Known, bounded residual scope (not closed by this PR, stated so the
 # "safely" claim above does not overreach): team-rbac-guard.yaml's own
@@ -97,7 +97,7 @@
 # examples/inference/sglang/disagg-pd-llmd, both at
 # feat/disagg-pd-reference@246b7ef) with a real sync through this exact
 # script's own AppProject, not merely a server-side dry run
-# (infra/foundation/tests/4.argocd-impersonation.sh's own checks 11-12):
+# (infra/foundation/tests/4.argocd-impersonation.sh's own checks 12-13):
 # both charts' own sidecar Role, and their shared llm-d-router-gateway
 # dependency chart's own namespaced Role, fit the allow-list once it
 # was widened to include inferencepools (inference.networking.k8s.io)
@@ -312,12 +312,13 @@ echo "applied gitops/bootstrap/team-rbac-guard.yaml (ValidatingAdmissionPolicy t
 # -------  security-relevant labels (cluster-wide, once) -----------------
 # team-rbac-guard.yaml's own namespaceSelector decides which namespaces
 # it constrains at all by checking whether the namespace carries
-# distai.dev/team -- a label a team's own Application can otherwise
-# strip or change through Argo CD's syncPolicy.managedNamespaceMetadata
-# (issue #57 item 1's own PR #66 caveat; see
-# gitops/bootstrap/team-namespace-guard.yaml's own header for the full
-# finding and infra/foundation/tests/4.argocd-impersonation.sh's own
-# check 10 for the real-hardware confirmation). Applied the same way as
+# distai.dev/team -- a label that, by code reading alone, looked
+# reachable through a team's own Application's
+# syncPolicy.managedNamespaceMetadata (issue #57 item 1's own PR #66
+# caveat; see gitops/bootstrap/team-namespace-guard.yaml's own header
+# for the full finding, including what
+# infra/foundation/tests/4.argocd-impersonation.sh's own checks 10-11
+# actually confirmed and did not). Applied the same way as
 # team-rbac-guard.yaml, for the same reason.
 kubectl apply -f "${SCRIPT_DIR}/team-namespace-guard.yaml" \
   || { echo "kubectl apply gitops/bootstrap/team-namespace-guard.yaml" >&2; exit 1; }
@@ -517,7 +518,16 @@ spec:
     # themselves are cluster-scoped and administrator-installed, never
     # rendered by this chart). Confirmed by a real sync, not merely a
     # dry run: infra/foundation/tests/4.argocd-impersonation.sh's own
-    # checks 11-12.
+    # checks 12-13. Caveat (not checked by that real sync, which
+    # installed no Gateway at all): whether a team's own HTTPRoute can
+    # claim a hostname another team also expects depends entirely on
+    # the shared, admin-installed Gateway's own listeners and
+    # allowedRoutes.namespaces -- a Gateway API-level control this
+    # AppProject's own namespaceResourceWhitelist has no say over
+    # either way. Sizing that control correctly is the administrator's
+    # own responsibility when installing the Gateway (RFC #37's own
+    # serving add-on wave), not something HTTPRoute's presence on this
+    # whitelist grants or withholds.
     - group: "inference.networking.k8s.io"
       kind: InferencePool
     - group: "gateway.networking.k8s.io"

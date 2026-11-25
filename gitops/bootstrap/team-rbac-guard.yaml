@@ -84,10 +84,13 @@
 #          of Service traffic) -- add them deliberately, narrowed to
 #          read-only verbs, if a real chart needs them, rather than by
 #          default.
-#        - inferencepools (apiGroup inference.networking.k8s.io) and
+#        - inferencepools (apiGroup inference.networking.k8s.io, the
+#          Gateway API Inference Extension's own CRD group) and
 #          inferenceobjectives, inferencemodelrewrites (apiGroup
-#          llm-d.ai) were added for issue #57 item 1's own motivating
-#          chart (examples/inference/vllm/disagg-pd-llmd and
+#          llm-d.ai -- llm-d's own CRD group, separate from the Gateway
+#          API Inference Extension project; only InferencePool belongs
+#          to that project) were added for issue #57 item 1's own
+#          motivating chart (examples/inference/vllm/disagg-pd-llmd and
 #          examples/inference/sglang/disagg-pd-llmd, both at
 #          feat/disagg-pd-reference@246b7ef): their shared sidecar
 #          Role (templates/sidecar-rbac.yaml) and the llm-d-router-gateway
@@ -95,17 +98,28 @@
 #          (charts/router/templates/_rbac.yaml's "non-sa" Role) both
 #          grant only get/watch/list on these three resources, to watch
 #          this release's own InferencePool and the InferenceObjective/
-#          InferenceModelRewrite CRs the Gateway API Inference Extension
-#          defines -- all three are namespace-scoped, matching every
-#          other entry already on this list, and the dependency chart's
-#          own ClusterRole/ClusterRoleBinding (token-review auth for its
+#          InferenceModelRewrite CRs llm-d.ai defines -- all three are
+#          namespace-scoped, matching every other entry already on
+#          this list, and the dependency chart's own
+#          ClusterRole/ClusterRoleBinding (token-review auth for its
 #          Prometheus metrics endpoint) is never rendered here, because
 #          the chart's own values.yaml sets
 #          llmdRouter.router.monitoring.prometheus.auth.enabled: false
 #          for exactly this reason (see that file's own comment) -- real
 #          server-side verification: infra/foundation/tests/4.argocd-impersonation.sh
-#          checks 11-12.
-#        - verbs: get, list, watch, create, update, patch, delete
+#          checks 12-13. Unlike every resource above, these three are
+#          restricted to get/list/watch ONLY (rule 2's own CEL has a
+#          separate, narrower verb clause for exactly these three) --
+#          every real caller needs only those three verbs, and this
+#          file's own rule (stated when endpoints/endpointslices were
+#          left off, above) is to add anything beyond the ordinary
+#          namespaced-workload defaults narrowed to what is actually
+#          needed, not by the same full-CRUD default as everything
+#          else.
+#        - verbs: get, list, watch, create, update, patch, delete for
+#          every resource above except inferencepools,
+#          inferenceobjectives and inferencemodelrewrites, which are
+#          get, list, watch only.
 #      Widening any of the three lists (for example, if a real chart
 #      this guard is meant to allow needs a resource not on it) is a
 #      one-line, auditable, reviewed change to this file -- not a
@@ -173,9 +187,11 @@ spec:
         object.rules.all(r,
           r.apiGroups.all(g, g in ['', 'apps', 'batch', 'policy', 'networking.k8s.io', 'inference.networking.k8s.io', 'llm-d.ai']) &&
           r.resources.all(x, x in ['serviceaccounts', 'configmaps', 'pods', 'services', 'deployments', 'statefulsets', 'daemonsets', 'jobs', 'cronjobs', 'poddisruptionbudgets', 'networkpolicies', 'inferencepools', 'inferenceobjectives', 'inferencemodelrewrites']) &&
-          r.verbs.all(v, v in ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'])
+          (r.resources.exists(x, x in ['inferencepools', 'inferenceobjectives', 'inferencemodelrewrites'])
+            ? r.verbs.all(v, v in ['get', 'list', 'watch'])
+            : r.verbs.all(v, v in ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete']))
         )
-      message: "a Role in a team namespace may grant only {get,list,watch,create,update,patch,delete} on {serviceaccounts,configmaps,pods,services,deployments,statefulsets,daemonsets,jobs,cronjobs,poddisruptionbudgets,networkpolicies,inferencepools,inferenceobjectives,inferencemodelrewrites} in {core,apps,batch,policy,networking.k8s.io,inference.networking.k8s.io,llm-d.ai} -- this rule granted something outside that allow-list (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
+      message: "a Role in a team namespace may grant only {get,list,watch,create,update,patch,delete} on {serviceaccounts,configmaps,pods,services,deployments,statefulsets,daemonsets,jobs,cronjobs,poddisruptionbudgets,networkpolicies} (or {get,list,watch} only on {inferencepools,inferenceobjectives,inferencemodelrewrites}) in {core,apps,batch,policy,networking.k8s.io,inference.networking.k8s.io,llm-d.ai} -- this rule granted something outside that allow-list (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
