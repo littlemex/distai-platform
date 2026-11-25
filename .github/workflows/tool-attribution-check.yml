@@ -4,7 +4,8 @@ name: Tool Attribution Check
 # new to this pull request name a specific AI coding tool or AI vendor
 # (the list lives in .github/tool-attribution-denylist.txt, not here).
 # Looks only at commits new to the pull request (via the pulls/.../commits
-# API, which lists exactly those, paginated), never at commits already on
+# API, which lists only those -- at most the first 250 of them, the
+# endpoint's own cap; see the commit step below), never at commits already on
 # main.
 #
 # Trust boundary: the checker script and the denylist are read from the
@@ -12,12 +13,17 @@ name: Tool Attribution Check
 # the pull request's own head, so a pull request cannot pass this check by
 # editing the script or the denylist in the same pull request. This holds
 # for any pull request whose base branch already carries both files (which
-# is every pull request once this change is on `main`, but also, for
-# example, a pull request stacked on another feature branch that already
-# has them). The only pull request that falls back to its own head copy is
-# one whose base has NEITHER file yet (today, only this introducing pull
-# request against `main`); that fallback is unavoidable for a bootstrapping
-# change and is logged as a warning in the job's own output. A base branch
+# is every pull request against `main` once this change is on `main`, and
+# also, for example, a pull request stacked on another feature branch
+# that already has them). A pull request falls back to its own head copy
+# only when its base has NEITHER file. Today that is only this introducing
+# pull request against `main`; after this change merges it can still
+# happen for a pull request whose base is another branch lacking both
+# files (for example, one stacked on a feature branch cut before this
+# change merged), and there the head copy is self-editable exactly as it
+# is for the introducing pull request. The fallback is unavoidable for a
+# bootstrapping change and is logged as a warning in the job's own output.
+# A base branch
 # with exactly one of the two files is treated as neither trusted nor a
 # normal bootstrap case and fails the job outright (see the step below) --
 # that split state should not occur, and silently guessing which copy to
