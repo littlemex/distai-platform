@@ -1,6 +1,6 @@
 # Spot placement score snapshot used by issue #17
 
-This note gives the full, reproducible provenance for the Spot placement score values already summarized in issue #17's facts table ("Capacity survey" row), and adds two further table rows (both for `g7.2xlarge`) from the same survey and the same API call that issue #17's prose did not separately state. Issue #17 also pairs `g7.2xlarge` against `g6e.xlarge` (score 1 everywhere) in a comment about a launch-fallback experiment; this note does not add a `g6e.xlarge` row, for the reason given below the table. It exists so every value below can be checked and refreshed without re-deriving the call that produced it.
+This note gives the full, reproducible provenance for the Spot placement score values already summarized in issue #17's facts table ("Capacity survey" row), and adds two further table rows (both for `g7.2xlarge`) from the same survey and the same API call that issue #17's prose did not separately state. Issue #17 also pairs `g7.2xlarge` against `g6e.xlarge` in a comment about a launch-fallback experiment; this note does not add a `g6e.xlarge` row, for the reason given below the table. It exists so every value below can be checked and refreshed without re-deriving the call that produced it.
 
 ## What a Spot placement score is
 
@@ -26,7 +26,7 @@ The `trn2.48xlarge` and `trn2.3xlarge` rows restate exactly the single value iss
 
 ### Why there is no `g6e.xlarge` row
 
-Issue #29's decision requires the exact command used to read a value. `g6e.xlarge` was offered in 11 Regions at the time of this survey, but AWS's own API reference documents a maximum of 10 items for a `GetSpotPlacementScores` request's Region names, and this survey recorded a score for only 10 Regions. This note has no way to state, and no citable source to confirm, exactly which Regions the original request named, so it cannot give `g6e.xlarge` a command that meets the decision's requirement. Issue #17's own prose statement ("`g6e.xlarge` 1 everywhere") remains the only public record of that value; this note does not restate it as a full row, and does not add a new, less complete record in its place.
+Issue #29's decision requires the exact command used to read a value. `g6e.xlarge` was offered in 11 Regions at the time of this survey, but AWS's own API reference documents a maximum of 10 items for a `GetSpotPlacementScores` request's Region names, and this survey recorded a score for only 10 Regions. This note has no way to state, and no citable source to confirm, exactly which Regions the original request named, so it cannot give `g6e.xlarge` a command that meets the decision's requirement. Issue #17's own prose statement about `g6e.xlarge` remains the only public record of that value; this note does not restate it, and does not add a new, less complete record in its place.
 
 ### Captured time is approximate, not a per-call instant
 
