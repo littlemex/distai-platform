@@ -12,10 +12,18 @@ accelerators (`#19`), no per-team objects (`#22`) and no `sharedfs`/
 notifications (`#18`/`#23`) ship in this PR, so this layer's tests do not
 check them either.
 
+[Issue #41](https://github.com/littlemex/distai-platform/issues/41) adds
+the tier model on top: a fourth core add-on (`optional-pool`), the
+`gitops/addon-catalog/` directory, per-cell marker files under
+`gitops/cells/<cell>/addons/`, and a third ApplicationSet,
+`addons-optional.ApplicationSet.yaml`, with `dcgm-exporter` as the first
+platform-optional entry. Two static checks (`check_addon_tiers.py`,
+`check_addon_catalog_sync.py`) and `1.e2e.sh` step 14b cover it.
+
 | Script | What it checks | Needs AWS | Duration |
 | --- | --- | --- | --- |
-| `0.static.sh` | Required files, `bash -n`/`shellcheck` on every `*.sh` under `gitops/` (including this suite's own three scripts, not only `bootstrap.sh`), `yamllint` on every literal (non-templated) tracked YAML file, the structural contract of every `addon.yaml`/cells parameter file and both ApplicationSets (`check_gitops_contract.py`, including issue #27's `pool.capacityType`/`reservation.tags` rules, exercised against disposable copies since the tracked tree ships no reserved pool), `helm lint`/`helm template` of `charts/capacity-pool` and `charts/smoke`, the same for every values fixture under `fixtures/` (issue #27's shapes: `on-demand`/`reserved`/`flex`, `accelerator`+`tenancy`, a no-value taint, `memQuota`, and seven fixtures that must be refused) with the rendered fields of every fixture -- including the unchanged `on-demand` default -- checked field-by-field by `check_chart_renders.py` against the exact fixture set shipped, `kubeconform` of all rendered output plus both ApplicationSets and the root Application against pinned upstream + CRD-catalog schemas, and `check_pinned_crds.py` validating the rendered CRD-backed objects against each pinned chart's own exact CRD versions | No | About 2 to 3 minutes |
-| `1.e2e.sh` | Builds one foundation cell (with a temporary Identity Center group), the before/after RBAC change on the capability's own access entry, bootstrap idempotency / `--revision`-only re-run / wrong-cluster abort, the `crds`→`controllers`→`capacity` ordering (including two deliberately broken steps), the OCI chart and Git-file-generator-revision checks, no shared CRD between `karpenter-crd` and `karpenter`, the admin smoke canary through Kueue and Karpenter, issue #27's three pools (`-rsv` backed by a real targeted Capacity Reservation, `-od`, `-flex`) with one canary each and a second `-rsv` canary held by quota, then the reservation cancelled, one accidental generator-entry loss, one full bootstrap-object teardown and re-adopt, then destroy and leftovers | Yes | About 60 to 85 minutes (measured 60m07s on the issue #27 implementation's own real-cluster run) |
+| `0.static.sh` | Required files, `bash -n`/`shellcheck` on every `*.sh` under `gitops/` (including this suite's own three scripts, not only `bootstrap.sh`), `yamllint` on every literal (non-templated) tracked YAML file, the structural contract of every `addon.yaml`/cells parameter file and the three ApplicationSets (`check_gitops_contract.py`, including issue #27's `pool.capacityType`/`reservation.tags` rules, exercised against disposable copies since the tracked tree ships no reserved pool), the tier and naming rules of issue #41 Decision 2 (`check_addon_tiers.py`), issue #41 Decision 3's checks (0)-(4) of every `cells/*/addons/*.yaml` marker against its catalog entry, including each `overridableKeys` path against the wrapper chart's coalesced defaults (`check_addon_catalog_sync.py`), `helm lint`/`helm template` of `charts/capacity-pool`, `charts/smoke`, `charts/optional-pool` and `charts/dcgm-exporter` (after `helm dependency build`), the same for every values fixture under `fixtures/` (issue #27's shapes: `on-demand`/`reserved`/`flex`, `accelerator`+`tenancy`, a no-value taint, `memQuota`, and seven fixtures that must be refused) with the rendered fields of every fixture -- including the unchanged `on-demand` default -- checked field-by-field by `check_chart_renders.py` against the exact fixture set shipped, `kubeconform` of all rendered output plus the three ApplicationSets and the root Application against pinned upstream + CRD-catalog schemas, and `check_pinned_crds.py` validating the rendered CRD-backed objects against each pinned chart's own exact CRD versions | No | About 2 to 3 minutes |
+| `1.e2e.sh` | Builds one foundation cell (with a temporary Identity Center group), the before/after RBAC change on the capability's own access entry, bootstrap idempotency / `--revision`-only re-run / wrong-cluster abort, the `crds`→`controllers`→`capacity` ordering (including two deliberately broken steps), the OCI chart and Git-file-generator-revision checks, no shared CRD between `karpenter-crd` and `karpenter`, the admin smoke canary through Kueue and Karpenter, issue #27's three pools (`-rsv` backed by a real targeted Capacity Reservation, `-od`, `-flex`) with one canary each and a second `-rsv` canary held by quota, then the reservation cancelled, one accidental generator-entry loss, one full bootstrap-object teardown and re-adopt, the `dcgm-exporter` platform-optional add-then-remove cycle with a GPU placement check (issue #41), then destroy and leftovers | Yes | About 60 to 85 minutes (measured 60m07s on the issue #27 implementation's own real-cluster run) |
 | `2.upgrade.sh` | The mechanical version-pair check (decision 6) on a mismatched `karpenter`/`karpenter-crd` bump, then a matched bump against a live cell: no `Application` goes `Degraded`, the `NodePool`-launched instance is not replaced, and the canary pod stays `Running` throughout | Yes | About 35 to 50 minutes |
 
 ## Prerequisites
@@ -23,9 +31,10 @@ check them either.
 Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
 
 - Bash 4.3 or later (both `mapfile`/`readarray` and the `${var,,}`
-  lowercasing expansion, already used throughout `1.e2e.sh`/`2.upgrade.sh`
-  before this PR, need it). The EC2 test runner's Bash is new enough; the
-  Mac's own `/bin/bash` (3.2) is not, one more reason these never run there.
+  lowercasing expansion, used throughout all three scripts, need it).
+  macOS's own shipped `/bin/bash` is 3.2 and does not have either; run
+  these on Linux (this repository's own distai-platform-runner CI, Amazon
+  Linux's `bash` is `>= 5`, always satisfies this).
 - Helm `>= 3.8` (OCI charts), for `0.static.sh` only (`1.e2e.sh`/`2.upgrade.sh`
   never call `helm` themselves -- Argo CD installs every chart in-cluster).
 - `uv` (for `0.static.sh`'s pinned `yamllint`/`pyyaml`, and for `2.upgrade.sh`'s
@@ -73,10 +82,11 @@ Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
   (default `us-east-1`) -- never passed as an env var, a command-line
   argument, or written to `.git/config`: both scripts read it through a
   one-shot `GIT_ASKPASS` helper, deleted immediately after the one `git`
-  command that needs it. `1.e2e.sh` pushes up to six small, disposable
+  command that needs it. `1.e2e.sh` pushes up to seven small, disposable
   branches (one per-run cell fixture if `NAME` needs one, `pristine-both-broken`
   and `pristine-kueue-broken` for the pristine first-bootstrap stages,
-  `break-crds`, `break-kueue`, `remove-kueue`); `2.upgrade.sh` pushes up
+  `break-crds`, `break-kueue`, `remove-kueue`, and one of
+  `no-dcgm-exporter`/`add-dcgm-exporter` for step 14b); `2.upgrade.sh` pushes up
   to two (the cell fixture, `upgrade-match`). Every one of them lives under
   `refs/heads/e2e/<run-id>/*` (a guard function refuses pushing or
   deleting anything outside that namespace), to exercise the ordering,
@@ -229,6 +239,10 @@ runner/run.sh --ref "${GITOPS_REVISION}" \
 | #27: the reservation is cancelled at the end, pass or fail, shown by `DescribeCapacityReservations` | `1.e2e.sh` step 11b-6, and `cleanup()` (`cancel_run_capacity_reservations`) if 11b-6 was not reached |
 | #27: `helm lint` and `kubeconform` pass for every new values shape, including `memQuota` | `0.static.sh` sections 5b and 6 (every `fixture-*.yaml` render is a `kubeconform` target) |
 | Upgrade e2e's version-pair check catches a mismatch; a matched bump passes no-replacement and canary-stays-Running | `2.upgrade.sh` experiments A and B |
+| Issue #41: every `gitops/addons/` entry is `tier: core`, every catalog entry `platform-optional` or `workload`, directory name equals `addon`, no name in both directories | `0.static.sh` (`check_addon_tiers.py`) |
+| Issue #41: markers match their catalog entry (stem/`addon`/`fromCatalog`, cell-wide uniqueness, `dir`/`namespace`/`skipCrds`, tier, wave, `dependsOn`, `overridableKeys`) | `0.static.sh` (`check_addon_catalog_sync.py`) |
+| Issue #41: `optional-pool` delivered to every cell as an untainted, on-demand pool | `1.e2e.sh` step 10 |
+| Issue #41 Decision 4: add-then-remove cycle of a catalog entry on a real cell -- no `Application` without the marker, `Healthy`/`Synced` with it, removal orphans the resources; the component's pods land only where its own `nodeSelector` says | `1.e2e.sh` step 14b (`dcgm-exporter`, a disposable GPU `NodePool` test fixture, DaemonSet/Namespace UID comparisons) |
 | CRD-schema-diff check not claimed met | `2.upgrade.sh`'s final `INFO` line states this explicitly; no assertion claims it |
 | Every claim about upstream versions/capability behavior backed by a primary source or an "unconfirmed" marker | Enforced by this README and the scripts' own comments pointing at the issue's facts comment, not re-derived here |
 
@@ -444,6 +458,26 @@ silently:
   the Secret even exists) can catch it. A single run exercises both,
   independently, by forging a different field each time rather than by
   pointing at a second cluster.
+- **Step 14b (issue #41) starts by removing the `dcgm-exporter` marker,
+  not by adding it.** Step 0 copies `gitops/cells/example-cell/` verbatim,
+  and `example-cell` ships `addons/dcgm-exporter.yaml`, so the cell has had
+  a synced `dcgm-exporter` `Application` since its first bootstrap. Step
+  15 pushes a disposable branch without the marker (`no-dcgm-exporter`),
+  confirms the `Application` disappears and its DaemonSet stays
+  (orphaned), deletes that namespace so the re-add proves creation rather
+  than re-adoption, then restores the marker. If `GITOPS_REVISION`'s own
+  `gitops/cells/${NAME}/` has no marker, it adds `example-cell`'s on a
+  disposable branch (`add-dcgm-exporter`) instead.
+- **Step 14b's GPU `NodePool`/`EC2NodeClass` is a test fixture, not part of
+  the platform.** It is applied with `kubectl`, named `e2e-gpu-<hash of the
+  run id>`, limited to one small NVIDIA instance (`g5`/`g6`/`g6e`, spot or
+  on-demand, `limits.cpu: "8"`), copies role/AMI/discovery from the live
+  `capacity-pool` `EC2NodeClass`, and is deleted at the end of step 14b and
+  by `cleanup()` on failure. A pause Pod pinned to it triggers the node
+  launch, since Karpenter does not launch nodes for DaemonSet pods. The
+  `dcgm-exporter` `Application` is expected `Healthy`, not only `Synced`,
+  while no NVIDIA node exists: Argo CD's DaemonSet health check is
+  `Healthy` at `desiredNumberScheduled: 0`.
 - **No separate experiment for Karpenter's OCI chart `skipCrds` content.**
   Checked structurally by `check_gitops_contract.py` (acceptance-criterion-
   adjacent, not itself one of the nine criteria) and confirmed in

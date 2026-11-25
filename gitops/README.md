@@ -22,14 +22,18 @@ gitops/
   appsets/
     platform.ApplicationSet.yaml # one Application per gitops/addons/*/addon.yaml
     cells.ApplicationSet.yaml    # one Application per gitops/cells/<cell>/{capacity-pool,smoke}/*.yaml
+    addons-optional.ApplicationSet.yaml # one Application per gitops/cells/<cell>/addons/*.yaml
   addons/
-    <name>/addon.yaml            # one platform-wide add-on: chart, version, wave, values
+    <name>/addon.yaml            # one platform-wide add-on: chart, version, wave, values (tier: core)
+  addon-catalog/
+    <name>/addon.yaml            # one reviewed platform-optional entry; never read by an ApplicationSet
   charts/
     <name>/                      # shared chart templates, parameterized per cell
   cells/
     <cluster-name>/
       capacity-pool/*.yaml        # one parameter file per NodePool
       smoke/*.yaml                 # the admin-owned smoke ClusterQueue/LocalQueue
+      addons/*.yaml                # one marker file per platform-optional component this cell opts into
 ```
 
 Directories are named by **ownership and kind**, not by sync order: a wave
@@ -41,6 +45,55 @@ entry (`* @littlemex`) -- which also covers every other path, including
 `cells/*/teams/*` once #22 ships, so nothing in `CODEOWNERS` yet
 distinguishes an admin path from a team one; a path-specific rule drawing
 that line is #22's own to add.
+
+## Tiers
+
+Every component is one of three tiers (RFC
+[#41](https://github.com/littlemex/distai-platform/issues/41)). **core**
+ships to every cell with no opt-out: an `addons/<name>/addon.yaml` with
+`tier: core`, delivered by `platform.ApplicationSet.yaml`.
+**platform-optional** is an admin-delivered capability a cell opts into:
+its reviewed definition is `addon-catalog/<name>/addon.yaml`, and a marker
+file `cells/<cluster-name>/addons/<name>.yaml` (naming it in `fromCatalog`)
+is the opt-in, delivered by `addons-optional.ApplicationSet.yaml`. A
+component with no node-placement need of its own lands on the core
+`optional-pool` `NodePool`, never the system node group (whether that
+pool exists is still an open choice, see
+`charts/optional-pool/README.md`); `dcgm-exporter`, the first shipped
+entry, is the opposite case -- its own `nodeSelector` targets GPU nodes
+specifically, so it never schedules onto `optional-pool` at all. A
+wrapped upstream chart is pinned in the wrapper's own `Chart.yaml`, not
+in an `addon.yaml`. **workload** is scoped to one team and has no delivery path until
+[#22](https://github.com/littlemex/distai-platform/issues/22) ships.
+
+### `wave` and "optional" each name more than one thing
+
+Both terms are overloaded across this platform (#63, filed as #61 item
+3); this is the one place that lists every meaning rather than leaving
+a reader to infer which one applies from context.
+
+`wave` is:
+- A named ordering step for **core** add-ons and cells: `crds`,
+  `controllers`, `accelerators`, `capacity` (see Ordering below) --
+  these values gate `platform.ApplicationSet.yaml`'s/`cells.ApplicationSet.yaml`'s
+  own sync order, and nothing else reads them.
+- A numbered slot for **platform-optional** add-ons instead:
+  `optional-1`, `optional-2`, ... (for example
+  `cells/<cluster>/addons/dcgm-exporter.yaml`'s `wave: optional-1`) --
+  `addons-optional.ApplicationSet.yaml`'s own `dependsOn` ordering reads
+  these, a different mechanism from the named core steps above, sharing
+  only the field name.
+
+"optional" is, separately:
+- A tier name: **platform-optional** (above).
+- A core add-on's own name: `optional-pool`, the admin-owned `NodePool`
+  every cell gets regardless of tier.
+- That add-on's own rendered object name: `optional-pool` (the
+  `NodePool`/`EC2NodeClass` Karpenter actually creates).
+- A wave-value prefix: the `optional-N` numbering immediately above.
+
+None of these four refer to each other; reading "optional" or `wave` in
+one file never implies the meaning it carries in a different one.
 
 ## Bootstrapping a cell (once, after `terraform apply`)
 
@@ -64,9 +117,10 @@ a `cell-registration` `Secret` (labelled `argocd.argoproj.io/secret-type:
 cluster`, `server` set to the cluster's ARN - never an API server URL),
 the `platform` `AppProject`, and a root `Application` sourced at
 `gitops/appsets/`. Everything after that point is Git, not a script: the
-root `Application` delivers `platform.ApplicationSet.yaml` and
-`cells.ApplicationSet.yaml`, which deliver every add-on and every cell's
-own capacity.
+root `Application` delivers `platform.ApplicationSet.yaml`,
+`cells.ApplicationSet.yaml` and `addons-optional.ApplicationSet.yaml`,
+which deliver every add-on, every cell's own capacity and every
+platform-optional component a cell opts into.
 
 The script is idempotent: re-running it with the same inputs changes
 nothing. It aborts before writing anything if the live `kubectl` context's
@@ -119,9 +173,12 @@ Every cell already enforces `NetworkPolicy` (`infra/foundation`'s VPC CNI
 `enableNetworkPolicy: "true"`), but enforcement with no policy objects is
 not segmentation: with nothing shipped, any Pod anywhere can reach any
 other Pod. An independent security-axis review pass (#63, filed as a
-private report "SA4") found exactly that true of `karpenter`/`kueue` -
-the only NetworkPolicy enforcement this platform turned on, with no
-policy object anywhere to make it mean anything.
+private report "SA4") found exactly that true of this platform's own
+add-ons: `karpenter`/`kueue` (the only NetworkPolicy enforcement this
+platform turned on, with no policy object anywhere to make it mean
+anything) and `dcgm-exporter` (#46 - its `NetworkPolicy` existed but its
+`allowedPeers` matched every namespace, the only real segmentation this
+stack shipped until this PR).
 
 The policy going forward: **default deny, name the exception**. An
 add-on that exposes a network port ships `networkPolicy.enabled: true`
@@ -130,10 +187,15 @@ add-on that exposes a network port ships `networkPolicy.enabled: true`
 peer allowed in by default; a cell (or a later PR, once a real consumer
 exists) adds exactly the peer that component needs, never a blanket
 `namespaceSelector: {}`/`podSelector: {}` "every pod" default.
+`dcgm-exporter`'s own `allowedPeers: []` (renders `ingress: []` -
+confirmed against the rendered manifest) was the first add-on to follow
+this: a functional no-op (nothing scrapes it yet) and a real boundary
+the day something does, since `dcgm-exporter.networkPolicy.allowedPeers`
+is a cell-overridable key for exactly that.
 
-`karpenter-netpol` and `kueue-netpol` (this PR) follow the one pattern
-researched for this exact problem: kube-apiserver's calls to a webhook
-or aggregated-API port, and kubelet's own health-probe calls, cannot be
+`karpenter-netpol` and `kueue-netpol` follow the one pattern researched
+for this exact problem: kube-apiserver's calls to a webhook or
+aggregated-API port, and kubelet's own health-probe calls, cannot be
 matched by a `podSelector`/`namespaceSelector` the way an ordinary Pod
 can - the control plane and a node's own kubelet are not addressable
 that way under VPC CNI. Rather than invent a workaround, both charts
@@ -180,11 +242,12 @@ separate `ApplicationSet` objects.
 | `ApplicationSet` | Step (`wave`) | Delivered in this PR |
 | --- | --- | --- |
 | `platform` | `crds` (`karpenter-crd`) | yes |
-| `platform` | `controllers` (`karpenter`, `kueue`) | yes |
+| `platform` | `controllers` (`karpenter`, `kueue`, `optional-pool`) | yes |
 | `platform` | `accelerators` (`accel-nvidia-device-plugin`, `accel-nvidia-dra`, `accel-neuron-device-plugin`, `accel-neuron-dra`, `accel-device-classes`, `accel-efa-device-plugin-nvidia`, `accel-efa-device-plugin-neuron`) | yes |
 | `platform` | `extras` | no - [#18](https://github.com/littlemex/distai-platform/issues/18)/[#23](https://github.com/littlemex/distai-platform/issues/23) |
 | `cells` | `capacity` (`capacity-pool/*`, `smoke/*`) | yes |
 | `cells` | `teams` | no - [#22](https://github.com/littlemex/distai-platform/issues/22) |
+| `addons-optional` | `optional-1`..`optional-4` (`cells/*/addons/*`) | yes ([#41](https://github.com/littlemex/distai-platform/issues/41)) |
 
 ## Versioning
 
@@ -280,8 +343,12 @@ in this PR's own Test Results.
 ## Adding a cell
 
 1. Build the cell with `infra/foundation` and run `gitops/bootstrap/bootstrap.sh`
-   against it (above). This alone delivers `karpenter-crd`, `karpenter` and
-   `kueue` cluster-wide - no `NodePool` exists yet.
+   against it (above). This alone delivers `karpenter-crd`, `karpenter`,
+   `kueue` cluster-wide, and `optional-pool` (RFC #41 Decision 1: a core
+   add-on, delivered to every cell) - the one `NodePool`/`EC2NodeClass`
+   pair that exists before any `cells/<cluster-name>/capacity-pool/*.yaml`
+   file does, an untainted, on-demand CPU pool with no Kueue
+   `ResourceFlavor` of its own. No *team* `NodePool` exists yet.
 2. Copy `gitops/cells/example-cell/` to `gitops/cells/<cluster-name>/`,
    replacing `example-cell` with the cell's own `cluster_name` output.
 3. In `capacity-pool/cpu.yaml`, keep or change `values.pool.name`; `dir`
@@ -290,7 +357,13 @@ in this PR's own Test Results.
    own annotations - never set them by hand in this file.
 4. In `smoke/queue.yaml`, set `values.clusterQueue.resourceFlavor` to the
    same `pool.name` chosen in step 3.
-5. Open a PR. Once merged and `stable` moves, `cells.ApplicationSet.yaml`
+5. For every file under `addons/` (today, just `dcgm-exporter.yaml`; a
+   future catalog entry adds its own), decide whether to keep it -- each
+   one opts this cell into one `platform-optional` component (RFC
+   [#41](https://github.com/littlemex/distai-platform/issues/41)); a
+   platform-optional component's own definition is that the cell works
+   the same either way.
+6. Open a PR. Once merged and `stable` moves, `cells.ApplicationSet.yaml`
    picks the new cell's files up on its own - no second `bootstrap.sh` run
    is needed for an ordinary cell addition (only a new chart registry, or
    a `--revision` change ahead of a merge, needs one).

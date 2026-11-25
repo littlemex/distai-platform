@@ -315,15 +315,23 @@ ABSENT_MEANS_FALSE = {"privileged", "runAsNonRoot"}
 
 
 def check_security_context_rendered(rendered_text, expected):
-    """accel-efa-device-plugin-{nvidia,neuron} (review round 2, finding
-    N6): an addon.yaml's own `values.securityContext` override is, like a method
-    label, a real Helm value that is silently ignored if the key or nesting is
-    wrong -- the same failure mode #19/#28's own review already found once for
-    `nodeSelector`. This asserts the *exact pinned chart's* own rendered
-    DaemonSet actually carries the override on every one of its containers, not
-    merely that `addon.yaml` declares it. Returns (True, "") or (False, reason).
-    No DaemonSet in the chart's output at all is reported as a reason, not a
-    silent pass -- that would otherwise look identical to "override lost"."""
+    """A fixed, named securityContext policy, checked against the exact
+    pinned chart's own rendered output (#63, filed as "SA3" item 2, and
+    accel-efa-device-plugin-{nvidia,neuron} review round 2 finding N6):
+    an addon.yaml's own `values.securityContext` override is, like a
+    method label, a real Helm value that is silently ignored if the key
+    or nesting is wrong -- the same failure mode #19/#28's own review
+    already found once for `nodeSelector`. dcgm-exporter's own hardening
+    (allowPrivilegeEscalation: false, capabilities add SYS_ADMIN/drop ALL,
+    runAsNonRoot: false, runAsUser: 0) has no override of its own in
+    addon.yaml, so its expectation is instead what the chart renders by
+    default (see SECURITY_CONTEXT_EXPECTATIONS above). Either way the
+    expectation is kept here rather than read back from the file being
+    checked, on purpose: reading it from the same file would pass
+    trivially the moment that file's own override is weakened or dropped.
+    Returns (True, "") or (False, reason). No DaemonSet in the chart's
+    output at all is reported as a reason, not a silent pass -- that
+    would otherwise look identical to "override lost'."""
     found_any_daemonset = False
     mismatches = []
     for doc in yaml.safe_load_all(rendered_text):
@@ -494,6 +502,17 @@ def main(repo_root, rendered_dir):
                 print(f"FAIL {label}: the rendered chart's own container(s) do not carry the hardened securityContext ({reason})")
                 failures += 1
 
+    # A label this run DID find, that is also in SECURITY_CONTEXT_EXPECTATIONS,
+    # but whose own entry skipped check_security_context_rendered() for
+    # some other reason (a catalog entry with no "dir" key, for example)
+    # is a shape this expectation table assumed cannot happen -- comparing
+    # the two sets below turns that into a FAIL instead of a silent no-op
+    # (#63). This does NOT catch the addon/catalog entry's own `addon:`
+    # field (or directory name) being renamed or mistyped: a typo changes
+    # which string labels_seen holds too, so the expected label vanishes
+    # from both sets at once, indistinguishable from a sibling branch's
+    # addon that legitimately does not exist in this checkout yet, which
+    # must not fail.
     unchecked = (set(SECURITY_CONTEXT_EXPECTATIONS) & labels_seen) - security_context_checked
     if unchecked:
         print(

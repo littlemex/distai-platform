@@ -374,6 +374,10 @@ def main(root: str) -> int:
 
     check_applicationset(os.path.join(gitops, "appsets/platform.ApplicationSet.yaml"), {"crds", "controllers", "accelerators"})
     check_applicationset(os.path.join(gitops, "appsets/cells.ApplicationSet.yaml"), {"capacity"})
+    check_applicationset(
+        os.path.join(gitops, "appsets/addons-optional.ApplicationSet.yaml"),
+        {"optional-1", "optional-2", "optional-3", "optional-4"},
+    )
 
     # #28 Interface: "rollingSync.steps gains one step matching
     # distai.dev/wave In [accelerators], after controllers". The set check

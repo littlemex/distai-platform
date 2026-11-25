@@ -74,6 +74,14 @@
 #   d. the reservation is cancelled at the end, on success and on failure
 #      alike, confirmed by DescribeCapacityReservations showing cancelled.
 #
+# Issue #41 (platform-optional add-ons), step 14b: a cell's own
+# gitops/cells/<cell>/addons/dcgm-exporter.yaml marker file generates a
+# dcgm-exporter Application through addons-optional.ApplicationSet.yaml
+# (absent without it), the Application reaches Healthy+Synced, its
+# DaemonSet runs only on a GPU node (proved with a disposable GPU
+# NodePool test fixture), and removing the marker orphans its resources;
+# step 10 also checks the fourth core add-on, optional-pool.
+#
 # The upgrade-mode e2e (decision 6/9) is a separate script, 2.upgrade.sh.
 #
 # Required environment (export before running):
@@ -144,6 +152,9 @@
 #   may take to reach Running, spot launch and driver/plugin start
 #   included).
 set -euo pipefail
+# mapfile/readarray needs bash >=4 (gitops/tests/README.md's own
+# Prerequisites) -- never run this on macOS's shipped bash 3.2.
+[[ "${BASH_VERSINFO[0]}" -ge 4 ]] || { echo "FAIL this script needs bash >= 4 (mapfile/readarray); got ${BASH_VERSION}" >&2; exit 1; }
 
 : "${AWS_PROFILE:?export AWS_PROFILE}"
 : "${AWS_REGION:?export AWS_REGION}"
@@ -220,6 +231,9 @@ chmod 700 "${SECRET_TMP_DIR}"
 STATE_KEY="distai-platform/${AWS_REGION}/${NAME}/foundation"
 RUN_ID="gitops-e2e-${NAME}-$(date -u +%Y%m%d%H%M%S)-${RANDOM}"
 TEST_TAG_KEY="distai-platform-e2e"
+# Same image+digest infra/foundation/tests/1.e2e.sh's own IMDS check
+# already pins: a scrape pod for step 14b-d's metrics check below.
+DCGM_SCRAPE_CURL_IMAGE="docker.io/curlimages/curl@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
 
 APPLY_ATTEMPTED=0
 DESTROYED=0
@@ -247,6 +261,10 @@ TRN_DESTROYED=0
 TRN_BOOTSTRAP_RAN=0
 TRN_VPC_ID=""
 TRN_ARGOCD_NS=""
+# Step 14b's GPU NodePool/EC2NodeClass/trigger Pod test fixture (issue #41),
+# named per run; empty until step 14b applies it. cleanup() deletes all
+# three by this name on any failure path that reaches it.
+GPU_FIXTURE_NAME=""
 
 # ---------------------------------------------------------------- helpers
 
@@ -765,6 +783,15 @@ cleanup() {
         k delete namespace "${ACCEL_TEST_NS}" --ignore-not-found --wait=false >/dev/null 2>&1
         k delete application root -n "${ARGOCD_NS}" --cascade=background --ignore-not-found >/dev/null 2>&1
       fi
+      # Step 14b's test fixture, never part of the platform: deleting the
+      # NodePool lets Karpenter drain its GPU node before the destroy below;
+      # the foundation teardown guard terminates it regardless.
+      if [[ -n "${GPU_FIXTURE_NAME}" ]]; then
+        k delete pod "${GPU_FIXTURE_NAME}" -n default --ignore-not-found --wait=false >/dev/null 2>&1
+        k delete nodepool "${GPU_FIXTURE_NAME}" --ignore-not-found --wait=false >/dev/null 2>&1
+        k delete ec2nodeclass "${GPU_FIXTURE_NAME}" --ignore-not-found --wait=false >/dev/null 2>&1
+        info "cleanup: deleted the step 14b GPU test fixture ${GPU_FIXTURE_NAME} (Pod, NodePool, EC2NodeClass)"
+      fi
       tf "${DESTROY_FROM_ROOT}" destroy -auto-approve -input=false -var-file="${TFVARS}"
       local destroy_rc=$?
       if [[ "${destroy_rc}" -ne 0 ]]; then
@@ -1190,9 +1217,27 @@ wait_until 300 10 "a capacity-pool Application exists" discover_capacity_pool_ap
 # same as on one that exists but has no sync status yet, so a "never
 # reaches Synced" check alone would also pass on an Application the
 # ApplicationSet never generated at all -- confirmed as a real gap, not
-# a hypothetical one.
+# a hypothetical one. Waited for, not checked once: the capacity-pool
+# Application just above needed wait_until's own retry window to
+# appear (the ApplicationSet controller's own generation is not
+# instantaneous with the root Application's first sync), and a one-shot
+# app_exists() immediately after that wait consumed part of the same
+# propagation window -- a real, if rare, race in principle. What this
+# wait_until actually caught on a real run was not that race: it was
+# platform.ApplicationSet.yaml's templatePatch failing to parse entirely
+# (a missing {{- end }}, fixed separately), which made the first app in
+# this loop time out the same way a slow propagation would, but
+# permanently -- no amount of retrying inside this wait_until could have
+# passed. Kept as wait_until anyway, since the propagation race above is
+# still real and still needs it; a parse error should instead be caught
+# earlier and explicitly, which gitops/tests/0.static.sh and
+# check_pinned_crds.py's own rendering do not currently check for this
+# manifest's own templatePatch field (left as a gap, not fixed here).
 for app in "${APP_KARPENTER_CRD}" "${APP_KARPENTER}" "${APP_KUEUE}" "${APP_SMOKE}"; do
-  app_exists "${app}" || fail "Application ${app} does not exist -- the cells/platform ApplicationSet never generated it"
+  app_exists_app="${app}"
+  app_exists_check() { app_exists "${app_exists_app}"; }
+  wait_until 60 5 "Application ${app} exists" app_exists_check \
+    || fail "Application ${app} does not exist -- the cells/platform ApplicationSet never generated it"
 done
 pass "discovered generated Applications, each confirmed to exist: ${APP_KARPENTER_CRD}, ${APP_KARPENTER}, ${APP_KUEUE}, ${APP_CAPACITY_POOL}, ${APP_SMOKE}"
 
@@ -1670,6 +1715,17 @@ crds_owned_by_karpenter="$(app_field "${APP_KARPENTER}" '{.status.resources[?(@.
   || fail "${APP_KARPENTER} (skipCrds) still owns CRD(s) in its own resource list: ${crds_owned_by_karpenter}"
 pass "${APP_KARPENTER_CRD} owns the CRDs (${crds_owned_by_karpenter_crd}); ${APP_KARPENTER} owns none -- no shared-resource conflict"
 
+# Regression guard for RFC #41 Decision 4 Finding 1's own allowEmpty
+# scoping: templatePatch's {{- if .allowEmpty }} branch must never fire
+# for a core addon that does not set it, which would mean the key went
+# back into platform.ApplicationSet.yaml's own SHARED base template --
+# silently removing Argo CD's own safety net (refuse to prune to zero
+# resources) for karpenter-crd too, not only for optional-pool.
+karpenter_crd_automated="$(app_field "${APP_KARPENTER_CRD}" '{.spec.syncPolicy.automated}')"
+[[ "${karpenter_crd_automated}" != *"allowEmpty"* ]] \
+  || fail "${APP_KARPENTER_CRD}'s spec.syncPolicy.automated is [${karpenter_crd_automated}] -- allowEmpty must never appear here; it is optional-pool's own addon.yaml-scoped opt-in, not the shared base template's"
+pass "${APP_KARPENTER_CRD}'s spec.syncPolicy.automated carries no allowEmpty -- the per-addon opt-in stayed scoped to optional-pool, not the shared base template"
+
 # -------------------------------------------------------------- 10. capacity
 
 wait_until 900 15 "capacity-pool Application Healthy and Synced" app_healthy_synced "${APP_CAPACITY_POOL}" \
@@ -1678,16 +1734,52 @@ wait_until 900 15 "smoke Application Healthy and Synced" app_healthy_synced "${A
   || fail "${APP_SMOKE} did not reach Healthy+Synced: health=$(app_health "${APP_SMOKE}") sync=$(app_sync "${APP_SMOKE}")"
 pass "${APP_CAPACITY_POOL} and ${APP_SMOKE} (capacity step) reached Healthy+Synced"
 
-mapfile -t nodepools < <(k get nodepools -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$')
-mapfile -t ec2nodeclasses < <(k get ec2nodeclasses -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$')
+# Issue #41: optional-pool is a fourth core add-on (gitops/addons/,
+# platform.ApplicationSet.yaml, every cell), the untainted on-demand CPU
+# NodePool/EC2NodeClass pair platform-optional components schedule on. Its
+# pair is told apart from capacity-pool's by the Application that owns it
+# (status.resources), never by a hardcoded name, so the "exactly one"
+# checks below keep meaning "exactly one capacity pool".
+APP_OPTIONAL_POOL="${CLUSTER}-optional-pool"
+app_exists "${APP_OPTIONAL_POOL}" || fail "Application ${APP_OPTIONAL_POOL} does not exist -- the platform ApplicationSet never generated it from addons/optional-pool/addon.yaml"
+wait_until 900 15 "optional-pool Application Healthy and Synced" app_healthy_synced "${APP_OPTIONAL_POOL}" \
+  || fail "${APP_OPTIONAL_POOL} did not reach Healthy+Synced: health=$(app_health "${APP_OPTIONAL_POOL}") sync=$(app_sync "${APP_OPTIONAL_POOL}")"
+# app_owned_names APP KIND: names of every KIND object APP's own
+# status.resources lists, one per line.
+app_owned_names() { app_field "$1" "{.status.resources[?(@.kind==\"$2\")].name}" | tr ' ' '\n' | grep -v '^$' || true; }
+mapfile -t optional_nodepools < <(app_owned_names "${APP_OPTIONAL_POOL}" NodePool)
+mapfile -t optional_ec2nodeclasses < <(app_owned_names "${APP_OPTIONAL_POOL}" EC2NodeClass)
+[[ "${#optional_nodepools[@]}" -eq 1 ]] || fail "expected ${APP_OPTIONAL_POOL} to own exactly 1 NodePool, found ${#optional_nodepools[@]}: ${optional_nodepools[*]:-none}"
+[[ "${#optional_ec2nodeclasses[@]}" -eq 1 ]] || fail "expected ${APP_OPTIONAL_POOL} to own exactly 1 EC2NodeClass, found ${#optional_ec2nodeclasses[@]}: ${optional_ec2nodeclasses[*]:-none}"
+OPTIONAL_NODEPOOL="${optional_nodepools[0]}"
+OPTIONAL_NODECLASS="${optional_ec2nodeclasses[0]}"
+optional_taints="$(k get nodepool "${OPTIONAL_NODEPOOL}" -o jsonpath='{.spec.template.spec.taints}')"
+[[ -z "${optional_taints}" || "${optional_taints}" == "[]" ]] \
+  || fail "optional-pool NodePool ${OPTIONAL_NODEPOOL} carries taints (${optional_taints}); platform-optional components are expected to land on it untolerated"
+optional_capacity_types="$(k get nodepool "${OPTIONAL_NODEPOOL}" -o jsonpath='{.spec.template.spec.requirements[?(@.key=="karpenter.sh/capacity-type")].values[*]}')"
+[[ "${optional_capacity_types}" == "on-demand" ]] \
+  || fail "optional-pool NodePool ${OPTIONAL_NODEPOOL}'s karpenter.sh/capacity-type values are [${optional_capacity_types}], expected exactly [on-demand]"
+# templatePatch's own {{- if .allowEmpty }} branch (platform.ApplicationSet.yaml)
+# must MERGE allowEmpty into spec.syncPolicy.automated alongside the base
+# template's own selfHeal/prune, not replace that block -- checked
+# directly on the generated Application rather than only assumed from
+# how the same templatePatch mechanism already merges source.helm
+# alongside source.repoURL/chart/targetRevision elsewhere.
+optional_automated="$(app_field "${APP_OPTIONAL_POOL}" '{.spec.syncPolicy.automated}')"
+[[ "${optional_automated}" == *'"selfHeal":true'* && "${optional_automated}" == *'"prune":true'* && "${optional_automated}" == *'"allowEmpty":true'* ]] \
+  || fail "${APP_OPTIONAL_POOL}'s spec.syncPolicy.automated is [${optional_automated}], expected selfHeal/prune (from the base template) and allowEmpty (from templatePatch) all merged together, not one replacing the other"
+pass "${APP_OPTIONAL_POOL} reached Healthy+Synced and owns one untainted, on-demand NodePool (${OPTIONAL_NODEPOOL}) and its EC2NodeClass (${OPTIONAL_NODECLASS}), with selfHeal/prune/allowEmpty all merged into spec.syncPolicy.automated"
+
+mapfile -t nodepools < <(k get nodepools -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$' | grep -vxF "${OPTIONAL_NODEPOOL}")
+mapfile -t ec2nodeclasses < <(k get ec2nodeclasses -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$' | grep -vxF "${OPTIONAL_NODECLASS}")
 mapfile -t resourceflavors < <(k get resourceflavors -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$')
-[[ "${#nodepools[@]}" -eq 1 ]] || fail "expected exactly 1 NodePool, found ${#nodepools[@]}: ${nodepools[*]:-none}"
-[[ "${#ec2nodeclasses[@]}" -eq 1 ]] || fail "expected exactly 1 EC2NodeClass, found ${#ec2nodeclasses[@]}: ${ec2nodeclasses[*]:-none}"
+[[ "${#nodepools[@]}" -eq 1 ]] || fail "expected exactly 1 NodePool besides optional-pool's ${OPTIONAL_NODEPOOL}, found ${#nodepools[@]}: ${nodepools[*]:-none}"
+[[ "${#ec2nodeclasses[@]}" -eq 1 ]] || fail "expected exactly 1 EC2NodeClass besides optional-pool's ${OPTIONAL_NODECLASS}, found ${#ec2nodeclasses[@]}: ${ec2nodeclasses[*]:-none}"
 [[ "${#resourceflavors[@]}" -eq 1 ]] || fail "expected exactly 1 ResourceFlavor, found ${#resourceflavors[@]}: ${resourceflavors[*]:-none}"
 NODEPOOL="${nodepools[0]}"
 NODECLASS="${ec2nodeclasses[0]}"
 RESOURCEFLAVOR="${resourceflavors[0]}"
-pass "exactly one NodePool (${NODEPOOL}), EC2NodeClass (${NODECLASS}) and ResourceFlavor (${RESOURCEFLAVOR})"
+pass "exactly one capacity NodePool (${NODEPOOL}), EC2NodeClass (${NODECLASS}) and ResourceFlavor (${RESOURCEFLAVOR}) besides optional-pool's own pair"
 
 nodepool_classref="$(k get nodepool "${NODEPOOL}" -o jsonpath='{.spec.template.spec.nodeClassRef.name}')"
 [[ "${nodepool_classref}" == "${NODECLASS}" ]] \
@@ -2214,11 +2306,11 @@ pass "all six issue #27 Applications are Healthy+Synced, and the cell's own ${AP
 # Acceptance criterion a, evidenced by each object's own spec on the
 # cluster, not by `helm template` (0.static.sh does that part).
 
-want_set="$(printf '%s\n' "${NODEPOOL}" "${POOLS_27[@]}" | sort)"
+want_set="$(printf '%s\n' "${NODEPOOL}" "${OPTIONAL_NODEPOOL}" "${POOLS_27[@]}" | sort)"
 [[ "$(list_names nodepools)" == "${want_set}" ]] \
-  || fail "NodePools are not exactly {${NODEPOOL} ${POOLS_27[*]}}: $(list_names nodepools | tr '\n' ' ')"
-[[ "$(list_names ec2nodeclasses)" == "$(printf '%s\n' "${NODECLASS}" "${POOLS_27[@]}" | sort)" ]] \
-  || fail "EC2NodeClasses are not exactly {${NODECLASS} ${POOLS_27[*]}}: $(list_names ec2nodeclasses | tr '\n' ' ')"
+  || fail "NodePools are not exactly {${NODEPOOL} ${OPTIONAL_NODEPOOL} ${POOLS_27[*]}}: $(list_names nodepools | tr '\n' ' ')"
+[[ "$(list_names ec2nodeclasses)" == "$(printf '%s\n' "${NODECLASS}" "${OPTIONAL_NODECLASS}" "${POOLS_27[@]}" | sort)" ]] \
+  || fail "EC2NodeClasses are not exactly {${NODECLASS} ${OPTIONAL_NODECLASS} ${POOLS_27[*]}}: $(list_names ec2nodeclasses | tr '\n' ' ')"
 [[ "$(list_names resourceflavors)" == "$(printf '%s\n' "${RESOURCEFLAVOR}" "${POOLS_27[@]}" | sort)" ]] \
   || fail "ResourceFlavors are not exactly {${RESOURCEFLAVOR} ${POOLS_27[*]}}: $(list_names resourceflavors | tr '\n' ' ')"
 pass "one NodePool, EC2NodeClass and ResourceFlavor per pool: ${POOLS_27[*]} (plus the cell's own ${NODEPOOL})"
@@ -2471,7 +2563,8 @@ rsv_instance_terminated() {
 }
 wait_until 600 15 "reserved instance ${RSV_INSTANCE_ID} terminated" rsv_instance_terminated \
   || fail "instance ${RSV_INSTANCE_ID} was not terminated after deleting NodePool ${POOL_RSV}"
-[[ "$(list_names nodepools)" == "${NODEPOOL}" && "$(list_names ec2nodeclasses)" == "${NODECLASS}" \
+[[ "$(list_names nodepools)" == "$(printf '%s\n' "${NODEPOOL}" "${OPTIONAL_NODEPOOL}" | sort)" \
+  && "$(list_names ec2nodeclasses)" == "$(printf '%s\n' "${NODECLASS}" "${OPTIONAL_NODECLASS}" | sort)" \
   && "$(list_names resourceflavors)" == "${RESOURCEFLAVOR}" ]] \
   || fail "the cell is not back to its own pool only: NodePools [$(list_names nodepools | tr '\n' ' ')], EC2NodeClasses [$(list_names ec2nodeclasses | tr '\n' ' ')], ResourceFlavors [$(list_names resourceflavors | tr '\n' ' ')]"
 [[ "$(k get localqueues -A --no-headers 2>/dev/null | wc -l | tr -d ' ')" -eq 1 ]] \
@@ -2709,17 +2802,622 @@ run_bootstrap --revision "${GITOPS_REVISION}" || fail "bootstrap.sh (re-adopt af
 wait_until 600 15 "capacity-pool Application reappears and reaches Synced" app_synced "${APP_CAPACITY_POOL}" \
   || fail "${APP_CAPACITY_POOL} did not reappear and reach Synced after re-running bootstrap.sh"
 
-mapfile -t nodepools_after < <(k get nodepools -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$')
-mapfile -t ec2nodeclasses_after < <(k get ec2nodeclasses -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$')
-[[ "${#nodepools_after[@]}" -eq 1 && "${nodepools_after[0]}" == "${NODEPOOL}" ]] \
-  || fail "expected exactly 1 NodePool named ${NODEPOOL} after re-adopting, found: ${nodepools_after[*]:-none}"
-[[ "${#ec2nodeclasses_after[@]}" -eq 1 && "${ec2nodeclasses_after[0]}" == "${NODECLASS}" ]] \
-  || fail "expected exactly 1 EC2NodeClass named ${NODECLASS} after re-adopting, found: ${ec2nodeclasses_after[*]:-none}"
+# Exactly the capacity pool and optional-pool's own pair (step 10), both
+# orphaned and re-adopted by name -- anything else is a duplicate.
+expected_nodepools="$(printf '%s\n' "${NODEPOOL}" "${OPTIONAL_NODEPOOL}" | sort | tr '\n' ' ')"
+expected_ec2nodeclasses="$(printf '%s\n' "${NODECLASS}" "${OPTIONAL_NODECLASS}" | sort | tr '\n' ' ')"
+nodepools_after="$(k get nodepools -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | { grep -v '^$' || true; } | sort | tr '\n' ' ')"
+ec2nodeclasses_after="$(k get ec2nodeclasses -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | { grep -v '^$' || true; } | sort | tr '\n' ' ')"
+[[ "${nodepools_after}" == "${expected_nodepools}" ]] \
+  || fail "expected exactly the NodePools [${expected_nodepools}] after re-adopting, found: [${nodepools_after}]"
+[[ "${ec2nodeclasses_after}" == "${expected_ec2nodeclasses}" ]] \
+  || fail "expected exactly the EC2NodeClasses [${expected_ec2nodeclasses}] after re-adopting, found: [${ec2nodeclasses_after}]"
 [[ "$(k get nodepool "${NODEPOOL}" -o jsonpath='{.metadata.creationTimestamp}')" == "${NODEPOOL_CREATED}" ]] \
   || fail "NodePool ${NODEPOOL}'s creationTimestamp changed -- it was deleted and recreated, not re-adopted"
 [[ "$(k get ec2nodeclass "${NODECLASS}" -o jsonpath='{.metadata.creationTimestamp}')" == "${NODECLASS_CREATED}" ]] \
   || fail "EC2NodeClass ${NODECLASS}'s creationTimestamp changed -- it was deleted and recreated, not re-adopted"
 pass "re-running bootstrap.sh re-adopted the same NodePool and EC2NodeClass (unchanged creationTimestamps), not a duplicate"
+
+# ---------------- 14b. platform-optional add-on: dcgm-exporter (issue #41)
+#
+# Issue #41 Decision 3/4: a cell opts into a platform-optional component
+# by the mere presence of gitops/cells/<cell>/addons/<addon>.yaml, read by
+# the third ApplicationSet, addons-optional.ApplicationSet.yaml. This step
+# runs Decision 4's add-then-remove cycle on a real cell for the one
+# catalog entry that ships, dcgm-exporter:
+#   14b-a. without the marker file, no ${CLUSTER}-dcgm-exporter Application
+#        exists;
+#   14b-b. with it, the Application is generated and reaches Healthy+Synced
+#        while no node matches the DaemonSet's GPU nodeSelector;
+#   14b-c. a disposable GPU NodePool/EC2NodeClass TEST FIXTURE (applied with
+#        kubectl, never part of the platform) launches one NVIDIA node;
+#   14b-d. a dcgm-exporter pod becomes Ready on that node, and only there --
+#        not on the system node group, not on optional-pool's CPU pool;
+#   14b-e. removing the marker file removes the Application and orphans its
+#        DaemonSet and Namespace (preserveResourcesOnDeletion: true);
+#   14b-f. the cell is restored to GITOPS_REVISION and the fixture deleted.
+#
+# Which case 14b-a starts in depends on step 0: ensure_cell_fixture copies
+# gitops/cells/example-cell/ verbatim, and example-cell ships
+# addons/dcgm-exporter.yaml, so a run with a derived fixture (and a run
+# with NAME=example-cell) has had the marker -- and a synced
+# dcgm-exporter Application -- since its first bootstrap. 14b-a therefore
+# removes the marker on a disposable branch first rather than assuming
+# it was never there. If GITOPS_REVISION's own cells/${NAME}/ has no
+# marker at all, 14b-a has nothing to remove and 14b-b adds example-cell's
+# marker on a disposable branch instead.
+
+APP_DCGM="${CLUSTER}-dcgm-exporter"
+DCGM_MARKER_REL="gitops/cells/${NAME}/addons/dcgm-exporter.yaml"
+DCGM_EXAMPLE_MARKER_REL="gitops/cells/example-cell/addons/dcgm-exporter.yaml"
+DCGM_CLONE="${WORK_DIR}/dcgm-exporter"
+DCGM_MARKER_COPY="${WORK_DIR}/dcgm-exporter-marker.yaml"
+# GITOPS_REPO_URL, never REPO_ROOT -- see break_addon_branches()'s own comment.
+git clone --quiet --no-single-branch "${GITOPS_REPO_URL}" "${DCGM_CLONE}" || fail "git clone (dcgm-exporter)"
+checkout_revision_as "${DCGM_CLONE}" "dcgm-exporter-probe" "${GITOPS_REVISION}" || fail "git checkout (dcgm-exporter)"
+if [[ -f "${DCGM_CLONE}/${DCGM_MARKER_REL}" ]]; then
+  cp "${DCGM_CLONE}/${DCGM_MARKER_REL}" "${DCGM_MARKER_COPY}"
+  # Read by step 14b-f below: whether restoring GITOPS_REVISION (the
+  # shared branch, always restored verbatim -- the override below never
+  # lands there) is also "restoring the add step" depends on whether the
+  # marker already lived in GITOPS_REVISION, not on whether ADD_DCGM_REVISION
+  # happens to be a disposable branch (it always is now, see below).
+  DCGM_MARKER_PREEXISTED=1
+  NO_DCGM_REVISION="e2e/${RUN_ID}/no-dcgm-exporter"
+  git -C "${DCGM_CLONE}" checkout --quiet -B "${NO_DCGM_REVISION}" || fail "git checkout (no-dcgm-exporter)"
+  git -C "${DCGM_CLONE}" rm --quiet "${DCGM_MARKER_REL}" || fail "git rm ${DCGM_MARKER_REL}"
+  git -C "${DCGM_CLONE}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
+    commit --quiet -m "test: remove ${DCGM_MARKER_REL} for the e2e add-then-remove cycle (never merged)" \
+    || fail "git commit (no-dcgm-exporter)"
+  push_disposable_branch "${DCGM_CLONE}" "${NO_DCGM_REVISION}" || fail "git push (no-dcgm-exporter)"
+  BROKEN_BRANCHES+=("${NO_DCGM_REVISION}")
+  # ADD_DCGM_REVISION must still grant step 14b-d's own scrape Pod an
+  # allowedPeers entry (same reasoning as the no-marker branch below) --
+  # it cannot simply be GITOPS_REVISION itself, since that is the real,
+  # shared branch and this override is disposable/test-only. A fresh
+  # branch off GITOPS_REVISION (not off NO_DCGM_REVISION above, which has
+  # the marker removed) restores the marker's original content, then
+  # layers the override on top.
+  ADD_DCGM_REVISION="e2e/${RUN_ID}/add-dcgm-exporter-scrape-allow"
+  checkout_revision_as "${DCGM_CLONE}" "add-dcgm-exporter-scrape-allow" "${GITOPS_REVISION}" \
+    || fail "git checkout (add-dcgm-exporter-scrape-allow)"
+  # A blind append would silently become a duplicate top-level `values:`
+  # key the day a real cell's own ${DCGM_MARKER_REL} starts setting one
+  # (gitops/charts/dcgm-exporter/README.md's own overridableKeys
+  # mechanism this override itself exercises) -- caught here instead of
+  # discovered as a flaky "Application never generated" failure later.
+  # The leading blank line in the heredoc below is not cosmetic: if the
+  # marker's own last line has no trailing newline, this is what keeps
+  # "values:" from being appended onto the end of that line instead of
+  # starting its own.
+  grep -q '^values:' "${DCGM_CLONE}/${DCGM_MARKER_REL}" \
+    && fail "${DCGM_MARKER_REL} at ${GITOPS_REVISION} already has a top-level values: key -- this test's blind append would duplicate it; merge the allowedPeers entry into the existing block instead"
+  cat >>"${DCGM_CLONE}/${DCGM_MARKER_REL}" <<VALUES
+
+values:
+  dcgm-exporter:
+    networkPolicy:
+      allowedPeers:
+        - podSelector:
+            matchLabels:
+              ${TEST_TAG_KEY}: "${RUN_ID}"
+VALUES
+  git -C "${DCGM_CLONE}" add "${DCGM_MARKER_REL}" || fail "git add ${DCGM_MARKER_REL} (scrape-allow)"
+  git -C "${DCGM_CLONE}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
+    commit --quiet -m "test: grant step 14b-d's scrape Pod an allowedPeers entry in ${DCGM_MARKER_REL} (never merged)" \
+    || fail "git commit (add-dcgm-exporter-scrape-allow)"
+  push_disposable_branch "${DCGM_CLONE}" "${ADD_DCGM_REVISION}" || fail "git push (add-dcgm-exporter-scrape-allow)"
+  BROKEN_BRANCHES+=("${ADD_DCGM_REVISION}")
+else
+  DCGM_MARKER_PREEXISTED=0
+  [[ -f "${DCGM_CLONE}/${DCGM_EXAMPLE_MARKER_REL}" ]] \
+    || fail "neither ${DCGM_MARKER_REL} nor ${DCGM_EXAMPLE_MARKER_REL} exists at ${GITOPS_REVISION}"
+  cp "${DCGM_CLONE}/${DCGM_EXAMPLE_MARKER_REL}" "${DCGM_MARKER_COPY}"
+  # #63/"SA4"'s networkPolicy.allowedPeers default-denies everything
+  # (dcgm-exporter/values.yaml, "no monitoring namespace or scraper
+  # exists yet in this repository"). Step 14b-d's own throwaway scrape
+  # Pod below is exactly the kind of in-cluster consumer that comment
+  # describes, so it must name itself the same way any real cell's
+  # scraper would -- gitops/charts/dcgm-exporter/README.md's own
+  # "overridableKeys" row -- rather than relying on a deny-all policy
+  # happening to let it through. podSelector only (no namespaceSelector)
+  # is correctly scoped to DCGM_NS alone (a NetworkPolicy peer with only
+  # a podSelector matches within the policy's own namespace), which is
+  # also where this scrape Pod is created, below. Guarded the same way
+  # as the other branch's append (same leading-blank-line reasoning too),
+  # even though DCGM_EXAMPLE_MARKER_REL is a known, checked-in file with
+  # no values: key today -- a future edit to that one file (it is this
+  # platform's own worked example, not a disposable fixture) would
+  # otherwise silently duplicate the key here too.
+  grep -q '^values:' "${DCGM_MARKER_COPY}" \
+    && fail "${DCGM_EXAMPLE_MARKER_REL} already has a top-level values: key -- this test's blind append would duplicate it; merge the allowedPeers entry into the existing block instead"
+  cat >>"${DCGM_MARKER_COPY}" <<VALUES
+
+values:
+  dcgm-exporter:
+    networkPolicy:
+      allowedPeers:
+        - podSelector:
+            matchLabels:
+              ${TEST_TAG_KEY}: "${RUN_ID}"
+VALUES
+  NO_DCGM_REVISION="${GITOPS_REVISION}"
+  ADD_DCGM_REVISION="e2e/${RUN_ID}/add-dcgm-exporter"
+  git -C "${DCGM_CLONE}" checkout --quiet -B "${ADD_DCGM_REVISION}" || fail "git checkout (add-dcgm-exporter)"
+  mkdir -p "$(dirname "${DCGM_CLONE}/${DCGM_MARKER_REL}")"
+  cp "${DCGM_MARKER_COPY}" "${DCGM_CLONE}/${DCGM_MARKER_REL}"
+  git -C "${DCGM_CLONE}" add "${DCGM_MARKER_REL}" || fail "git add ${DCGM_MARKER_REL}"
+  git -C "${DCGM_CLONE}" -c user.name="distai-platform gitops e2e" -c user.email="noreply@users.noreply.github.com" \
+    commit --quiet -m "test: add ${DCGM_MARKER_REL} for the e2e add-then-remove cycle (never merged)" \
+    || fail "git commit (add-dcgm-exporter)"
+  push_disposable_branch "${DCGM_CLONE}" "${ADD_DCGM_REVISION}" || fail "git push (add-dcgm-exporter)"
+  BROKEN_BRANCHES+=("${ADD_DCGM_REVISION}")
+fi
+
+# The marker's own namespace and wave, read from the file itself rather
+# than restated here.
+dcgm_marker_field() { sed -n "s/^$1:[[:space:]]*//p" "${DCGM_MARKER_COPY}" | tr -d "\"'" | head -n1; }
+DCGM_NS="$(dcgm_marker_field namespace)"
+DCGM_WAVE="$(dcgm_marker_field wave)"
+[[ -n "${DCGM_NS}" && -n "${DCGM_WAVE}" ]] || fail "could not read namespace/wave from the dcgm-exporter marker (namespace=${DCGM_NS} wave=${DCGM_WAVE})"
+
+# `! app_exists` would read a transient kubectl/API error exactly
+# the same as a confirmed absence (both are "the positive check failed"),
+# which is wrong here specifically because this predicate feeds
+# wait_until's "stop as soon as this returns true" loop -- a single
+# transient error on any poll would end the wait immediately and report
+# "gone" while the Application might still exist. This checks the
+# server's own response text for "NotFound" instead of only the exit
+# code: exists -> false (not gone); confirmed NotFound -> true (gone);
+# any other error (timeout, connection refused, ...) -> false, so
+# wait_until retries rather than concluding anything from a reply the
+# cluster never actually gave.
+dcgm_app_gone() {
+  local err
+  err="$(k get application "${APP_DCGM}" -n "${ARGOCD_NS}" 2>&1 >/dev/null)" && return 1
+  [[ "${err}" == *"NotFound"* ]]
+}
+# Note: a failed `k get daemonsets` here would read as "no DaemonSets
+# exist" (the same risk class other checks in this step now guard
+# against), which would skip the dcgm-exporter namespace reset below and
+# let 14b-b pass its "re-adoption" assertion for the wrong reason. Left as
+# is rather than guarded with fail(): this function is invoked through
+# `< <(dcgm_daemonsets)` process substitution, where `fail`'s own `exit`
+# would only terminate that subshell, not this script -- the same
+# subtlety the other guarded checks in this step avoid by never calling
+# fail() from inside a process-substituted function. A real fix needs a
+# different mechanism (a side-channel exit-code file, or restructuring
+# the two call sites to not use process substitution), not attempted
+# here.
+dcgm_daemonsets() { k get daemonsets -n "${DCGM_NS}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | { grep -v '^$' || true; }; }
+
+# ---- 14b-a. no marker file, no Application
+mapfile -t dcgm_ds_before_removal < <(dcgm_daemonsets)
+run_bootstrap --revision "${NO_DCGM_REVISION}" || fail "bootstrap.sh --revision ${NO_DCGM_REVISION}"
+wait_until 300 10 "dcgm-exporter Application absent without its marker file" dcgm_app_gone \
+  || fail "${APP_DCGM} still exists at ${NO_DCGM_REVISION}, which has no ${DCGM_MARKER_REL}"
+if [[ "${#dcgm_ds_before_removal[@]}" -ge 1 ]]; then
+  # The Application synced from an earlier bootstrap. Its DaemonSet
+  # surviving the Application's removal is a first, early observation of
+  # the orphaning 14b-e checks properly; then the namespace is deleted so
+  # that 14b-b proves the Application creates the DaemonSet, rather than
+  # only re-adopting an orphan. Cluster-scoped objects the chart may
+  # render (a ClusterRole, for example) are left and re-adopted in 14b-b.
+  for ds in "${dcgm_ds_before_removal[@]}"; do
+    k get daemonset "${ds}" -n "${DCGM_NS}" >/dev/null 2>&1 \
+      || fail "DaemonSet ${DCGM_NS}/${ds} was deleted when ${APP_DCGM} was removed (expected orphaned, preserveResourcesOnDeletion: true)"
+  done
+  pass "removing the marker file removed ${APP_DCGM} and orphaned its DaemonSet(s) ${dcgm_ds_before_removal[*]} from the earlier bootstrap"
+  k delete namespace "${DCGM_NS}" --wait=true --timeout=300s >/dev/null \
+    || fail "kubectl delete namespace ${DCGM_NS} (resetting the orphaned resources before 14b-b)"
+  info "deleted the orphaned namespace ${DCGM_NS} so that 14b-b starts from nothing"
+fi
+pass "no Application ${APP_DCGM} exists at ${NO_DCGM_REVISION} (no ${DCGM_MARKER_REL})"
+
+# ---- 14b-b. marker file added: Application generated, Healthy+Synced
+#
+# No node matches the DaemonSet's nvidia nodeSelector yet (checked below),
+# so its desiredNumberScheduled is 0. Argo CD's DaemonSet health check
+# reports a DaemonSet Healthy once its observedGeneration has caught up
+# and its updated/available pod counts are not below desiredNumberScheduled
+# -- trivially true at 0
+# (https://github.com/argoproj/gitops-engine/blob/5baed5604d2dd970619fc9b91e8d31724662ab3e/pkg/health/health_daemonset.go),
+# so Healthy+Synced, not merely Synced, is what this step expects. A
+# capability whose health check differs fails here with both statuses
+# printed, rather than being assumed either way.
+# Under pipefail, a failed `k get nodes` here (API hiccup, not "zero
+# nodes") would make the whole pipeline's exit code non-zero even though
+# wc -l/tr both exit 0 on their own, which a bare assignment with no
+# guard would let abort the script with no message. Capturing kubectl
+# alone first, guarded, keeps that failure distinguishable from a
+# genuine zero-node answer.
+nvidia_node_names="$(k get nodes -l karpenter.k8s.aws/instance-gpu-manufacturer=nvidia -o name 2>&1)" \
+  || fail "kubectl get nodes -l karpenter.k8s.aws/instance-gpu-manufacturer=nvidia failed: ${nvidia_node_names}"
+nvidia_nodes="$(echo "${nvidia_node_names}" | grep -c . || true)"
+[[ "${nvidia_nodes}" -eq 0 ]] \
+  || fail "${nvidia_nodes} NVIDIA node(s) already exist before step 14b-c launches one; 14b-b's zero-matched-node expectation would not hold"
+run_bootstrap --revision "${ADD_DCGM_REVISION}" || fail "bootstrap.sh --revision ${ADD_DCGM_REVISION}"
+wait_until 300 10 "dcgm-exporter Application generated from its marker file" app_exists "${APP_DCGM}" \
+  || fail "no Application ${APP_DCGM} appeared at ${ADD_DCGM_REVISION} (addons-optional ApplicationSet did not generate it)"
+wait_until 900 15 "dcgm-exporter Application Healthy and Synced" app_healthy_synced "${APP_DCGM}" \
+  || fail "${APP_DCGM} did not reach Healthy+Synced: health=$(app_health "${APP_DCGM}") sync=$(app_sync "${APP_DCGM}") operationState=[$(app_operation_state "${APP_DCGM}")]"
+mapfile -t dcgm_daemonset_names < <(dcgm_daemonsets)
+[[ "${#dcgm_daemonset_names[@]}" -eq 1 ]] \
+  || fail "expected exactly 1 DaemonSet in ${DCGM_NS}, found ${#dcgm_daemonset_names[@]}: ${dcgm_daemonset_names[*]:-none}"
+DCGM_DS="${dcgm_daemonset_names[0]}"
+dcgm_desired="$(k get daemonset "${DCGM_DS}" -n "${DCGM_NS}" -o jsonpath='{.status.desiredNumberScheduled}')"
+[[ "${dcgm_desired}" == "0" ]] \
+  || fail "DaemonSet ${DCGM_NS}/${DCGM_DS} wants ${dcgm_desired} pod(s) although no NVIDIA node exists -- its nodeSelector does not restrict it to GPU nodes"
+pass "${APP_DCGM} was generated from ${DCGM_MARKER_REL} and reached Healthy+Synced with DaemonSet ${DCGM_DS} scheduling 0 pods (no NVIDIA node yet)"
+
+dcgm_wave_label="$(app_field "${APP_DCGM}" '{.metadata.labels.distai\.dev/wave}')"
+[[ "${dcgm_wave_label}" == "${DCGM_WAVE}" ]] \
+  || fail "${APP_DCGM}'s distai.dev/wave label (${dcgm_wave_label}) is not the marker's wave (${DCGM_WAVE})"
+dcgm_project="$(app_field "${APP_DCGM}" '{.spec.project}')"
+[[ "${dcgm_project}" == "platform" ]] || fail "${APP_DCGM}'s project is ${dcgm_project}, expected platform (issue #41 Decision 3)"
+dcgm_target_revision="$(app_field "${APP_DCGM}" '{.spec.source.targetRevision}')"
+[[ "${dcgm_target_revision}" == "${ADD_DCGM_REVISION}" ]] \
+  || fail "${APP_DCGM}'s targetRevision (${dcgm_target_revision}) is not the Secret's revision annotation (${ADD_DCGM_REVISION})"
+dcgm_psa="$(k get namespace "${DCGM_NS}" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}')"
+[[ "${dcgm_psa}" == "privileged" ]] \
+  || fail "namespace ${DCGM_NS}'s pod-security.kubernetes.io/enforce label is [${dcgm_psa}], expected privileged (the chart's own Namespace)"
+pass "${APP_DCGM}: wave label ${DCGM_WAVE}, project platform, targetRevision ${ADD_DCGM_REVISION}, namespace ${DCGM_NS} enforce=privileged"
+# Issue #41 Decision 3's evidence check, recorded rather than asserted
+# (the same treatment step 12 gives RollingSync's status): present means
+# the capability leaves automated sync in place (RollingSync inert, every
+# Application converges independently); absent means the capability
+# strips it, i.e. honors RollingSync, and Decision 3's convergence claims
+# need re-deriving.
+dcgm_automated="$(app_field "${APP_DCGM}" '{.spec.syncPolicy.automated}')"
+if [[ -n "${dcgm_automated}" ]]; then
+  info "${APP_DCGM}'s spec.syncPolicy.automated is present (${dcgm_automated}): RollingSync is inert on this capability for addons-optional, as issue #41 Decision 3 states"
+else
+  info "${APP_DCGM}'s spec.syncPolicy.automated is ABSENT: the capability appears to honor RollingSync for addons-optional; issue #41 Decision 3's convergence claims need re-deriving"
+fi
+
+# ---- 14b-c. GPU NodePool/EC2NodeClass TEST FIXTURE
+#
+# A throwaway fixture for proving placement, applied with kubectl and
+# never part of the shipped platform: one untainted NodePool/EC2NodeClass
+# pair limited to one small NVIDIA instance, plus one pause Pod pinned to
+# that NodePool (Karpenter never launches a node for a DaemonSet pod on
+# its own, so something schedulable has to ask for the node). Named per
+# run so it cannot collide with a concurrent run or a real cell's objects;
+# deleted at the end of this step, and by cleanup() on any failure.
+# The EC2NodeClass copies role, AMI and subnet/security-group discovery
+# from the live capacity-pool EC2NodeClass (rendered from
+# gitops/charts/capacity-pool/templates/ec2nodeclass.yaml), so the fixture
+# uses the same pinned AMI alias -- Karpenter resolves an AL2023 alias to
+# its NVIDIA variant for a GPU instance type -- and the same discovery
+# tag; metadataOptions repeats that template's IMDSv2 settings. The root
+# volume is set explicitly because the NVIDIA AMI and the dcgm-exporter
+# image are larger than the CPU pools need. Every instance carries this
+# run's TEST_TAG_KEY tag, so step 15's leftover check finds it.
+GPU_FIXTURE_NAME="e2e-gpu-$(python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:12])' "${RUN_ID}")"
+gpu_role="$(k get ec2nodeclass "${NODECLASS}" -o jsonpath='{.spec.role}')"
+gpu_ami_family="$(k get ec2nodeclass "${NODECLASS}" -o jsonpath='{.spec.amiFamily}')"
+gpu_ami_alias="$(k get ec2nodeclass "${NODECLASS}" -o jsonpath='{.spec.amiSelectorTerms[0].alias}')"
+gpu_discovery="$(k get ec2nodeclass "${NODECLASS}" -o jsonpath='{.spec.subnetSelectorTerms[0].tags.karpenter\.sh/discovery}')"
+[[ -n "${gpu_role}" && -n "${gpu_ami_family}" && -n "${gpu_ami_alias}" && -n "${gpu_discovery}" ]] \
+  || fail "could not read role/amiFamily/amiSelectorTerms alias/discovery tag from EC2NodeClass ${NODECLASS}"
+cat >"${WORK_DIR}/gpu-fixture.yaml" <<YAML
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: ${GPU_FIXTURE_NAME}
+  labels:
+    ${TEST_TAG_KEY}: ${RUN_ID}
+spec:
+  role: "${gpu_role}"
+  amiFamily: ${gpu_ami_family}
+  amiSelectorTerms:
+    - alias: "${gpu_ami_alias}"
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "${gpu_discovery}"
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "${gpu_discovery}"
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 100Gi
+        volumeType: gp3
+        encrypted: true
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 1
+    httpTokens: required
+  tags:
+    ${TEST_TAG_KEY}: "${RUN_ID}"
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: ${GPU_FIXTURE_NAME}
+  labels:
+    ${TEST_TAG_KEY}: ${RUN_ID}
+spec:
+  template:
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: ${GPU_FIXTURE_NAME}
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot", "on-demand"]
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["g"]
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: ["g5", "g6", "g6e"]
+        - key: karpenter.k8s.aws/instance-gpu-manufacturer
+          operator: In
+          values: ["nvidia"]
+      terminationGracePeriod: 10m
+  limits:
+    cpu: "8"
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: Never
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${GPU_FIXTURE_NAME}
+  namespace: default
+  labels:
+    ${TEST_TAG_KEY}: ${RUN_ID}
+spec:
+  nodeSelector:
+    karpenter.sh/nodepool: ${GPU_FIXTURE_NAME}
+  terminationGracePeriodSeconds: 0
+  containers:
+    - name: pause
+      image: public.ecr.aws/eks-distro/kubernetes/pause:3.10
+      resources:
+        requests:
+          cpu: 100m
+          memory: 64Mi
+YAML
+k apply -f "${WORK_DIR}/gpu-fixture.yaml" || fail "kubectl apply the step 14b GPU test fixture"
+pass "applied the GPU test fixture ${GPU_FIXTURE_NAME} (EC2NodeClass, NodePool limited to cpu 8, trigger Pod)"
+
+# ---- 14b-d. dcgm-exporter lands on the GPU node, and only there
+#
+# "|" between fields, never " ": see canary_node()'s own comment (step 11).
+dcgm_ready_node() {
+  k get pods -n "${DCGM_NS}" \
+    -o jsonpath='{range .items[*]}{.metadata.ownerReferences[0].kind}{"|"}{.spec.nodeName}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null \
+    | awk -F'|' '$1=="DaemonSet" && $2!="" && $3=="True" {print $2; found=1; exit} END{exit !found}'
+}
+dcgm_pod_ready() { [[ -n "$(dcgm_ready_node)" ]]; }
+wait_until 1500 20 "a dcgm-exporter pod is Ready on a node" dcgm_pod_ready \
+  || fail "no dcgm-exporter pod became Ready: pods=[$(k get pods -n "${DCGM_NS}" -o wide 2>&1 | tr '\n' ' ')] nodeclaims=[$(k get nodeclaims -o wide 2>&1 | tr '\n' ' ')]"
+# dcgm_ready_node's own awk exits 1 (via END{exit !found}) when no
+# matching pod is found; a bare assignment with no guard would let that
+# abort the script silently under set -e if the pod stopped being Ready
+# in the instant between wait_until's last successful poll and this
+# direct re-invocation (unlikely, but the same shape this step's own
+# other fixes are closing elsewhere).
+DCGM_NODE="$(dcgm_ready_node)" \
+  || fail "dcgm_ready_node found no Ready dcgm-exporter pod on this direct re-check, immediately after wait_until confirmed one"
+dcgm_node_gpu="$(k get node "${DCGM_NODE}" -o jsonpath='{.metadata.labels.karpenter\.k8s\.aws/instance-gpu-manufacturer}')"
+dcgm_node_pool="$(k get node "${DCGM_NODE}" -o jsonpath='{.metadata.labels.karpenter\.sh/nodepool}')"
+dcgm_node_mng="$(k get node "${DCGM_NODE}" -o jsonpath='{.metadata.labels.eks\.amazonaws\.com/nodegroup}')"
+dcgm_node_type="$(k get node "${DCGM_NODE}" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}')"
+[[ "${dcgm_node_gpu}" == "nvidia" ]] \
+  || fail "dcgm-exporter pod is Ready on node ${DCGM_NODE}, which has karpenter.k8s.aws/instance-gpu-manufacturer=[${dcgm_node_gpu}], not nvidia"
+[[ -z "${dcgm_node_mng}" ]] \
+  || fail "dcgm-exporter pod is Ready on node ${DCGM_NODE}, a system managed node group node (eks.amazonaws.com/nodegroup=${dcgm_node_mng})"
+[[ "${dcgm_node_pool}" == "${GPU_FIXTURE_NAME}" ]] \
+  || fail "dcgm-exporter pod is Ready on node ${DCGM_NODE} from NodePool [${dcgm_node_pool}], not the GPU test fixture ${GPU_FIXTURE_NAME} (optional-pool is ${OPTIONAL_NODEPOOL})"
+# A process-substitution `done < <(...)` never surfaces the piped
+# command's own exit code -- a failed `kubectl get pods` here would feed
+# the loop zero lines, same as a query that genuinely found none, and the
+# loop would exit having checked nothing while the pass below still
+# claims "every dcgm-exporter pod is on an NVIDIA node". Capturing the
+# output and its exit code first makes that failure loud instead.
+dcgm_pod_nodes="$(k get pods -n "${DCGM_NS}" -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' 2>&1)" \
+  || fail "kubectl get pods -n ${DCGM_NS} failed while checking every dcgm-exporter pod's node: ${dcgm_pod_nodes}"
+dcgm_pod_node_count=0
+while IFS= read -r pod_node; do
+  [[ -n "${pod_node}" ]] || continue
+  dcgm_pod_node_count=$((dcgm_pod_node_count + 1))
+  [[ "$(k get node "${pod_node}" -o jsonpath='{.metadata.labels.karpenter\.k8s\.aws/instance-gpu-manufacturer}')" == "nvidia" ]] \
+    || fail "a dcgm-exporter pod is scheduled on non-NVIDIA node ${pod_node}"
+done <<<"${dcgm_pod_nodes}"
+[[ "${dcgm_pod_node_count}" -ge 1 ]] || fail "no dcgm-exporter pod had a .spec.nodeName to check, even though one was just found Ready on ${DCGM_NODE}"
+pass "a dcgm-exporter pod is Ready on ${DCGM_NODE} (${dcgm_node_type}, nvidia, NodePool ${GPU_FIXTURE_NAME}) -- not on the system node group or optional-pool's ${OPTIONAL_NODEPOOL}; every dcgm-exporter pod is on an NVIDIA node"
+
+# "Ready" proves the container's liveness/readiness probes
+# pass, not that DCGM itself produced a real metric from the GPU on this
+# node -- the three-stage check (Ready, resource registered, computed
+# value) DA-31 names, applied here to the metrics endpoint rather than a
+# device-plugin resource. This scrapes the chart's own Service (never
+# the Pod IP directly, so it also proves the Service/port the catalog
+# entry's README states is reachable, not only the container port) from
+# a throwaway Pod using this suite's own pinned curl image, and greps for
+# a real DCGM_FI_DEV_* series -- the actual series name, not merely a
+# 200 response (an exporter that serves an empty or malformed page on
+# :9400/metrics would otherwise look identical to a working one here).
+# A failed `k get svc` here would otherwise read as "one Service named
+# <the error text>" -- mapfile/< <() never surfaces the piped command's
+# own exit code, same shape as the step 14b-d node-loop fix above.
+dcgm_svc_output="$(k get svc -n "${DCGM_NS}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>&1)" \
+  || fail "kubectl get svc -n ${DCGM_NS} failed: ${dcgm_svc_output}"
+mapfile -t dcgm_services <<<"${dcgm_svc_output}"
+[[ "${#dcgm_services[@]}" -eq 1 && -n "${dcgm_services[0]}" ]] \
+  || fail "expected exactly one Service in ${DCGM_NS} to scrape, found: ${dcgm_services[*]:-none}"
+DCGM_SVC="${dcgm_services[0]}"
+DCGM_SCRAPE_POD="dcgm-scrape-${RUN_ID##*-}"
+cat >"${WORK_DIR}/dcgm-scrape-pod.yaml" <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${DCGM_SCRAPE_POD}
+  namespace: ${DCGM_NS}
+  labels:
+    ${TEST_TAG_KEY}: ${RUN_ID}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: ${DCGM_SCRAPE_CURL_IMAGE}
+      command: ["curl", "-sf", "-m", "10", "http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics"]
+      resources:
+        requests: {cpu: 10m, memory: 16Mi}
+        limits: {cpu: 100m, memory: 32Mi}
+YAML
+k apply -f "${WORK_DIR}/dcgm-scrape-pod.yaml" >/dev/null || fail "apply the step 14b-d metrics-scrape Pod"
+dcgm_scrape_done() {
+  local phase
+  phase="$(k get pod "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" -o jsonpath='{.status.phase}' 2>/dev/null)"
+  [[ "${phase}" == "Succeeded" || "${phase}" == "Failed" ]]
+}
+wait_until 120 5 "the metrics-scrape Pod finished" dcgm_scrape_done \
+  || fail "the step 14b-d metrics-scrape Pod ${DCGM_SCRAPE_POD} never reached Succeeded/Failed"
+dcgm_scrape_phase="$(k get pod "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" -o jsonpath='{.status.phase}')" \
+  || fail "kubectl get pod ${DCGM_SCRAPE_POD} -n ${DCGM_NS} failed: ${dcgm_scrape_phase}"
+dcgm_scrape_output="$(k logs "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" 2>&1)" \
+  || fail "kubectl logs ${DCGM_SCRAPE_POD} -n ${DCGM_NS} failed: ${dcgm_scrape_output}"
+[[ "${dcgm_scrape_phase}" == "Succeeded" ]] \
+  || fail "curl http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics (-sf) exited non-zero (Pod phase ${dcgm_scrape_phase}): ${dcgm_scrape_output}"
+echo "${dcgm_scrape_output}" | grep -qE '^DCGM_FI_DEV_[A-Z_]+(\{[^}]*\})? [0-9.eE+-]+$' \
+  || fail "curl http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics succeeded but no DCGM_FI_DEV_* series appeared; first 10 lines: $(echo "${dcgm_scrape_output}" | head -10 | tr '\n' ' ')"
+dcgm_series_count="$(echo "${dcgm_scrape_output}" | grep -cE '^DCGM_FI_DEV_[A-Z_]+(\{[^}]*\})? [0-9.eE+-]+$')"
+k delete pod "${DCGM_SCRAPE_POD}" -n "${DCGM_NS}" --ignore-not-found --wait=true --timeout=60s >/dev/null \
+  || fail "kubectl delete the step 14b-d metrics-scrape Pod"
+pass "GET http://${DCGM_SVC}.${DCGM_NS}.svc:9400/metrics returned ${dcgm_series_count} DCGM_FI_DEV_* series from the real GPU on ${DCGM_NODE}"
+
+# Confirm the wrapper's own stated defaults against the real
+# rendered objects on this cluster, not only against what the chart's
+# values.yaml says it will do -- NetworkPolicy present and of the shape
+# the README claims, no ServiceMonitor CRD instance, and no
+# priorityClassName set on the running pod.
+# 2>&1 would merge in any benign stderr warning kubectl happens to print
+# on a SUCCESSFUL call too (a deprecation notice, for example), and that
+# noise alone would satisfy "non-empty" even if the real jsonpath result
+# was genuinely empty (no NetworkPolicy) -- not only a failure-path risk,
+# so stdout and stderr are kept apart here rather than merged.
+dcgm_netpol_errfile="$(mktemp)"
+if ! dcgm_netpol_names="$(k get networkpolicy -n "${DCGM_NS}" -o jsonpath='{.items[*].metadata.name}' 2>"${dcgm_netpol_errfile}")"; then
+  fail "kubectl get networkpolicy -n ${DCGM_NS} failed: $(cat "${dcgm_netpol_errfile}")"
+fi
+rm -f "${dcgm_netpol_errfile}"
+[[ -n "$(tr -d '[:space:]' <<<"${dcgm_netpol_names}")" ]] \
+  || fail "no NetworkPolicy exists in ${DCGM_NS}, but the chart's own networkPolicy.enabled is true"
+# --ignore-not-found
+# only suppresses "no object of this kind exists"; it does nothing for
+# "this kind does not exist on this cluster at all" (no Prometheus
+# Operator CRD here, the expected and normal case), which kubectl
+# reports as a hard, non-zero-exit error on stderr -- piped into
+# `grep -c .` with 2>&1, that one error line was counted as "1
+# ServiceMonitor object", the opposite of what it meant. A second,
+# independent bug an earlier version of this fix introduced and did not
+# catch until a later real-cluster run: `var=$(failing_cmd); rc=$?` still
+# aborts the whole script right at the assignment under `set -e`
+# (confirmed: `set -e; v=$(false); echo reached` never prints "reached"
+# -- a plain assignment statement's own exit status is checked same as
+# any other simple command, so the following `rc=$?` line is never
+# reached). The existing aws_text() helper already has the fix for this
+# exact shape: put the assignment inside an `if` condition, where set -e
+# does not apply to the first branch of an AND-OR or compound test.
+# Stdout and stderr are kept apart here too (see the NetworkPolicy check
+# just above): a benign stderr line on a SUCCESSFUL call must never add
+# to the ServiceMonitor count, only a real stderr line on the FAILURE
+# branch is ever inspected for the CRD-absent message.
+dcgm_sm_errfile="$(mktemp)"
+if dcgm_sm_output="$(k get servicemonitors.monitoring.coreos.com -n "${DCGM_NS}" --ignore-not-found -o name 2>"${dcgm_sm_errfile}")"; then
+  dcgm_servicemonitor_count="$(echo "${dcgm_sm_output}" | grep -c . || true)"
+else
+  dcgm_sm_err="$(cat "${dcgm_sm_errfile}")"
+  [[ "${dcgm_sm_err}" == *"doesn't have a resource type"* || "${dcgm_sm_err}" == *"the server could not find the requested resource"* ]] \
+    || fail "kubectl get servicemonitors.monitoring.coreos.com -n ${DCGM_NS} failed, not with 'no such resource type': ${dcgm_sm_err}"
+  dcgm_servicemonitor_count=0
+fi
+rm -f "${dcgm_sm_errfile}"
+[[ "${dcgm_servicemonitor_count}" -eq 0 ]] \
+  || fail "found ${dcgm_servicemonitor_count} ServiceMonitor object(s) in ${DCGM_NS}, but serviceMonitor.enabled is false"
+# A bare `x=$(cmd)` with no `||` still trips set -e on cmd's own exit
+# code (this is not a readability choice -- bash's errexit does check a
+# command substitution's exit status in a plain assignment), and
+# `-o jsonpath='{.items[0]...}'` against zero matching pods is exactly
+# that: kubectl's own jsonpath engine errors on an out-of-range index
+# rather than printing nothing, which would otherwise abort this script
+# with no FAIL message naming why. Listing names first makes "is there
+# exactly one" an explicit, loud check instead of an implicit one.
+dcgm_pod_names_raw="$(k get pods -n "${DCGM_NS}" -l "app.kubernetes.io/name=dcgm-exporter" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>&1)" \
+  || fail "kubectl get pods -n ${DCGM_NS} -l app.kubernetes.io/name=dcgm-exporter failed: ${dcgm_pod_names_raw}"
+mapfile -t dcgm_pod_names <<<"${dcgm_pod_names_raw}"
+[[ "${#dcgm_pod_names[@]}" -eq 1 && -n "${dcgm_pod_names[0]}" ]] \
+  || fail "expected exactly one dcgm-exporter pod in ${DCGM_NS}, found: ${dcgm_pod_names[*]:-none}"
+dcgm_pod_name="${dcgm_pod_names[0]}"
+dcgm_prio_errfile="$(mktemp)"
+if ! dcgm_pod_priority_class="$(k get pod "${dcgm_pod_name}" -n "${DCGM_NS}" -o jsonpath='{.spec.priorityClassName}' 2>"${dcgm_prio_errfile}")"; then
+  fail "kubectl get pod ${dcgm_pod_name} -n ${DCGM_NS} failed: $(cat "${dcgm_prio_errfile}")"
+fi
+rm -f "${dcgm_prio_errfile}"
+[[ -z "${dcgm_pod_priority_class}" ]] \
+  || fail "pod ${dcgm_pod_name} has priorityClassName=${dcgm_pod_priority_class}, expected none (the wrapper sets priorityClassName: \"\")"
+pass "NetworkPolicy exists in ${DCGM_NS}, no ServiceMonitor object, pod ${dcgm_pod_name} has no priorityClassName"
+
+# ---- 14b-e. marker file removed: Application gone, resources orphaned
+#
+# Same reasoning as step 14: wait for the Application itself to be gone
+# first, so "still there" means "never going to be pruned", not "not yet".
+DCGM_DS_UID="$(k get daemonset "${DCGM_DS}" -n "${DCGM_NS}" -o jsonpath='{.metadata.uid}')"
+DCGM_NS_UID="$(k get namespace "${DCGM_NS}" -o jsonpath='{.metadata.uid}')"
+run_bootstrap --revision "${NO_DCGM_REVISION}" || fail "bootstrap.sh --revision ${NO_DCGM_REVISION} (removing the marker)"
+wait_until 300 10 "dcgm-exporter Application disappears once its marker file is removed" dcgm_app_gone \
+  || fail "${APP_DCGM} still exists after removing ${DCGM_MARKER_REL}"
+[[ "$(k get daemonset "${DCGM_DS}" -n "${DCGM_NS}" -o jsonpath='{.metadata.uid}' 2>/dev/null)" == "${DCGM_DS_UID}" ]] \
+  || fail "DaemonSet ${DCGM_NS}/${DCGM_DS} was deleted or replaced after removing the marker file (expected orphaned, preserveResourcesOnDeletion: true)"
+[[ "$(k get namespace "${DCGM_NS}" -o jsonpath='{.metadata.uid}' 2>/dev/null)" == "${DCGM_NS_UID}" ]] \
+  || fail "namespace ${DCGM_NS} was deleted or replaced after removing the marker file (expected orphaned)"
+pass "removing ${DCGM_MARKER_REL} removed ${APP_DCGM} and orphaned DaemonSet ${DCGM_NS}/${DCGM_DS} and namespace ${DCGM_NS} (same UIDs) -- issue #41 Decision 4's removal half"
+
+# ---- 14b-f. restore GITOPS_REVISION, delete the GPU test fixture
+run_bootstrap --revision "${GITOPS_REVISION}" || fail "bootstrap.sh (restoring --revision ${GITOPS_REVISION} after step 14b)"
+# DCGM_MARKER_PREEXISTED, not "${ADD_DCGM_REVISION}" == "${GITOPS_REVISION}":
+# ADD_DCGM_REVISION is always a disposable branch now (it also carries
+# step 14b-d's own scrape-allow override, which GITOPS_REVISION itself
+# never gets), so that string comparison can no longer tell this apart --
+# whether restoring GITOPS_REVISION re-adopts the same DaemonSet still
+# depends only on whether the marker already lived there before 14b-a
+# removed it.
+if [[ "${DCGM_MARKER_PREEXISTED}" == "1" ]]; then
+  wait_until 600 15 "dcgm-exporter Application reappears and reaches Synced" app_synced "${APP_DCGM}" \
+    || fail "${APP_DCGM} did not reappear and reach Synced after restoring --revision ${GITOPS_REVISION}"
+  [[ "$(k get daemonset "${DCGM_DS}" -n "${DCGM_NS}" -o jsonpath='{.metadata.uid}' 2>/dev/null)" == "${DCGM_DS_UID}" ]] \
+    || fail "DaemonSet ${DCGM_NS}/${DCGM_DS} was recreated, not re-adopted, after restoring the marker file"
+  pass "restoring the marker file re-adopted the orphaned DaemonSet ${DCGM_NS}/${DCGM_DS} (unchanged UID)"
+fi
+k delete pod "${GPU_FIXTURE_NAME}" -n default --ignore-not-found --wait=true --timeout=120s >/dev/null \
+  || fail "kubectl delete the step 14b trigger Pod ${GPU_FIXTURE_NAME}"
+k delete nodepool "${GPU_FIXTURE_NAME}" --ignore-not-found --wait=true --timeout=900s >/dev/null \
+  || fail "kubectl delete the step 14b NodePool ${GPU_FIXTURE_NAME}"
+k delete ec2nodeclass "${GPU_FIXTURE_NAME}" --ignore-not-found --wait=true --timeout=600s >/dev/null \
+  || fail "kubectl delete the step 14b EC2NodeClass ${GPU_FIXTURE_NAME}"
+# Capture kubectl's own exit code before treating an empty result
+# as "no nodes" -- `2>/dev/null` with command substitution makes an API
+# error and a genuinely empty list produce the identical empty string,
+# and this predicate feeds a wait_until that stops as soon as it is true.
+gpu_fixture_nodes_gone() {
+  local out
+  out="$(k get nodes -l "karpenter.sh/nodepool=${GPU_FIXTURE_NAME}" -o name 2>&1)" || return 1
+  [[ -z "${out}" ]]
+}
+wait_until 900 20 "the GPU test fixture's node is gone" gpu_fixture_nodes_gone \
+  || fail "node(s) from NodePool ${GPU_FIXTURE_NAME} remain after deleting it: $(k get nodes -l "karpenter.sh/nodepool=${GPU_FIXTURE_NAME}" -o name 2>&1 | tr '\n' ' ')"
+pass "deleted the GPU test fixture ${GPU_FIXTURE_NAME} and its node"
 
 # ------------------------------------------------------- 15. destroy
 #
