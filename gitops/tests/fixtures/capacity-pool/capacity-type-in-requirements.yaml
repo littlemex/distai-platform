@@ -1,0 +1,13 @@
+# Static-check input (0.static.sh), expected to FAIL `helm template`:
+# pool.capacityType is the only place the capacity type is declared; a
+# karpenter.sh/capacity-type entry inside pool.requirements must be
+# refused rather than silently kept or silently overridden. Identical to
+# on-demand-default.yaml except for this one extra requirement entry.
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: cpu
+  requirements:
+    - key: karpenter.sh/capacity-type
+      operator: In
+      values: ["spot"]

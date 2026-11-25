@@ -1,0 +1,18 @@
+# Static-check input (0.static.sh), expected to FAIL `helm template`:
+# accelerator.taint and tenancy.teamTaint repeating the same key and
+# effect would render the same taint twice, which Kubernetes itself
+# rejects on a NodePool -- caught here, before a real cluster run.
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: accel-team-a
+accelerator:
+  taint:
+    key: distai.dev/team
+    value: team-a
+    effect: NoSchedule
+tenancy:
+  teamTaint:
+    key: distai.dev/team
+    value: team-b
+    effect: NoSchedule

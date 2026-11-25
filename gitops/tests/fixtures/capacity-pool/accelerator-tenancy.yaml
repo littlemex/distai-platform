@@ -1,0 +1,22 @@
+# Static-check input (0.static.sh): the accelerator and tenancy values
+# blocks together, values only (no device, no admission policy). The
+# names below are arbitrary test strings; the chart must not branch on
+# their content.
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: accel-team-a
+accelerator:
+  resourceName: aws.amazon.com/neuron
+  taint:
+    key: aws.amazon.com/neuron
+    value: "present"
+    effect: NoSchedule
+  methodLabel:
+    key: distai.dev/device-method
+    value: static-check-method
+tenancy:
+  teamTaint:
+    key: distai.dev/team
+    value: team-a
+    effect: NoSchedule

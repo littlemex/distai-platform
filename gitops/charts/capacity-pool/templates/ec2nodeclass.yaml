@@ -20,6 +20,28 @@ spec:
   securityGroupSelectorTerms:
     - tags:
         karpenter.sh/discovery: {{ .Values.clusterName | quote }}
+{{- if eq .Values.pool.capacityType "reserved" }}
+{{- /*
+Reserved pools select their reservation by tag (#17), never by ID, and
+match it "targeted" by default.
+*/}}
+{{- $r := default (dict) .Values.reservation }}
+{{- if empty $r.tags }}
+{{- fail "reservation.tags must select at least one tag when pool.capacityType is reserved" }}
+{{- end }}
+{{- if not (has $r.instanceMatchCriteria (list "targeted" "open")) }}
+{{- fail (printf "reservation.instanceMatchCriteria must be targeted or open (got %q)" (toString $r.instanceMatchCriteria)) }}
+{{- end }}
+  capacityReservationSelectorTerms:
+    - tags:
+{{- range $k, $v := $r.tags }}
+{{- if or (empty $k) (empty (toString $v)) }}
+{{- fail "reservation.tags must not contain an empty key or value" }}
+{{- end }}
+        {{ $k | quote }}: {{ $v | toString | quote }}
+{{- end }}
+      instanceMatchCriteria: {{ $r.instanceMatchCriteria }}
+{{- end }}
   metadataOptions:
     httpEndpoint: enabled
     httpProtocolIPv6: disabled

@@ -244,10 +244,12 @@ semver):
 
 ## Known limits (this PR)
 
-- CPU-only: `gitops/charts/capacity-pool` ships one capacity type, no
-  reserved/on-demand/flex ordering across several `NodePool`s
-  ([#17](https://github.com/littlemex/distai-platform/issues/17) extends
-  it).
+- `gitops/charts/capacity-pool` declares one capacity type per release
+  (`on-demand`, `reserved` selecting a Capacity Reservation by tag, or
+  `flex`), so #17's `-rsv`/`-od`/`-flex` pools are separate releases; its
+  `accelerator`/`tenancy` values render taints and labels but enforce
+  nothing until #19 and #22 ship. Field-level detail is in
+  [`charts/capacity-pool/README.md`](./charts/capacity-pool/README.md).
 - No accelerator advertiser, team object, `sharedfs` or notifications
   add-on ships here (RFC #25 Decision 9); their steps exist in the RFC but
   have no `addon.yaml` yet, so they generate nothing today.

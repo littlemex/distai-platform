@@ -1,0 +1,15 @@
+# Static-check input (0.static.sh), must fail (#63, filed as #56; a
+# review found the new _helpers.tpl check this fixture exists
+# to exercise had no test coverage at all). Unlike accelerator.taint
+# (fixtures/capacity-pool/taint-no-value.yaml, an accepted no-value
+# case), tenancy.teamTaint must reject an empty value when its key is
+# set - #22 Decision 3 accepts a team-exclusive toleration only with a
+# value equal to the team's own label, never a bare operator: Exists.
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: team-taint-no-value
+tenancy:
+  teamTaint:
+    key: distai.dev/team
+    effect: NoSchedule

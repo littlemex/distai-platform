@@ -2,8 +2,12 @@
 # come from a cells/<cluster-name>/capacity-pool/*.yaml parameter file via
 # cells.ApplicationSet.yaml's valuesFrom (clusterName from the Cluster
 # generator's own "name" param; nodeRole from the registration Secret's
-# distai.dev.annotations/karpenter-node-role annotation, the one Terraform
-# output no platform add-on reads - RFC #25 Decision 2).
+# distai.dev.annotations/karpenter-node-role annotation - RFC #25 Decision
+# 2). This was previously described as "the one Terraform output no
+# platform add-on reads"; #41's optional-pool (a platform add-on, core
+# tier) reads exactly this annotation too (#63, filed as #58) - the
+# annotation is not cell-specific-parameter-file-only, only nodeRole's
+# *value* is cell-specific.
 clusterName: ""
 nodeRole: ""
 
@@ -11,13 +15,20 @@ pool:
   # Shared by the NodePool, its EC2NodeClass and the matching ResourceFlavor.
   name: ""
 
-  # CPU-only, on-demand, amd64: the minimal skeleton this PR ships. #17's PR
-  # adds spot/flex requirements and per-capacity-type pools (-rsv/-od/-flex)
-  # on top of this same chart.
+  # The one capacity type this pool launches (#17's -rsv/-od/-flex pools).
+  # The chart generates the NodePool's karpenter.sh/capacity-type
+  # requirement from this field:
+  #   on-demand -> ["on-demand"]
+  #   reserved  -> ["reserved"] (never mixed with on-demand; needs
+  #                reservation.tags below)
+  #   flex      -> ["spot", "on-demand"]
+  # Any other value fails the render.
+  capacityType: on-demand
+
+  # Every other scheduling requirement. Must not contain
+  # karpenter.sh/capacity-type (the render fails if it does): capacityType
+  # above is the only place the capacity type is declared.
   requirements:
-    - key: karpenter.sh/capacity-type
-      operator: In
-      values: ["on-demand"]
     - key: kubernetes.io/arch
       operator: In
       values: ["amd64"]
@@ -34,6 +45,52 @@ pool:
   disruption:
     consolidationPolicy: WhenEmptyOrUnderutilized
     consolidateAfter: 60s
+
+# Used only when pool.capacityType is "reserved": renders
+# EC2NodeClass.spec.capacityReservationSelectorTerms as one term
+# [{tags, instanceMatchCriteria}]. Reservations are selected by tag, not by
+# ID, so a replacement reservation (every Capacity Block purchase is one) is
+# picked up as long as it carries the same tags. tags must be non-empty when
+# capacityType is "reserved" (the render fails otherwise).
+# instanceMatchCriteria defaults to "targeted": an "open" reservation can be
+# consumed by any matching On-Demand launch in the account, not only by
+# this pool.
+reservation:
+  tags: {}
+  instanceMatchCriteria: targeted
+
+# Optional accelerator-class fields shared by every accelerator vendor
+# (#19, #22). Values only: nothing here installs a device plugin or
+# enforces anything; left empty (the default), none of it renders.
+#   resourceName  - provenance annotation distai.dev/accelerator-resource-name
+#                   on the NodePool and the ResourceFlavor (for example
+#                   nvidia.com/gpu or aws.amazon.com/neuron); no template
+#                   branches on its value.
+#   taint         - a NodePool taint, mirrored as a ResourceFlavor
+#                   toleration. Rendered only when taint.key is set; effect
+#                   must then be NoSchedule, PreferNoSchedule or NoExecute.
+#   methodLabel   - a label on the NodePool's node template, for an
+#                   advertiser DaemonSet to select nodes by. Rendered only
+#                   when methodLabel.key is set.
+accelerator:
+  resourceName: ""
+  taint:
+    key: ""
+    value: ""
+    effect: ""
+  methodLabel:
+    key: ""
+    value: ""
+
+# Optional team-exclusive taint (#22 Decision 3), rendered exactly like
+# accelerator.taint: a NodePool taint mirrored as a ResourceFlavor
+# toleration, only when teamTaint.key is set. A value only: nothing in this
+# chart stops another team's ClusterQueue from listing this ResourceFlavor.
+tenancy:
+  teamTaint:
+    key: ""
+    value: ""
+    effect: ""
 
 # Pinned, not "latest": confirmed against the public SSM parameter
 # /aws/service/eks/optimized-ami/1.37/amazon-linux-2023/x86_64/standard/recommended/release_version

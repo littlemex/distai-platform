@@ -4,21 +4,28 @@ Three scripts check `gitops/` against the acceptance criteria of
 [issue #25](https://github.com/littlemex/distai-platform/issues/25) (the
 delivery layer), scoped to its first PR (decision 9): bootstrap, the
 `crds`/`controllers`/`capacity` steps, the CPU `capacity-pool` skeleton, the
-admin smoke queue, and the upgrade e2e's version-pair check. No
+admin smoke queue, and the upgrade e2e's version-pair check -- plus the
+acceptance criteria of [issue #27](https://github.com/littlemex/distai-platform/issues/27)
+(the `capacity-pool` chart's `-rsv`/`-od`/`-flex` pools, its `accelerator`/
+`tenancy` values and the smoke chart's `memQuota`). No
 accelerators (`#19`), no per-team objects (`#22`) and no `sharedfs`/
 notifications (`#18`/`#23`) ship in this PR, so this layer's tests do not
 check them either.
 
 | Script | What it checks | Needs AWS | Duration |
 | --- | --- | --- | --- |
-| `0.static.sh` | Required files, `bash -n`/`shellcheck` on every `*.sh` under `gitops/` (including this suite's own three scripts, not only `bootstrap.sh`), `yamllint` on every literal (non-templated) tracked YAML file, the structural contract of every `addon.yaml`/cells parameter file and both ApplicationSets (`check_gitops_contract.py`), `helm lint`/`helm template` of `charts/capacity-pool` and `charts/smoke`, `kubeconform` of the rendered output plus both ApplicationSets and the root Application against pinned upstream + CRD-catalog schemas, and `check_pinned_crds.py` validating the rendered CRD-backed objects against each pinned chart's own exact CRD versions | No | About 2 to 3 minutes |
-| `1.e2e.sh` | Builds one foundation cell (with a temporary Identity Center group), the before/after RBAC change on the capability's own access entry, bootstrap idempotency / `--revision`-only re-run / wrong-cluster abort, the `crds`→`controllers`→`capacity` ordering (including two deliberately broken steps), the OCI chart and Git-file-generator-revision checks, no shared CRD between `karpenter-crd` and `karpenter`, the admin smoke canary through Kueue and Karpenter, one accidental generator-entry loss, one full bootstrap-object teardown and re-adopt, then destroy and leftovers | Yes | About 45 to 60 minutes |
+| `0.static.sh` | Required files, `bash -n`/`shellcheck` on every `*.sh` under `gitops/` (including this suite's own three scripts, not only `bootstrap.sh`), `yamllint` on every literal (non-templated) tracked YAML file, the structural contract of every `addon.yaml`/cells parameter file and both ApplicationSets (`check_gitops_contract.py`, including issue #27's `pool.capacityType`/`reservation.tags` rules, exercised against disposable copies since the tracked tree ships no reserved pool), `helm lint`/`helm template` of `charts/capacity-pool` and `charts/smoke`, the same for every values fixture under `fixtures/` (issue #27's shapes: `on-demand`/`reserved`/`flex`, `accelerator`+`tenancy`, a no-value taint, `memQuota`, and seven fixtures that must be refused) with the rendered fields of every fixture -- including the unchanged `on-demand` default -- checked field-by-field by `check_chart_renders.py` against the exact fixture set shipped, `kubeconform` of all rendered output plus both ApplicationSets and the root Application against pinned upstream + CRD-catalog schemas, and `check_pinned_crds.py` validating the rendered CRD-backed objects against each pinned chart's own exact CRD versions | No | About 2 to 3 minutes |
+| `1.e2e.sh` | Builds one foundation cell (with a temporary Identity Center group), the before/after RBAC change on the capability's own access entry, bootstrap idempotency / `--revision`-only re-run / wrong-cluster abort, the `crds`→`controllers`→`capacity` ordering (including two deliberately broken steps), the OCI chart and Git-file-generator-revision checks, no shared CRD between `karpenter-crd` and `karpenter`, the admin smoke canary through Kueue and Karpenter, issue #27's three pools (`-rsv` backed by a real targeted Capacity Reservation, `-od`, `-flex`) with one canary each and a second `-rsv` canary held by quota, then the reservation cancelled, one accidental generator-entry loss, one full bootstrap-object teardown and re-adopt, then destroy and leftovers | Yes | About 60 to 85 minutes (measured 60m07s on the issue #27 implementation's own real-cluster run) |
 | `2.upgrade.sh` | The mechanical version-pair check (decision 6) on a mismatched `karpenter`/`karpenter-crd` bump, then a matched bump against a live cell: no `Application` goes `Degraded`, the `NodePool`-launched instance is not replaced, and the canary pod stays `Running` throughout | Yes | About 35 to 50 minutes |
 
 ## Prerequisites
 
 Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
 
+- Bash 4.3 or later (both `mapfile`/`readarray` and the `${var,,}`
+  lowercasing expansion, already used throughout `1.e2e.sh`/`2.upgrade.sh`
+  before this PR, need it). The EC2 test runner's Bash is new enough; the
+  Mac's own `/bin/bash` (3.2) is not, one more reason these never run there.
 - Helm `>= 3.8` (OCI charts), for `0.static.sh` only (`1.e2e.sh`/`2.upgrade.sh`
   never call `helm` themselves -- Argo CD installs every chart in-cluster).
 - `uv` (for `0.static.sh`'s pinned `yamllint`/`pyyaml`, and for `2.upgrade.sh`'s
@@ -31,7 +38,22 @@ Everything in `infra/foundation/tests/README.md`'s prerequisites, plus:
   (`1.e2e.sh`/`2.upgrade.sh` create and delete their own temporary group;
   unlike `infra/foundation/tests/1.e2e.sh`, no pre-existing group ID is
   taken as input), `eks:ListAssociatedAccessPolicies`,
-  `eks:DescribeCapability`, `eks:ListCapabilities`.
+  `eks:DescribeCapability`, `eks:ListCapabilities`, and for `1.e2e.sh`
+  step 11b's Capacity Reservation `ec2:CreateCapacityReservation`,
+  `ec2:DescribeCapacityReservations`, `ec2:CancelCapacityReservation`,
+  `ec2:CreateTags` (on `capacity-reservation`, for its
+  `--tag-specifications`), `ec2:DescribeInstanceTypes`,
+  `ec2:DescribeInstanceTypeOfferings` and `ec2:DescribeSubnets`.
+- For `1.e2e.sh` step 11b: On-Demand capacity for one
+  `E2E_RSV_INSTANCE_TYPE` (default `m7i.large`) instance in one of the
+  cell's own Availability Zones (each is tried in turn), and Spot usable in
+  the account (the `-flex` pool may launch Spot; the
+  `AWSServiceRoleForEC2Spot` service-linked role must exist or be
+  creatable). The reservation is billed from creation until step 11b's
+  own teardown cancels it (about 9 minutes, measured 9m19s on the issue
+  #27 implementation's own real-cluster run); it ends on its own 110
+  minutes after creation in any case, so a run that fails before reaching
+  11b-6 and before `cleanup()` runs still bounds the cost.
 - A GitHub token with **Contents: write** on `littlemex/distai-platform`
   itself (`GITOPS_TEST_REPO_URL` defaults to it, and every manifest this
   suite bootstraps - both `ApplicationSet`s, the root Application,
@@ -148,6 +170,13 @@ For `2.upgrade.sh` instead, additionally export `UPGRADE_TO_KARPENTER_VERSION` (
 | `karpenter-crd`/`karpenter` report no shared CRD | `1.e2e.sh` step 9 (`status.resources` kind=CustomResourceDefinition lists compared) |
 | `kueue`/`karpenter` Healthy before any `NodePool`-launched node exists; smoke canary admitted and a node launches | `1.e2e.sh` steps 9 and 11 |
 | Removing one `addon.yaml` orphans nothing; deleting the three bootstrap objects orphans `NodePool`/`EC2NodeClass`/the instance; re-running bootstrap.sh re-adopts without duplicating; destroy still terminates the instance | `1.e2e.sh` steps 13-15 (creationTimestamp/instance-state comparisons) |
+| #27: a `-rsv`, `-od` and `-flex` release each render one `NodePool`/`EC2NodeClass`/`ResourceFlavor` joined by `karpenter.sh/nodepool`, with the pool's `karpenter.sh/capacity-type` requirement and, for `-rsv` only, `capacityReservationSelectorTerms` from `reservation.tags` (targeted) -- on a real cluster | `1.e2e.sh` step 11b-3 (each live object's spec; `EC2NodeClass` status resolves the reservation for `-rsv` only); `0.static.sh` section 5b for the rendered shape |
+| #27: a targeted one-instance two-hour ODCR backs `-rsv`: a canary launches exactly one node with `capacity-type=reserved` and `capacity-reservation-id` equal to the reservation; a second canary is not admitted, by the `ClusterQueue`'s quota | `1.e2e.sh` steps 11b-1, 11b-4 (node labels, NodeClaim count, the instance's own `CapacityReservationId`) and 11b-5 (`Workload` `QuotaReserved=False` on quota, `ClusterQueue` admitted/pending `1/1`, Job suspended with no pod, still one NodeClaim) |
+| #27: `-od` and `-flex` each admit a canary and launch a node of the pool's capacity type | `1.e2e.sh` step 11b-4 |
+| #27: with `accelerator`/`tenancy` unset, the rendered fields are identical to #25's | `0.static.sh` section 5b (`check_chart_renders.py` on `fixtures/capacity-pool/on-demand-default.yaml` and `fixtures/smoke/default.yaml`: object counts, names, the join, the capacity-type requirement, no reservation/taints/tolerations/labels/annotation) |
+| #27: `accelerator.*` and `tenancy.teamTaint` render taints, mirrored tolerations, the method label and the resource-name annotation | `0.static.sh` section 5b (`check_chart_renders.py` on `fixtures/capacity-pool/accelerator-tenancy.yaml`) |
+| #27: the reservation is cancelled at the end, pass or fail, shown by `DescribeCapacityReservations` | `1.e2e.sh` step 11b-6, and `cleanup()` (`cancel_run_capacity_reservations`) if 11b-6 was not reached |
+| #27: `helm lint` and `kubeconform` pass for every new values shape, including `memQuota` | `0.static.sh` sections 5b and 6 (every `fixture-*.yaml` render is a `kubeconform` target) |
 | Upgrade e2e's version-pair check catches a mismatch; a matched bump passes no-replacement and canary-stays-Running | `2.upgrade.sh` experiments A and B |
 | CRD-schema-diff check not claimed met | `2.upgrade.sh`'s final `INFO` line states this explicitly; no assertion claims it |
 | Every claim about upstream versions/capability behavior backed by a primary source or an "unconfirmed" marker | Enforced by this README and the scripts' own comments pointing at the issue's facts comment, not re-derived here |
@@ -358,6 +387,34 @@ silently:
   Checked structurally by `check_gitops_contract.py` (acceptance-criterion-
   adjacent, not itself one of the nine criteria) and confirmed in
   `1.e2e.sh` by each `Application`'s own resource list (criterion 5).
+
+- **Issue #27's cell-specific fixtures live on a disposable branch,
+  never in the tracked tree.** `1.e2e.sh` step 11b writes
+  `gitops/cells/<NAME>/capacity-pool/cpu-{rsv,od,flex}.yaml` and
+  `gitops/cells/<NAME>/smoke/cpu-{rsv,od,flex}.yaml` into a clone of
+  `GITOPS_REVISION`, commits them to `e2e/<run-id>/capacity-types`
+  (the `-rsv` file selects this run's own reservation tag, so it cannot be
+  a permanent file), re-points the cell at that branch with a
+  `--revision`-only `bootstrap.sh` re-run, and points it back at
+  `GITOPS_REVISION` and deletes every object the three pools created
+  before step 12, so steps 12-15 see the single-pool cell step 11 left.
+  Each smoke fixture uses its own `addon: smoke-<pool>` value (one
+  `Application` name each), which `check_gitops_contract.py` accepts.
+- **No checked-in golden file for the unchanged default pool/queue; its
+  rendered fields, not its raw bytes, are what issue #27 is checked
+  against.** `check_chart_renders.py`'s own module docstring has the
+  reasoning: a byte-level golden file breaks on an unrelated base-branch
+  rebase or a different Helm version, neither a field regression, with
+  no way to tell the two apart from a byte diff alone.
+  `check_chart_renders.py`'s own field-level assertions on
+  `fixtures/capacity-pool/on-demand-default.yaml` and
+  `fixtures/smoke/default.yaml` are the evidence instead; the rendered
+  bytes are not identical to #25's original output (the capacity-pool
+  chart's own top-of-file comment reads differently), stated explicitly
+  since issue #27's own wording asks for byte-for-byte identity.
+- **Values paths follow issue #27's own spelling**: `pool.capacityType`,
+  and top-level `reservation.*`, `accelerator.*`, `tenancy.teamTaint`;
+  `clusterQueue.memQuota` for the smoke chart.
 
 ## Known issues
 
