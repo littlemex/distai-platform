@@ -299,9 +299,16 @@ def check_layouts(fixtures_dir: str, pairs: list[str]) -> None:
 
 def synthetic(base_doc, cards: int, efa: int | None, efa_supported: bool) -> object:
     """A copy of base_doc with only C, E and EfaSupported changed (E None =
-    no EfaInfo at all), and NetworkCards resized to match C."""
+    no EfaInfo at all), and NetworkCards resized to match C. _source is
+    dropped: these synthetic inputs are tested against instance type names
+    that differ from the real fixture base_doc was copied from (for example
+    SYNTHETIC_UNKNOWN_TYPE), and render-network-interfaces.py's own
+    _source.instanceType cross-check would otherwise refuse every one of
+    them for the wrong reason (a borrowed fixture), hiding the refusal or
+    positive-control behavior this function exists to test."""
     doc = copy.deepcopy(base_doc)
     ni = find_network_info(doc)
+    ni.pop("_source", None)
     ni["MaximumNetworkCards"] = cards
     ni["EfaSupported"] = efa_supported
     if efa is None:
