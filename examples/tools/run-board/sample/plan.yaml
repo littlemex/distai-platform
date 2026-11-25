@@ -1,0 +1,131 @@
+# Sample plan.yaml for run-board (toy tool, see ../README.md).
+#
+# Modeled on the shape of a real 24h shared-reservation schedule this project has
+# used to plan verification work: a bare-EC2 experiment phase that must finish and
+# hand off before the EKS platform-verification phase can claim the same reserved
+# capacity, a device-plugin-mode baseline, a mode switch, a DRA-mode phase split
+# across two node lanes, a joint two-node check, and a fixed closing tail. All
+# names, namespaces and timings below are generic placeholders — not the real
+# project's own codenames, account IDs, or timings.
+grace_minutes: 15
+items:
+  - id: phase-a-bare-ec2-experiment
+    name: "Phase A: bare-EC2 experiment (shared reservation)"
+    lane: shared-reservation
+    planned_start: "T+00:00"
+    planned_duration: "PT6H"
+    depends_on: []
+    stop_condition: "hard cap reached, or the owning session signals done"
+    status_source: {kind: manual, key: phase-a}
+
+  - id: reservation-handoff
+    name: "Handoff: reservation released to the EKS lane"
+    lane: shared-reservation
+    planned_start: "T+06:00"
+    planned_duration: "PT0H30M"
+    depends_on: [phase-a-bare-ec2-experiment]
+    stop_condition: "two-key handoff: owner's release + independent re-check"
+    status_source: {kind: manual, key: handoff}
+
+  - id: tier0-baseline-node-a
+    name: "Tier 0: device-plugin baseline checks"
+    lane: node-a
+    planned_start: "T+06:30"
+    planned_duration: "PT2H"
+    depends_on: [reservation-handoff]
+    stop_condition: "n/a"
+    status_source: {kind: job, namespace: run-board-sample, name: tier0-baseline-node-a}
+
+  - id: tier0-baseline-node-b
+    name: "Tier 0: device-plugin baseline checks"
+    lane: node-b
+    planned_start: "T+06:30"
+    planned_duration: "PT2H"
+    depends_on: [reservation-handoff]
+    stop_condition: "n/a"
+    status_source: {kind: job, namespace: run-board-sample, name: tier0-baseline-node-b}
+
+  - id: device-manager-mode-switch
+    name: "Pool-wide mode switch: device plugin to DRA"
+    lane: shared-reservation
+    planned_start: "T+08:30"
+    planned_duration: "PT0H45M"
+    depends_on: [tier0-baseline-node-a, tier0-baseline-node-b]
+    stop_condition: "both nodes must rejoin before proceeding"
+    status_source: {kind: manual, key: mode-switch}
+
+  - id: dra-mode-node-a
+    name: "DRA mode: constrained-placement check"
+    lane: node-a
+    planned_start: "T+09:15"
+    planned_duration: "PT2H15M"
+    depends_on: [device-manager-mode-switch]
+    stop_condition: "n/a"
+    status_source: {kind: kueue_workload, namespace: run-board-sample, name: dra-mode-node-a}
+
+  - id: dra-mode-node-b
+    name: "DRA mode: unconstrained-placement check"
+    lane: node-b
+    planned_start: "T+09:15"
+    planned_duration: "PT2H00M"
+    depends_on: [device-manager-mode-switch]
+    stop_condition: "n/a"
+    status_source: {kind: kueue_workload, namespace: run-board-sample, name: dra-mode-node-b}
+
+  - id: cross-node-collective-check
+    name: "Joint: cross-node collective check (both lanes)"
+    lane: shared-reservation
+    planned_start: "T+11:30"
+    planned_duration: "PT3H00M"
+    depends_on: [dra-mode-node-a, dra-mode-node-b]
+    stop_condition: "n/a"
+    status_source: {kind: job, namespace: run-board-sample, name: cross-node-collective-check}
+
+  - id: serving-benchmark
+    name: "Phase C: serving benchmark lane"
+    lane: shared-reservation
+    planned_start: "T+14:30"
+    planned_duration: "PT6H00M"
+    depends_on: [cross-node-collective-check]
+    stop_condition: "reported as a scope change if the window runs out, not silently dropped"
+    status_source: {kind: job, namespace: run-board-sample, name: serving-benchmark}
+
+  - id: closing-tail
+    name: "Fixed tail: evidence capture + teardown"
+    lane: shared-reservation
+    planned_start: "T+21:20"
+    planned_duration: "PT2H00M"
+    depends_on: [serving-benchmark]
+    stop_condition: "never compressed, never delayed"
+    status_source: {kind: manual, key: closing-tail}
+
+  # The three items below are not part of the real schedule's main critical path
+  # above; they exist only so the sample data exercises every state this tool can
+  # draw (failed, overdue-not-started, overrunning), which the main schedule above
+  # does not happen to produce on its own.
+  - id: node-health-suite-check
+    name: "Node health suite (independent check)"
+    lane: node-a
+    planned_start: "T+06:30"
+    planned_duration: "PT0H10M"
+    depends_on: []
+    stop_condition: "n/a"
+    status_source: {kind: job, namespace: run-board-sample, name: node-health-suite-check}
+
+  - id: efa-loopback-check
+    name: "EFA loopback check (independent check)"
+    lane: node-b
+    planned_start: "T+07:00"
+    planned_duration: "PT0H15M"
+    depends_on: []
+    stop_condition: "n/a"
+    status_source: {kind: manual, key: efa-loopback}
+
+  - id: node-replacement-drill
+    name: "Node replacement drill (independent check)"
+    lane: shared-reservation
+    planned_start: "T+09:00"
+    planned_duration: "PT0H20M"
+    depends_on: []
+    stop_condition: "n/a"
+    status_source: {kind: kueue_workload, namespace: run-board-sample, name: node-replacement-drill}

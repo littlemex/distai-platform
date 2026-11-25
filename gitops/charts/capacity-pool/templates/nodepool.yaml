@@ -17,7 +17,11 @@ metadata:
 spec:
   template:
 {{- $methodLabel := (default (dict) .Values.accelerator).methodLabel }}
+{{- $sharingLabel := (default (dict) .Values.accelerator).sharingLabel }}
+{{- $mpsLabel := (default (dict) .Values.accelerator).mpsLabel }}
 {{- $hasMethodLabel := and $methodLabel $methodLabel.key }}
+{{- $hasSharingLabel := and $sharingLabel $sharingLabel.key }}
+{{- $hasMpsLabel := and $mpsLabel $mpsLabel.key }}
 {{- /*
 distai.dev/efa-attached must mean an EFA device is actually attached, not
 merely that pool.networkInterfaces is non-empty: Karpenter's own CEL
@@ -34,11 +38,17 @@ least one efa-only entry is the actual signal.
 {{- $hasEfa = true }}
 {{- end }}
 {{- end }}
-{{- if or $hasMethodLabel $hasEfa }}
+{{- if or $hasMethodLabel $hasSharingLabel $hasMpsLabel $hasEfa }}
     metadata:
       labels:
 {{- if $hasMethodLabel }}
         {{ $methodLabel.key | quote }}: {{ $methodLabel.value | toString | quote }}
+{{- end }}
+{{- if $hasSharingLabel }}
+        {{ $sharingLabel.key | quote }}: {{ $sharingLabel.value | toString | quote }}
+{{- end }}
+{{- if $hasMpsLabel }}
+        {{ $mpsLabel.key | quote }}: {{ $mpsLabel.value | toString | quote }}
 {{- end }}
 {{- if $hasEfa }}
         # Set only when this pool's own EC2NodeClass actually attaches at least one

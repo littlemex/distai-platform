@@ -53,3 +53,61 @@ values:
               - key: distai.dev/nvidia-gpu-method
                 operator: In
                 values: ["device-plugin"]
+  # GPU sub-device sharing via NVIDIA's own MPS control daemon (this
+  # chart's `sharing.mps` config block, confirmed against the upstream
+  # README's "With CUDA MPS" section, tag v0.20.2, fetched 2026-11-22; MPS
+  # is marked experimental upstream since v0.15.0). One named config per
+  # replica count this platform has actually measured; "whole" (no
+  # sharing block at all) is config.default, so a node without
+  # capacity-pool's new accelerator.sharingLabel keeps today's unchanged
+  # behavior -- exactly one nvidia.com/gpu per physical device. A pool
+  # that sets accelerator.sharingLabel = {key:
+  # "nvidia.com/device-plugin.config", value: "mps-N"} (capacity-pool
+  # chart, additive to accelerator.methodLabel) gets that many
+  # nvidia.com/gpu resources advertised per physical GPU instead, each
+  # backed by the device plugin's own MPS control daemon.
+  #
+  # What this config actually buys, stated precisely rather than
+  # overclaimed (upstream README, same section): the MPS control daemon
+  # splits BOTH compute and device memory into N EQUAL shares per
+  # physical GPU -- there is no separate, independently settable
+  # CUDA_MPS_ACTIVE_THREAD_PERCENTAGE or per-client memory-limit value in
+  # this config schema. The only tunable this mechanism exposes is the
+  # replica count itself (one named config per count below); an unequal
+  # split (for example one client reserved 70% of a GPU's compute, a
+  # second capped at 30%) is not something sharing.mps.resources[].replicas
+  # can express -- it would need either several non-uniform MPS pinned
+  # per-process CUDA_MPS_ACTIVE_THREAD_PERCENTAGE exports set directly in
+  # each Pod's own environment (outside what this device-plugin
+  # mechanism manages, and unconfirmed to interact safely with its own
+  # equal-share accounting) or the separate DRA GPU driver's own MPS
+  # claim shape, not used by this platform today (#19 Decision 2 chose
+  # device-plugin as the opt-in default method).
+  config:
+    default: whole
+    map:
+      whole: |-
+        version: v1
+        flags:
+          migStrategy: none
+      mps-2: |-
+        version: v1
+        sharing:
+          mps:
+            resources:
+            - name: nvidia.com/gpu
+              replicas: 2
+      mps-3: |-
+        version: v1
+        sharing:
+          mps:
+            resources:
+            - name: nvidia.com/gpu
+              replicas: 3
+      mps-4: |-
+        version: v1
+        sharing:
+          mps:
+            resources:
+            - name: nvidia.com/gpu
+              replicas: 4

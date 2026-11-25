@@ -1,0 +1,117 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- include "disagg.validate" . -}}
+{{- $fullname := include "disagg.fullname" . -}}
+{{- /*
+  #63 (filed as a private report "SA2"): engine Pods and the proxy are
+  reachable from any Pod in the cluster, in any namespace, with nothing
+  enforcing the README's own claim that the Service is the boundary.
+  Default deny, name the exception (the same convention gitops/'s own
+  karpenter-netpol/kueue-netpol use): each Deployment gets its own
+  NetworkPolicy opening only the ports this chart's own release actually
+  needs reachable, from only the Pods that actually need to reach them.
+*/}}
+---
+# prefill and decode engines: the HTTP port (engine.port) only from this
+# release's own proxy, and the NIXL side channel (transport.sideChannelPort)
+# only from the PEER role's own Pods -- NixlConnector's prefill<->decode KV
+# pull is the only legitimate caller of that port; neither role calls its
+# own side channel.
+#
+# What this does NOT cover: transport.sideChannelPort is NIXL's own
+# handshake/connection-setup port (values.yaml names it
+# VLLM_NIXL_SIDE_CHANNEL_PORT) -- the actual KV cache bytes move over
+# whatever backend NIXL negotiates during that handshake (EFA/RDMA when
+# available), which bypasses the kernel's own IP stack and is not
+# something NetworkPolicy can see or enforce at all (the same limitation
+# gitops/README.md's own NetworkPolicy section already states for the
+# EKS control plane, for a different underlying reason). Restricting the
+# handshake port to the peer role narrows who can ever negotiate a
+# transfer in the first place; it is not a claim that the KV bytes
+# themselves are also NetworkPolicy-protected.
+#
+# transport.backend=UCX is the one case where the above does NOT hold:
+# NIXL's UCX backend has no EFA userspace to hand the connection to, so
+# its own TCP transport both negotiates AND moves the KV bytes over the
+# kernel's own IP stack (confirmed on real hardware -- one g7.8xlarge node,
+# no EFA device, both roles co-located, default UCX_TCP_PORT_RANGE, every request failed
+# HTTP 500: NIXL's own UCX worker could not create an endpoint to the
+# peer's dynamic, OS-picked ephemeral port, which this policy's own
+# default-deny had no way to name). transport.ucx.tcpPortRange fixes that
+# port to a narrow, declared range (see values.yaml) so this policy can
+# open exactly it, from the peer role only -- disagg.validate (_helpers.tpl)
+# rejects any range wider than 4096 ports, so this can never become
+# 1024-65535.
+{{- range $role := list "prefill" "decode" }}
+{{- $peer := ternary "decode" "prefill" (eq $role "prefill") }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-{{ $role }}
+  labels:
+    {{- include "disagg.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "disagg.selector" (dict "root" $ "component" "proxy") | nindent 14 }}
+      ports:
+        - port: {{ $.Values.engine.port }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "disagg.selector" (dict "root" $ "component" $peer) | nindent 14 }}
+      ports:
+        - port: {{ $.Values.transport.sideChannelPort }}
+        {{- if eq $.Values.transport.backend "UCX" }}
+        {{- $ucxParts := splitList "-" (toString (dig "ucx" "tcpPortRange" "" $.Values.transport)) }}
+        - port: {{ index $ucxParts 0 | atoi }}
+          endPort: {{ index $ucxParts 1 | atoi }}
+        {{- end }}
+    {{- if and $.Values.metrics.enabled $.Values.networkPolicy.metricsScrapeFrom }}
+    - from:
+        {{- toYaml $.Values.networkPolicy.metricsScrapeFrom | nindent 8 }}
+      ports:
+        - port: {{ $.Values.engine.port }}
+    {{- end }}
+{{- end }}
+---
+# proxy: its own port only from the shared load-replay driver (the only
+# documented client of this chart's own benchmarks, examples/inference/
+# _shared/load-replay/load-job.yaml's own app.kubernetes.io/name label) in
+# this same namespace -- NetworkPolicy's own podSelector is always scoped to
+# the policy's own namespace, so this does not reach into another team's.
+# "this same namespace" is not a new assumption this policy introduces:
+# load-job.yaml's own header comment already says to "apply into the
+# namespace of the target Service", and examples/inference/_shared/
+# README.md's own usage applies both the load-replay Job and the release
+# being benchmarked with the same $NAMESPACE variable. A load-replay run
+# against a release in a different namespace was never a documented
+# usage; this policy makes that combination fail closed instead of
+# silently reaching across a namespace boundary nothing else enforced.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-proxy
+  labels:
+    {{- include "disagg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "disagg.selector" (dict "root" $ "component" "proxy") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: load-replay
+      ports:
+        - port: {{ .Values.proxy.port }}
+{{- end }}

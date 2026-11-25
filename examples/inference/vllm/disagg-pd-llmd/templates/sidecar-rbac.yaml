@@ -1,0 +1,51 @@
+{{- if .Values.routingSidecar.ssrfProtection }}
+{{- $fullname := include "disagg.fullname" . -}}
+{{- /*
+  The routing sidecar's SSRF protection (--enable-ssrf-protection) only sends
+  a prefill request to an address that belongs to this release's own
+  InferencePool, which it learns by watching that InferencePool and its pods
+  (llm-d-router v1.0.0, pkg/sidecar/proxy/allowlist.go). Namespaced only:
+  read access to InferencePools and Pods in this release's namespace.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-routing-sidecar
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "disagg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: routing-sidecar
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-routing-sidecar
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "disagg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: routing-sidecar
+rules:
+  - apiGroups: ["inference.networking.k8s.io"]
+    resources: ["inferencepools"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-routing-sidecar
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "disagg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: routing-sidecar
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-routing-sidecar
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-routing-sidecar
+{{- end }}
