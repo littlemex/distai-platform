@@ -217,11 +217,23 @@ echo "ls /sys/class/infiniband | wc -l = ${IB_COUNT}"
 [ "${IB_COUNT}" = "1" ] && echo "PASS: 1 real EFA (RDMA) device visible in the guest OS" \
   || echo "FAIL: ${IB_COUNT} RDMA devices visible, expected 1"
 
-echo "network (ENA) interfaces other than loopback (expect exactly 1 -- only the primary card's ENA function, no stray secondary ENA interface):"
-NET_COUNT="$(kubectl exec efa-check -- sh -c "ls /host-sys/class/net | grep -v '^lo$' | wc -l")"
-kubectl exec efa-check -- sh -c "ls /host-sys/class/net"
-echo "non-loopback /sys/class/net entries = ${NET_COUNT}"
-[ "${NET_COUNT}" = "1" ] && echo "PASS: exactly 1 ENA network interface (the primary card's eth0); no stray secondary ENA device" \
-  || echo "FAIL: ${NET_COUNT} non-loopback network interfaces, expected 1"
+echo "network interfaces by driver (a node also carries non-EC2NodeClass netdevs -- the VPC CNI's own dynamically-attached secondary ENI and the EKS Pod Identity Agent's synthetic pod-id-link0 -- so raw /sys/class/net count alone is not the right assertion; classify by /sys/class/net/<if>/device/driver instead):"
+kubectl exec efa-check -- sh -c '
+for IFACE in $(ls /host-sys/class/net | grep -v "^lo$"); do
+  DRV_LINK="$(readlink "/host-sys/class/net/${IFACE}/device/driver" 2>/dev/null || true)"
+  DRV="$(basename "${DRV_LINK}" 2>/dev/null || true)"
+  [ -z "${DRV}" ] && DRV="(no PCI device -- software interface)"
+  echo "${IFACE} driver=${DRV}"
+done
+' | tee /tmp/efa-check-drivers.txt
+ENA_COUNT="$(grep -c 'driver=ena$' /tmp/efa-check-drivers.txt || true)"
+EFA_NET_COUNT="$(grep -c 'driver=efa$' /tmp/efa-check-drivers.txt || true)"
+OTHER_COUNT="$(grep -vc 'driver=ena$\|driver=efa$' /tmp/efa-check-drivers.txt || true)"
+echo "ena-driver interfaces = ${ENA_COUNT}, efa-driver interfaces = ${EFA_NET_COUNT}, other (non-EC2NodeClass) = ${OTHER_COUNT}"
+[ "${ENA_COUNT}" = "1" ] && echo "PASS: exactly 1 ena-driver network interface (the primary card's deviceIndex 0 ENI); no stray secondary ENA device" \
+  || echo "FAIL: ${ENA_COUNT} ena-driver network interfaces, expected 1"
+[ "${EFA_NET_COUNT}" = "1" ] && echo "PASS: exactly 1 efa-driver network interface, consistent with the 1 EFA RDMA device above (AWS's EFA kernel driver registers both a /sys/class/infiniband entry and its own netdev for the same physical EFA ENI -- this is the same device counted twice by two different kernel subsystems, not two EFA devices)" \
+  || echo "WARN: ${EFA_NET_COUNT} efa-driver network interfaces (expected 1, matching the RDMA count above)"
+rm -f /tmp/efa-check-drivers.txt
 
 echo "=== all substantive checks printed above; cleanup runs next via EXIT trap ==="
