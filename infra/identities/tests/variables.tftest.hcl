@@ -101,7 +101,7 @@ run "one_read_only_s3_entry_plans" {
   assert {
     condition = alltrue([
       for c in data.aws_iam_policy_document.identity_assume["image-builder"].statement[0].condition :
-      c.variable != "aws:RequestTag/kubernetes-namespace" || c.values == ["image-builder"]
+      c.variable != "aws:RequestTag/kubernetes-namespace" || (length(c.values) == 1 && contains(c.values, "image-builder"))
     ])
     error_message = "the trust policy's own namespace condition must scope to exactly this entry's declared namespace."
   }
@@ -109,7 +109,7 @@ run "one_read_only_s3_entry_plans" {
   assert {
     condition = alltrue([
       for c in data.aws_iam_policy_document.identity_assume["image-builder"].statement[0].condition :
-      c.variable != "aws:RequestTag/kubernetes-service-account" || c.values == ["image-builder"]
+      c.variable != "aws:RequestTag/kubernetes-service-account" || (length(c.values) == 1 && contains(c.values, "image-builder"))
     ])
     error_message = "the trust policy's own service-account condition must scope to exactly this entry's declared service_account."
   }
