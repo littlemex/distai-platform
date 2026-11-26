@@ -1,0 +1,19 @@
+# Static-check input (0.static.sh): pool.startupTaints (#96) next to an
+# accelerator.taint. The accelerator taint must still be a NodePool taint
+# mirrored as a ResourceFlavor toleration while the startup taint must
+# not be mirrored, so this fixture tells "startup taints are never
+# mirrored" apart from "nothing is mirrored any more" and from "startup
+# taints were merged into capacity-pool.taints". The startup taint's key
+# deliberately differs from the accelerator taint's key.
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: accel-startup
+  startupTaints:
+    - key: distai.dev/startup-not-ready
+      effect: NoSchedule
+accelerator:
+  taint:
+    key: aws.amazon.com/neuron
+    value: "present"
+    effect: NoSchedule

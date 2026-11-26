@@ -35,6 +35,12 @@ original (`gitops/tests/README.md`'s own assumptions section says so):
     the NodePool and mirrored as a toleration on the ResourceFlavor, the
     method label is on the NodePool's node template, and
     `distai.dev/accelerator-resource-name` is on both objects;
+  * `pool.startupTaints` (issue #96) is rendered as exactly the NodePool's
+    `spec.template.spec.startupTaints` (absent or empty when unset), is not
+    added to the NodePool's `taints`, and is never mirrored as a
+    ResourceFlavor toleration: no toleration names a startup taint's key
+    with its effect, and none would tolerate it under Kubernetes' own
+    toleration matching (so a wildcard toleration cannot sneak it in);
   * the smoke chart's `clusterQueue.memQuota` becomes the memory
     `nominalQuota` of its one flavor, next to `cpuQuota`.
 
@@ -106,6 +112,44 @@ def taint_entries(values: dict) -> list[dict]:
                 "has_value": has_value,
             })
     return out
+
+
+def normalize_taint(t: dict) -> dict:
+    """{key, effect, value?} with an absent, null or empty value dropped:
+    Kubernetes treats a taint with no value and one with value "" the same,
+    and this chart omits an empty value rather than rendering it."""
+    out = {"key": t.get("key"), "effect": t.get("effect")}
+    if t.get("value") not in (None, ""):
+        out["value"] = str(t["value"])
+    return out
+
+
+def startup_taint_entries(values: dict) -> list[dict]:
+    """The fixture's own pool.startupTaints (issue #96), normalized. Read
+    from pool.startupTaints only -- never from accelerator.taint or
+    tenancy.teamTaint, which are a different list with a different rule
+    (those are mirrored as ResourceFlavor tolerations, these never are)."""
+    pool = values.get("pool") or {}
+    return [normalize_taint(t) for t in (pool.get("startupTaints") or [])]
+
+
+def tolerates(tol: dict, taint: dict) -> bool:
+    """Kubernetes' own toleration matching (core/v1 Toleration.ToleratesTaint):
+    an empty effect matches every effect; an empty key with operator Exists
+    matches every key; Exists ignores the value; Equal (the default operator)
+    needs an identical value."""
+    tol_effect = tol.get("effect") or ""
+    if tol_effect and tol_effect != taint.get("effect"):
+        return False
+    operator = tol.get("operator") or "Equal"
+    tol_key = tol.get("key") or ""
+    if tol_key and tol_key != taint.get("key"):
+        return False
+    if not tol_key and operator != "Exists":
+        return False
+    if operator == "Exists":
+        return True
+    return str(tol.get("value") or "") == str(taint.get("value") or "")
 
 
 def check_capacity_pool(name: str, values: dict, docs: list[dict]) -> None:
@@ -205,6 +249,36 @@ def check_capacity_pool(name: str, values: dict, docs: list[dict]) -> None:
     check(f"{label} ResourceFlavor has no toleration beyond the mirrored taints",
           len(got_tolerations) == len(want_taints), f"got {got_tolerations!r}")
 
+    # --- startup taints (issue #96): a node-readiness gate, never mirrored
+    want_startup = startup_taint_entries(values)
+    got_startup_raw = np_spec.get("startupTaints")
+    got_startup = [normalize_taint(t) for t in (got_startup_raw or [])]
+    if want_startup:
+        check(f"{label} NodePool startupTaints are exactly pool.startupTaints {want_startup}",
+              sorted(got_startup, key=repr) == sorted(want_startup, key=repr), f"got {got_startup_raw!r}")
+    else:
+        # Unset pool.startupTaints renders either no startupTaints key at all
+        # (this chart's own convention for taints) or an empty list -- never
+        # a startup taint the fixture did not ask for.
+        check(f"{label} NodePool has no startupTaints (pool.startupTaints unset)",
+              not got_startup_raw, f"got {got_startup_raw!r}")
+    np_taint_ids = {(t.get("key"), t.get("effect")) for t in (np_spec.get("taints") or [])}
+    for t in want_startup:
+        check(f"{label} startup taint {t['key']}:{t['effect']} is not also a NodePool taint",
+              (t["key"], t["effect"]) not in np_taint_ids, f"got taints {np_spec.get('taints')!r}")
+        # The one rule that differs from accelerator.taint/tenancy.teamTaint:
+        # a startup taint must NOT appear on the ResourceFlavor in any form.
+        # Checked directly (by key+effect, and by whether any toleration
+        # would tolerate it), not only implied by the toleration count above.
+        offending = [
+            tol for tol in got_tolerations
+            if (tol.get("key") == t["key"] and (tol.get("effect") or "") in (t["effect"], ""))
+            or tolerates(tol, t)
+        ]
+        check(f"{label} ResourceFlavor does not mirror the startup taint {t['key']}:{t['effect']} "
+              f"(no toleration names or tolerates it)",
+              not offending, f"got offending tolerations {offending!r}")
+
     method = accelerator.get("methodLabel") or {}
     want_labels = {}
     if method:
@@ -279,6 +353,8 @@ EXPECTED_FIXTURES = {
         "reserved-no-tags", "unknown-capacity-type", "capacity-type-in-requirements",
         "invalid-instance-match-criteria", "invalid-taint-effect", "duplicate-taint",
         "empty-tag-value", "team-taint-no-value",
+        "startup-taints", "startup-taints-with-accelerator-taint",
+        "invalid-startup-taint-effect", "duplicate-startup-taint",
     },
     "smoke": {"default", "mem-quota"},
 }
@@ -288,6 +364,7 @@ EXPECTED_MUST_FAIL = {
     "reserved-no-tags", "unknown-capacity-type", "capacity-type-in-requirements",
     "invalid-instance-match-criteria", "invalid-taint-effect", "duplicate-taint",
     "empty-tag-value", "team-taint-no-value",
+    "invalid-startup-taint-effect", "duplicate-startup-taint",
 }
 
 
