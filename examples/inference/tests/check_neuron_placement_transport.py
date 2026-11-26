@@ -7,9 +7,12 @@ checked here from `helm template` output alone:
 
   - prefill/decode.gpusPerEngine is renamed neuronCoresPerEngine (agg-baseline:
     engine.neuronCoresPerEngine), and there is no mps/gpuMemoryUtilization;
-  - accelerator.resourceName defaults to aws.amazon.com/neuron, and each
-    role's vLLM container requests exactly neuronCoresPerEngine of it, which
-    also reaches vLLM's --tensor-parallel-size;
+  - accelerator.resourceName defaults to aws.amazon.com/neuron, requested as
+    whole devices -- ceil(neuronCoresPerEngine / accelerator.coresPerDevice),
+    never a raw core count, because the device plugin advertises whole
+    Neuron chips, not individual NeuronCores (gitops/addons/
+    accel-neuron-device-plugin/addon.yaml). neuronCoresPerEngine itself still
+    reaches vLLM's --tensor-parallel-size unchanged, raw;
   - transport.efaResourceName still defaults to vpc.amazonaws.com/efa;
   - engine.compileCacheVolume (default emptyDir: {}) is mounted at exactly the
     path VLLM_CACHE_ROOT names;
@@ -165,11 +168,29 @@ def check_no_forbidden_env(label, docs):
     check(f"{label}: {FORBIDDEN_ENV} is never set (left to the Neuron device plugin)", not hits, hits)
 
 
-def check_neuron_request(label, w, want):
+def devices_for(cores, per_device):
+    """Whole Neuron devices (chips) a request for `cores` NeuronCores needs.
+
+    The device plugin advertises aws.amazon.com/neuron as whole devices, not
+    individual NeuronCores (confirmed against this platform's own
+    gitops/addons/accel-neuron-device-plugin/addon.yaml: "Light-tier pods
+    request aws.amazon.com/neuron, never neuroncore" because Karpenter's own
+    capacity estimate for the per-core resource is wrong on trn2.3xlarge).
+    neuronCoresPerEngine is a NeuronCore count (vLLM's --tensor-parallel-size);
+    the resource request is ceil(cores / coresPerDevice) -- a request for
+    fewer cores than one device still holds the whole device, with the rest
+    of its cores idle.
+    """
+    return -(-int(cores) // int(per_device))
+
+
+def check_neuron_request(label, w, want_cores, per_device):
     cs = neuron_containers(pod_spec(w))
+    want_devices = devices_for(want_cores, per_device)
     got = [str(((c.get("resources") or {}).get("limits") or {}).get(NEURON)) for c in cs]
-    check(f"{label}: {name_of(w)} has a container with resources.limits[{NEURON}] = {want} "
-          "(neuronCoresPerEngine)", bool(got) and all(g == str(want) for g in got), f"got {got or 'no Neuron request'}")
+    check(f"{label}: {name_of(w)} has a container with resources.limits[{NEURON}] = {want_devices} "
+          f"(ceil({want_cores} neuronCoresPerEngine / {per_device} accelerator.coresPerDevice))",
+          bool(got) and all(g == str(want_devices) for g in got), f"got {got or 'no Neuron request'}")
     return cs
 
 
@@ -235,7 +256,10 @@ AGG_ABSENT = [("engine", k) for k in ("gpusPerEngine", "mps", "gpuMemoryUtilizat
 
 # Fixed core counts for the override render, chosen to fit a trn2.3xlarge
 # (4 NeuronCores); replaced by another if a default already equals one.
-CORE_CANDIDATES = (2, 4, 1)
+# Spread across device boundaries (coresPerDevice defaults to 4) so the
+# override scenario actually exercises ceil(cores / coresPerDevice) instead
+# of landing on 1 device for every candidate.
+CORE_CANDIDATES = (2, 5, 9)
 
 
 def pick_override(default, avoid=()):
@@ -289,7 +313,8 @@ def check_disagg(R, chart):
                     got = (pod_spec(w).get("nodeSelector") or {}).get(key)
                     check(f"{rel} default: {name_of(w)} ({r}) nodeSelector {key}={sel_values[r]} "
                           f"({r}.nodeSelectorValue)", got == sel_values[r], repr(got))
-                    cs = check_neuron_request(f"{rel} default ({r})", w, val(r, "neuronCoresPerEngine"))
+                    cs = check_neuron_request(f"{rel} default ({r})", w, val(r, "neuronCoresPerEngine"),
+                                               val("accelerator", "coresPerDevice"))
                     check_compile_cache(f"{rel} default ({r})", w, cs, val("engine", "compileCacheVolume"))
                     efa = val(r, "efaDevices")
                     got_efa = [str(((c.get("resources") or {}).get("limits") or {}).get(EFA)) for c in cs]
@@ -345,7 +370,7 @@ def check_disagg(R, chart):
                 default_names = tp_env_names([c for w in droles[r] for c in neuron_containers(pod_spec(w))],
                                              default_cores)
                 for w in kroles[r]:
-                    cs = check_neuron_request(f"{label} ({r})", w, want[r])
+                    cs = check_neuron_request(f"{label} ({r})", w, want[r], val("accelerator", "coresPerDevice"))
                     # An env var carries the core count when it equals the
                     # configured value both at the default and under the
                     # override -- the same name, following the value.
@@ -430,7 +455,8 @@ def check_agg(R, chart):
         ws = workloads(docs)
         check(f"{rel} default: exactly one vLLM workload", len(ws) == 1, str([name_of(w) for w in ws]))
         for w in ws:
-            cs = check_neuron_request(f"{rel} default", w, val("engine", "neuronCoresPerEngine"))
+            cs = check_neuron_request(f"{rel} default", w, val("engine", "neuronCoresPerEngine"),
+                                       val("accelerator", "coresPerDevice"))
             check_compile_cache(f"{rel} default", w, cs, val("engine", "compileCacheVolume"))
 
     want = pick_override(val("engine", "neuronCoresPerEngine"))
@@ -438,7 +464,8 @@ def check_agg(R, chart):
     if check(f"{rel} engine.neuronCoresPerEngine={want}: helm template", kdocs is not None, err):
         scenarios["neuronCoresPerEngine override"] = kdocs
         for w in workloads(kdocs):
-            cs = check_neuron_request(f"{rel} engine.neuronCoresPerEngine={want}", w, want)
+            cs = check_neuron_request(f"{rel} engine.neuronCoresPerEngine={want}", w, want,
+                                       val("accelerator", "coresPerDevice"))
             check_tp_wired(f"{rel} engine.neuronCoresPerEngine={want}", w, cs, tp_env_names(cs, want), want)
 
     for name, sdocs in scenarios.items():
