@@ -98,10 +98,15 @@ def main():
         optimizer.load_state_dict(state["optimizer"])
         start_step = int(state["step"])
         log(rank, f"[resume] loaded s3://{bucket}/{key}, resuming from step {start_step}")
-    # Every rank listed the same prefix while nothing was writing to it, so
-    # all ranks agree on start_step; the barrier makes a disagreement (for
-    # example an S3 listing that raced a late write from a previous attempt)
-    # hang visibly here rather than diverge silently later.
+    # Every rank lists the same S3 prefix and loads independently -- there
+    # is no broadcast of rank 0's own start_step to the others, a known
+    # simplification for this toy example (a real training script would
+    # broadcast it, not re-derive it per rank). The barrier below only
+    # synchronizes timing (every rank waits for every other rank to reach
+    # it); it does not compare each rank's own start_step value, so a race
+    # that gave two ranks two different answers (for example an S3 listing
+    # that caught a late write from a previous attempt mid-upload) would
+    # pass this barrier silently, not hang on it.
     dist.barrier()
 
     if start_step >= total_steps:

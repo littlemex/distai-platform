@@ -15,9 +15,9 @@ No custom container image is built. The Pods run the public `pytorch/pytorch` im
 
 ## Layout
 
-The default is one node with two GPUs: `workers.replicas: 1` (one Pod) and `workers.gpusPerNode: 2` (torchrun starts one process per GPU, `--nproc-per-node=2`). It fits one `g5`, `g6e` or `g7` node with at least two NVIDIA GPUs, for example `g5.12xlarge` or `g6e.12xlarge`. The two ranks talk over the GPUs' own peer-to-peer and shared-memory paths; nothing goes over the network.
+**Two nodes with one GPU each is the layout this PR's own real-hardware verification ran** (Issue #34's Test Results): `--set workers.replicas=2 --set workers.gpusPerNode=1`. The chart starts torchrun with `--nnodes=2`, each Pod's node rank taken from the `jobset.sigs.k8s.io/job-index` annotation the JobSet controller sets, and the rank-0 Pod's stable host name (`<release>-worker-0-0.<release>`, from the `JobSet`'s headless `Service`) as the rendezvous address. NCCL reaches the other node over TCP sockets: the public PyTorch image has no libfabric and no `aws-ofi-nccl` plugin, so the `FI_*` variables the chart sets have no effect and `workers.efaPerNode` should stay `0` with this image. EFA between nodes needs an EFA-enabled image (`image.*`), `workers.efaPerNode` set to the number of EFA devices per node, and a `NodePool` whose `pool.networkInterfaces` attaches them. This layout also requests less of a GPU `NodePool`'s own `limits` per node than the default below (one GPU per node, not two) — the verification cell's own light-tier pool (`gitops/cells/dp-34-jobset-r1/capacity-pool/gpu.yaml`) has no `pool.limits.cpu` override wide enough for two of the default layout's two-GPU Pods to fit on one `g5`/`g6e`/`g7` node at once (every size in those families with 2+ GPUs needs 48+ vCPU; the chart's own default `NodePool` limit, inherited from `gitops/charts/capacity-pool`, is smaller) — see "Known issues".
 
-Two nodes with one GPU each is the documented alternative, not run as part of this example's own verification. Install with `--set workers.replicas=2 --set workers.gpusPerNode=1`. The chart then starts torchrun with `--nnodes=2`, each Pod's node rank taken from the `jobset.sigs.k8s.io/job-index` annotation the JobSet controller sets, and the rank-0 Pod's stable host name (`<release>-worker-0-0.<release>`, from the `JobSet`'s headless `Service`) as the rendezvous address. NCCL then reaches the other node over TCP sockets: the public PyTorch image has no libfabric and no `aws-ofi-nccl` plugin, so the `FI_*` variables the chart sets have no effect and `workers.efaPerNode` should stay `0` with this image. EFA between nodes needs an EFA-enabled image (`image.*`), `workers.efaPerNode` set to the number of EFA devices per node, and a `NodePool` whose `pool.networkInterfaces` attaches them.
+The default is one node with two GPUs: `workers.replicas: 1` (one Pod) and `workers.gpusPerNode: 2` (torchrun starts one process per GPU, `--nproc-per-node=2`), fitting one `g5`, `g6e` or `g7` node with at least two NVIDIA GPUs, for example `g5.12xlarge` or `g6e.12xlarge` (both have 4). The two ranks would talk over the GPUs' own peer-to-peer and shared-memory paths, nothing over the network — **this is the chart's own shipped default, and is documented but not run as part of this PR's own verification** (the two-node layout above is what proves the issue's acceptance criteria instead; either shape satisfies them, since the issue accepts "two-node (or single-node, multi-GPU)").
 
 ## Prerequisites
 
@@ -27,7 +27,8 @@ Two nodes with one GPU each is the documented alternative, not run as part of th
 | The `jobset` catalog entry opted into on the cell | The JobSet controller and webhook are `platform-optional`. Without them a `JobSet` is accepted by the API server but never runs. See "Opting a cell into JobSet" below |
 | A team namespace onboarded with `gitops/bootstrap/team-onboard.sh` | Its `<team>-deployer` identity can create `JobSet`s, `ConfigMap`s, `ServiceAccount`s and `NetworkPolicy`s, and delete Pods. The namespace enforces Pod Security `restricted`; this chart's Pods meet it |
 | A Kueue `LocalQueue` in that namespace, pointing at a `ClusterQueue` with quota on a GPU `ResourceFlavor` | `kueue.queueName`. `team-onboard.sh` does not create one; a cell administrator does. The cell's `distai-smoke` queue is CPU only and not usable here |
-| A `NodePool` that can launch the GPU instance type the layout needs | For the default, one node with at least two NVIDIA GPUs and the device plugin method label (`gitops/README.md` "Accelerators") |
+| A `NodePool` that can launch the GPU instance type the layout needs | For the default, one node with at least two NVIDIA GPUs and the device plugin method label (`gitops/README.md` "Accelerators"); for the two-node layout this PR verified, two nodes with at least one GPU each |
+| An NVIDIA driver from the 580 series or later on the GPU nodes | The pinned image's CUDA 13.0 runtime needs it (see the `image.*` row in "Values" below) |
 | An S3 bucket, and an EKS Pod Identity association for the chart's `ServiceAccount` to an IAM role that can read and write only the checkpoint prefix | The Pods read and write checkpoints. The association and role are created by a cell administrator; this chart does not create them. See the block below |
 | Internet egress from the GPU nodes (the foundation's NAT gateway) | Pulling `pytorch/pytorch` from Docker Hub and `boto3` from PyPI at every Pod start |
 | `kubectl`, Helm 3.8 or later, and the AWS CLI on your workstation | Rendering and applying the chart; the S3 and IAM steps |
@@ -35,6 +36,8 @@ Two nodes with one GPU each is the documented alternative, not run as part of th
 The IAM role and Pod Identity association, run by a cell administrator. The role trusts the EKS Pod Identity service principal only, and allows `s3:ListBucket` on the bucket limited to the prefix, and `s3:GetObject`/`s3:PutObject` on objects under the prefix, nothing else:
 
 ```bash
+set -euo pipefail
+
 export AWS_REGION=us-east-1
 export CLUSTER_NAME=my-cell
 export NAMESPACE=team-a
@@ -52,7 +55,14 @@ cat > /tmp/pytorch-ddp-trust.json <<EOF
     {
       "Effect": "Allow",
       "Principal": {"Service": "pods.eks.amazonaws.com"},
-      "Action": ["sts:AssumeRole", "sts:TagSession"]
+      "Action": ["sts:AssumeRole", "sts:TagSession"],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/kubernetes-namespace": ["${NAMESPACE}"],
+          "aws:RequestTag/kubernetes-service-account": ["${SERVICE_ACCOUNT}"],
+          "aws:RequestTag/eks-cluster-name": ["${CLUSTER_NAME}"]
+        }
+      }
     }
   ]
 }
@@ -209,8 +219,9 @@ The checkpoints stay in S3 (`aws s3 rm "s3://${BUCKET}/${PREFIX}/" --recursive` 
 
 - `boto3` is installed with `pip install --no-cache-dir --target` at every Pod start, because no custom image is built for this example. Every start, including every restart, needs egress to PyPI and adds a few seconds; a PyPI outage makes the Pod exit and counts as a `JobSet` failure. A real training image should carry its dependencies.
 - The default image is about 3.3 GB compressed and is pulled on every new node.
-- Only rank 0 writes checkpoints, and only the model and optimizer state: a resumed run does not reproduce the random data stream exactly. A checkpoint is one `PutObject`, so a Pod killed during a write leaves the previous checkpoint as the newest.
+- Only rank 0 writes checkpoints, and only the model and optimizer state, not the data generator's own position. This does not break reproducibility, though: each step's random batch is seeded from `(step, world_size, rank)` (`files/train.py`), not from an accumulating generator state, so a resumed run regenerates the identical "random" data for every step at and after the one it resumed from. A checkpoint is one `PutObject`, so a Pod killed during a write leaves the previous checkpoint as the newest.
+- Every rank lists S3 and loads the checkpoint independently on resume, rather than rank 0 broadcasting `start_step` to the others — a known simplification (see `files/train.py`'s own comment on the `dist.barrier()` call, which only synchronizes timing across ranks, not each rank's own computed value).
 - Old checkpoints are never deleted by the script.
 - Pod logs and Kueue `Workload` objects are not readable with a team's own identity (no `pods/log` and no `kueue.x-k8s.io` access in its `Role`); watching the run in detail needs a cell administrator.
-- `automountServiceAccountToken: false` is set on the `ServiceAccount`, since the Pods never call the Kubernetes API. EKS Pod Identity injects its own token volume and does not depend on the automounted token; this follows from how Pod Identity delivers credentials and is not yet confirmed on this chart's own real-hardware run.
-- The two-node layout is documented but not run here.
+- `automountServiceAccountToken: false` is set on the `ServiceAccount`, since the Pods never call the Kubernetes API. EKS Pod Identity injects its own token volume and does not depend on the automounted token; confirmed on this chart's own real-hardware run (Issue #34's Test Results) — the Pods read S3 successfully with this setting.
+- The default, single-node two-GPU layout is documented but not run as part of this PR's own verification (see "Layout" above for why, and which layout was run instead).
