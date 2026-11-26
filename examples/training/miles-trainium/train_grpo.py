@@ -67,8 +67,17 @@ def start_server(model_path: str) -> subprocess.Popen:
     env["MODEL_PATH"] = model_path
     log(f"starting sglang-neuron server: MODEL_PATH={model_path} via {RUN_SERVER_SH}")
     log_file = open("/tmp/sglang-neuron-server.log", "a")
+    # --dtype bfloat16, not left at run_server.sh's "auto": sglang-neuron's own check_bf16_launch
+    # (sglang_neuron/models/transformer/config.py, commit 4e2432622bfab2c6663d12286a6813ef1a40bfe6)
+    # resolves "auto" from the checkpoint's own config.json torch_dtype, which this script's CPU
+    # training copy saves as float32 (loaded with torch_dtype=torch.float32 for CPU training
+    # stability, not for the inference server's benefit) -- refused with "launch with --dtype
+    # bfloat16" on real hardware (this session's attempt 2, restarting against the first saved
+    # checkpoint). The base Qwen3-0.6B checkpoint downloaded from the Hub is already bfloat16, so
+    # this was not hit on the first (unrestarted) launch; passing --dtype explicitly makes both
+    # launches identical rather than depending on which checkpoint happens to already match.
     proc = subprocess.Popen(
-        ["bash", RUN_SERVER_SH], env=env, stdout=log_file, stderr=subprocess.STDOUT
+        ["bash", RUN_SERVER_SH, "--dtype", "bfloat16"], env=env, stdout=log_file, stderr=subprocess.STDOUT
     )
     return proc
 
