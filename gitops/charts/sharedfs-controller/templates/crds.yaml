@@ -31,8 +31,9 @@
 #  4. A `--preparer-image` flag is added to the Deployment's own args
 #     (absent from upstream's own default manifest, which otherwise
 #     refuses to start the moment any FilesystemShare sets `provision` -
-#     exactly what gitops/charts/sharedfs-shares' checkpoints/datasets
-#     shares both do): set to the same value as the container's own image,
+#     exactly what gitops/charts/sharedfs-shares' own checkpoints share
+#     does; datasets does not, see that chart's own
+#     templates/filesystemshares.yaml): set to the same value as the container's own image,
 #     matching the README's own documented default ("the controller's own
 #     image, pinned to the digest it runs").
 

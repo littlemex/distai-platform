@@ -156,18 +156,22 @@ cleanup() {
 trap cleanup EXIT
 
 # run_test_pod <name> <namespace> <sa-or-empty> <pvc-name> <command string>
-# Every pod this script creates in a namespace at Pod Security "restricted"
-# (team-a, team-b, fs-admin -- gitops/bootstrap/team-onboard.sh and
-# gitops/charts/sharedfs-shares' own fs-admin namespace.yaml) must itself
-# satisfy "restricted": runAsNonRoot, a non-zero runAsUser (the busybox
-# image's own default user is root, so Kubernetes cannot verify
-# non-root without one), no privilege escalation, every capability
-# dropped, RuntimeDefault seccomp. runAsGroup: 1000 matches every
-# FilesystemShare's own provision.gid in this PR's gitops/charts/
-# sharedfs-shares (sharedfs's own README: "Pods write as a member of
-# the directory's group: set runAsGroup ... fsGroup has no effect on
-# these volumes") -- without it, even a read against a 2770-mode
-# directory is denied to every uid outside that group.
+# Every pod this helper creates runs through team-a/team-b's own Pod
+# Security "restricted" (gitops/bootstrap/team-onboard.sh): runAsNonRoot,
+# a non-zero runAsUser (the busybox image's own default user is root, so
+# Kubernetes cannot verify non-root without one), no privilege
+# escalation, every capability dropped, RuntimeDefault seccomp. fs-admin
+# is baseline, not restricted (gitops/charts/sharedfs-shares' own
+# namespace.yaml, needed for templates/seed.yaml's own uid 0 + CAP_CHOWN)
+# - the one caller against fs-admin (check 3's own seed pod) does not use
+# this helper at all, for exactly that reason; every call site below
+# that does use it targets team-a or team-b only. runAsGroup: 1000
+# matches checkpoints' own FilesystemShare provision.gid (not datasets,
+# which carries no provision at all - see gitops/charts/sharedfs-shares'
+# own templates/filesystemshares.yaml) - sharedfs's own README: "Pods
+# write as a member of the directory's group: set runAsGroup ... fsGroup
+# has no effect on these volumes" -- without it, even a read against a
+# 2770-mode directory is denied to every uid outside that group.
 run_test_pod() {
   local name="$1" ns="$2" sa="$3" pvc="$4" cmd="$5"
   local sa_json=""
@@ -276,6 +280,16 @@ print(chr(10).join(bad))
   sleep 20
 done
 
+# Not also checked inside the Argo CD convergence loop above: an
+# Application's own Synced/Healthy status reflects whether Argo CD
+# applied its objects, not whether templates/seed.yaml's own PostSync
+# hook Job actually finished creating the directories those objects
+# need - a review round raised this as a real gap in that loop. This
+# wait is the actual gate, not that loop: sharedfs's own controller sets
+# a FilesystemShare's Ready condition only once it can confirm the share
+# is actually usable (which needs the seed Job's own work done first),
+# so nothing after this line runs before that is true, regardless of
+# what the Argo CD loop above already reported.
 log "waiting for FilesystemShare objects to report Ready"
 kubectl wait --for=condition=Ready fss/checkpoints fss/datasets --timeout=300s
 
@@ -400,7 +414,17 @@ EOF
   kubectl wait --for=jsonpath='{.status.phase}'=Succeeded "pod/ds-reader-${team}" -n "${team}" --timeout=180s
   kubectl logs "pod/ds-reader-${team}" -n "${team}" | tee "${RESULTS_DIR}/check3-${team}-dataset-read.log"
   grep -q "shared-dataset-content" "${RESULTS_DIR}/check3-${team}-dataset-read.log" || { log "CHECK 3 FAIL: ${team} could not read the shared dataset"; exit 1; }
-  grep -qE "Read-only|Permission denied|RC=[1-9]" "${RESULTS_DIR}/check3-${team}-dataset-read.log" || { log "CHECK 3 FAIL: ${team}'s write attempt against datasets-ro did not fail"; exit 1; }
+  # "Read-only file system" specifically, not also "Permission denied":
+  # templates/seed.yaml (the B1 fix) creates datasets as root:root 0755,
+  # not group-writable, so a non-root team pod's write would get
+  # "Permission denied" from the directory's own raw unix mode alone,
+  # whether or not the datasets-ro mount itself actually enforces
+  # read-only access at all - that reading would make this assertion
+  # pass even if sharedfs's own controller had a real bug and granted
+  # read-write access by mistake. "Read-only file system" (EROFS) is the
+  # message a genuinely read-only mount gives, which only a correctly
+  # enforced grant produces.
+  grep -q "Read-only file system" "${RESULTS_DIR}/check3-${team}-dataset-read.log" || { log "CHECK 3 FAIL: ${team}'s write attempt against datasets-ro did not fail with Read-only file system (a directory-permission denial would look the same without proving the mount itself is read-only)"; exit 1; }
 done
 log "CHECK 3 PASS: both teams read the admin-seeded dataset; neither could write to it"
 

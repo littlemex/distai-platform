@@ -209,9 +209,11 @@ variable "shared_fsx_lustre" {
     # "chosen for this platform's own test cells... not a production
     # sizing recommendation"). A cell whose own fixture is destroyed and
     # recreated on every real-machine run sets this true explicitly
-    # (infra/foundation/tests' own SCRATCH_2 fixture does); nothing here
-    # defaults every cell, including a future PERSISTENT one, to the
-    # less-safe choice.
+    # (gitops/tests/.tmp-sharedfs-verify.sh's own terraform apply does -
+    # there is no infra/foundation/tests fixture for shared_fsx_lustre
+    # yet, a known gap this variable's own description does not claim is
+    # closed); nothing here defaults every cell, including a future
+    # PERSISTENT one, to the less-safe choice.
     skip_final_backup = optional(bool, false)
   })
   default  = null
