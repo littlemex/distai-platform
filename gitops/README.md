@@ -568,3 +568,5 @@ in this PR's own Test Results.
   `karpenter-crd` ships only `CustomResourceDefinition` objects, with no
   `Health` status of its own; the OCI chart and the cross-generator
   `revision:` templating are both evidenced too), not an open item.
+
+<!-- ci-verify: throwaway smoke test for .github/workflows/static-checks.yml, see PR -->

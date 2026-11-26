@@ -210,3 +210,5 @@ recorded on #47 itself.
 - An item `name` is not clipped or wrapped. The label column is sized for
   names around the length of the longest one in the sample data (about 50
   characters); a much longer name can run into the chart area.
+
+<!-- ci-verify: throwaway smoke test for .github/workflows/static-checks.yml, see PR -->

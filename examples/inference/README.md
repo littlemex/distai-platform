@@ -219,3 +219,5 @@ unrelated bugs the prior rounds hit."
 - Images are pinned by tag and digest. Services are `ClusterIP`; nothing is exposed outside the cluster by default.
 - The disaggregated examples are GPU only: neither the vLLM Neuron plugin nor NeuronX Distributed Inference ships a disaggregated prefill/decode path today, and SGLang's disaggregation path has no Neuron variant.
 - The vLLM and SGLang charts share their value names wherever the two engines share a concept (`placement.*`, `prefill.*`, `decode.*`, `engine.*`, `kvCacheTier.mode`, `metrics.enabled`); they differ where the engines do (`transport.*`), and the router in front of the roles is named per *chart*, not per engine, since the three router mechanisms genuinely differ: `proxy.*` in `vllm/disagg-pd` (the hand-written proxy), `routingSidecar.*`/`llmdRouter.*` in `vllm/disagg-pd-llmd` (llm-d's own Gateway-mode router), and `router.*` in `sglang/disagg-pd` (SGLang's own bundled router).
+
+<!-- ci-verify: throwaway smoke test for .github/workflows/static-checks.yml, see PR -->

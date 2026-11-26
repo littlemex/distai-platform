@@ -142,3 +142,5 @@ The guards remove only what Karpenter, the VPC CNI and EKS leave in AWS. Resourc
 - The guards are destroy-time provisioners. A guard does not run if `teardown.tf` is removed from the configuration or its resource (`terraform_data.teardown_guard`, `terraform_data.network_guard`) is removed from the state before `terraform destroy`. A cell applied before `terraform_data.network_guard` existed gets it with the next `terraform apply` (one resource to add, no other change); run that before `terraform destroy`.
 - The control plane log group keeps logs for 30 days and is deleted with the cell.
 - IPv4 only.
+
+<!-- ci-verify: throwaway smoke test for .github/workflows/static-checks.yml, see PR -->

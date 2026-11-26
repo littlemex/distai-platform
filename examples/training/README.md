@@ -17,3 +17,5 @@ Self-contained references for running real distributed training jobs on an EKS c
 - No example here builds a custom container image; each one pins an existing public image by tag and digest.
 - A `JobSet`'s Pod template carries `kueue.x-k8s.io/queue-name`; nothing here creates its own `LocalQueue` or `ClusterQueue` -- a cell administrator provides one, the same convention `examples/inference/` follows for its own GPU/EFA prerequisites.
 - Checkpoint storage is Amazon S3, read and written directly by the training container (an EKS Pod Identity association an administrator creates, scoped to one bucket/prefix) -- not a `PersistentVolumeClaim` or FSx for Lustre; see each example's own README for why.
+
+<!-- ci-verify: throwaway smoke test for .github/workflows/static-checks.yml, see PR -->
