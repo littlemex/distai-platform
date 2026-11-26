@@ -72,10 +72,11 @@ def start_server(model_path: str) -> subprocess.Popen:
     # resolves "auto" from the checkpoint's own config.json torch_dtype, which this script's CPU
     # training copy saves as float32 (loaded with torch_dtype=torch.float32 for CPU training
     # stability, not for the inference server's benefit) -- refused with "launch with --dtype
-    # bfloat16" on real hardware (this session's attempt 2, restarting against the first saved
-    # checkpoint). The base Qwen3-0.6B checkpoint downloaded from the Hub is already bfloat16, so
-    # this was not hit on the first (unrestarted) launch; passing --dtype explicitly makes both
-    # launches identical rather than depending on which checkpoint happens to already match.
+    # bfloat16" on real hardware (README.md "What actually ran", the restart against the first
+    # saved checkpoint). The base Qwen3-0.6B checkpoint downloaded from the Hub is already
+    # bfloat16, so this was not hit on the first (unrestarted) launch; passing --dtype explicitly
+    # makes both launches identical rather than depending on which checkpoint happens to already
+    # match. Re-verified on the next real-machine attempt: the restart succeeded.
     proc = subprocess.Popen(
         ["bash", RUN_SERVER_SH, "--dtype", "bfloat16"], env=env, stdout=log_file, stderr=subprocess.STDOUT
     )
@@ -95,11 +96,12 @@ def stop_server(proc: subprocess.Popen) -> None:
 
 
 def _dump_server_log() -> None:
-    # Unverified fix: the one real-machine attempt that reached this far (see README.md "What
-    # actually ran") lost the server's own reason for failing along with the container -- its
-    # log stayed in a file (below) that kubectl logs never sees. Printing it to this script's own
+    # The earliest real-machine attempt that reached this far (see README.md "What actually ran",
+    # session 1) lost the server's own reason for failing along with the container -- its log
+    # stayed in a file (below) that kubectl logs never sees. Printing it to this script's own
     # stdout on failure means a future `kubectl logs` capture carries it even if the container is
-    # gone by the time anyone looks.
+    # gone by the time anyone looks. Confirmed working on the next real attempt that hit this path
+    # (session 2): the dumped log carried the server's own ValueError verbatim.
     try:
         with open("/tmp/sglang-neuron-server.log") as f:
             tail = f.readlines()[-200:]
@@ -133,7 +135,7 @@ def wait_health(proc: subprocess.Popen, timeout_s: int) -> bool:
 
 def generate_completions(prompt: str, n: int) -> list[str]:
     """OpenAI-compatible route (stable across SGLang versions), not the native /generate
-    schema, which has changed shape between releases -- see README.md "Still not working" if this 404s."""
+    schema, which has changed shape between releases -- see README.md "Known limits" if this 404s."""
     resp = requests.post(
         f"{SERVER_URL}/v1/completions",
         json={
@@ -146,13 +148,16 @@ def generate_completions(prompt: str, n: int) -> list[str]:
         timeout=180,
     )
     if resp.status_code >= 400:
-        # Unverified-fix follow-up: the real-machine attempt that found this PR's own sampler-mode
-        # root cause (README.md "On the exit code") only recovered it from the Python traceback's
-        # exception message, which `requests.HTTPError` does not include the server's own response
-        # body in. sglang-neuron answers an admission refusal with a JSON body naming the setting
-        # at fault (general_plugin.py's _validate_request -> HTTPException(detail=...)); logging it
-        # here means a future admission refusal is diagnosed from this script's own stdout, not by
-        # re-deriving it from sglang-neuron's source after the fact.
+        # Unverified fix, not yet exercised on real hardware: the real-machine attempt that found
+        # this PR's own sampler-mode defect (README.md "On the two defects this found") predates
+        # this check, so it only recovered the cause from `requests.HTTPError`'s own exception
+        # message ("400 Client Error: Bad Request"), which carries no response body -- the actual
+        # cause (SGLANG_NEURON_SAMPLER defaulting to "greedy") was found by reading sglang-neuron's
+        # source after the fact, not from anything this script itself captured that run.
+        # sglang-neuron answers an admission refusal with a JSON body naming the setting at fault
+        # (general_plugin.py's _validate_request -> HTTPException(detail=...)); logging it here
+        # means a future admission refusal of this kind is diagnosed from this script's own
+        # stdout directly. No later real-machine attempt has hit a >=400 response to re-verify it.
         log(f"FATAL: {SERVER_URL}/v1/completions returned {resp.status_code}: {resp.text[:2000]}")
     resp.raise_for_status()
     data = resp.json()

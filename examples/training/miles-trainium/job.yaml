@@ -78,12 +78,15 @@ spec:
               # sglang-neuron's own sampling.py defaults SGLANG_NEURON_SAMPLER to "greedy" when unset, and its
               # general_plugin.py admission hook (validate_device_sampling_request) then refuses any request that
               # is not greedy (temperature below 1e-6 or top_k=1) with HTTP 400 at the first /v1/completions call --
-              # this is this PR's own real-machine root cause for the prior attempt's exit, confirmed by reading
-              # sglang-neuron's source (sglang_neuron/sampling.py's sampler_mode()/validate_device_sampling_request,
-              # commit 4e2432622bfab2c6663d12286a6813ef1a40bfe6), not by guessing from the exit code alone. "topk_topp"
-              # serves this script's sampled request (temperature=1.0, no top_k/top_p/min_p set, so the unrestricted
-              # path applies) and additionally supports top_k/top_p/min_p if a future change to train_grpo.py needs
-              # them; "temperature" would also serve this exact request shape but refuses any filtering at all.
+              # confirmed as the real-machine root cause of a 400 from /v1/completions (README.md "What actually
+              # ran", session 2's first attempt, HTTP 400 at the first generate call) by reading sglang-neuron's
+              # source (sglang_neuron/sampling.py's sampler_mode()/validate_device_sampling_request, commit
+              # 4e2432622bfab2c6663d12286a6813ef1a40bfe6), not by guessing from an exit code alone. This fix does
+              # NOT explain session 1's own earlier exit code 2 (~72s, no application log captured) -- that
+              # attempt's cause remains unconfirmed; see README.md "Known limits". "topk_topp" serves this script's
+              # sampled request (temperature=1.0, no top_k/top_p/min_p set, so the unrestricted path applies) and
+              # additionally supports top_k/top_p/min_p if a future change to train_grpo.py needs them; "temperature"
+              # would also serve this exact request shape but refuses any filtering at all.
               value: "topk_topp"
           resources:
             requests:

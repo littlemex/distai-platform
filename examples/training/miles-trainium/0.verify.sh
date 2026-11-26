@@ -29,21 +29,43 @@ EXDIR="${REPO_ROOT}/examples/training/miles-trainium"
 RUN_LOG_DIR="${REPO_ROOT}/../evidence-${NAME}"
 mkdir -p "${RUN_LOG_DIR}"
 
+# A dedicated kubeconfig, not the caller's default ~/.kube/config: a kubectl call issued before
+# PHASE 2's own `aws eks update-kubeconfig` (an early failure, or a bug in this script) would
+# otherwise run against whatever context the caller already had current -- which, on a shared
+# machine, can be a different, real cell. The file does not need to exist yet; kubectl/aws create
+# it on the first `update-kubeconfig` call.
+KUBECONFIG="${RUN_LOG_DIR}/kubeconfig"
+export KUBECONFIG
+
 log() { echo "[$(date -u +%H:%M:%SZ)] $*"; }
 
 VPC_ID=""
 IDC_GROUP_ID=""
 TEARDOWN_DONE=0
+# Set only once the matching resource actually exists, so an early failure (before terraform init
+# or before a kubeconfig is fetched) does not run terraform destroy against a backend left over
+# from some earlier, unrelated run in this same directory, or run kubectl against a context this
+# script never set up.
+TF_INIT_DONE=0
+KUBECTL_READY=0
 
 teardown() {
   if [[ "${TEARDOWN_DONE}" == "1" ]]; then return; fi
   TEARDOWN_DONE=1
   log "=== TEARDOWN start ==="
-  kubectl delete job miles-trainium-grpo -n distai-smoke --ignore-not-found --wait=true --timeout=180s 2>&1 | tee -a "${RUN_LOG_DIR}/teardown.log" || true
-  kubectl delete configmap miles-trainium-script -n distai-smoke --ignore-not-found 2>&1 | tee -a "${RUN_LOG_DIR}/teardown.log" || true
-  kubectl delete secret ecr-public-pull -n distai-smoke --ignore-not-found 2>&1 | tee -a "${RUN_LOG_DIR}/teardown.log" || true
-  cd "${REPO_ROOT}/infra/foundation"
-  terraform destroy -auto-approve 2>&1 | tee -a "${RUN_LOG_DIR}/terraform-destroy.log" || log "WARN: terraform destroy exited non-zero, continuing to the read-only sweep anyway"
+  if [[ "${KUBECTL_READY}" == "1" ]]; then
+    kubectl delete job miles-trainium-grpo -n distai-smoke --ignore-not-found --wait=true --timeout=180s 2>&1 | tee -a "${RUN_LOG_DIR}/teardown.log" || true
+    kubectl delete configmap miles-trainium-script -n distai-smoke --ignore-not-found 2>&1 | tee -a "${RUN_LOG_DIR}/teardown.log" || true
+    kubectl delete secret ecr-public-pull -n distai-smoke --ignore-not-found 2>&1 | tee -a "${RUN_LOG_DIR}/teardown.log" || true
+  else
+    log "skip: no kubeconfig was ever fetched (KUBECTL_READY=0), nothing to delete through kubectl"
+  fi
+  if [[ "${TF_INIT_DONE}" == "1" ]]; then
+    cd "${REPO_ROOT}/infra/foundation"
+    terraform destroy -auto-approve 2>&1 | tee -a "${RUN_LOG_DIR}/terraform-destroy.log" || log "WARN: terraform destroy exited non-zero, continuing to the read-only sweep anyway"
+  else
+    log "skip: terraform init never completed (TF_INIT_DONE=0), nothing to destroy"
+  fi
   if [[ -n "${IDC_GROUP_ID}" ]]; then
     if aws identitystore delete-group --identity-store-id "${ARGOCD_IDC_IDENTITY_STORE_ID}" \
       --region "${ARGOCD_IDC_REGION}" --group-id "${IDC_GROUP_ID}" >>"${RUN_LOG_DIR}/teardown.log" 2>&1; then
@@ -111,17 +133,25 @@ export TF_VAR_region="${AWS_REGION}"
 export TF_VAR_endpoint_public_access_cidrs="[\"${MY_CIDR}\"]"
 export TF_VAR_admin_principal_arns="[\"${ADMIN_PRINCIPAL_ARN}\"]"
 export TF_VAR_argocd="{\"idc_instance_arn\":\"${ARGOCD_IDC_INSTANCE_ARN}\",\"idc_region\":\"${ARGOCD_IDC_REGION}\",\"role_mappings\":[{\"role\":\"ADMIN\",\"group_ids\":[\"${IDC_GROUP_ID}\"]}]}"
-terraform init -input=false \
+terraform init -input=false -reconfigure \
   -backend-config="bucket=${STATE_BUCKET}" \
   -backend-config="key=distai-platform/${AWS_REGION}/${NAME}/foundation" \
   -backend-config="region=${STATE_REGION}" \
   -backend-config="use_lockfile=true" | tee "${RUN_LOG_DIR}/terraform-init.log"
+# -reconfigure: without it, a `.terraform/` directory left behind by an earlier run of this
+# script against a different cell name in the same working copy makes init fail ("Backend
+# configuration changed") instead of switching to this cell's own backend -- and a teardown
+# after that failure would otherwise destroy against the leftover backend's state, not this
+# cell's. TF_INIT_DONE is set only now, after init has actually succeeded against this cell's
+# own backend config.
+TF_INIT_DONE=1
 terraform apply -auto-approve | tee "${RUN_LOG_DIR}/terraform-apply.log"
 VPC_ID="$(terraform output -raw vpc_id)"
 log "vpc_id=${VPC_ID}"
 
 log "=== PHASE 2: kubeconfig + gitops bootstrap (revision ${GITOPS_REVISION}) ==="
 aws eks update-kubeconfig --name "${NAME}" --region "${AWS_REGION}"
+KUBECTL_READY=1
 kubectl get nodes
 "${REPO_ROOT}/gitops/bootstrap/bootstrap.sh" --tf-outputs <(terraform output -json) --revision "${GITOPS_REVISION}"
 
@@ -162,9 +192,14 @@ for i in $(seq 1 90); do
   sleep 10
 done
 [[ -n "${POD}" ]] || { log "FAIL: pod never created"; exit 1; }
+NODE="$(kubectl get pod "${POD}" -n distai-smoke -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)"
+# PHASE 5's own loop only breaks early once a node is assigned; falling out of it after the full
+# wait with a pod but no node (the shape attempt 2 of this PR's own real-machine history hit, a
+# transient spot-capacity shortage) must fail here explicitly, not fall through into PHASE 6's
+# `kubectl get node ""`.
+[[ -n "${NODE}" ]] || { log "FAIL: pod ${POD} never got a node assigned within the wait"; exit 1; }
 
 log "=== PHASE 6: confirm the node is real trn2.3xlarge with the neuron device plugin ==="
-NODE="$(kubectl get pod "${POD}" -n distai-smoke -o jsonpath='{.spec.nodeName}')"
 kubectl get node "${NODE}" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}{"\n"}{.status.allocatable}' | tee "${RUN_LOG_DIR}/node.log"
 echo >> "${RUN_LOG_DIR}/node.log"
 aws ec2 describe-instances --region "${AWS_REGION}" \
@@ -181,14 +216,26 @@ log "=== PHASE 7: stream logs until the Job finishes (deadline ~55min) ==="
 # `kubectl logs -f` any time it exits early, as long as the Job itself has not finished, and the
 # belt-and-suspenders plain `kubectl logs` below re-fetches the full buffered log once more after
 # the Job finishes. Re-verified working in session 2 (attempts 4-6 all captured the application
-# log in full, including the exact server-side error line each time).
+# log in full, including this script's own stdout/stderr -- this does not by itself mean every
+# attempt's own root cause was visible without also reading sglang-neuron's source: attempt 4
+# only got a client-side `requests.HTTPError` message with no response body, since the response-
+# body logging below predates that run; attempt 5's FATAL did carry sglang-neuron's own dumped
+# server log verbatim, which is where that attempt's exact error line came from).
 LOGS_PID=""
+LOG_TMP="${RUN_LOG_DIR}/job.log.tmp"
 relaunch_logs() {
   if [[ -n "${LOGS_PID}" ]] && kill -0 "${LOGS_PID}" 2>/dev/null; then return; fi
-  # Overwrite (>), not append (>>): kubectl logs -f dumps the container's FULL log from the
-  # start every time it (re-)attaches, so appending across relaunches would duplicate it once
-  # per relaunch; each relaunch's full dump fully supersedes the previous one.
-  kubectl logs -f "${POD}" -n distai-smoke --timestamps >"${RUN_LOG_DIR}/job.log" 2>&1 &
+  # Promote the PREVIOUS attempt's capture to job.log before starting a new one, and only if it
+  # is not empty: `kubectl logs -f` truncates its own output file to empty the instant it starts,
+  # then dumps the container's FULL log from the start -- a later relaunch that only manages a
+  # client-side error line (for example, the pod already gone after a spot reclaim) would
+  # otherwise overwrite an earlier relaunch's complete capture with that one line. Writing every
+  # attempt to the same job.log directly (the previous form of this loop) could lose evidence
+  # this way; writing to a separate temp file and promoting it only when non-empty cannot.
+  if [[ -s "${LOG_TMP}" ]]; then
+    cp "${LOG_TMP}" "${RUN_LOG_DIR}/job.log"
+  fi
+  kubectl logs -f "${POD}" -n distai-smoke --timestamps >"${LOG_TMP}" 2>&1 &
   LOGS_PID=$!
 }
 relaunch_logs
@@ -225,9 +272,18 @@ done
 sleep 5
 kill "${LOGS_PID}" 2>/dev/null || true
 wait "${LOGS_PID}" 2>/dev/null || true
+if [[ -s "${LOG_TMP}" ]]; then
+  cp "${LOG_TMP}" "${RUN_LOG_DIR}/job.log"
+fi
 # Belt-and-suspenders: a plain (non-follow) `kubectl logs` after the Job finished, in case every
-# `-f` attempt above still raced the container's own short lifetime.
-kubectl logs "${POD}" -n distai-smoke --timestamps >"${RUN_LOG_DIR}/job.log" 2>&1 || true
+# `-f` attempt above still raced the container's own short lifetime. Written to its own file and
+# promoted only if non-empty, for the same reason as relaunch_logs above: a Pod gone by now (for
+# example, after a spot reclaim) would make this call print nothing or a client-side error, which
+# must not overwrite a job.log that already holds a real capture from the loop above.
+kubectl logs "${POD}" -n distai-smoke --timestamps >"${RUN_LOG_DIR}/job.log.final" 2>&1 || true
+if [[ -s "${RUN_LOG_DIR}/job.log.final" ]]; then
+  cp "${RUN_LOG_DIR}/job.log.final" "${RUN_LOG_DIR}/job.log"
+fi
 log "=== JOB STATUS: ${STATUS} ==="
 kubectl get events -n distai-smoke --field-selector involvedObject.name="${POD}" --sort-by='.lastTimestamp' 2>&1 | tee "${RUN_LOG_DIR}/events-final.log" || true
 kubectl get job miles-trainium-grpo -n distai-smoke -o yaml | tee "${RUN_LOG_DIR}/job-final.yaml" >/dev/null
@@ -235,3 +291,11 @@ echo "job_status=${STATUS}" > "${RUN_LOG_DIR}/RESULT.txt"
 grep -E "STEP_SUMMARY|DONE|FATAL|Error|Traceback" "${RUN_LOG_DIR}/job.log" | tee -a "${RUN_LOG_DIR}/RESULT.txt" || true
 
 log "=== PHASE 7 done; teardown runs automatically on exit ==="
+# A verification script that exits 0 on a Failed or timed-out (STATUS=unknown) Job cannot be
+# trusted by anything that only checks its exit code (a CI job, or a human skimming a scrollback
+# instead of reading RESULT.txt). Teardown still runs regardless: `trap teardown EXIT` fires on
+# any exit code.
+if [[ "${STATUS}" != "Complete" ]]; then
+  log "FAIL: Job status is ${STATUS}, not Complete -- see ${RUN_LOG_DIR}/RESULT.txt and job.log"
+  exit 1
+fi
