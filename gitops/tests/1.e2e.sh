@@ -2007,6 +2007,32 @@ print(len(doc) if isinstance(doc, list) else -1)
   pass "node ${node} runs ${app}'s advertiser (${advertiser_ns}) and no DaemonSet pod of ${other_app} (${other_ns})"
 
   k delete namespace "${ACCEL_TEST_NS}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+
+  # Deleting the namespace only removes this check's own Pod; the node
+  # Karpenter launched for it stays until that NodePool's own
+  # disruption.consolidateAfter elapses (this fixture's gpu/trn pools set
+  # it to 15m -- gitops/cells/dp-a19-gpu-r3/capacity-pool/gpu.yaml,
+  # gitops/cells/dp-a19-trn-r3/capacity-pool/trn.yaml -- specifically so a
+  # real multi-gigabyte verification image is never evicted mid-pull on a
+  # freshly launched node, a defect this script's own header traces to a
+  # real run). Step 14b-b, which runs on the GPU cell roughly 15-20
+  # minutes after this function returns, asserts zero
+  # karpenter.k8s.aws/instance-gpu-manufacturer=nvidia nodes before it
+  # launches its own disposable one; whether this check's own node has
+  # finished consolidating away by then is a race against that same 15m
+  # window, not a guarantee, and failed exactly this way on a real run
+  # (2026-11-26). This check's own NodeClaim is deleted outright instead
+  # of waiting on it: it is this check's own disposable fixture node, not
+  # a workload anything else depends on, so there is no image-pull window
+  # left to protect once the probe above has already run on it.
+  accel_nodeclaim="$(k get nodeclaims -o jsonpath='{range .items[*]}{.status.nodeName}{"="}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+    | awk -F= -v n="${node}" '$1==n{print $2}')"
+  if [[ -n "${accel_nodeclaim}" ]]; then
+    k delete nodeclaim "${accel_nodeclaim}" --ignore-not-found --wait=true --timeout=300s >/dev/null 2>&1 \
+      || info "kubectl delete nodeclaim ${accel_nodeclaim} (this check's own node ${node}) did not confirm within 300s; a later step may still observe it"
+  else
+    info "no NodeClaim found for node ${node} (already gone, nothing to delete)"
+  fi
 }
 
 if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then

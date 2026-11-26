@@ -64,6 +64,15 @@ focused fix to make it look substantive.
       mocks are supporting checks, not a real run. Real means the change
       is applied and real traffic flows through it (a workload runs, a
       metric is scraped, a pod reads from Amazon S3).
+    - **A change touching the `accelerators` step, `gitops/addons/accel-*`,
+      `gitops/addon-catalog/accel-*`, `gitops/charts/accel-device-classes/`,
+      the accelerator fields of `gitops/charts/capacity-pool/`, or
+      `gitops/cells/dp-a19-gpu-r3/`/`gitops/cells/dp-a19-trn-r3/`**: a run
+      of `gitops/tests/1.e2e.sh` with `GITOPS_RUN_ACCEL_E2E=1`, not only the
+      base suite. The base suite passes with no GPU or Trainium node
+      launched, so it does not satisfy this bullet on its own; see
+      `gitops/tests/README.md`'s accelerator extension section for cost and
+      time.
     - **Small functional fix**: verification proportionate to the change.
     - **No functional impact**: write `docs-only` under `## Test Results`.
 
