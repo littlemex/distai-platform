@@ -9,6 +9,17 @@
 # (gitops/cells/dp-miles-trn-r1/capacity-pool/trn.yaml), and the resource
 # request/limit is the extended resource aws.amazon.com/neuron the device
 # plugin advertises (never aws.amazon.com/neuroncore -- #19 E4a).
+#
+# imagePullSecrets: attempt 2 (run-20261126T072032Z-45834) reached a real
+# trn2.3xlarge node (confirmed allocatable aws.amazon.com/neuron=1,
+# neuroncore=4) but the pod sat in ContainerCreating for the full 45-minute
+# deadline and the Job never started -- root cause confirmed read-only from
+# the Mac afterward: this image's own manifest totals 15.5 GB across 23
+# layers, and an ANONYMOUS public.ecr.aws pull is rate-limited well below
+# what finishes that in 45 minutes. An authenticated pull (ecr-public
+# get-login-password) gets a materially higher per-account rate limit, so
+# this attempt creates and uses a short-lived imagePullSecret instead of
+# pulling anonymously.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -31,6 +42,8 @@ spec:
         - key: aws.amazon.com/neuron
           operator: Exists
           effect: NoSchedule
+      imagePullSecrets:
+        - name: ecr-public-pull
       containers:
         - name: grpo-smoke
           image: public.ecr.aws/neuron/pytorch-training-neuronx:2.9.0-neuronx-py312-sdk2.30.0-ubuntu24.04

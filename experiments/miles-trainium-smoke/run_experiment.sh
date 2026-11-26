@@ -132,6 +132,17 @@ kubectl get nodepool,ec2nodeclass | tee "${RUN_LOG_DIR}/nodepool.log"
 kubectl get pods -n kube-system -l app.kubernetes.io/name=neuron-helm-chart -o wide 2>&1 | tee -a "${RUN_LOG_DIR}/nodepool.log" || true
 
 log "=== PHASE 4: apply the Job (ConfigMap generated from train_grpo_smoke.py) ==="
+# Attempt 2's own root cause (see job.yaml's header comment): anonymous
+# public.ecr.aws pulls of this 15.5 GB image did not finish in 45 minutes.
+# Create a short-lived imagePullSecret from an authenticated ECR Public
+# token (ECR Public's registry is always us-east-1, regardless of cluster
+# region) so this attempt pulls authenticated instead.
+ECR_PUBLIC_PASSWORD="$(aws ecr-public get-login-password --region us-east-1)"
+kubectl create secret docker-registry ecr-public-pull -n distai-smoke \
+  --docker-server=public.ecr.aws --docker-username=AWS \
+  --docker-password="${ECR_PUBLIC_PASSWORD}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+unset ECR_PUBLIC_PASSWORD
 kubectl create configmap miles-grpo-smoke-script -n distai-smoke \
   --from-file=train_grpo_smoke.py="${REPO_ROOT}/experiments/miles-trainium-smoke/train_grpo_smoke.py" \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -167,8 +178,21 @@ kubectl logs -f "${POD}" -n distai-smoke --timestamps 2>&1 | tee "${RUN_LOG_DIR}
 LOGS_PID=$!
 DEADLINE=$((SECONDS + 2700))
 STATUS="unknown"
+LAST_PHASE=""
 while (( SECONDS < DEADLINE )); do
   STATUS="$(kubectl get job miles-grpo-smoke -n distai-smoke -o jsonpath='{.status.conditions[0].type}' 2>/dev/null || true)"
+  PHASE_NOW="$(kubectl get pod "${POD}" -n distai-smoke -o jsonpath='{.status.phase}{" "}{.status.containerStatuses[0].state}' 2>/dev/null || true)"
+  if [[ "${PHASE_NOW}" != "${LAST_PHASE}" ]]; then
+    log "pod phase/state: ${PHASE_NOW}"
+    LAST_PHASE="${PHASE_NOW}"
+  fi
+  # Early, cheap diagnosis: a pull that is really stuck (vs. just large and
+  # slow) shows up as an ImagePullBackOff/ErrImagePull event well before the
+  # 45-minute deadline -- surface it immediately instead of waiting blind.
+  if (( SECONDS % 120 < 15 )); then
+    kubectl get events -n distai-smoke --field-selector involvedObject.name="${POD}" --sort-by='.lastTimestamp' 2>/dev/null \
+      | tail -5 | tee -a "${RUN_LOG_DIR}/events.log" || true
+  fi
   if [[ "${STATUS}" == "Complete" || "${STATUS}" == "Failed" ]]; then
     break
   fi
@@ -178,6 +202,7 @@ sleep 5
 kill "${LOGS_PID}" 2>/dev/null || true
 wait "${LOGS_PID}" 2>/dev/null || true
 log "=== JOB STATUS: ${STATUS} ==="
+kubectl get events -n distai-smoke --field-selector involvedObject.name="${POD}" --sort-by='.lastTimestamp' 2>&1 | tee "${RUN_LOG_DIR}/events-final.log" || true
 kubectl get job miles-grpo-smoke -n distai-smoke -o yaml | tee "${RUN_LOG_DIR}/job-final.yaml" >/dev/null
 echo "job_status=${STATUS}" > "${RUN_LOG_DIR}/RESULT.txt"
 grep -E "STEP_SUMMARY|DONE|FATAL|Error|Traceback" "${RUN_LOG_DIR}/job.log" | tee -a "${RUN_LOG_DIR}/RESULT.txt" || true
