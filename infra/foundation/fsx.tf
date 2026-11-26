@@ -17,23 +17,27 @@
 # below contains this account's ID.
 
 locals {
-  # FSx for Lustre's client ports (Amazon FSx for Lustre User Guide,
-  # "Amazon VPC security groups for Lustre"): 988/tcp for the Lustre
-  # protocol itself, 1021-1023/tcp and /udp for the lnet/LND transport.
-  # Security groups are stateful (AWS EC2 User Guide, "Security group
-  # rules"), so only the file system's own ingress (from every node, which
-  # already shares one security group - eks.tf's cluster security group,
-  # the same one Karpenter-launched nodes join) needs a rule here; FSx
-  # never opens a new connection toward a client, so this security group
-  # carries no egress rule at all (AWS's own default "allow all egress"
-  # rule, present on every newly created security group unless removed,
-  # is removed below for the same least-privilege reason
-  # aws_default_security_group.this in vpc.tf empties the VPC's default
-  # security group).
+  # FSx for Lustre's own ports (AWS FSx for Lustre User Guide, "File
+  # system access control with Amazon VPC" -> "Amazon VPC Security
+  # Groups", fetched 2026-11-26): TCP 988 for the Lustre protocol itself,
+  # TCP 1018-1023 for the LNET/LND transport. That same page's own
+  # required-rules table is explicit that this is not ingress-from-clients
+  # alone: the file system's own security group needs ALL FOUR of
+  # self-referencing ingress, self-referencing egress, ingress from the
+  # client security group and egress to the client security group - the
+  # file system's own network interfaces talk to each other over these
+  # same ports, not only to a mounting client, and
+  # CreateFileSystem's own server-side validation enforces this
+  # (confirmed on the runner, 2026-11-26: a security group with ingress
+  # from the client security group only, no self-reference, failed
+  # CreateFileSystem outright with "InvalidNetworkSettings: ... does not
+  # permit Lustre LNET network traffic on port 988" - security groups
+  # being stateful was not enough to satisfy this check, since the
+  # self-referencing rules this validation wants are a different, and
+  # genuinely missing, pair of rules, not a question of return traffic).
   fsx_lustre_ports = [
     { protocol = "tcp", from_port = 988, to_port = 988 },
-    { protocol = "tcp", from_port = 1021, to_port = 1023 },
-    { protocol = "udp", from_port = 1021, to_port = 1023 },
+    { protocol = "tcp", from_port = 1018, to_port = 1023 },
   ]
 }
 
@@ -41,19 +45,17 @@ resource "aws_security_group" "fsx_lustre" {
   count = var.shared_fsx_lustre == null ? 0 : 1
 
   name        = "${var.name}-fsx-lustre"
-  description = "Ingress for the shared FSx for Lustre file system (#18), from this cell own node/cluster security group only."
+  description = "Lustre traffic for the shared FSx for Lustre file system (#18): self-referencing, and to/from this cell own node/cluster security group."
   vpc_id      = aws_vpc.this.id
 
   # Every newly created EC2 security group gets one default rule: allow
   # all IPv4 egress (EC2 User Guide, "Security group rules" - an API-level
   # default, not a Terraform artifact). Writing egress = [] here, rather
-  # than omitting the argument, tells Terraform to manage the egress
-  # rule set as a whole and removes that default rule on apply - FSx never
-  # opens a connection toward a client (see local.fsx_lustre_ports's own
-  # comment on why ingress alone is enough), so this file system's own
-  # security group needs no egress at all, the same least-privilege
-  # reasoning vpc.tf's aws_default_security_group.this already applies to
-  # the VPC's default security group.
+  # than omitting the argument, tells Terraform to manage the egress rule
+  # set as a whole and removes that default rule on apply, replaced below
+  # by the exact egress AWS's own required-rules table lists - the same
+  # least-privilege reasoning vpc.tf's aws_default_security_group.this
+  # already applies to the VPC's default security group.
   egress = []
 
   tags = {
@@ -61,8 +63,41 @@ resource "aws_security_group" "fsx_lustre" {
   }
 }
 
-resource "aws_security_group_rule" "fsx_lustre_ingress" {
-  for_each = var.shared_fsx_lustre == null ? {} : { for p in local.fsx_lustre_ports : "${p.protocol}-${p.from_port}" => p }
+locals {
+  fsx_lustre_port_map = { for p in local.fsx_lustre_ports : "${p.protocol}-${p.from_port}" => p }
+}
+
+# Self-referencing ingress and egress: the file system's own network
+# interfaces talk to each other over these ports (AWS's own required-rules
+# table, this file's own header comment above).
+resource "aws_security_group_rule" "fsx_lustre_self_ingress" {
+  for_each = var.shared_fsx_lustre == null ? {} : local.fsx_lustre_port_map
+
+  type                     = "ingress"
+  security_group_id        = aws_security_group.fsx_lustre[0].id
+  protocol                 = each.value.protocol
+  from_port                = each.value.from_port
+  to_port                  = each.value.to_port
+  source_security_group_id = aws_security_group.fsx_lustre[0].id
+  description              = "FSx for Lustre file servers to each other (self-referencing, required by CreateFileSystem)"
+}
+
+resource "aws_security_group_rule" "fsx_lustre_self_egress" {
+  for_each = var.shared_fsx_lustre == null ? {} : local.fsx_lustre_port_map
+
+  type                     = "egress"
+  security_group_id        = aws_security_group.fsx_lustre[0].id
+  protocol                 = each.value.protocol
+  from_port                = each.value.from_port
+  to_port                  = each.value.to_port
+  source_security_group_id = aws_security_group.fsx_lustre[0].id
+  description              = "FSx for Lustre file servers to each other (self-referencing, required by CreateFileSystem)"
+}
+
+# Client traffic: this cell's node/cluster security group (every
+# Karpenter-launched node and the system node group share it, eks.tf).
+resource "aws_security_group_rule" "fsx_lustre_client_ingress" {
+  for_each = var.shared_fsx_lustre == null ? {} : local.fsx_lustre_port_map
 
   type                     = "ingress"
   security_group_id        = aws_security_group.fsx_lustre[0].id
@@ -70,7 +105,19 @@ resource "aws_security_group_rule" "fsx_lustre_ingress" {
   from_port                = each.value.from_port
   to_port                  = each.value.to_port
   source_security_group_id = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
-  description              = "FSx for Lustre client traffic from this cell own node/cluster security group"
+  description              = "FSx for Lustre client traffic from this cell's node/cluster security group"
+}
+
+resource "aws_security_group_rule" "fsx_lustre_client_egress" {
+  for_each = var.shared_fsx_lustre == null ? {} : local.fsx_lustre_port_map
+
+  type                     = "egress"
+  security_group_id        = aws_security_group.fsx_lustre[0].id
+  protocol                 = each.value.protocol
+  from_port                = each.value.from_port
+  to_port                  = each.value.to_port
+  source_security_group_id = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
+  description              = "FSx for Lustre client traffic to this cell's node/cluster security group"
 }
 
 resource "aws_fsx_lustre_file_system" "shared" {
