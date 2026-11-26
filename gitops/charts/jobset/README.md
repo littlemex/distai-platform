@@ -123,19 +123,22 @@ are no longer reconciled.
 
 - Argo CD's repo server fetches the OCI dependency
   (`oci://registry.k8s.io/jobset/charts`) itself when it renders this
-  chart. Whether the managed Argo CD capability does that for an OCI
-  dependency of a Git-sourced chart without a repository credential is
-  confirmed only for `dcgm-exporter`'s classic Helm repository
-  dependency, not for an OCI one; real-hardware verification settles it.
-- `skipCrds: true` is confirmed load-bearing, not a no-op (`helm template
+  chart. Confirmed on real hardware (issue #34's own pull request Test
+  Results): the managed Argo CD capability does fetch an OCI dependency
+  of a Git-sourced chart with no repository credential configured for
+  it, the same as it already does for `dcgm-exporter`'s classic Helm
+  repository dependency -- the `jobset` Application reached
+  `Synced`/`Healthy` with the controller Deployment Available, which is
+  not possible if this fetch had failed.
+- `skipCrds: true` is confirmed load-bearing, not a no-op: `helm template
   --include-crds` renders the CustomResourceDefinition from the upstream
   dependency's own `crds/` folder, without the flag it does not render
-  at all -- checked locally, no cluster needed). What real-hardware
-  verification settles is narrower: whether setting it on the generated
-  Argo CD Application actually keeps that Application from listing the
-  CustomResourceDefinition as one of its own owned resources, so
-  `jobset-crd`'s own Application stays the CRD's only owner (see the
-  catalog entry's comment).
+  at all (checked locally, no cluster needed), and on real hardware
+  (issue #34's own pull request Test Results) the `jobset` Application's
+  own `status.resources` carried no `CustomResourceDefinition` at all,
+  while `jobset-crd`'s own `status.resources` carried exactly the one
+  CRD -- `jobset-crd`'s Application is the CRD's only owner on a real
+  cell, not only in a local render (see the catalog entry's own comment).
 - The controller's webhook certificate is generated and rotated by the
   controller itself into a `Secret` this chart renders empty, and its CA
   bundle is patched into the two webhook configurations at runtime. Argo

@@ -92,9 +92,11 @@ spec:
                         --master-addr="$MASTER_ADDR" --master-port="$MASTER_PORT" \
                         /opt/train/train.py
                   env:
-                    # int before quote everywhere on this page (also
-                    # TOTAL_STEPS/CHECKPOINT_EVERY/STEP_SLEEP_SECONDS/
-                    # MASTER_PORT below): Helm's YAML decoder reads a
+                    # int before quote on every integer-only env below
+                    # (NNODES/NPROC_PER_NODE here, TOTAL_STEPS/
+                    # CHECKPOINT_EVERY/MASTER_PORT further down --
+                    # STEP_SLEEP_SECONDS is the one exception, see its own
+                    # comment): Helm's YAML decoder reads a
                     # values-FILE integer as float64 (go-yaml has no
                     # separate int type for a plain scalar), and Go's
                     # default float-to-string formatting switches to
@@ -136,8 +138,18 @@ spec:
                       value: {{ .Values.training.totalSteps | int | quote }}
                     - name: CHECKPOINT_EVERY
                       value: {{ .Values.training.checkpointEvery | int | quote }}
+                    # Not `| int`, unlike every other numeric env on this
+                    # page: train.py reads this one as a float (it is a
+                    # sleep duration, legitimately fractional, e.g. 0.5),
+                    # and `int` truncates -- confirmed by rendering
+                    # stepSleepSeconds: 0.5 from a values file with `| int`:
+                    # it rendered "0", silently removing the pause rather
+                    # than failing loudly. This value's own realistic range
+                    # (a human-scale sleep duration) never reaches the
+                    # magnitude where Go's float formatting switches to
+                    # scientific notation, so plain `quote` is safe here.
                     - name: STEP_SLEEP_SECONDS
-                      value: {{ .Values.training.stepSleepSeconds | int | quote }}
+                      value: {{ .Values.training.stepSleepSeconds | quote }}
                     # The image's user does not exist in /etc/passwd for this
                     # UID; give pip and Python a writable home.
                     - name: HOME

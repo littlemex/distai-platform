@@ -70,10 +70,14 @@ A pull request bumping JobSet changes both halves together:
 - `helm lint` prints `[WARNING] templates/: directory does not exist`.
   The chart has no templates by design; the warning does not fail the
   lint.
-- Nothing mechanically checks that the vendored file and
-  `gitops/charts/jobset`'s dependency are the same version yet; content
-  review is the only control. The `karpenter-crd`/`karpenter` pair has a
-  version-pair check in the upgrade e2e; this pair has none.
+- `gitops/tests/check_jobset_addon.py` checks that the vendored file's
+  own cited version and `gitops/charts/jobset`'s pinned dependency
+  version are the same string, and that the cited digest is the sha256
+  of the file's own body -- a reviewer who bumps one without the other,
+  or edits the body without updating the digest, fails this check, not
+  only content review. It does not (yet) check this against the real
+  upstream file content the way `--network` does for drift from the
+  tag it cites; see the catalog entry's own comment.
 - Removing `gitops/addons/jobset-crd/` does not delete the CRD from a cell
   (`platform.ApplicationSet.yaml` sets `preserveResourcesOnDeletion:
   true`). Deleting the CRD by hand deletes every `JobSet` in the cluster.

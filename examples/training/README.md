@@ -10,7 +10,7 @@ Self-contained references for running real distributed training jobs on an EKS c
 
 | Example | Built | Run on real hardware |
 | --- | --- | --- |
-| [`pytorch-ddp`](pytorch-ddp/) | Yes: chart, README and static checks (`helm lint`/`helm template`/`check_training_render.py` on the runner) | Tracked on [#34](https://github.com/littlemex/distai-platform/issues/34) |
+| [`pytorch-ddp`](pytorch-ddp/) | Yes: chart, README and static checks (`helm lint`/`helm template`/`check_training_render.py` on the runner) | Yes, the two-node layout (`workers.replicas=2`, `workers.gpusPerNode=1`) -- all four of #34's own acceptance criteria passed on a real `us-east-1` cell, see that issue's own pull request Test Results. The chart's own single-node default layout is not yet run on real hardware (see the chart's own README "Layout") |
 
 ## Conventions
 

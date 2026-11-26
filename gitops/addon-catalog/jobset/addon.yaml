@@ -27,9 +27,14 @@ namespace: jobset-system
 # one with --include-crds (Argo CD's repo-server passes this by default
 # when rendering a Helm source) -- the subchart's crds/ folder really is
 # included through the parent chart, so skipCrds is load-bearing here,
-# not a no-op. Left to real-hardware verification: that setting it on the
-# generated Application actually keeps this one Application from trying
-# to own the CustomResourceDefinition jobset-crd already delivers.
+# not a no-op. Confirmed on real hardware (issue #34's own pull request
+# Test Results) that setting it on the generated Application does keep
+# this one Application from owning the CustomResourceDefinition
+# jobset-crd already delivers: on a real cell this Application's own
+# status.resources carried no CustomResourceDefinition at all, while
+# jobset-crd's own status.resources carried exactly the one CRD, and
+# nothing else in the cell claimed to own a CRD with "jobset" in its
+# name.
 skipCrds: true
 # The CRD must exist before this chart's controller can start watching
 # JobSets. jobset-crd is core (gitops/addons/), so this always resolves

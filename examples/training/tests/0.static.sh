@@ -199,6 +199,54 @@ else
   fail "examples/training/pytorch-ddp/Chart.yaml is missing; nothing to render"
 fi
 
+# --------------------------------------- 5b. a values FILE, not --set, once
+#
+# --set/--set-string infer a value's own Go type directly (int, string);
+# a -f values file goes through Helm's own YAML decoder instead, which has
+# no separate int type for a plain scalar and decodes it as float64 --
+# confirmed once already (training.totalSteps: 1000000 rendered "1e+06"
+# with a bare `| quote` in the chart's own templates, before `| int` was
+# added there). None of the renders above use -f, so a regression of that
+# fix -- or a new numeric env added the same way, without the same `| int`
+# -- would pass every other check here and still break on a real values
+# file. A large totalSteps and a fractional stepSleepSeconds (the one
+# numeric env deliberately NOT cast through `| int`, since it is allowed
+# to be fractional) together in one render catch both failure modes: a
+# literal "e+0"/"e-0" in any of the numeric envs below (the float64
+# scientific-notation render Python's `int()`/`float()` would choke on
+# only for the ones train.py parses with `int()`), and
+# STEP_SLEEP_SECONDS silently truncated to "0" by a wrongly-added `| int`.
+if [[ -f "${CHART}/Chart.yaml" ]]; then
+  cat > "${WORK_DIR}/values-file-check.yaml" <<'VALUESEOF'
+training:
+  totalSteps: 1000000
+  stepSleepSeconds: 0.5
+VALUESEOF
+  run_check "helm template pytorch-ddp (values file, large totalSteps + fractional stepSleepSeconds)" \
+    bash -c '"$@" > "'"${RENDERED_DIR}/pytorch-ddp-values-file.yaml"'"' _ \
+    "${HELM}" template ddp-static "${CHART}" --namespace static-check "${STATIC_SETS[@]}" -f "${WORK_DIR}/values-file-check.yaml"
+  rendered_vf="${RENDERED_DIR}/pytorch-ddp-values-file.yaml"
+  if [[ -s "${rendered_vf}" ]]; then
+    if grep -qE 'e[+-][0-9]' "${rendered_vf}"; then
+      fail "pytorch-ddp (values file render) contains scientific notation (e+NN/e-NN) in a rendered value -- a numeric env is missing its '| int' cast ($(grep -nE 'e[+-][0-9]' "${rendered_vf}" | tr '\n' ';'))"
+    else
+      pass "pytorch-ddp (values file render) has no scientific-notation value"
+    fi
+    if grep -A1 'name: TOTAL_STEPS' "${rendered_vf}" | grep -q 'value: "1000000"'; then
+      pass "pytorch-ddp (values file render) TOTAL_STEPS is \"1000000\", not truncated or in scientific notation"
+    else
+      fail "pytorch-ddp (values file render) TOTAL_STEPS did not render as \"1000000\" ($(grep -A1 'name: TOTAL_STEPS' "${rendered_vf}" | tr '\n' ';'))"
+    fi
+    if grep -A1 'name: STEP_SLEEP_SECONDS' "${rendered_vf}" | grep -q 'value: "0.5"'; then
+      pass "pytorch-ddp (values file render) STEP_SLEEP_SECONDS is \"0.5\", not truncated to an integer"
+    else
+      fail "pytorch-ddp (values file render) STEP_SLEEP_SECONDS did not render as \"0.5\" ($(grep -A1 'name: STEP_SLEEP_SECONDS' "${rendered_vf}" | tr '\n' ';'))"
+    fi
+  else
+    fail "no rendered manifest for the values-file render (helm template failed above)"
+  fi
+fi
+
 # ------------------------------------------------ 6. rendered-object checks
 
 JOBSET_CRD=""

@@ -36,10 +36,14 @@ kueue:
 # number of GPUs each Pod requests and the number of processes torchrun
 # starts in it. World size = replicas x gpusPerNode.
 #
-# Default: replicas 1, gpusPerNode 2 (one node, two GPUs).
-# Two nodes with one GPU each instead: replicas 2, gpusPerNode 1. That
-# layout is documented, not run as part of this example's own
-# verification; it relies on the JobSet's headless Service (Pod host name
+# Default: replicas 1, gpusPerNode 2 (one node, two GPUs) -- not run as
+# part of this chart's own real-hardware verification (issue #34's pull
+# request, its own Test Results section): every g5/g6e/g7 size with 2+
+# GPUs needs 48+ vCPU, more than the verification cell's own light-tier
+# pool.limits.cpu allowed. Two nodes with one GPU each instead (replicas
+# 2, gpusPerNode 1) is the layout that PR's own verification actually
+# ran. It relies on the
+# JobSet's headless Service (Pod host name
 # <release>-worker-0-0.<release>) for the rendezvous address, and on
 # NCCL reaching the other node over TCP sockets, since the image carries
 # no EFA libraries (see efaPerNode below).
