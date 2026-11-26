@@ -289,7 +289,40 @@ jobs:
           fi
 
       - name: Run gitops/tests/0.static.sh
-        run: bash gitops/tests/0.static.sh
+        # Retries the whole script up to 3 times: a real run of this exact
+        # step on 2026-11-26 failed check_pinned_crds.py's and
+        # check_appproject_whitelist.py's own `helm template oci://
+        # public.ecr.aws/karpenter/...` calls with "429 toomanyrequests:
+        # Data limit exceeded" -- Amazon ECR Public's own anonymous-pull
+        # data quota, shared across every unauthenticated puller behind a
+        # GitHub-hosted runner's own IP range, not something this
+        # workflow controls and not a defect in the script. Authenticating
+        # to raise that quota needs real AWS credentials
+        # (`aws ecr-public get-login-password`), which this workflow does
+        # not have and must not add just to raise a public, anonymous
+        # rate limit. A fixed, unconditional retry (not "retry only on
+        # 429", which would need parsing this script's own mixed
+        # pass/fail output) is the same mitigation this exact error
+        # message's own ecosystem (container registries under shared CI
+        # IP ranges) commonly uses; three attempts with a growing pause
+        # converges in practice without masking a real, deterministic
+        # failure for more than a couple of minutes (the backoff is
+        # visible in the log either way).
+        run: |
+          set -euo pipefail
+          attempt=1
+          max_attempts=3
+          until bash gitops/tests/0.static.sh; do
+            rc=$?
+            if [[ "${attempt}" -ge "${max_attempts}" ]]; then
+              echo "FAIL gitops/tests/0.static.sh did not pass after ${attempt} attempt(s) (exit ${rc})"
+              exit "${rc}"
+            fi
+            sleep_seconds=$((attempt * 20))
+            echo "gitops/tests/0.static.sh failed on attempt ${attempt} (exit ${rc}); retrying in ${sleep_seconds}s"
+            sleep "${sleep_seconds}"
+            attempt=$((attempt + 1))
+          done
 
   # ----------------------------------------------------------------------
   inference-static:
