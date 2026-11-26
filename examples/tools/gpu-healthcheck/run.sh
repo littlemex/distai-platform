@@ -38,11 +38,21 @@
 #                     Never set for a real pre-flight.
 #   SUITE_ARGS        Passed to gpu-healthcheck.sh verbatim (default
 #                     "--suite lightweight", checks 0-3, the pre-flight's
-#                     own scope). "--suite intensive --exclusive" also
-#                     runs checks 4-6 (DCGM L4, NCCL allreduce, EFA
-#                     loopback); upstream itself refuses --suite intensive
-#                     without --exclusive, since those checks assume no
-#                     other GPU workload is on the node at the same time.
+#                     own scope). "--suite intensive --exclusive" runs
+#                     checks 4-6 instead (DCGM L4, NCCL allreduce, EFA
+#                     loopback) -- the two suites are separate selections,
+#                     not additive: upstream's own gpu-healthcheck.sh
+#                     --suite lightweight|intensive and its own
+#                     "Checks 4-6" description for intensive (vendor/
+#                     awsome-distributed-ai/gpu-healthcheck.sh) confirm
+#                     this, and a real run with --suite intensive
+#                     --exclusive reported 3/3 checks, not 7/7. Run this
+#                     script twice, once with each suite, for both.
+#                     Without --exclusive, upstream itself refuses to
+#                     start the intensive suite at all ("Intensive suite
+#                     requires --exclusive flag to confirm exclusive node
+#                     access", same vendored file) -- confirmed by
+#                     reading that line, not by running without the flag.
 #   KUBECTL           (kubectl)
 set -euo pipefail
 
@@ -56,13 +66,15 @@ BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/cloud-native/dcgm:3.3.7-1-ubuntu22.04}"
 RUN_ID="${RUN_ID:-$(date +%s)}"
 # The arguments gpu-healthcheck.sh itself is invoked with, verbatim
 # (upstream's own --suite/--check/--exclusive/--dry-run flags). Default
-# matches this script's own previous, hardcoded behavior exactly (checks
-# 0-3, the pre-flight's own stated scope) -- no behavior change for a
-# caller that does not set this. Set to "--suite intensive --exclusive"
-# to also run checks 4-6 (DCGM L4, NCCL allreduce, EFA loopback); upstream
-# itself refuses --suite intensive without --exclusive, since those
-# checks assume no other GPU workload is running on the node at the same
-# time -- true that, not merely pass it, before setting this.
+# "--suite lightweight" substitutes the identical literal the previous
+# hardcoded invocation used, in the same position, so the command this
+# script runs for a caller that does not set this is unchanged; the
+# rendered Job's own log banner line changed text (from "running
+# lightweight suite (checks 0-3)" to "running suite: --suite
+# lightweight"), stated here rather than left implicit. "--suite
+# intensive --exclusive" runs checks 4-6 instead of 0-3, not in
+# addition to them -- see this variable's own usage-comment entry above
+# for the exact confirmation and citation.
 SUITE_ARGS="${SUITE_ARGS:---suite lightweight}"
 INJECT_BAD_EFA_COUNT="${INJECT_BAD_EFA_COUNT:-0}"
 
