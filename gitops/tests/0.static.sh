@@ -654,6 +654,15 @@ KUBECONFORM_ARGS=(
   -schema-location "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/${K8S_SCHEMA_COMMIT}/{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json"
   -schema-location "https://raw.githubusercontent.com/datreeio/CRDs-catalog/${CRD_CATALOG_COMMIT}/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
   -summary
+  # #18: sharedfs.io is this platform's own first brand-new CRD group (every
+  # other CRD this repository renders an instance of - karpenter.sh,
+  # kueue.x-k8s.io, resource.k8s.io - is an established upstream project
+  # already in datreeio/CRDs-catalog); -skip (kubeconform's own flag, "a
+  # comma-separated list of kinds or GVKs to ignore") names only these two
+  # kinds, not a blanket -ignore-missing-schemas for every resource this
+  # script validates - a real "no schema for a kind that should have one"
+  # (a typo, a renamed CRD) still fails everywhere else.
+  -skip "FilesystemShare,FilesystemShareDirectory"
 )
 
 # The two ApplicationSets and the root Application, plus every *.yaml this

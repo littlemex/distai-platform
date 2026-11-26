@@ -80,7 +80,18 @@ def placeholder_values(addon_doc):
     # no live cluster - working for a catalog entry's own bare render,
     # not only a cell marker's.
     for entry in addon_doc.get("overridableKeys", []) or []:
-        set_path(values, entry["path"], "pinned-crd-check-placeholder")
+        # kind: object (dcgm-exporter's own dcgm-exporter.resources,
+        # .networkPolicy.allowedPeers) must get a placeholder Helm's own
+        # values-coalescing can merge as a table, never a bare string: an
+        # earlier version of this fix used the same string placeholder
+        # for every kind and broke dcgm-exporter's own render
+        # ("cannot overwrite table with non table for
+        # dcgm-exporter.dcgm-exporter.resources", found by this fix's own
+        # first real-machine-adjacent run) - {} merges into any map- or
+        # list-shaped default with no effect, the same "do nothing, just
+        # exist" role the string placeholder plays for kind: scalar.
+        placeholder = {} if entry.get("kind") == "object" else "pinned-crd-check-placeholder"
+        set_path(values, entry["path"], placeholder)
     return values
 
 
