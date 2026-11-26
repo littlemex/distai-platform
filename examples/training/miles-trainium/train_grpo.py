@@ -27,7 +27,6 @@ Design, and why:
 
 Prints lines prefixed with [HH:MM:SS] for the caller to grep (STEP_SUMMARY, DONE, FATAL).
 """
-import json
 import os
 import shutil
 import signal
