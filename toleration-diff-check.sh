@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="uv run --no-project -q --with pyyaml==6.0.2 python3"
 W=$(mktemp -d)
 cd "$W"
 
@@ -31,9 +33,9 @@ helm template after ./nvidia-device-plugin -n nvidia-device-plugin -f nvidia-ove
 echo "--- default tolerations in chart's own values.yaml ---"
 grep -A6 "^tolerations:" ./nvidia-device-plugin/values.yaml
 echo "--- rendered tolerations, before override ---"
-yq -r 'select(.kind=="DaemonSet") | .spec.template.spec.tolerations' before-nvidia.yaml
+${PY} "${SCRIPT_DIR}/extract.py" before-nvidia.yaml DaemonSet '' 'spec.template.spec.tolerations'
 echo "--- rendered tolerations, after override ---"
-yq -r 'select(.kind=="DaemonSet") | .spec.template.spec.tolerations' after-nvidia.yaml
+${PY} "${SCRIPT_DIR}/extract.py" after-nvidia.yaml DaemonSet '' 'spec.template.spec.tolerations'
 
 echo
 echo "=== Neuron device plugin (1.11.2): before vs after ==="
@@ -65,11 +67,11 @@ helm template after ./neuron-helm-chart -n neuron-device-plugin -f neuron-overri
 echo "--- default devicePlugin.tolerations in chart's own values.yaml ---"
 grep -A8 "^devicePlugin:" ./neuron-helm-chart/values.yaml | grep -A6 "tolerations:"
 echo "--- rendered device-plugin DaemonSet tolerations, before override ---"
-yq -r 'select(.kind=="DaemonSet" and (.metadata.name | test("device-plugin"))) | .spec.template.spec.tolerations' before-neuron.yaml
+${PY} "${SCRIPT_DIR}/extract.py" before-neuron.yaml DaemonSet 'device-plugin' 'spec.template.spec.tolerations'
 echo "--- rendered device-plugin DaemonSet tolerations, after override ---"
-yq -r 'select(.kind=="DaemonSet" and (.metadata.name | test("device-plugin"))) | .spec.template.spec.tolerations' after-neuron.yaml
+${PY} "${SCRIPT_DIR}/extract.py" after-neuron.yaml DaemonSet 'device-plugin' 'spec.template.spec.tolerations'
 echo "--- npd DaemonSet tolerations (should be unchanged, not touched by this PR) ---"
-yq -r 'select(.kind=="DaemonSet" and (.metadata.name | test("problem-detector|npd"))) | .spec.template.spec.tolerations' after-neuron.yaml
+${PY} "${SCRIPT_DIR}/extract.py" after-neuron.yaml DaemonSet 'problem-detector|npd' 'spec.template.spec.tolerations'
 
 echo
 echo "=== EFA device plugin (v0.5.35): before vs after ==="
@@ -97,9 +99,9 @@ helm template after ./aws-efa-k8s-device-plugin -n kube-system -f efa-override.y
 echo "--- default tolerations in chart's own values.yaml ---"
 grep -A3 "^tolerations:" ./aws-efa-k8s-device-plugin/values.yaml
 echo "--- rendered tolerations, before override ---"
-yq -r 'select(.kind=="DaemonSet") | .spec.template.spec.tolerations' before-efa.yaml
+${PY} "${SCRIPT_DIR}/extract.py" before-efa.yaml DaemonSet '' 'spec.template.spec.tolerations'
 echo "--- rendered tolerations, after override ---"
-yq -r 'select(.kind=="DaemonSet") | .spec.template.spec.tolerations' after-efa.yaml
+${PY} "${SCRIPT_DIR}/extract.py" after-efa.yaml DaemonSet '' 'spec.template.spec.tolerations'
 
 echo
 echo "=== vigil-controller (0.7.0): config + tolerations/affinity rendered ==="
@@ -124,23 +126,23 @@ config:
 VALUES
 helm template v ./vigil-controller -n vigil-system -f vigil-override.yaml > vigil-rendered.yaml
 echo "--- rendered ConfigMap data (must contain the configured taintKey and timeoutSeconds 300) ---"
-yq -r 'select(.kind=="ConfigMap") | .data."config.yaml"' vigil-rendered.yaml
+${PY} "${SCRIPT_DIR}/extract.py" vigil-rendered.yaml ConfigMap '' 'data'
 echo "--- rendered Deployment tolerations/affinity ---"
-yq -r 'select(.kind=="Deployment") | .spec.template.spec.tolerations' vigil-rendered.yaml
-yq -r 'select(.kind=="Deployment") | .spec.template.spec.affinity' vigil-rendered.yaml
+${PY} "${SCRIPT_DIR}/extract.py" vigil-rendered.yaml Deployment '' 'spec.template.spec.tolerations'
+${PY} "${SCRIPT_DIR}/extract.py" vigil-rendered.yaml Deployment '' 'spec.template.spec.affinity'
 
 echo
 echo "=== dcgm-exporter: local wrapper chart defaults ==="
 
 echo
 echo "=== every DaemonSet name NVIDIA chart renders, before vs after (same set == no new/missing DaemonSet from the override) ==="
-echo "before:"; yq -r 'select(.kind=="DaemonSet") | .metadata.name' before-nvidia.yaml
-echo "after:"; yq -r 'select(.kind=="DaemonSet") | .metadata.name' after-nvidia.yaml
+echo "before:"; ${PY} "${SCRIPT_DIR}/extract.py" before-nvidia.yaml DaemonSet '' ''
+echo "after:"; ${PY} "${SCRIPT_DIR}/extract.py" after-nvidia.yaml DaemonSet '' ''
 echo
 echo "=== every DaemonSet name Neuron chart renders, before vs after ==="
-echo "before:"; yq -r 'select(.kind=="DaemonSet") | .metadata.name' before-neuron.yaml
-echo "after:"; yq -r 'select(.kind=="DaemonSet") | .metadata.name' after-neuron.yaml
+echo "before:"; ${PY} "${SCRIPT_DIR}/extract.py" before-neuron.yaml DaemonSet '' ''
+echo "after:"; ${PY} "${SCRIPT_DIR}/extract.py" after-neuron.yaml DaemonSet '' ''
 echo
 echo "=== every DaemonSet name EFA chart renders, before vs after ==="
-echo "before:"; yq -r 'select(.kind=="DaemonSet") | .metadata.name' before-efa.yaml
-echo "after:"; yq -r 'select(.kind=="DaemonSet") | .metadata.name' after-efa.yaml
+echo "before:"; ${PY} "${SCRIPT_DIR}/extract.py" before-efa.yaml DaemonSet '' ''
+echo "after:"; ${PY} "${SCRIPT_DIR}/extract.py" after-efa.yaml DaemonSet '' ''
