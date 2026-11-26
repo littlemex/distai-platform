@@ -9,6 +9,8 @@
 # Reads these globals of the calling script at call time:
 #   TEST_TAG_KEY, RUN_ID   the run tag this test applies to every resource
 #                          it creates directly (IAM roles, the S3 bucket)
+#   NAME                   cell name; every role name-prefix sweep below is
+#                           scoped to it
 #   FAILED_STEP            set by fail()
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
@@ -76,23 +78,50 @@ no_role_left() {
 }
 
 # no_bucket_left BUCKET: true if the S3 bucket no longer exists.
+# Not routed through aws_text's generic NotFound-shaped patterns: a HEAD
+# request carries no response body, so on a gone bucket the AWS CLI's own
+# error text for this specific call is "An error occurred (404) ... Not
+# Found", never ".NotFound"/"NotFoundException"/"NoSuchBucket" - confirmed
+# against a real run, which found aws_text's generic patterns did not
+# match this call's own wording either way (a bucket that still existed
+# also read as "gone", because head-bucket's own success produces no
+# output for aws_text to distinguish from a recognized NotFound string).
 no_bucket_left() {
-  local out
-  if ! out="$(aws_text aws s3api head-bucket --bucket "$1" 2>&1)"; then
-    fail "checking for leftover S3 bucket $1: ${out}"
+  local err
+  if err="$(aws s3api head-bucket --bucket "$1" 2>&1)"; then
+    return 1
   fi
-  true
+  if [[ "${err}" == *"404"* || "${err}" == *"Not Found"* || "${err}" == *"NoSuchBucket"* ]]; then
+    return 0
+  fi
+  fail "checking for leftover S3 bucket $1: ${err}"
 }
 
-# no_role_tagged_for_run: true if no IAM role anywhere in the account still
-# carries this run's own tag (TEST_TAG_KEY=RUN_ID) - the independent sweep
-# that does not rely on this script's own list of role names, the same
-# "describe by tag, do not trust your own bookkeeping" shape
-# infra/foundation/tests/e2e-lib.sh's list_leftover uses for EC2 resources.
+# no_role_tagged_for_run: true if no IAM role whose name starts with this
+# cell's own NAME still carries this run's own tag (TEST_TAG_KEY=RUN_ID).
+# Not account-wide by tag alone: IAM's own ListRoles response never
+# includes Tags at all (confirmed against the API's own documentation,
+# "ListRoles... does not return... Tags"), and the Resource Groups Tagging
+# API's GetResources returned an empty result for a role confirmed, by a
+# direct GetRole call, to carry a real tag (confirmed on a real account,
+# 2026-11-26) - IAM roles are not actually discoverable through either of
+# those two tag-search mechanisms. This instead lists every role name
+# under this cell's own prefix (every role this script, or a bug in it,
+# could plausibly have created shares that prefix: the derived
+# "<cluster_name>-identity-<key>" names and the simulated legacy role,
+# "<NAME>-legacy-imagebuilder") and calls GetRole (which does return Tags)
+# on each candidate.
 no_role_tagged_for_run() {
-  local out
-  if ! out="$(aws_text aws iam list-roles --query "Roles[?Tags[?Key=='${TEST_TAG_KEY}' && Value=='${RUN_ID}']].RoleName" --output text)"; then
-    fail "checking for IAM roles tagged ${TEST_TAG_KEY}=${RUN_ID}: ${out}"
+  local role_names role_name tags
+  if ! role_names="$(aws_text aws iam list-roles --query "Roles[?starts_with(RoleName, '${NAME}')].RoleName" --output text)"; then
+    fail "listing IAM roles under prefix ${NAME}: ${role_names}"
   fi
-  [[ -z "${out}" || "${out}" == "None" ]]
+  for role_name in ${role_names}; do
+    [[ "${role_name}" == "None" || -z "${role_name}" ]] && continue
+    if ! tags="$(aws_text aws iam get-role --role-name "${role_name}" --query "Role.Tags[?Key=='${TEST_TAG_KEY}' && Value=='${RUN_ID}']" --output text)"; then
+      fail "checking tags on IAM role ${role_name}: ${tags}"
+    fi
+    [[ -z "${tags}" || "${tags}" == "None" ]] || return 1
+  done
+  return 0
 }

@@ -43,6 +43,11 @@ variable "platform_identities" {
                          that happens not to match an existing role's real
                          name must not force a replacement; this field is
                          the escape hatch for that mismatch.
+      role_path       - optional, default "/". IAM role paths cannot be
+                         changed in place either (same ForceNew reasoning
+                         as role_name); set this when importing an
+                         already-existing role created under a non-default
+                         path.
       s3              - list of { bucket, prefixes, write }. Every bucket
                          grants s3:GetObject/s3:ListBucket scoped to exactly
                          the listed key prefixes; write = true additionally
@@ -70,6 +75,7 @@ variable "platform_identities" {
     namespace       = string
     service_account = string
     role_name       = optional(string, null)
+    role_path       = optional(string, "/")
     s3 = optional(list(object({
       bucket   = string
       prefixes = list(string)
@@ -92,6 +98,14 @@ variable "platform_identities" {
       v.role_name != null || length("${var.cluster_name}-identity-${k}") <= 64
     ])
     error_message = "cluster_name plus every platform_identities key must fit IAM's 64-character role-name limit as \"<cluster_name>-identity-<key>\" unless that entry sets its own role_name; shorten cluster_name or the key, or set role_name explicitly."
+  }
+
+  validation {
+    condition = alltrue([
+      for v in values(var.platform_identities) :
+      can(regex("^/([\\x21-\\x7E]+/)*$", v.role_path)) && length(v.role_path) <= 512
+    ])
+    error_message = "Every entry's role_path must be a valid IAM path: start and end with \"/\", at most 512 characters, containing no whitespace."
   }
 
   validation {

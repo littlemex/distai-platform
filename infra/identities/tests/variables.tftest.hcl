@@ -72,6 +72,47 @@ run "one_read_only_s3_entry_plans" {
     condition     = length(aws_iam_role_policies_exclusive.entry["image-builder"].policy_names) == 1 && contains(aws_iam_role_policies_exclusive.entry["image-builder"].policy_names, "scoped")
     error_message = "an entry that declares s3 must list exactly its own \"scoped\" inline policy in the exclusive inline-policy set."
   }
+
+  assert {
+    condition     = !contains(data.aws_iam_policy_document.identity_scoped["image-builder"].statement[*].sid, "AllowScopedS3Write")
+    error_message = "a read-only entry (no s3 block sets write = true) must not get the write statement at all."
+  }
+
+  assert {
+    condition     = !contains(flatten(data.aws_iam_policy_document.identity_scoped["image-builder"].statement[*].actions), "s3:PutObject") && !contains(flatten(data.aws_iam_policy_document.identity_scoped["image-builder"].statement[*].actions), "s3:DeleteObject")
+    error_message = "a read-only entry's scoped policy must grant neither s3:PutObject nor s3:DeleteObject, under any statement."
+  }
+
+  assert {
+    condition     = !contains(data.aws_iam_policy_document.identity_scoped["image-builder"].statement[*].sid, "AllowScopedKms")
+    error_message = "an entry with no kms_key_arns declared must get no KMS statement at all."
+  }
+
+  assert {
+    condition     = alltrue([for a in flatten(data.aws_iam_policy_document.identity_scoped["image-builder"].statement[*].actions) : a != "*" && a != "s3:*"])
+    error_message = "no statement of a declared entry's scoped policy may grant a wildcard action."
+  }
+
+  assert {
+    condition     = alltrue([for r in flatten(data.aws_iam_policy_document.identity_scoped["image-builder"].statement[*].resources) : r != "*"])
+    error_message = "no statement of a declared entry's scoped policy may target a wildcard resource."
+  }
+
+  assert {
+    condition = alltrue([
+      for c in data.aws_iam_policy_document.identity_assume["image-builder"].statement[0].condition :
+      c.variable != "aws:RequestTag/kubernetes-namespace" || c.values == toset(["image-builder"])
+    ])
+    error_message = "the trust policy's own namespace condition must scope to exactly this entry's declared namespace."
+  }
+
+  assert {
+    condition = alltrue([
+      for c in data.aws_iam_policy_document.identity_assume["image-builder"].statement[0].condition :
+      c.variable != "aws:RequestTag/kubernetes-service-account" || c.values == toset(["image-builder"])
+    ])
+    error_message = "the trust policy's own service-account condition must scope to exactly this entry's declared service_account."
+  }
 }
 
 run "write_entry_adds_put_delete_and_generatedatakey" {
@@ -152,6 +193,62 @@ run "policy_arns_only_entry_gets_no_inline_policy" {
   assert {
     condition     = length(aws_iam_role_policies_exclusive.entry["mcp-server"].policy_names) == 0
     error_message = "an entry with no s3/kms_key_arns must declare an empty exclusive inline-policy set (removing any inline policy attached outside this layer)."
+  }
+}
+
+# Regression test: a single combined ListBucket statement, with every
+# declared bucket's own ARN in `resources` and every declared bucket's own
+# prefixes merged into one `s3:prefix` condition, would let IAM match any
+# resource against any condition value independently - bucket A's own
+# prefix would also be allowed when listing bucket B. One statement per
+# declared s3 block (identities.tf) pairs each bucket with only its own
+# prefixes.
+run "multi_bucket_entry_list_statements_do_not_cross_pair" {
+  command = plan
+
+  variables {
+    platform_identities = {
+      multi-bucket = {
+        namespace       = "kube-system"
+        service_account = "multi-bucket"
+        s3 = [
+          { bucket = "distai-platform-bucket-a", prefixes = ["a-prefix/"] },
+          { bucket = "distai-platform-bucket-b", prefixes = ["b-prefix/"] },
+        ]
+      }
+    }
+  }
+
+  assert {
+    condition = length([
+      for s in data.aws_iam_policy_document.identity_scoped["multi-bucket"].statement :
+      s if s.actions == toset(["s3:ListBucket"])
+    ]) == 2
+    error_message = "a two-bucket entry must get two separate ListBucket statements, one per declared bucket."
+  }
+
+  assert {
+    condition = alltrue([
+      for s in data.aws_iam_policy_document.identity_scoped["multi-bucket"].statement : (
+        s.actions != toset(["s3:ListBucket"]) || !(
+          contains(s.resources, "arn:aws:s3:::distai-platform-bucket-a") &&
+          contains(flatten([for c in s.condition : c.values]), "b-prefix/*")
+        )
+      )
+    ])
+    error_message = "bucket-a's own ListBucket statement must not also allow bucket-b's own declared prefix."
+  }
+
+  assert {
+    condition = alltrue([
+      for s in data.aws_iam_policy_document.identity_scoped["multi-bucket"].statement : (
+        s.actions != toset(["s3:ListBucket"]) || !(
+          contains(s.resources, "arn:aws:s3:::distai-platform-bucket-b") &&
+          contains(flatten([for c in s.condition : c.values]), "a-prefix/*")
+        )
+      )
+    ])
+    error_message = "bucket-b's own ListBucket statement must not also allow bucket-a's own declared prefix."
   }
 }
 
@@ -239,6 +336,54 @@ run "role_name_override_lets_import_target_match_an_existing_role" {
     condition     = aws_iam_role.entry["legacy-imagebuilder"].name == "example-cell-legacy-imagebuilder"
     error_message = "an entry with role_name set must name its role exactly that value, not the derived <cluster_name>-identity-<key> default (the whole point: letting an already-existing role's real name be imported without a replacement)."
   }
+
+  assert {
+    condition     = aws_iam_role.entry["legacy-imagebuilder"].path == "/"
+    error_message = "role_path must default to \"/\" when not set."
+  }
+
+  assert {
+    condition     = aws_iam_role.entry["legacy-imagebuilder"].force_detach_policies == true
+    error_message = "every entry's role must set force_detach_policies = true, so destroying this root never fails with DeleteConflict on a role whose policy_arns is non-empty (aws_iam_role_policy_attachments_exclusive's own destroy does not reliably detach on its own)."
+  }
+}
+
+run "role_path_override_lets_import_target_a_non_default_path" {
+  command = plan
+
+  variables {
+    platform_identities = {
+      legacy-custom-path = {
+        namespace       = "image-builder"
+        service_account = "image-builder"
+        role_name       = "example-cell-legacy-custom"
+        role_path       = "/distai-platform/legacy/"
+        policy_arns     = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]
+      }
+    }
+  }
+
+  assert {
+    condition     = aws_iam_role.entry["legacy-custom-path"].path == "/distai-platform/legacy/"
+    error_message = "role_path must be passed through to the role's own path, so importing a role created under a non-default path does not plan a replacement."
+  }
+}
+
+run "rejects_invalid_role_path" {
+  command = plan
+
+  variables {
+    platform_identities = {
+      bad = {
+        namespace       = "kube-system"
+        service_account = "x"
+        role_path       = "no-leading-slash/"
+        policy_arns     = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]
+      }
+    }
+  }
+
+  expect_failures = [var.platform_identities]
 }
 
 run "rejects_role_name_collision" {

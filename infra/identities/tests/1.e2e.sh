@@ -320,46 +320,16 @@ pass "the broad, hand-attached AmazonS3ReadOnlyAccess policy is gone; only the e
 
 # --------------------------------------------- 5. pods and credential checks
 
-cat <<YAML | kubectl apply -f - || fail "apply test pods"
+apply_test_pod() {
+  local name="$1" sa="$2"
+  cat <<YAML | kubectl apply -f - || fail "apply test pod ${name}"
 apiVersion: v1
 kind: Pod
 metadata:
-  name: reader
+  name: ${name}
   namespace: ${TEST_NAMESPACE}
 spec:
-  serviceAccountName: reader
-  restartPolicy: Never
-  tolerations:
-    - key: CriticalAddonsOnly
-      operator: Exists
-  containers:
-    - name: aws-cli
-      image: ${AWS_CLI_IMAGE}
-      command: ["/bin/sh", "-c", "sleep 3600"]
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: writer
-  namespace: ${TEST_NAMESPACE}
-spec:
-  serviceAccountName: writer
-  restartPolicy: Never
-  tolerations:
-    - key: CriticalAddonsOnly
-      operator: Exists
-  containers:
-    - name: aws-cli
-      image: ${AWS_CLI_IMAGE}
-      command: ["/bin/sh", "-c", "sleep 3600"]
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: undeclared
-  namespace: ${TEST_NAMESPACE}
-spec:
-  serviceAccountName: undeclared
+  serviceAccountName: ${sa}
   restartPolicy: Never
   tolerations:
     - key: CriticalAddonsOnly
@@ -369,31 +339,81 @@ spec:
       image: ${AWS_CLI_IMAGE}
       command: ["/bin/sh", "-c", "sleep 3600"]
 YAML
+}
 
+pod_running() {
+  [[ "$(kubectl get pod "$1" -n "${TEST_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null)" == Running ]]
+}
+
+# True once EKS Pod Identity's own mutating webhook has injected the
+# container-credentials environment variable into this Pod's spec. This
+# is set once, at Pod admission time, from whether the Pod's own
+# ServiceAccount already had an association *at that moment* - it never
+# appears later on an already-created Pod, so a Pod missing it must be
+# recreated, not retried in place.
+pod_has_creds_env() {
+  local v
+  v="$(kubectl get pod "$1" -n "${TEST_NAMESPACE}" \
+    -o jsonpath='{.spec.containers[0].env[?(@.name=="AWS_CONTAINER_CREDENTIALS_FULL_URI")].name}' 2>/dev/null)"
+  [[ "${v}" == "AWS_CONTAINER_CREDENTIALS_FULL_URI" ]]
+}
+
+# apply_test_pod reader/writer/undeclared, then, for reader and writer
+# only (the two with a declared association), wait for the credentials
+# env var - recreating the Pod, not retrying a call against the same one,
+# on every attempt that still lacks it.
+#
+# EKS Pod Identity associations are eventually consistent (AWS's own
+# documentation: "potential delays of several seconds after API calls");
+# this layer's own apply, just above, created the associations these Pods
+# use. A real run of this exact step found the very first Pod created
+# right after that apply never had the env var injected at all (not a
+# credential-fetch failure - the SDK reported "Unable to locate
+# credentials", meaning it found no AWS_CONTAINER_CREDENTIALS_FULL_URI to
+# try in the first place) - a single Pod's own env, once set at creation,
+# does not change, so retrying a call against that same Pod could never
+# have helped; only recreating it after the association has propagated
+# does.
+wait_for_creds_env() {
+  local name="$1" sa="$2" start now
+  start="$(date +%s)"
+  while true; do
+    if pod_has_creds_env "${name}"; then
+      return 0
+    fi
+    now="$(date +%s)"
+    if ((now - start >= 90)); then
+      return 1
+    fi
+    kubectl delete pod "${name}" -n "${TEST_NAMESPACE}" --wait --timeout=30s >/dev/null 2>&1
+    apply_test_pod "${name}" "${sa}"
+    wait_until 60 5 "pod ${name} Running" pod_running || true
+  done
+}
+
+apply_test_pod reader reader
+apply_test_pod writer writer
+apply_test_pod undeclared undeclared
 for p in reader writer undeclared; do
-  if ! wait_until 360 5 "pod ${p} Running" bash -c "[[ \"\$(kubectl get pod ${p} -n ${TEST_NAMESPACE} -o jsonpath='{.status.phase}' 2>/dev/null)\" == Running ]]"; then
+  if ! wait_until 360 5 "pod ${p} Running" pod_running; then
     kubectl describe pod "${p}" -n "${TEST_NAMESPACE}" || true
     fail "pod ${p} did not reach Running within 360s"
   fi
 done
 pass "reader, writer and undeclared pods are Running"
 
+for pair in "reader:reader" "writer:writer"; do
+  name="${pair%%:*}"
+  sa="${pair#*:}"
+  wait_for_creds_env "${name}" "${sa}" \
+    || fail "pod ${name} never had AWS_CONTAINER_CREDENTIALS_FULL_URI injected within 90s, even after being recreated - its own Pod Identity association never propagated in time"
+done
+pass "reader and writer both have the Pod Identity credentials environment variable injected"
+
 kexec() { kubectl exec -i -n "${TEST_NAMESPACE}" "$1" -- "${@:2}"; }
 
-# EKS Pod Identity associations are eventually consistent (AWS's own
-# documentation: "potential delays of several seconds after API calls");
-# the association was created by the apply just above, and these Pods
-# right after it, so the very first credentialed call gets a retry budget
-# for that documented propagation window. A real run of this exact check,
-# with no retry, failed immediately with "Unable to locate credentials"
-# (the SDK found no AWS_CONTAINER_CREDENTIALS_FULL_URI at all, consistent
-# with the association not yet having propagated to this node's agent)
-# before this retry was added.
-reader_reads_allowed() {
-  kexec reader aws s3 cp "s3://${BUCKET}/allowed/ok.txt" - >/dev/null 2>"${WORK_DIR}/reader-ok.err"
-}
-wait_until 60 5 "reader reads its own declared prefix (allowing for EKS Pod Identity's documented propagation delay)" reader_reads_allowed \
-  || fail "reader could not read s3://${BUCKET}/allowed/ok.txt within 60s (its own declared prefix): $(cat "${WORK_DIR}/reader-ok.err")"
+kexec reader aws s3 cp "s3://${BUCKET}/allowed/ok.txt" - >/dev/null \
+  || fail "reader could not read s3://${BUCKET}/allowed/ok.txt (its own declared prefix)"
 pass "reader reads inside its own declared prefix (allowed/)"
 
 if kexec reader aws s3 cp "s3://${BUCKET}/other/secret.txt" - >/dev/null 2>"${WORK_DIR}/reader-other.err"; then
@@ -408,11 +428,8 @@ fi
 grep -qi "AccessDenied\|Forbidden" "${WORK_DIR}/reader-write.err" || fail "reader's denied write did not fail with AccessDenied/Forbidden: $(cat "${WORK_DIR}/reader-write.err")"
 pass "reader is denied writing, because its own entry does not declare write = true"
 
-writer_writes_own_prefix() {
-  echo "written" | kexec writer aws s3 cp - "s3://${BUCKET}/writer-area/new.txt" >/dev/null 2>"${WORK_DIR}/writer-ok.err"
-}
-wait_until 60 5 "writer writes its own declared prefix (allowing for EKS Pod Identity's documented propagation delay)" writer_writes_own_prefix \
-  || fail "writer could not write s3://${BUCKET}/writer-area/new.txt within 60s (its own declared prefix, write = true): $(cat "${WORK_DIR}/writer-ok.err")"
+echo "written" | kexec writer aws s3 cp - "s3://${BUCKET}/writer-area/new.txt" \
+  || fail "writer could not write s3://${BUCKET}/writer-area/new.txt (its own declared prefix, write = true)"
 pass "writer writes inside its own declared prefix (writer-area/), because its own entry declares write = true"
 
 if kexec writer aws s3 cp "s3://${BUCKET}/allowed/ok.txt" - >/dev/null 2>"${WORK_DIR}/writer-other.err"; then
@@ -421,10 +438,14 @@ fi
 grep -qi "AccessDenied\|Forbidden" "${WORK_DIR}/writer-other.err" || fail "writer's denied cross-prefix read did not fail with AccessDenied/Forbidden: $(cat "${WORK_DIR}/writer-other.err")"
 pass "writer is denied touching reader's own prefix (allowed/); each entry's role is scoped to only its own declared resources"
 
+pod_has_creds_env undeclared \
+  && fail "the undeclared ServiceAccount's pod has AWS_CONTAINER_CREDENTIALS_FULL_URI injected; no Pod Identity association exists for it, so this env var must never appear"
 if kexec undeclared aws sts get-caller-identity >/dev/null 2>"${WORK_DIR}/undeclared.err"; then
   fail "the undeclared ServiceAccount's pod obtained AWS credentials; an undeclared workload must get none at all"
 fi
-pass "the undeclared ServiceAccount's pod gets no AWS credentials at all (no role or Pod Identity association exists for it) - AccessDenied by construction"
+grep -qi "Unable to locate credentials" "${WORK_DIR}/undeclared.err" \
+  || fail "the undeclared ServiceAccount's pod failed for a reason other than having no credentials at all: $(cat "${WORK_DIR}/undeclared.err")"
+pass "the undeclared ServiceAccount's pod has no credentials environment variable and gets no AWS credentials at all - AccessDenied by construction, not a transient failure"
 
 # --------------------------------- 6. remove one entry, re-apply, check scope
 

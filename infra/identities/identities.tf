@@ -9,6 +9,12 @@
 # infra/foundation untouched: it is not migrated here (its lifetime is the
 # cell's own foundation lifetime, not an independently added/removed
 # add-on), and this layer does not reproduce it.
+#
+# role_name/role_path default to this layer's own convention ("/" and
+# "<cluster_name>-identity-<key>"); an entry importing an already-existing
+# role sets both to that role's real values, because IAM role `name` and
+# `path` are both ForceNew - a mismatch on either plans a replacement, not
+# an update, defeating the import.
 
 locals {
   # "<cluster_name>-identity-<key>" by default; an entry's own role_name
@@ -75,9 +81,20 @@ data "aws_iam_policy_document" "identity_assume" {
 resource "aws_iam_role" "entry" {
   for_each = var.platform_identities
 
-  name               = local.role_names[each.key]
-  description        = "distai-platform add-on identity (issue #8): ${each.key}, ${each.value.namespace}/${each.value.service_account}"
-  assume_role_policy = data.aws_iam_policy_document.identity_assume[each.key].json
+  name                   = local.role_names[each.key]
+  path                   = each.value.role_path
+  description            = "distai-platform add-on identity (issue #8): ${each.key}, ${each.value.namespace}/${each.value.service_account}"
+  assume_role_policy     = data.aws_iam_policy_document.identity_assume[each.key].json
+  # Policies attached/managed outside this layer (the migration case: a
+  # hand-rolled role's own pre-existing attachments) must not block
+  # DeleteRole with DeleteConflict when this layer's own apply removes
+  # them via the exclusive resources below, nor when the whole root is
+  # destroyed - force_detach_policies makes DeleteRole itself detach
+  # everything first, which the exclusive resources' own destroy does not
+  # reliably do on their own (per the provider's own documentation,
+  # destroying an *_exclusive resource stops Terraform managing the set,
+  # it does not necessarily detach it).
+  force_detach_policies = true
 }
 
 # --- Scoped inline policy: only this entry's own s3/kms_key_arns ---------
@@ -111,24 +128,6 @@ locals {
     ])
   }
 
-  # Bucket-level ARNs (one per distinct bucket) for s3:ListBucket, with the
-  # s3:prefix condition (below) doing the actual per-prefix scoping: S3 has
-  # no object-level permission for ListBucket, only a bucket ARN with a
-  # condition on the request's own prefix parameter.
-  s3_bucket_arns = {
-    for key, entry in var.platform_identities : key => distinct([
-      for b in entry.s3 : "arn:${local.partition}:s3:::${b.bucket}"
-    ])
-  }
-
-  s3_list_prefix_values = {
-    for key, entry in var.platform_identities : key => flatten([
-      for b in entry.s3 : [
-        for p in b.prefixes : "${trimprefix(p, "/")}*"
-      ]
-    ])
-  }
-
   any_s3_write = {
     for key, entry in var.platform_identities : key => anytrue([for b in entry.s3 : b.write])
   }
@@ -154,17 +153,27 @@ data "aws_iam_policy_document" "identity_scoped" {
     }
   }
 
+  # One statement per declared s3 block, not one combined statement for
+  # every bucket in the entry: a combined statement would put every
+  # bucket's ARN in `resources` and every bucket's prefixes in one
+  # `s3:prefix` condition, and IAM evaluates a statement's resource list
+  # and its condition's value list independently (OR within each, not
+  # paired) - an entry declaring bucket A with prefix "a/" and bucket B
+  # with prefix "b/" would then also allow listing bucket A with prefix
+  # "b/*" and bucket B with prefix "a/*", neither of which is declared.
+  # One statement per s3 block keeps each bucket's own resource paired
+  # with only that same block's own prefixes.
   dynamic "statement" {
-    for_each = length(each.value.s3) > 0 ? [1] : []
+    for_each = each.value.s3
     content {
-      sid       = "AllowScopedS3List"
+      sid       = "AllowScopedS3List${statement.key}"
       actions   = ["s3:ListBucket"]
-      resources = local.s3_bucket_arns[each.key]
+      resources = ["arn:${local.partition}:s3:::${statement.value.bucket}"]
 
       condition {
         test     = "StringLike"
         variable = "s3:prefix"
-        values   = local.s3_list_prefix_values[each.key]
+        values   = [for p in statement.value.prefixes : "${trimprefix(p, "/")}*"]
       }
     }
   }
@@ -206,23 +215,22 @@ resource "aws_iam_role_policy" "identity_scoped" {
 # each manage only the one resource they declare: neither detaches a
 # managed policy, nor removes an inline policy under a different name,
 # that was attached outside this layer - exactly the shape a hand-rolled
-# identity (issue #8's own Motivation) has. A real run of this layer's own
-# end-to-end test found this directly: importing a hand-rolled role that
-# had AmazonS3ReadOnlyAccess attached by hand, with no policy_arns
-# declared for that entry, left AmazonS3ReadOnlyAccess attached after
-# apply - the migration's own "permissions are tightened to this layer's
-# declared shape" claim does not hold with only aws_iam_role_policy_attachment.
+# identity (issue #8's own Motivation) has, so an import would leave
+# whatever was attached by hand still attached, contradicting the
+# migration's own "tightened to this layer's declared shape" claim.
 #
 # aws_iam_role_policy_attachments_exclusive/aws_iam_role_policies_exclusive
-# take over the role's *entire* set of managed attachments/inline policies:
-# anything not in the given list is removed on the next apply, which is
-# the fail-closed behavior this layer's own migration section promises.
-# Per the provider's own documentation, these must not be mixed with a
-# plain aws_iam_role_policy_attachment for the same role (this layer never
-# creates one) and must list every inline policy name this layer itself
-# still manages (depends_on makes the content exist before this exclusive
-# declaration is reconciled, even though the name list itself is computed
-# only from var.platform_identities, not from that resource's own attributes).
+# take over the role's *entire* set of managed attachments/inline policies
+# instead: anything not in the given list is removed on the next apply.
+# The provider's own documentation says that if a plain
+# aws_iam_role_policy_attachment is *also* managed for the same role, its
+# own policy ARN must be included in this resource's policy_arns to avoid
+# drift; this layer never creates a plain attachment resource at all; the
+# inline-policy exclusive resource must list every inline policy name
+# this layer itself still manages (depends_on makes the content exist
+# before this exclusive declaration is reconciled, even though the name
+# list itself is computed only from var.platform_identities, not from
+# that resource's own attributes).
 
 resource "aws_iam_role_policy_attachments_exclusive" "entry" {
   for_each = var.platform_identities
