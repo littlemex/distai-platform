@@ -59,8 +59,8 @@ run "one_read_only_s3_entry_plans" {
   }
 
   assert {
-    condition     = length(aws_iam_role_policy.identity_scoped["image-builder"]) == 1
-    error_message = "an entry that declares s3 must get the scoped inline policy."
+    condition     = aws_iam_role_policy.identity_scoped["image-builder"].role == aws_iam_role.entry["image-builder"].name
+    error_message = "an entry that declares s3 must get the scoped inline policy, attached to its own role."
   }
 
   assert {
@@ -146,7 +146,11 @@ run "policy_arns_only_entry_gets_no_inline_policy" {
 }
 
 run "two_entries_get_two_independent_roles_and_associations" {
-  command = plan
+  # apply, not plan: role_arn and the role_arns output are both computed
+  # attributes of a mocked resource, unknown until "applied" even against
+  # mock_provider (no real AWS call either way - mock_provider replaces
+  # the provider's RPCs entirely, so this creates nothing real).
+  command = apply
 
   variables {
     platform_identities = {

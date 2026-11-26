@@ -88,6 +88,7 @@ FOUNDATION_DESTROYED=0
 FAILED_STEP=""
 
 # shellcheck source=e2e-lib.sh
+# shellcheck disable=SC1091 # SCRIPT_DIR is computed at runtime; shellcheck cannot follow it statically (same info-level notice infra/foundation/tests/3.tenancy-primitive.sh and 4.argocd-impersonation.sh already carry and suppress the same way)
 source "${SCRIPT_DIR}/e2e-lib.sh"
 
 tff() { "${TERRAFORM}" -chdir="${FOUNDATION_ROOT}" -var-file="${FOUNDATION_TFVARS}" "$@"; }
