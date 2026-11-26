@@ -69,10 +69,16 @@ focused fix to make it look substantive.
       the accelerator fields of `gitops/charts/capacity-pool/`, or
       `gitops/cells/dp-a19-gpu-r3/`/`gitops/cells/dp-a19-trn-r3/`**: a run
       of `gitops/tests/1.e2e.sh` with `GITOPS_RUN_ACCEL_E2E=1`, not only the
-      base suite. The base suite passes with no GPU or Trainium node
-      launched, so it does not satisfy this bullet on its own; see
+      base suite. The base suite does not exercise the device plugin, DRA,
+      `accel-device-classes` or either accelerator cell fixture at all
+      (nothing in `accel-*` runs without the flag), so it does not satisfy
+      this bullet on its own for those paths -- see
       `gitops/tests/README.md`'s accelerator extension section for cost and
-      time.
+      time. (The base suite's own, separately-gated `accelerators`/
+      dcgm-exporter step does launch a real GPU-family instance on every
+      run regardless of this flag; that is a different code path from the
+      one this bullet is about, tracked as a known gap in #87, not fixed
+      here.)
     - **Small functional fix**: verification proportionate to the change.
     - **No functional impact**: write `docs-only` under `## Test Results`.
 

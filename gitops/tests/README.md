@@ -226,11 +226,18 @@ Neuron pool. Off by default, so an ordinary `1.e2e.sh` run (any `NAME`) is
 unaffected -- **the default is a cost control, not a statement that this
 extension is optional to run.** A plain `1.e2e.sh` run against a generic
 cell (any `NAME` other than `dp-a19-gpu-r3`/`dp-a19-trn-r3`, whose own
-fixtures carry no accelerator pool at all) passes every check the script
-has without ever launching a GPU or a Trainium node; this is not
-hypothetical, it happened against `main`'s own tip on 2026-11-25
-(cell `dp-main-e2e-r1`, 89 PASS / 0 FAIL, no accelerator step at all).
-Nothing in this script stops a flag-off run against `dp-a19-gpu-r3`/
+fixtures carry no accelerator pool at all) does not exercise this
+extension's own device plugin, DRA, `accel-device-classes` or either
+accelerator cell fixture; this is not hypothetical, it happened against
+`main`'s own tip on 2026-11-25, predating the dcgm-exporter/14b step
+below (#46, merged later that same day) (cell `dp-main-e2e-r1`, 89
+PASS / 0 FAIL, no accelerator step at all). The base suite's own,
+separately-gated `accelerators`/dcgm-exporter step (#41, unconditional,
+not controlled by this flag) does launch a real GPU-family instance on
+every generic-cell run too, now that #46 has landed -- a known gap
+tracked in #87, not fixed here, and distinct from the device-plugin/DRA
+code this flag actually controls. Nothing in this script stops a
+flag-off run against `dp-a19-gpu-r3`/
 `dp-a19-trn-r3` themselves from skipping every accelerator-specific
 check -- this has not been run and confirmed separately, but the flag,
 not the cell, is what gates every such check. That is narrower than

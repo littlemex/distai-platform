@@ -2933,10 +2933,14 @@ if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
   # this point ever deleted that node, so step 14b-b's precondition was
   # never actually starting from zero on this cell once step 11's canary
   # had landed on an NVIDIA-labeled node -- independent of, and in
-  # addition to, the NodeClaim-deletion-timing cause already fixed above
-  # for check_accel_layer1's own probe node. A real run (2026-11-26, this
-  # PR) with only this release added reached and passed step 14b-b's full
-  # sequence cleanly, the first time since #87 opened.
+  # addition to, the candidate cause addressed above for
+  # check_accel_layer1's own probe node (what that one's own real run
+  # showed is only that its delete did not confirm within 300s; whether
+  # the leftover node it actually saw was that probe node is not
+  # confirmed). A real run (#88 Run A) with this release and that other
+  # change both applied -- never run separately, and with this block a
+  # few lines earlier than it now sits -- reached and passed step
+  # 14b-b's full sequence cleanly, the first time since #87 opened.
   #
   # Released here, right after the line above that marks step 14 done
   # needing it, not tolerated in step 14b's checks: an earlier version of
@@ -3886,9 +3890,11 @@ JSON
   # discovers and excludes it for the GPU cell -- confirmed by a
   # real run (2026-11-26): without this exclusion, the Trainium cell
   # reports 2 NodePools (optional-pool and this cell's own), failing the
-  # "exactly 1" assertion below the first time this extension ever
-  # reached this step. Discovered the same way (the Application's own
-  # status.resources), not hardcoded as a literal "optional-pool" string.
+  # "exactly 1" assertion below the first time a run reached this step
+  # since the optional-pool add-on landed (#46, merged 2026-11-25); the
+  # 2026-11-22 pass predates #46 and is not a counter-example. Discovered
+  # the same way (the Application's own status.resources), not hardcoded
+  # as a literal "optional-pool" string.
   trn_app_optional_pool="${TRN_CLUSTER}-optional-pool"
   trn app_exists "${trn_app_optional_pool}" \
     || fail "Application ${trn_app_optional_pool} does not exist on the Trainium cell -- the platform ApplicationSet never generated it from addons/optional-pool/addon.yaml"
