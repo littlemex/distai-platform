@@ -317,9 +317,9 @@ HM upgrade --install dp80-agg "${REPO_ROOT}/examples/inference/vllm/neuron/agg-b
   || fail "dp80-agg install"
 pass "dp80-agg (aggregated baseline) release installed"
 
-wait_until 2000 15 "dp80-agg pod Ready" bash -c \
+wait_until 900 15 "dp80-agg pod Ready" bash -c \
   "kubectl --kubeconfig '${KUBECONFIG}' get pods -n default -l app.kubernetes.io/instance=dp80-agg -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null | grep -q true" \
-  || { K get pods -n default -o wide; K describe pods -n default -l app.kubernetes.io/instance=dp80-agg | tail -60; fail "dp80-agg engine never became Ready within 25m"; }
+  || { K get pods -n default -o wide; K describe pods -n default -l app.kubernetes.io/instance=dp80-agg | tail -60; fail "dp80-agg engine never became Ready within 15m"; }
 pass "dp80-agg engine Ready"
 
 AGG_NODE="$(K get pods -n default -l app.kubernetes.io/instance=dp80-agg -o jsonpath='{.items[0].spec.nodeName}')"
@@ -360,9 +360,9 @@ wait_until 300 10 "dp80-disagg prefill and decode Pods exist" bash -c \
   "[ \"\$(kubectl --kubeconfig '${KUBECONFIG}' get pods -n default -l app.kubernetes.io/instance=dp80-disagg --no-headers 2>/dev/null | wc -l)\" -ge 2 ]" \
   || { K get pods -n default -o wide; fail "dp80-disagg never created 2 pods"; }
 for role in prefill decode; do
-  wait_until 2000 15 "dp80-disagg ${role} Ready" bash -c \
+  wait_until 900 15 "dp80-disagg ${role} Ready" bash -c \
     "kubectl --kubeconfig '${KUBECONFIG}' get pods -n default -l app.kubernetes.io/instance=dp80-disagg,app.kubernetes.io/component=${role} -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null | grep -q true" \
-    || { K get pods -n default -o wide; K describe pods -n default -l app.kubernetes.io/instance=dp80-disagg,app.kubernetes.io/component=${role} | tail -60; fail "dp80-disagg ${role} never became Ready within 25m"; }
+    || { K get pods -n default -o wide; K describe pods -n default -l app.kubernetes.io/instance=dp80-disagg,app.kubernetes.io/component=${role} | tail -60; fail "dp80-disagg ${role} never became Ready within 15m"; }
   pass "dp80-disagg ${role} Ready"
 done
 
