@@ -38,10 +38,15 @@ echo "=== [3/7] both roles really are on the one node ==="
 kubectl get pods -n "${NAMESPACE}" -l app.kubernetes.io/instance="${RELEASE}" -o wide
 
 echo "=== [4/7] one smoke request through the proxy (retrying up to 3 min) ==="
+# The proxy's own NetworkPolicy (rendered by this chart) allows ingress
+# on 8000 only from a pod labeled app.kubernetes.io/name=load-replay --
+# not a bug, the documented "every Service cluster-internal" posture; a
+# plain `kubectl run` pod needs that same label to pass it.
 smoke_deadline=$(( $(date +%s) + 180 ))
 smoke_ok=0
 while [[ $(date +%s) -lt ${smoke_deadline} ]]; do
   if kubectl run "curl-pd-smoke-$(date +%s)" --rm -i --restart=Never -n "${NAMESPACE}" \
+    --labels=app.kubernetes.io/name=load-replay \
     --image=curlimages/curl:8.23.0 --command -- \
     curl -sS --max-time 20 "http://${RELEASE}-vllm-disagg-pd:8000/v1/completions" \
     -H 'Content-Type: application/json' \
@@ -78,7 +83,31 @@ kubectl create configmap load-replay-scripts -n "${NAMESPACE}" \
   --dry-run=client -o yaml | kubectl apply -f -
 envsubst '${TARGET_URL} ${MODEL_ID} ${NUM_PROMPTS} ${REQUEST_RATE} ${MAX_SEND_LAG_MS} ${BENCH_EXTRA_ARGS}' \
   < examples/inference/_shared/load-replay/load-job.yaml \
-  | kubectl apply -n "${NAMESPACE}" -f -
+  > /tmp/load-job.rendered.yaml
+# load-job.yaml carries no nodeSelector/tolerations of its own, so the
+# client (same ~7GB vllm/vllm-openai image as the engines) can land on
+# any node, including a small optional-pool node with no room for that
+# image (confirmed on real hardware this same run: ErrImagePull, "no
+# space left on device" extracting a layer, after the node's
+# ephemeral-storage was exhausted -- the same shape as the proxy's own
+# fix above). Pin it to this one well-provisioned node the same way.
+python3 -c "
+import sys
+text = open('/tmp/load-job.rendered.yaml').read()
+anchor = '      restartPolicy: Never\n'
+addition = (
+    '      nodeSelector:\n'
+    '        distai.dev/pd-role: shared\n'
+    '      tolerations:\n'
+    '        - key: nvidia.com/gpu\n'
+    '          operator: Exists\n'
+    '          effect: NoSchedule\n'
+)
+assert text.count(anchor) == 1, 'expected exactly one restartPolicy: Never line'
+text = text.replace(anchor, anchor + addition)
+open('/tmp/load-job.rendered.yaml', 'w').write(text)
+"
+kubectl apply -n "${NAMESPACE}" -f /tmp/load-job.rendered.yaml
 
 kubectl wait -n "${NAMESPACE}" --for=condition=Ready pod -l job-name=load-replay --timeout=15m
 POD="$(kubectl get pods -n "${NAMESPACE}" -l job-name=load-replay -o jsonpath='{.items[0].metadata.name}')"
