@@ -329,6 +329,9 @@ metadata:
 spec:
   serviceAccountName: reader
   restartPolicy: Never
+  tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists
   containers:
     - name: aws-cli
       image: ${AWS_CLI_IMAGE}
@@ -342,6 +345,9 @@ metadata:
 spec:
   serviceAccountName: writer
   restartPolicy: Never
+  tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists
   containers:
     - name: aws-cli
       image: ${AWS_CLI_IMAGE}
@@ -355,6 +361,9 @@ metadata:
 spec:
   serviceAccountName: undeclared
   restartPolicy: Never
+  tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists
   containers:
     - name: aws-cli
       image: ${AWS_CLI_IMAGE}
@@ -362,8 +371,10 @@ spec:
 YAML
 
 for p in reader writer undeclared; do
-  wait_until 180 5 "pod ${p} Running" bash -c "[[ \"\$(kubectl get pod ${p} -n ${TEST_NAMESPACE} -o jsonpath='{.status.phase}' 2>/dev/null)\" == Running ]]" \
-    || fail "pod ${p} did not reach Running"
+  if ! wait_until 360 5 "pod ${p} Running" bash -c "[[ \"\$(kubectl get pod ${p} -n ${TEST_NAMESPACE} -o jsonpath='{.status.phase}' 2>/dev/null)\" == Running ]]"; then
+    kubectl describe pod "${p}" -n "${TEST_NAMESPACE}" || true
+    fail "pod ${p} did not reach Running within 360s"
+  fi
 done
 pass "reader, writer and undeclared pods are Running"
 
