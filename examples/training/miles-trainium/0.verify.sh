@@ -28,6 +28,10 @@ REPO_ROOT="$(pwd)"
 EXDIR="${REPO_ROOT}/examples/training/miles-trainium"
 RUN_LOG_DIR="${REPO_ROOT}/../evidence-${NAME}"
 mkdir -p "${RUN_LOG_DIR}"
+# Clear evidence left by a PREVIOUS run that reused this same NAME, here at the very start, not
+# only right before PHASE 7 (a round of review found that the later position left a prior run's
+# RESULT.txt/job.log in place if this run then failed earlier than PHASE 7 itself).
+rm -f "${RUN_LOG_DIR}"/job.log* "${RUN_LOG_DIR}/RESULT.txt" "${RUN_LOG_DIR}"/*.log "${RUN_LOG_DIR}/job-final.yaml"
 
 # A dedicated kubeconfig, not the caller's default ~/.kube/config: a kubectl call issued before
 # PHASE 2's own `aws eks update-kubeconfig` (an early failure, or a bug in this script) would
@@ -119,6 +123,17 @@ teardown() {
 }
 trap teardown EXIT
 
+log "=== PHASE -1: confirm the gitops cell fixture exists on ${GITOPS_REVISION} before touching AWS ==="
+# A wrong NAME/GITOPS_REVISION pairing is exactly this script's own documented prerequisite
+# (header comment above) failing silently until PHASE 3's wait times out, 15+ minutes and a real
+# EKS cluster into the run (this is what session 2's own first attempt hit, see README.md "What
+# actually ran"). `git ls-tree` against the remote ref costs nothing and needs no AWS call.
+if ! git ls-tree -r --name-only "origin/${GITOPS_REVISION}" -- "gitops/cells/${NAME}/capacity-pool" 2>/dev/null \
+  | grep -q .; then
+  log "FAIL: gitops/cells/${NAME}/capacity-pool has no files on origin/${GITOPS_REVISION} -- add this cell's fixture there first (gitops/README.md \"Adding a cell\"), or point NAME/GITOPS_REVISION at one that already has it."
+  exit 1
+fi
+
 log "=== PHASE 0: temporary Identity Center group for the Argo CD capability ==="
 IDC_GROUP_ID="$(aws identitystore create-group --identity-store-id "${ARGOCD_IDC_IDENTITY_STORE_ID}" \
   --region "${ARGOCD_IDC_REGION}" --display-name "${NAME}" \
@@ -142,8 +157,20 @@ terraform init -input=false -reconfigure \
 # script against a different cell name in the same working copy makes init fail ("Backend
 # configuration changed") instead of switching to this cell's own backend -- and a teardown
 # after that failure would otherwise destroy against the leftover backend's state, not this
-# cell's. TF_INIT_DONE is set only now, after init has actually succeeded against this cell's
-# own backend config.
+# cell's.
+#
+# NAME is meant to name a fresh, disposable cell (this script's own header comment: point it at
+# an existing fixture only for GITOPS_REVISION, never for the terraform state itself). If NAME
+# collides with a real cell's own state at this exact backend key, a non-empty state here means
+# apply would modify that real cell and a later destroy would destroy it -- checked and refused
+# BEFORE TF_INIT_DONE is set, so that if this does trip, teardown's own destroy is skipped too
+# (TF_INIT_DONE staying 0 is exactly what keeps teardown from touching a state this run did not
+# start empty).
+EXISTING_RESOURCE_COUNT="$(terraform state list | wc -l | tr -d ' ')"
+if [[ "${EXISTING_RESOURCE_COUNT}" != "0" ]]; then
+  log "FAIL: terraform state for NAME=${NAME} at this backend key is not empty (${EXISTING_RESOURCE_COUNT} resources already in it) -- refusing to apply or later destroy against what looks like an existing, real cell. Use a NAME that has never been applied at this STATE_BUCKET/AWS_REGION before."
+  exit 1
+fi
 TF_INIT_DONE=1
 terraform apply -auto-approve | tee "${RUN_LOG_DIR}/terraform-apply.log"
 VPC_ID="$(terraform output -raw vpc_id)"
@@ -233,8 +260,8 @@ log "=== PHASE 7: stream logs until the Job finishes (deadline ~55min) ==="
 # start, so a genuinely fuller capture is never smaller in bytes than an earlier one; a partial
 # capture cut short mid-stream is). Not re-verified against a real failure of this kind -- this
 # session's real-machine budget was already spent confirming the underlying defects, not this
-# specific robustness fix.
-rm -f "${RUN_LOG_DIR}"/job.log* "${RUN_LOG_DIR}/RESULT.txt"
+# specific robustness fix. (Stale evidence from a prior run of this same NAME is cleared once,
+# near the top of this script, not here -- see the comment there.)
 LOGS_PID=""
 LOG_TMP="${RUN_LOG_DIR}/job.log.tmp"
 LOG_TMP_ERR="${RUN_LOG_DIR}/job.log.tmp.err"
@@ -254,7 +281,9 @@ relaunch_logs() {
     wait "${LOGS_PID}" 2>/dev/null || true
     promote_log "${LOG_TMP}"
   fi
-  kubectl logs -f "${POD}" -n distai-smoke --timestamps >"${LOG_TMP}" 2>"${LOG_TMP_ERR}" &
+  # LOG_TMP_ERR appends (>>): each relaunch's own stderr adds to the others, so an earlier
+  # relaunch's own disconnect reason is not overwritten by a later one's.
+  kubectl logs -f "${POD}" -n distai-smoke --timestamps >"${LOG_TMP}" 2>>"${LOG_TMP_ERR}" &
   LOGS_PID=$!
 }
 relaunch_logs
