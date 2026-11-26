@@ -8,6 +8,11 @@
 # Run via the EC2 runner only:
 #   runner/run.sh --ref feat/18-sharedfs-storage --detach \
 #     -- bash gitops/tests/.tmp-sharedfs-verify.sh
+#
+# shellcheck disable=SC2015
+# Every "A && B || C" below has only log/exit calls (which always
+# succeed) as B, never a command whose own failure the "||" branch is
+# meant to catch - not the misuse this check warns about.
 set -euo pipefail
 
 : "${AWS_REGION:?}"
