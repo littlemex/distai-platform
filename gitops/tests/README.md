@@ -217,13 +217,37 @@ for `2.upgrade.sh`). As with `infra/foundation/tests/1.e2e.sh`,
 `AWS_PROFILE=default` on the runner (it authenticates via its IAM role
 through IMDS) and `MY_CIDR` is the runner's own public IP, not the Mac's.
 
-### Accelerator extension (issue #28, opt-in: `GITOPS_RUN_ACCEL_E2E=1`)
+### Accelerator extension (issue #28, opt-in flag: `GITOPS_RUN_ACCEL_E2E=1`)
 
 Adds the `accelerators` step's own real-hardware check, light tier (#16):
 a Layer 1 pod on the existing cell's NVIDIA GPU pool, and a second
 foundation cell built in a Trainium-capable Region for a Layer 1 pod on a
 Neuron pool. Off by default, so an ordinary `1.e2e.sh` run (any `NAME`) is
-unaffected.
+unaffected -- **the default is a cost control, not a statement that this
+extension is optional to run.** A plain `1.e2e.sh` run passes every check
+the script has without ever launching a GPU or a Trainium node; this is
+not hypothetical, it happened against `main`'s own tip on 2026-11-25
+(89 PASS / 0 FAIL, no accelerator step at all). **Set
+`GITOPS_RUN_ACCEL_E2E=1` for any pull request that changes
+`gitops/addons/accel-*`, `gitops/addon-catalog/accel-*`,
+`gitops/charts/accel-device-classes/`, the accelerator fields of
+`gitops/charts/capacity-pool/`, `gitops/cells/dp-a19-gpu-r3/`,
+`gitops/cells/dp-a19-trn-r3/`, or the `accelerators` step of `1.e2e.sh`/
+`0.static.sh` itself** -- the base suite does not exercise any of that
+code and cannot stand in for it in a PR's `## Test Results`.
+
+Cost and time: both cells run on this suite's own light tier (spot/
+on-demand `g7`/`g6e`/`g5` for the GPU cell, spot `trn2.3xlarge` for the
+Trainium cell, #16), billed only while this script's own `terraform
+apply`/`destroy` window for each cell is open. A full run of the base
+suite plus this extension (both cells) took 1h59m37s end to end on a
+real run (2026-11-22, both cells reached a final `RESULT PASS`). A
+GPU-cell-only run of the base suite alone (no accelerator extension)
+took 1h22m on a real run against `main`'s own tip (2026-11-25). Four
+real runs of this extension in a row (2026-11-26, tracked in #87) each
+failed before completing -- treat 1h59m37s as the known-good order of
+magnitude for planning, not as a number this extension currently
+reproduces on demand.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
