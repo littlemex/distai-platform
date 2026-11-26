@@ -138,6 +138,36 @@ values:
   nodeSelector:
     distai.dev/nvidia-gpu-method: device-plugin
     distai.dev/efa-attached: "true"
+  # Verification-branch-only addition (p5en real-hardware run, not for
+  # merge to main): confirmed on real hardware that this release's own
+  # DaemonSet, unmodified, renders tolerations: [{key:
+  # CriticalAddonsOnly, operator: Exists}] only (the chart's own default,
+  # no override here before this edit) -- it does NOT tolerate
+  # capacity-pool's own accelerator.taint (nvidia.com/gpu:NoSchedule,
+  # #63/#56's own fix so a GPU-tainted node is not used for free by an
+  # ordinary pod). A pool that sets both accelerator.methodLabel and
+  # accelerator.taint (gitops/cells/dp-a19-gpu-r3's own gpu.yaml does
+  # both already) therefore gets a Node-Selector match with
+  # desiredNumberScheduled staying 0 for this DaemonSet: the device
+  # plugin never runs there, vpc.amazonaws.com/efa stays absent from
+  # that node's allocatable even though the physical EFA devices are
+  # present and healthy (confirmed the same moment on the same node via
+  # lspci/ibv_devices/fi_info, examples/tools/gpu-healthcheck). A manual
+  # `kubectl patch` of the live DaemonSet is reverted within about a
+  # minute by this Application's own selfHeal: true. This override adds
+  # the missing toleration, scoped to this one verification branch only
+  # (this addon is core tier, delivered unmodified to every other cell on
+  # main) so the same-node EFA-forced measurement in
+  # examples/tools/p5en-verify/04-disagg.sh can actually request
+  # vpc.amazonaws.com/efa. Whether to carry an equivalent toleration on
+  # main (and whether accel-efa-device-plugin-neuron has the identical
+  # gap) is left to a separate decision, not made here.
+  tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
   securityContext:
     privileged: false
     allowPrivilegeEscalation: false
