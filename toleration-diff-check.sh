@@ -5,7 +5,7 @@ cd "$W"
 
 echo "=== NVIDIA device plugin (0.20.2): before vs after ==="
 helm pull nvidia-device-plugin --repo https://nvidia.github.io/k8s-device-plugin --version 0.20.2 --untar
-helm template before ./nvidia-device-plugin > before-nvidia.yaml
+helm template before ./nvidia-device-plugin -n nvidia-device-plugin > before-nvidia.yaml
 cat > nvidia-override.yaml <<'VALUES'
 nodeSelector:
   distai.dev/nvidia-gpu-method: device-plugin
@@ -27,7 +27,7 @@ affinity:
               operator: In
               values: ["device-plugin"]
 VALUES
-helm template after ./nvidia-device-plugin -f nvidia-override.yaml > after-nvidia.yaml
+helm template after ./nvidia-device-plugin -n nvidia-device-plugin -f nvidia-override.yaml > after-nvidia.yaml
 echo "--- default tolerations in chart's own values.yaml ---"
 grep -A6 "^tolerations:" ./nvidia-device-plugin/values.yaml
 echo "--- rendered tolerations, before override ---"
@@ -38,7 +38,7 @@ yq -r 'select(.kind=="DaemonSet") | .spec.template.spec.tolerations' after-nvidi
 echo
 echo "=== Neuron device plugin (1.11.2): before vs after ==="
 helm pull oci://public.ecr.aws/neuron/neuron-helm-chart --version 1.11.2 --untar
-helm template before ./neuron-helm-chart > before-neuron.yaml
+helm template before ./neuron-helm-chart -n neuron-device-plugin > before-neuron.yaml
 cat > neuron-override.yaml <<'VALUES'
 devicePlugin:
   nodeSelector:
@@ -61,7 +61,7 @@ draDriver:
 npd:
   namespaceOverride: neuron-device-plugin
 VALUES
-helm template after ./neuron-helm-chart -f neuron-override.yaml > after-neuron.yaml
+helm template after ./neuron-helm-chart -n neuron-device-plugin -f neuron-override.yaml > after-neuron.yaml
 echo "--- default devicePlugin.tolerations in chart's own values.yaml ---"
 grep -A8 "^devicePlugin:" ./neuron-helm-chart/values.yaml | grep -A6 "tolerations:"
 echo "--- rendered device-plugin DaemonSet tolerations, before override ---"
@@ -74,7 +74,7 @@ yq -r 'select(.kind=="DaemonSet" and (.metadata.name | test("problem-detector|np
 echo
 echo "=== EFA device plugin (v0.5.35): before vs after ==="
 helm pull aws-efa-k8s-device-plugin --repo https://aws.github.io/eks-charts --version v0.5.35 --untar
-helm template before ./aws-efa-k8s-device-plugin > before-efa.yaml
+helm template before ./aws-efa-k8s-device-plugin -n kube-system > before-efa.yaml
 cat > efa-override.yaml <<'VALUES'
 image:
   tag: "v0.5.22-eksbuild.9@sha256:a392d84ff82b23580fd92d0a6c770136c56d4a6ee979a47d1bf4e379a7171647"
@@ -93,7 +93,7 @@ tolerations:
     operator: Exists
     effect: NoSchedule
 VALUES
-helm template after ./aws-efa-k8s-device-plugin -f efa-override.yaml > after-efa.yaml
+helm template after ./aws-efa-k8s-device-plugin -n kube-system -f efa-override.yaml > after-efa.yaml
 echo "--- default tolerations in chart's own values.yaml ---"
 grep -A3 "^tolerations:" ./aws-efa-k8s-device-plugin/values.yaml
 echo "--- rendered tolerations, before override ---"
@@ -122,7 +122,7 @@ config:
     - "distai.dev/startup-not-ready"
   timeoutSeconds: 300
 VALUES
-helm template v ./vigil-controller -f vigil-override.yaml > vigil-rendered.yaml
+helm template v ./vigil-controller -n vigil-system -f vigil-override.yaml > vigil-rendered.yaml
 echo "--- rendered ConfigMap data (must contain the configured taintKey and timeoutSeconds 300) ---"
 yq -r 'select(.kind=="ConfigMap") | .data."config.yaml"' vigil-rendered.yaml
 echo "--- rendered Deployment tolerations/affinity ---"
