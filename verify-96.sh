@@ -2,7 +2,7 @@ set -uo pipefail
 
 export AWS_PROFILE="${AWS_PROFILE:-default}"
 export AWS_REGION=us-east-1
-NAME=dp-c96-gpu-r3
+NAME=dp-c96-gpu-r4
 STATE_BUCKET="${STATE_BUCKET:?set to an S3 bucket for Terraform state}"
 STATE_REGION="${STATE_REGION:-ap-northeast-1}"
 ADMIN_PRINCIPAL_ARN="$(aws iam get-role --role-name "$(aws sts get-caller-identity --query Arn --output text | cut -d/ -f2)" --query Role.Arn --output text)"
@@ -106,6 +106,8 @@ config:
   taintEffect: "NoSchedule"
   knownStartupTaintKeys:
     - "distai.dev/startup-not-ready"
+    - "node.kubernetes.io/not-ready"
+    - "node.kubernetes.io/unreachable"
   timeoutSeconds: 300
 VALUES
 helm upgrade --install vigil-controller vigil/vigil-controller --version 0.7.0 -n vigil-system --create-namespace \
