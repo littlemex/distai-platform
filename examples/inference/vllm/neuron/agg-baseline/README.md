@@ -91,9 +91,9 @@ Run the same load replay and scorer from [`../../../_shared/`](../../../_shared/
 
 ## Known issues
 
-- Not yet run on real hardware; the status is kept in the [examples Status table](../../../README.md#status).
-- The image is pinned by tag only until its digest is confirmed on the verification runner.
-- The engines run as UID 2000, a user the image does not define; whether a non-root process can open the Neuron device files is a real-hardware check (see the [disaggregated chart's Known issues](../disagg-pd/README.md#known-issues)).
+- Not run on real hardware yet, not for lack of trying: the status, the exact capacity blocker (`trn2.3xlarge` spot `UnfulfillableCapacity` in `ap-southeast-4`, every layer up to the pending pod's own `NodeClaim` otherwise correct) and the real-hardware attempts that found it are kept in the [examples Status table](../../../README.md#status) and [#80](https://github.com/littlemex/distai-platform/issues/80).
+- The image is pinned by tag and digest (confirmed against the registry's own v2 manifest API).
+- The engines run as UID 2000, a user the image does not define; whether a non-root process can open the Neuron device files is still a real-hardware check, not yet reached (see the [disaggregated chart's Known issues](../disagg-pd/README.md#known-issues)).
 - vLLM's OpenAI-compatible server has no authentication in this configuration. The Service is `ClusterIP` and the NetworkPolicy admits only the shared load-replay driver.
 - With the default `emptyDir` volumes, every engine pod downloads the weights and compiles the model at start.
 
