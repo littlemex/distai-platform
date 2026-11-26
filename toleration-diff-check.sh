@@ -31,7 +31,7 @@ affinity:
 VALUES
 helm template after ./nvidia-device-plugin -n nvidia-device-plugin -f nvidia-override.yaml > after-nvidia.yaml
 echo "--- default tolerations in chart's own values.yaml ---"
-grep -A6 "^tolerations:" ./nvidia-device-plugin/values.yaml
+grep -A6 "^tolerations:" ./nvidia-device-plugin/values.yaml || true
 echo "--- rendered tolerations, before override ---"
 ${PY} "${SCRIPT_DIR}/extract.py" before-nvidia.yaml DaemonSet '' 'spec.template.spec.tolerations'
 echo "--- rendered tolerations, after override ---"
@@ -65,7 +65,7 @@ npd:
 VALUES
 helm template after ./neuron-helm-chart -n neuron-device-plugin -f neuron-override.yaml > after-neuron.yaml
 echo "--- default devicePlugin.tolerations in chart's own values.yaml ---"
-grep -A8 "^devicePlugin:" ./neuron-helm-chart/values.yaml | grep -A6 "tolerations:"
+grep -A8 "^devicePlugin:" ./neuron-helm-chart/values.yaml | grep -A6 "tolerations:" || true
 echo "--- rendered device-plugin DaemonSet tolerations, before override ---"
 ${PY} "${SCRIPT_DIR}/extract.py" before-neuron.yaml DaemonSet 'device-plugin' 'spec.template.spec.tolerations'
 echo "--- rendered device-plugin DaemonSet tolerations, after override ---"
@@ -97,7 +97,7 @@ tolerations:
 VALUES
 helm template after ./aws-efa-k8s-device-plugin -n kube-system -f efa-override.yaml > after-efa.yaml
 echo "--- default tolerations in chart's own values.yaml ---"
-grep -A3 "^tolerations:" ./aws-efa-k8s-device-plugin/values.yaml
+grep -A3 "^tolerations:" ./aws-efa-k8s-device-plugin/values.yaml || true
 echo "--- rendered tolerations, before override ---"
 ${PY} "${SCRIPT_DIR}/extract.py" before-efa.yaml DaemonSet '' 'spec.template.spec.tolerations'
 echo "--- rendered tolerations, after override ---"
