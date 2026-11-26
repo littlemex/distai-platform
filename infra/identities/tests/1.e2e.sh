@@ -108,18 +108,25 @@ cleanup() {
     else
       info "cleanup: destroying infra/identities"
       kubectl delete namespace "${TEST_NAMESPACE}" --ignore-not-found --timeout=60s >/dev/null 2>&1
-      tfi destroy -var-file="${IDENTITIES_TFVARS}" -auto-approve >/dev/null 2>&1
+      if ! tfi destroy -var-file="${IDENTITIES_TFVARS}" -auto-approve > "${WORK_DIR}/cleanup-identities-destroy.log" 2>&1; then
+        log "FAIL cleanup: terraform destroy infra/identities failed; see ${WORK_DIR}/cleanup-identities-destroy.log, or remove it by hand with:"
+        log "${TERRAFORM} -chdir=${IDENTITIES_ROOT} -var-file=${IDENTITIES_TFVARS} destroy"
+      fi
     fi
   fi
   if [[ "${BUCKET_CREATED}" -eq 1 ]]; then
     info "cleanup: emptying and deleting the disposable bucket ${BUCKET}"
-    aws s3 rm "s3://${BUCKET}" --recursive >/dev/null 2>&1
-    aws s3api delete-bucket --bucket "${BUCKET}" >/dev/null 2>&1
+    if ! { aws s3 rm "s3://${BUCKET}" --recursive && aws s3api delete-bucket --bucket "${BUCKET}"; } > "${WORK_DIR}/cleanup-bucket.log" 2>&1; then
+      log "FAIL cleanup: could not remove bucket ${BUCKET}; see ${WORK_DIR}/cleanup-bucket.log"
+    fi
   fi
   if [[ "${LEGACY_ROLE_CREATED}" -eq 1 ]]; then
     aws iam list-attached-role-policies --role-name "${LEGACY_ROLE_NAME}" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null \
       | tr '\t' '\n' | grep -v '^$' | while read -r p; do aws iam detach-role-policy --role-name "${LEGACY_ROLE_NAME}" --policy-arn "${p}" >/dev/null 2>&1; done
-    aws iam delete-role --role-name "${LEGACY_ROLE_NAME}" >/dev/null 2>&1
+    if ! aws iam delete-role --role-name "${LEGACY_ROLE_NAME}" > "${WORK_DIR}/cleanup-legacy-role.log" 2>&1; then
+      log "FAIL cleanup: could not delete role ${LEGACY_ROLE_NAME}; see ${WORK_DIR}/cleanup-legacy-role.log, or remove it by hand with:"
+      log "aws iam delete-role --role-name ${LEGACY_ROLE_NAME}"
+    fi
   fi
   if [[ "${FOUNDATION_APPLIED}" -eq 1 && "${FOUNDATION_DESTROYED}" -eq 0 ]]; then
     if [[ "${E2E_KEEP_ON_FAILURE}" == "1" ]]; then
@@ -127,7 +134,10 @@ cleanup() {
       info "${TERRAFORM} -chdir=${FOUNDATION_ROOT} -var-file=${FOUNDATION_TFVARS} destroy"
     else
       info "cleanup: destroying infra/foundation"
-      tff destroy -var-file="${FOUNDATION_TFVARS}" -auto-approve >/dev/null 2>&1
+      if ! tff destroy -var-file="${FOUNDATION_TFVARS}" -auto-approve > "${WORK_DIR}/cleanup-foundation-destroy.log" 2>&1; then
+        log "FAIL cleanup: terraform destroy infra/foundation failed; see ${WORK_DIR}/cleanup-foundation-destroy.log, or remove it by hand with:"
+        log "${TERRAFORM} -chdir=${FOUNDATION_ROOT} -var-file=${FOUNDATION_TFVARS} destroy"
+      fi
     fi
   fi
   if [[ -n "${FAILED_STEP}" ]]; then
