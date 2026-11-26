@@ -91,8 +91,13 @@ FAILED_STEP=""
 # shellcheck disable=SC1091 # SCRIPT_DIR is computed at runtime; shellcheck cannot follow it statically (same info-level notice infra/foundation/tests/3.tenancy-primitive.sh and 4.argocd-impersonation.sh already carry and suppress the same way)
 source "${SCRIPT_DIR}/e2e-lib.sh"
 
-tff() { "${TERRAFORM}" -chdir="${FOUNDATION_ROOT}" -var-file="${FOUNDATION_TFVARS}" "$@"; }
-tfi() { "${TERRAFORM}" -chdir="${IDENTITIES_ROOT}" -var-file="${IDENTITIES_TFVARS}" "$@"; }
+# Plain wrappers, deliberately with no -var-file baked in: init, output,
+# state list and show -json all reject a -var-file flag outright (and
+# applying an already-saved plan file must not repeat the variables that
+# plan already captured), so each call site below adds -var-file itself,
+# only on the apply/plan/destroy/import calls that both need and accept it.
+tff() { "${TERRAFORM}" -chdir="${FOUNDATION_ROOT}" "$@"; }
+tfi() { "${TERRAFORM}" -chdir="${IDENTITIES_ROOT}" "$@"; }
 
 cleanup() {
   local rc=$?
@@ -103,7 +108,7 @@ cleanup() {
     else
       info "cleanup: destroying infra/identities"
       kubectl delete namespace "${TEST_NAMESPACE}" --ignore-not-found --timeout=60s >/dev/null 2>&1
-      tfi destroy -auto-approve >/dev/null 2>&1
+      tfi destroy -var-file="${IDENTITIES_TFVARS}" -auto-approve >/dev/null 2>&1
     fi
   fi
   if [[ "${BUCKET_CREATED}" -eq 1 ]]; then
@@ -122,7 +127,7 @@ cleanup() {
       info "${TERRAFORM} -chdir=${FOUNDATION_ROOT} -var-file=${FOUNDATION_TFVARS} destroy"
     else
       info "cleanup: destroying infra/foundation"
-      tff destroy -auto-approve >/dev/null 2>&1
+      tff destroy -var-file="${FOUNDATION_TFVARS}" -auto-approve >/dev/null 2>&1
     fi
   fi
   if [[ -n "${FAILED_STEP}" ]]; then
@@ -168,7 +173,7 @@ pass "state at key ${FOUNDATION_STATE_KEY} has no resources before apply"
 
 FOUNDATION_APPLIED=1
 foundation_start="$(date +%s)"
-tff apply -auto-approve || fail "terraform apply infra/foundation"
+tff apply -var-file="${FOUNDATION_TFVARS}" -auto-approve || fail "terraform apply infra/foundation"
 pass "terraform apply infra/foundation ($(($(date +%s) - foundation_start))s)"
 
 CLUSTER_NAME="$(tff output -raw cluster_name)"
@@ -273,12 +278,12 @@ write_identities_tfvars 1
 # Import first: the plan must tighten legacy-imagebuilder's permissions and
 # trust policy in place, never replace it (the role ARN this test's own pod
 # will use must be the one created above, not a new one).
-tfi import -input=false "aws_iam_role.entry[\"legacy-imagebuilder\"]" "${LEGACY_ROLE_NAME}" \
+tfi import -input=false -var-file="${IDENTITIES_TFVARS}" "aws_iam_role.entry[\"legacy-imagebuilder\"]" "${LEGACY_ROLE_NAME}" \
   || fail "terraform import of the hand-rolled role into infra/identities"
 pass "imported the hand-rolled role ${LEGACY_ROLE_NAME} as platform_identities[\"legacy-imagebuilder\"]"
 
 import_plan="${WORK_DIR}/import.plan"
-tfi plan -input=false -out="${import_plan}" || fail "terraform plan after import"
+tfi plan -input=false -var-file="${IDENTITIES_TFVARS}" -out="${import_plan}" || fail "terraform plan after import"
 plan_json="$(tfi show -json "${import_plan}")"
 role_action="$(printf '%s' "${plan_json}" | python3 -c "
 import json, sys
@@ -387,7 +392,7 @@ pass "the undeclared ServiceAccount's pod gets no AWS credentials at all (no rol
 
 write_identities_tfvars 0
 removal_plan="${WORK_DIR}/removal.plan"
-tfi plan -input=false -out="${removal_plan}" || fail "terraform plan removing the writer entry"
+tfi plan -input=false -var-file="${IDENTITIES_TFVARS}" -out="${removal_plan}" || fail "terraform plan removing the writer entry"
 removal_json="$(tfi show -json "${removal_plan}")"
 removal_actions="$(printf '%s' "${removal_json}" | python3 -c "
 import json, sys
@@ -419,7 +424,7 @@ kubectl delete namespace "${TEST_NAMESPACE}" --timeout=60s || fail "delete test 
 pass "test namespace deleted"
 
 identities_destroy_start="$(date +%s)"
-tfi destroy -input=false -auto-approve || fail "terraform destroy infra/identities"
+tfi destroy -input=false -var-file="${IDENTITIES_TFVARS}" -auto-approve || fail "terraform destroy infra/identities"
 IDENTITIES_DESTROYED=1
 pass "terraform destroy infra/identities ($(($(date +%s) - identities_destroy_start))s)"
 
@@ -441,7 +446,7 @@ pass "disposable bucket ${BUCKET} removed"
 vpc_id="$(tff output -raw vpc_id 2>/dev/null || true)"
 
 foundation_destroy_start="$(date +%s)"
-tff destroy -auto-approve || fail "terraform destroy infra/foundation"
+tff destroy -var-file="${FOUNDATION_TFVARS}" -auto-approve || fail "terraform destroy infra/foundation"
 FOUNDATION_DESTROYED=1
 pass "terraform destroy infra/foundation ($(($(date +%s) - foundation_destroy_start))s)"
 
