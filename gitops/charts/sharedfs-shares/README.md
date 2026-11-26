@@ -22,9 +22,25 @@ CustomResourceDefinition this chart's own objects need), and `infra/foundation`'
 | `fsx.storageCapacityGib` | `""` (required) | `infra/foundation` output `shared_fsx_lustre_storage_capacity_gib`. |
 | `adminNamespace` | `fs-admin` | Namespace reserving the static `PersistentVolume`; never a team namespace. |
 
-All four `fsx.*` values and `adminNamespace` flow from the cell-registration Secret's own
-annotations through `valuesFrom` (`gitops/bootstrap/bootstrap.sh`), never as a literal value in
-a committed parameter file - see `infra/foundation/fsx.tf`'s own output descriptions for why.
+All four `fsx.*` values flow from the cell-registration Secret's own annotations through
+`valuesFrom` (`gitops/bootstrap/bootstrap.sh`), never as a literal value in a committed
+parameter file - see `infra/foundation/fsx.tf`'s own output descriptions for why.
+`adminNamespace` is the one key above with a real default (`fs-admin`); it is never set through
+a cell's own marker file today, so no `cells/<cluster-name>/sharedfs/*.yaml` parameter file in
+this repository sets it.
+
+## What this chart does
+
+`templates/seed.yaml` runs a one-time Argo CD `PreSync` hook Job (idempotent: `mkdir -p` plus a
+`chown`/`chmod` reassert on every sync) that creates the `checkpoints` and `datasets` top-level
+directories sharedfs's own `FilesystemShare` `provision` mechanism assumes already exist
+("the parent must already exist, be owned by root, and not be writable by group or others" -
+sharedfs's own README) - nothing else in this chart, or in sharedfs itself, creates that parent
+on a brand-new, empty file system. It mounts `sharedfs-source` (the same static
+`PersistentVolume` the `fs-admin` namespace's own reservation PVC binds) at its own file system
+root, so it needs `fs-admin`'s own Pod Security level to allow the same `UID 0` + `CAP_CHOWN`
+sharedfs's own preparer pods already run with (`baseline`, not `restricted` - see
+`templates/namespace.yaml`'s own comment).
 
 ## What this chart does not do
 
@@ -33,6 +49,7 @@ a committed parameter file - see `infra/foundation/fsx.tf`'s own output descript
   (`gitops/bootstrap/sharedfs-image-publish.sh`) - both are prerequisites, not rendered here.
 - It does not create team namespaces (`gitops/bootstrap/team-onboard.sh`'s own job) or grant
   Lustre project quotas (#18's own "Deferred to a follow-up" note).
-- It seeds no data into `datasets`: the `fs-admin` namespace's own `ReadWrite` grant on that
-  share exists so an admin (or this platform's own real-machine verification) can, not so this
-  chart does it automatically.
+- It seeds no data into `datasets`, only the empty directory itself (see "What this chart does"
+  above): the `fs-admin` namespace's own `ReadWrite` grant on that share exists so an admin (or
+  this platform's own real-machine verification) can seed actual content, not so this chart does
+  it automatically.

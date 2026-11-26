@@ -1,0 +1,94 @@
+# Creates the top-level `checkpoints` and `datasets` directories
+# templates/filesystemshares.yaml's own two FilesystemShare objects need
+# to already exist as their parent, on a file system that starts out
+# completely empty. sharedfs's own README states the precondition
+# ("the parent must already exist, be owned by root, and not be writable
+# by group or others") but ships no mechanism to satisfy it - this is
+# the one piece of this chart's own objects that is not a direct render
+# of something sharedfs documents, because nothing else does it.
+#
+# Found missing on a real cluster (2026-11-26): the `datasets`
+# FilesystemShare's own `provision` field made that object fail CRD
+# admission outright (fixed - see templates/filesystemshares.yaml's own
+# header comment); `checkpoints/{namespace}` passes admission but its
+# own provisioning would still fail at runtime against an unseeded file
+# system, since `checkpoints` itself is the directory this Job creates,
+# not something `provision` creates on its own (`provision` creates only
+# the final path segment, assuming its parent already exists).
+#
+# An Argo CD PreSync hook, not a plain Job: this chart's own objects
+# (the FilesystemShare CRs, the reserving PVC) do not depend on this
+# directory existing to apply successfully (CRD admission does not check
+# the live file system at all), only to provision successfully later -
+# but running this before anything else in the same sync, rather than
+# relying on apply ordering within one manifest list, needs no separate
+# wave number and matches the natural dependency (seed the parents,
+# then declare shares under them). hook-delete-policy: HookSucceeded
+# removes the Pod once it has done its one-time work; a failed run is
+# left in place for one sync cycle so its own logs are inspectable,
+# cleared by the next PreSync attempt (BeforeHookCreation is implicit:
+# Argo CD deletes a hook resource of the same name before creating a new
+# one for the next sync).
+#
+# mkdir -p is naturally idempotent: re-running this hook on a file
+# system that already has both directories changes nothing. chown/chmod
+# are reasserted every run regardless, so a directory any other process
+# ever touched is reset to the state sharedfs's own precondition
+# requires, rather than skipped because it merely exists.
+#
+# Security context mirrors sharedfs's own preparer pods exactly
+# (README: "It runs as UID 0 with only CAP_CHOWN" - every other
+# capability dropped, no service account token, RuntimeDefault seccomp
+# per the admission policy's own general requirement for task pods):
+# the same elevated-but-narrow privilege this platform already accepts
+# for sharedfs's own controller-created pods, not a wider one, and the
+# reason gitops/charts/sharedfs-shares' own namespace.yaml sets this
+# namespace's Pod Security to baseline rather than restricted.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sharedfs-seed-top-level-dirs
+  namespace: {{ .Values.adminNamespace }}
+  labels:
+    app.kubernetes.io/name: sharedfs-shares
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sharedfs-shares
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: seed
+          image: public.ecr.aws/docker/library/busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              for d in checkpoints datasets; do
+                mkdir -p "/mnt/${d}"
+                chown 0:0 "/mnt/${d}"
+                chmod 0755 "/mnt/${d}"
+              done
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+          volumeMounts:
+            - name: fsx-root
+              mountPath: /mnt
+      volumes:
+        - name: fsx-root
+          persistentVolumeClaim:
+            claimName: sharedfs-source

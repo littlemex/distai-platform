@@ -8,6 +8,28 @@
 # documented shape, README "the strongest mount the selected namespaces
 # may claim" per grant).
 #
+# `datasets` carries no `provision`: sharedfs's own CRD rejects
+# `provision` on any path with fewer than two segments ("provision needs
+# a path of two segments or more: the preparer mounts the parent
+# read-write, and the parent of a top-level directory is the whole file
+# system" - templates/crds.yaml in sharedfs-controller) - `datasets` is
+# exactly the single-segment case that rule exists to forbid, and
+# upstream's own README shows this exact path with no `provision` field
+# at all. `checkpoints/{namespace}` is two segments and keeps its own
+# `provision`, matching upstream's own other example. Caught on a real
+# cluster (2026-11-26): rendering `datasets` with `provision` set made
+# the object's own creation fail CRD admission on every sync attempt,
+# which is why gitops/charts/sharedfs-shares never converged in that run
+# - not the cross-ApplicationSet race this PR's own Test Results first
+# suspected.
+#
+# Both `checkpoints` and `datasets` are themselves top-level directories
+# whose own parent is the file system root - sharedfs's own README: "The
+# parent must already exist, be owned by root, and not be writable by
+# group or others," with no mechanism of its own to create that parent.
+# templates/seed.yaml creates both, once, before anything here needs
+# them to already exist.
+#
 # distai.dev/team (gitops/bootstrap/team-onboard.sh) is the one label
 # every team namespace carries, and the one no tenant can remove or
 # change the value of (gitops/bootstrap/team-namespace-guard.yaml's own
@@ -46,9 +68,6 @@ spec:
   persistentVolumeRef:
     name: sharedfs-source
   path: "datasets"
-  provision:
-    gid: 1000
-    mode: "2770"
   grants:
     - namespaceSelector:
         matchExpressions:
