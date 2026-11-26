@@ -408,6 +408,27 @@ run "rejects_role_name_collision" {
   expect_failures = [var.platform_identities]
 }
 
+run "rejects_two_entries_sharing_a_namespace_and_service_account" {
+  command = plan
+
+  variables {
+    platform_identities = {
+      a = {
+        namespace       = "kube-system"
+        service_account = "shared-sa"
+        policy_arns     = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]
+      }
+      b = {
+        namespace       = "kube-system"
+        service_account = "shared-sa"
+        policy_arns     = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]
+      }
+    }
+  }
+
+  expect_failures = [var.platform_identities]
+}
+
 run "rejects_entry_with_no_grant_at_all" {
   command = plan
 

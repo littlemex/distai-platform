@@ -127,6 +127,24 @@ variable "platform_identities" {
     error_message = "Two entries of platform_identities resolve to the same IAM role name (either the same explicit role_name, or the derived \"<cluster_name>-identity-<key>\" name colliding with another entry's role_name); every entry must have a distinct role name."
   }
 
+  # EKS allows at most one Pod Identity association per (cluster,
+  # namespace, service_account) triple; two different entries that both
+  # declare the same namespace/service_account would plan cleanly (each
+  # entry's own aws_eks_pod_identity_association is a separate resource
+  # at plan time) and then fail only at apply, on whichever of the two
+  # the provider creates second. Caught here instead, before any resource
+  # is created.
+  validation {
+    condition = alltrue([
+      for k, v in var.platform_identities :
+      length([
+        for k2, v2 in var.platform_identities :
+        k2 if k2 != k && v2.namespace == v.namespace && v2.service_account == v.service_account
+      ]) == 0
+    ])
+    error_message = "Two entries of platform_identities declare the same namespace/service_account; EKS allows at most one Pod Identity association per (namespace, service_account) pair, so the second entry's own association would fail to create at apply time."
+  }
+
   validation {
     condition = alltrue([
       for k, v in var.platform_identities :
