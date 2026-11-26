@@ -81,10 +81,10 @@ data "aws_iam_policy_document" "identity_assume" {
 resource "aws_iam_role" "entry" {
   for_each = var.platform_identities
 
-  name                   = local.role_names[each.key]
-  path                   = each.value.role_path
-  description            = "distai-platform add-on identity (issue #8): ${each.key}, ${each.value.namespace}/${each.value.service_account}"
-  assume_role_policy     = data.aws_iam_policy_document.identity_assume[each.key].json
+  name               = local.role_names[each.key]
+  path               = each.value.role_path
+  description        = "distai-platform add-on identity (issue #8): ${each.key}, ${each.value.namespace}/${each.value.service_account}"
+  assume_role_policy = data.aws_iam_policy_document.identity_assume[each.key].json
   # Policies attached/managed outside this layer (the migration case: a
   # hand-rolled role's own pre-existing attachments) must not block
   # DeleteRole with DeleteConflict when this layer's own apply removes
