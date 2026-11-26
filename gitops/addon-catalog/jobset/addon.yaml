@@ -21,11 +21,15 @@ namespace: jobset-system
 # chart's own values can never reach) -- the same defensive reasoning
 # gitops/addons/karpenter/addon.yaml gives for its own skipCrds. The
 # situation is not identical: there the second copy is a second top-level
-# chart install, here it is a Helm dependency's crds/ folder. A local
-# `helm template` render shows the CRD only with --include-crds (which
-# Argo CD passes by default) and not without it; whether skipCrds is
-# load-bearing on the managed Argo CD capability, or a no-op, is left to
-# real-hardware verification.
+# chart install, here it is a Helm dependency's crds/ folder. Confirmed
+# locally (no cluster needed): `helm template gitops/charts/jobset`
+# renders zero CustomResourceDefinition documents by default and exactly
+# one with --include-crds (Argo CD's repo-server passes this by default
+# when rendering a Helm source) -- the subchart's crds/ folder really is
+# included through the parent chart, so skipCrds is load-bearing here,
+# not a no-op. Left to real-hardware verification: that setting it on the
+# generated Application actually keeps this one Application from trying
+# to own the CustomResourceDefinition jobset-crd already delivers.
 skipCrds: true
 # The CRD must exist before this chart's controller can start watching
 # JobSets. jobset-crd is core (gitops/addons/), so this always resolves

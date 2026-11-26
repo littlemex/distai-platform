@@ -3,8 +3,10 @@
 # Fetched 2026-11-26. Everything from the first "---" line below to the end
 # of this file is the upstream file byte for byte; only these comment lines
 # were added. sha256 of the upstream file (this file minus these comment
-# lines):
-#   3aaa9ead975943c7aee4f63b1f66b62d3568ea2c8ba6c2b3866d6adf4372ef72
+# lines), same "sha256:<hex>" form gitops/addons/kueue/addon.yaml and
+# gitops/charts/dcgm-exporter/Chart.yaml already use for a vendored/pinned
+# digest:
+#   sha256:3aaa9ead975943c7aee4f63b1f66b62d3568ea2c8ba6c2b3866d6adf4372ef72
 # Reproduce:
 #   sed -n '/^---$/,$p' crds/jobset.x-k8s.io_jobsets.yaml | shasum -a 256
 # The same bytes are also the crds/ folder of the upstream chart
