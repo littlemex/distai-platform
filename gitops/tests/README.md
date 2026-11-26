@@ -230,11 +230,17 @@ fixtures carry no accelerator pool at all) passes every check the script
 has without ever launching a GPU or a Trainium node; this is not
 hypothetical, it happened against `main`'s own tip on 2026-11-25
 (cell `dp-main-e2e-r1`, 89 PASS / 0 FAIL, no accelerator step at all).
-Nothing in this script stops the same thing from happening against
-`dp-a19-gpu-r3`/`dp-a19-trn-r3` themselves if `GITOPS_RUN_ACCEL_E2E` is
-left at its default -- this has not been run and confirmed separately,
-but the mechanism is the same either way: the flag, not the cell, is
-what gates every accelerator-specific check. **Set
+Nothing in this script stops a flag-off run against `dp-a19-gpu-r3`/
+`dp-a19-trn-r3` themselves from skipping every accelerator-specific
+check -- this has not been run and confirmed separately, but the flag,
+not the cell, is what gates every such check. That is narrower than
+"no GPU node is launched": step 11's own admin smoke canary is
+unconditional and lands on `dp-a19-gpu-r3`'s general capacity-pool
+NodePool regardless of the flag, which is itself NVIDIA-backed (see
+the accelerator extension's own canary-release fix, #88) -- a
+flag-off run on this cell still launches a real GPU node for the
+canary, it only skips the accelerator-specific checks themselves.
+**Set
 `GITOPS_RUN_ACCEL_E2E=1` for any pull request that changes
 `gitops/addons/accel-*`, `gitops/addon-catalog/accel-*`,
 `gitops/charts/accel-device-classes/`, the accelerator fields of
@@ -250,17 +256,20 @@ apply`/`destroy` window for each cell is open. A full run of the base
 suite plus this extension (both cells) took 1h59m37s end to end on a
 real run (2026-11-22, both cells reached a final `RESULT PASS`). A base-suite-only
 run (the generic cell above, no accelerator extension) took
-1h22m on a real run against `main`'s own tip (2026-11-25). Four
-real runs of this extension in a row (2026-11-26, tracked in #87) each
-failed before completing, for three different reasons across two
-fixed defects (one in this extension's own node cleanup, one in the
-Trainium cell's own NodePool count) -- #87 has the full account. A
-fifth real run, with both fixes applied, reached a final `RESULT PASS`
-again (2h19m43s end to end, 2026-11-26): treat that and the 1h59m37s
-figure above as the known-good order of magnitude for planning, not as
-a number every run reproduces exactly -- the extra time against the
-2026-11-22 figure is this extension's own added waits and diagnostics,
-not a regression in the underlying infrastructure.
+1h22m on a real run against `main`'s own tip (2026-11-25). Six real
+runs of this extension, against this branch's history, are on record
+so far (2026-11-26, tracked in #87 and #88): four in a row each failed
+before completing, at three different points; a fifth, with a fix for
+one of those points applied, passed that point cleanly but failed at
+a new, previously-unreached defect in the Trainium cell's own NodePool
+count; a sixth, with a fix for that defect added too, reached a final
+`RESULT PASS` (2h19m43s end to end) -- #87 has the full account of the
+four, #88 of the fifth and sixth. Only the sixth run has passed. Treat
+2h19m43s and the 1h59m37s figure above as the known-good order of
+magnitude for planning, not as a number every run reproduces exactly --
+this extension does not measure or isolate why the sixth run took
+longer than the 2026-11-22 run, so neither figure should be read as a
+tight bound.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |

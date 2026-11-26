@@ -2963,8 +2963,11 @@ if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
   if canary_nc_lookup="$(k get nodeclaims -o jsonpath='{range .items[*]}{.status.nodeName}{"="}{.metadata.name}{"\n"}{end}' 2>&1)"; then
     canary_nc_name="$(echo "${canary_nc_lookup}" | awk -F= -v n="${CANARY_NODE}" '$1==n{print $2}')"
     if [[ -n "${canary_nc_name}" ]]; then
-      k delete nodeclaim "${canary_nc_name}" --ignore-not-found --wait=false >/dev/null 2>&1 \
-        || info "kubectl delete nodeclaim ${canary_nc_name} (step 14's own canary node ${CANARY_NODE}) did not accept; step 14b-b's own wait and diagnostics cover it either way"
+      if canary_nc_delete_out="$(k delete nodeclaim "${canary_nc_name}" --ignore-not-found --wait=false 2>&1)"; then
+        info "requested deletion of NodeClaim ${canary_nc_name} (step 14's own canary node ${CANARY_NODE}); not waiting for it here, see step 14b-b"
+      else
+        info "kubectl delete nodeclaim ${canary_nc_name} (step 14's own canary node ${CANARY_NODE}) was rejected; its node may still be observed at step 14b-b: ${canary_nc_delete_out}"
+      fi
     else
       info "no NodeClaim found for step 14's own canary node ${CANARY_NODE} (already gone, nothing to delete)"
     fi
@@ -3878,8 +3881,9 @@ JSON
   trn wait_until 1200 15 "Trainium capacity-pool Application Healthy and Synced" app_healthy_synced "${TRN_APP_CAPACITY_POOL}" \
     || fail "${TRN_APP_CAPACITY_POOL} did not reach Healthy+Synced: health=$(trn app_health "${TRN_APP_CAPACITY_POOL}") sync=$(trn app_sync "${TRN_APP_CAPACITY_POOL}")"
   # The platform's optional-pool ApplicationSet renders on every cell,
-  # the Trainium one included, the same way lines ~1781-1793 above
-  # already discover and exclude it for the GPU cell -- confirmed by a
+  # the Trainium one included, the same way step 10's own optional-pool
+  # discovery above (APP_OPTIONAL_POOL/OPTIONAL_NODEPOOL) already
+  # discovers and excludes it for the GPU cell -- confirmed by a
   # real run (2026-11-26): without this exclusion, the Trainium cell
   # reports 2 NodePools (optional-pool and this cell's own), failing the
   # "exactly 1" assertion below the first time this extension ever
