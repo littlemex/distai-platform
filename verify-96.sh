@@ -164,7 +164,7 @@ clusterName: "${NAME}"
 nodeRole: "${NODE_ROLE}"
 pool:
   name: gpu
-  capacityType: on-demand
+  capacityType: flex
   requirements:
     - key: kubernetes.io/arch
       operator: In
@@ -240,6 +240,12 @@ for i in $(seq 1 90); do
   TAINT_PRESENT=no
   echo "${TAINTS:-}" | grep -q "startup-not-ready" && TAINT_PRESENT=yes
   log "t+$((i*10))s node=${NODE1:-<none>} taint_present=${TAINT_PRESENT} dp_ready=${S1_DP_READY:-no} pod_phase=${PHASE:-<none>}"
+  if [ -z "${NODE1}" ] && [ "${i}" -eq 18 ]; then
+    log "no node after 3 minutes -- dumping karpenter logs and nodeclaim status for diagnosis"
+    kubectl get nodeclaims -o wide > "${EV}/s1-nodeclaims-t3m.txt" 2>&1 || true
+    kubectl describe nodeclaims > "${EV}/s1-nodeclaims-describe-t3m.txt" 2>&1 || true
+    kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter --since=5m --tail=200 > "${EV}/s1-karpenter-logs-t3m.txt" 2>&1 || true
+  fi
   if [ "${PHASE}" = "Running" ] && [ -z "${S1_POD_RUNNING}" ]; then
     S1_POD_RUNNING="$(date -u +%H:%M:%S)"; log "gpu-smoke-1 Running at ${S1_POD_RUNNING}"
     break
