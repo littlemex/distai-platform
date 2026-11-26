@@ -1,0 +1,138 @@
+# Template for run.sh. Tokens (__LIKE_THIS__) are substituted by sed; lines
+# tagged "# KUEUE-ONLY" are dropped entirely when run.sh has no QUEUE_NAME
+# (so the Job runs immediately, unsuspended, on a cluster with no Kueue).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gpu-healthcheck-preflight-__RUN_ID__
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: gpu-healthcheck
+    app.kubernetes.io/component: preflight
+    kueue.x-k8s.io/queue-name: __QUEUE_NAME__ # KUEUE-ONLY
+spec:
+  suspend: true # KUEUE-ONLY
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gpu-healthcheck
+        app.kubernetes.io/component: preflight
+    spec:
+      restartPolicy: Never
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        node.kubernetes.io/instance-type: __INSTANCE_TYPE__
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: preflight
+          image: __BASE_IMAGE__
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              echo "=== installing EFA userspace libraries (kernel module from host, --skip-kmod) ==="
+              # Still "latest", not a pinned version (a deviation from AGENTS.md's
+              # own pinning rule, stated here rather than left silent): this
+              # platform has not cross-checked a specific aws-efa-installer
+              # release against every instance type/kernel this Job might run
+              # against, and upstream's own kubernetes/Dockerfile pins to the
+              # same "latest" URL for the same userspace-only (--skip-kmod) use.
+              # Tracked, not fixed, in this PR.
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends pciutils kmod curl ca-certificates >/dev/null
+              cd /tmp
+              curl -fsSL https://efa-installer.amazonaws.com/aws-efa-installer-latest.tar.gz -o efa.tar.gz
+              tar xzf efa.tar.gz
+              cd aws-efa-installer
+              EFA_INSTALL_RC=0
+              ./efa_installer.sh -y -g -d --skip-kmod --skip-limit-conf --no-verify || EFA_INSTALL_RC=$?
+              # Confirmed on real hardware (issue #30's own Test Results): the
+              # installer can exit 0 and still leave fi_info off PATH -- its own
+              # packages (efa-profile) add /opt/amazon/efa/bin via
+              # /etc/profile.d, which a non-interactive, non-login `bash -c`
+              # (this container's own entrypoint) never sources. Add it to PATH
+              # directly instead of relying on shell init files this process
+              # never reads.
+              [ -d /opt/amazon/efa/bin ] && export PATH="/opt/amazon/efa/bin:${PATH}"
+              # Upstream's own check 2 (checks/2-efa-enumeration.sh) treats a
+              # missing fi_info as a WARN, logged to the Pod's own output, not
+              # something that fails the check: its own PCI/RDMA/uverbs-node
+              # sub-checks do not depend on fi_info and can still PASS without
+              # it (confirmed on real hardware, issue #30's own Test Results,
+              # first run). Neither WARN line below claims otherwise; read the
+              # Pod's own log for whether fi_info was actually exercised this
+              # run -- the Job's own exit code alone does not say.
+              if [ "$EFA_INSTALL_RC" -ne 0 ]; then
+                echo "[WARN] efa_installer.sh exited $EFA_INSTALL_RC -- continuing; check 2's own libfabric sub-check is a soft WARN in upstream's own design and will not by itself fail the suite"
+              elif command -v fi_info >/dev/null 2>&1; then
+                echo "[INFO] fi_info present after install: $(fi_info --version 2>&1 | head -1)"
+              else
+                echo "[WARN] efa_installer.sh exited 0 but fi_info is still not on PATH -- check 2's own libfabric sub-check will likely WARN on this, which does not by itself fail the suite"
+              fi
+              cd /opt/gpu-healthcheck
+              export INSTANCE_TYPE="__INSTANCE_TYPE__"
+              echo "=== running lightweight suite (checks 0-3) ==="
+              RESULT=0
+              ./gpu-healthcheck.sh --suite lightweight --json --results-dir /tmp/gpu-healthcheck-results || RESULT=$?
+              echo "=== summary.json ==="
+              cat /tmp/gpu-healthcheck-results/summary.json || true
+              echo "=== per-check results ==="
+              for f in /tmp/gpu-healthcheck-results/*.json; do
+                [ "$f" = "/tmp/gpu-healthcheck-results/summary.json" ] && continue
+                echo "--- $f ---"; cat "$f" || true
+              done
+              exit "$RESULT"
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 4Gi
+          volumeMounts:
+            - name: dev
+              mountPath: /dev
+            - name: proc-host
+              mountPath: /host/proc
+              readOnly: true
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+            - name: vendor-root
+              mountPath: /opt/gpu-healthcheck
+            - name: vendor-checks
+              mountPath: /opt/gpu-healthcheck/checks
+            - name: vendor-lib
+              mountPath: /opt/gpu-healthcheck/lib
+      volumes:
+        - name: dev
+          hostPath:
+            path: /dev
+        - name: proc-host
+          hostPath:
+            path: /proc
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: vendor-root
+          configMap:
+            name: gpu-healthcheck-vendor-root-__RUN_ID__
+            defaultMode: 0755
+        - name: vendor-checks
+          configMap:
+            name: gpu-healthcheck-vendor-checks-__RUN_ID__
+            defaultMode: 0755
+        - name: vendor-lib
+          configMap:
+            name: gpu-healthcheck-vendor-lib-__RUN_ID__
+            defaultMode: 0755

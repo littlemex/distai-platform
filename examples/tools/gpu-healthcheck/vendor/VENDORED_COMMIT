@@ -1,0 +1,13 @@
+# Vendored from https://github.com/awslabs/awsome-distributed-ai
+# Path: validation/gpu-cluster-healthcheck
+# Commit: 94853e2d55cc541aa44088c5b1a80913762cb4e0
+# Date captured: 2026-11-26
+# License: see awsome-distributed-ai/LICENSE in this directory (MIT-style,
+#   Copyright Amazon.com, Inc. or its affiliates).
+#
+# slurm/ was dropped from the vendored copy: this platform is Kubernetes-only
+# (AGENTS.md section 3), and the Slurm integration is unused dead weight here.
+# Everything else is byte-for-byte upstream. Do not hand-edit files under
+# awsome-distributed-ai/ -- re-run vendor/update-vendor.sh against a new pinned
+# commit instead, so the diff a reviewer sees is always "what upstream
+# changed", never "what we changed inside someone else's file".
