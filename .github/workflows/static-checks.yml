@@ -172,6 +172,21 @@ jobs:
           shellcheck --version
 
       - name: Run infra/foundation/tests/0.static.sh
+        # GITHUB_TOKEN: `tflint --init` fetches the pinned
+        # terraform-linters/tflint-ruleset-aws release from the GitHub API
+        # to install it (infra/foundation's own .tflint.hcl pins
+        # version = "0.50.0"); a real run of this exact step on
+        # 2026-11-26 failed with "403 API rate limit exceeded" against
+        # GitHub-hosted runners' own shared, unauthenticated IP pool.
+        # tflint's own plugin installer reads GITHUB_TOKEN when present
+        # and uses it to authenticate that request, which gets the
+        # authenticated (much higher) rate limit instead of the
+        # anonymous one; the default, read-only `github.token` is enough
+        # for that (it only needs to prove the request is authenticated,
+        # not that it can write anything), and this step requests no
+        # wider permission for it.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: bash infra/foundation/tests/0.static.sh
 
   # ----------------------------------------------------------------------
@@ -230,6 +245,48 @@ jobs:
           tar -xJf "${RUNNER_TEMP}/shellcheck.tar.xz" -C "${RUNNER_TEMP}" "shellcheck-${SC_VER}/shellcheck"
           sudo install -m 0755 "${RUNNER_TEMP}/shellcheck-${SC_VER}/shellcheck" /usr/local/bin/shellcheck
           shellcheck --version
+
+      - name: Register the Helm chart repositories gitops/ charts' own Chart.yaml dependencies name
+        # gitops/tests/0.static.sh's own `helm dependency build` calls
+        # (for charts/dcgm-exporter and any gitops/addon-catalog/*/
+        # wrapper chart with a `dependencies:` entry) resolve against
+        # Helm's local repository list, not a repository URL given
+        # directly in Chart.yaml -- confirmed by a real run of this exact
+        # step on 2026-11-26, which failed with "no repository definition
+        # for https://nvidia.github.io/dcgm-exporter/helm-charts" until
+        # this step was added. This repository's own EC2 test runner
+        # (runner/runner.yaml) has every chart repository this platform
+        # currently or prospectively depends on pre-added once, by hand,
+        # and keeps that state between runs; a GitHub-hosted runner starts
+        # with none of it and needs every repository added fresh, every
+        # run. Every classic (non-OCI) `repository:` URL is read straight
+        # out of every gitops/**/Chart.yaml (an OCI dependency --
+        # examples/inference's disagg-pd-llmd chart has one, under
+        # examples/, not gitops/ -- resolves directly from its own
+        # `oci://` reference with no local repository needed, and is
+        # deliberately not matched here), not a hand-typed list: this
+        # mirrors the same "derive from the tree, do not hand-type a set
+        # that drifts" rule gitops/tests/0.static.sh's own comments state
+        # for its fixture-chart and kubeconform-target loops, so a future
+        # add-on with its own new classic chart repository needs no
+        # matching edit here.
+        run: |
+          set -euo pipefail
+          mapfile -t repo_urls < <(
+            find gitops -name 'Chart.yaml' -exec grep -h '^\s*repository:\s*"https://' {} \; \
+              | sed -E 's/^\s*repository:\s*"([^"]+)"\s*$/\1/' \
+              | sort -u
+          )
+          echo "${#repo_urls[@]} classic chart repository URL(s) found under gitops/"
+          n=0
+          for url in "${repo_urls[@]}"; do
+            n=$((n + 1))
+            echo "helm repo add ci-repo-${n} ${url}"
+            helm repo add "ci-repo-${n}" "${url}"
+          done
+          if [[ "${#repo_urls[@]}" -gt 0 ]]; then
+            helm repo update
+          fi
 
       - name: Run gitops/tests/0.static.sh
         run: bash gitops/tests/0.static.sh
