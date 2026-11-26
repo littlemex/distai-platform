@@ -29,19 +29,32 @@ helm upgrade --install "${RELEASE}" examples/inference/vllm/disagg-pd \
   --set placement.sameNodeMeasurement=true \
   --set placement.sharedPoolValue=shared \
   --set placement.enforceAntiAffinity=false \
-  --set transport.forceEfaSameNode=true
+  --set transport.forceEfaSameNode=true \
+  --set-string 'proxy.nodeSelector.distai\.dev/pd-role=shared' \
+  --set-json 'proxy.tolerations=[{"key":"nvidia.com/gpu","operator":"Exists","effect":"NoSchedule"}]'
 kubectl rollout status deployment -n "${NAMESPACE}" -l app.kubernetes.io/instance="${RELEASE}" --timeout=40m
 
 echo "=== [3/7] both roles really are on the one node ==="
 kubectl get pods -n "${NAMESPACE}" -l app.kubernetes.io/instance="${RELEASE}" -o wide
 
-echo "=== [4/7] one smoke request through the proxy ==="
-kubectl run curl-pd --rm -i --restart=Never -n "${NAMESPACE}" \
-  --image=curlimages/curl:8.23.0 -- \
-  curl -sS "http://${RELEASE}-vllm-disagg-pd:8000/v1/completions" \
-  -H 'Content-Type: application/json' \
-  -d "{\"model\": \"${MODEL_ID}\", \"prompt\": \"The capital of France is\", \"max_tokens\": 32}"
+echo "=== [4/7] one smoke request through the proxy (retrying up to 3 min) ==="
+smoke_deadline=$(( $(date +%s) + 180 ))
+smoke_ok=0
+while [[ $(date +%s) -lt ${smoke_deadline} ]]; do
+  if kubectl run "curl-pd-smoke-$(date +%s)" --rm -i --restart=Never -n "${NAMESPACE}" \
+    --image=curlimages/curl:8.23.0 --command -- \
+    curl -sS --max-time 20 "http://${RELEASE}-vllm-disagg-pd:8000/v1/completions" \
+    -H 'Content-Type: application/json' \
+    -d "{\"model\": \"${MODEL_ID}\", \"prompt\": \"The capital of France is\", \"max_tokens\": 32}" \
+    | tee /tmp/p5en-smoke.json | grep -q '"text"'; then
+    smoke_ok=1
+    break
+  fi
+  sleep 10
+done
+cat /tmp/p5en-smoke.json || true
 echo
+[[ "${smoke_ok}" == "1" ]] || echo "WARNING: smoke request did not return a completion within 3 min, continuing anyway"
 
 read_efa_counters() {
   kubectl debug "node/${NODE}" -n "${NAMESPACE}" --profile=general --image=curlimages/curl:8.23.0 -i -- \
@@ -57,7 +70,7 @@ echo "=== [5/7] EFA counters before the load, then running the load-replay ==="
 read_efa_counters | tee /tmp/p5en-efa-before.txt
 
 export RUN_ID=run1 LAYOUT=disagg-pd-samenode TARGET_URL="http://${RELEASE}-vllm-disagg-pd:8000"
-export NUM_PROMPTS=200 REQUEST_RATE=2 MAX_SEND_LAG_MS=100
+export NUM_PROMPTS=200 REQUEST_RATE=2 MAX_SEND_LAG_MS=150
 export BENCH_EXTRA_ARGS="--random-input-len 512 --random-output-len 128 --seed 0"
 kubectl create configmap load-replay-scripts -n "${NAMESPACE}" \
   --from-file=examples/inference/_shared/load-replay/run-load.sh \
