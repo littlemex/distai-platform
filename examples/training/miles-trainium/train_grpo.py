@@ -136,6 +136,15 @@ def generate_completions(prompt: str, n: int) -> list[str]:
         },
         timeout=180,
     )
+    if resp.status_code >= 400:
+        # Unverified-fix follow-up: the real-machine attempt that found this PR's own sampler-mode
+        # root cause (README.md "On the exit code") only recovered it from the Python traceback's
+        # exception message, which `requests.HTTPError` does not include the server's own response
+        # body in. sglang-neuron answers an admission refusal with a JSON body naming the setting
+        # at fault (general_plugin.py's _validate_request -> HTTPException(detail=...)); logging it
+        # here means a future admission refusal is diagnosed from this script's own stdout, not by
+        # re-deriving it from sglang-neuron's source after the fact.
+        log(f"FATAL: {SERVER_URL}/v1/completions returned {resp.status_code}: {resp.text[:2000]}")
     resp.raise_for_status()
     data = resp.json()
     return [c["text"] for c in data["choices"]]
