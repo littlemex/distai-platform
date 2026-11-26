@@ -175,6 +175,33 @@ variable "argocd" {
   }
 }
 
+variable "budget_limit_usd" {
+  description = "Monthly AWS Budgets limit, in US dollars, for this cell's own tagged resources (cost_filter on the tag key distai-platform/cell, value var.name). Optional; null (the default) creates no aws_budgets_budget, Amazon SNS topic or Amazon SNS subscription at all, for example throwaway end-to-end test cells that never set it. When set, the cell's own Amazon SNS topic is notified at 80% and 100% of this limit (ACTUAL spend)."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.budget_limit_usd == null || var.budget_limit_usd > 0
+    error_message = "budget_limit_usd must be a positive number of US dollars, or null to create no budget."
+  }
+}
+
+variable "budget_notification_emails" {
+  description = "Email addresses subscribed to this cell's own Amazon SNS budget-alert topic. Each address needs its own AWS-sent confirmation click before it receives anything. Only used when budget_limit_usd is set; an empty list (the default) still creates the topic and the budget, with nobody subscribed yet."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for e in var.budget_notification_emails : can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", e))])
+    error_message = "Every entry of budget_notification_emails must look like an email address."
+  }
+
+  validation {
+    condition     = length(distinct(var.budget_notification_emails)) == length(var.budget_notification_emails)
+    error_message = "budget_notification_emails must not contain duplicates."
+  }
+}
+
 variable "tags" {
   description = "Tags applied to every resource this layer creates (through the provider's default_tags)."
   type        = map(string)

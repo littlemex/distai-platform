@@ -58,6 +58,16 @@ output "cluster_arn" {
   value       = local.cluster_arn
 }
 
+output "budget_alert_topic_arn" {
+  description = "ARN of the cell's Amazon SNS budget-alert topic, or null when var.budget_limit_usd is not set. An admin can subscribe more destinations to it from the console without any further Terraform apply."
+  value       = try(aws_sns_topic.budget_alerts[0].arn, null)
+}
+
+output "budget_name" {
+  description = "Name of the cell's aws_budgets_budget, or null when var.budget_limit_usd is not set."
+  value       = try(aws_budgets_budget.cell[0].name, null)
+}
+
 output "argocd_namespace" {
   description = "Kubernetes namespace of the managed Argo CD capability's own objects (registration Secret, AppProject, root Application), or null when var.argocd is not set. No ApplicationSet or addon.yaml reads this directly; each generated Application *object* (control-plane bookkeeping: where Argo CD stores it) inherits that namespace from the root Application this output's consumer (gitops/bootstrap/bootstrap.sh) writes, but each add-on's own *workload* namespace (where its chart's pods and other resources actually land) is a separate namespace: key in that add-on's own addon.yaml, never this output."
   value       = try(aws_eks_capability.argocd[0].configuration[0].argo_cd[0].namespace, null)

@@ -142,3 +142,82 @@ run "system_node_group_rejects_graviton_instance_types" {
 
   expect_failures = [var.system_node_group]
 }
+
+run "budget_limit_usd_null_creates_no_budget_resources" {
+  command = plan
+
+  variables {
+    budget_limit_usd = null
+  }
+
+  assert {
+    condition     = length(aws_budgets_budget.cell) == 0
+    error_message = "budget_limit_usd = null must create no aws_budgets_budget."
+  }
+
+  assert {
+    condition     = length(aws_sns_topic.budget_alerts) == 0
+    error_message = "budget_limit_usd = null must create no aws_sns_topic."
+  }
+}
+
+run "budget_limit_usd_accepts_a_positive_amount" {
+  command = plan
+
+  variables {
+    budget_limit_usd           = 10
+    budget_notification_emails = ["admin@example.com"]
+  }
+
+  assert {
+    condition     = length(aws_budgets_budget.cell) == 1
+    error_message = "budget_limit_usd = 10 must create exactly one aws_budgets_budget."
+  }
+
+  assert {
+    condition     = length(aws_sns_topic.budget_alerts) == 1
+    error_message = "budget_limit_usd = 10 must create exactly one aws_sns_topic."
+  }
+}
+
+run "budget_limit_usd_rejects_zero" {
+  command = plan
+
+  variables {
+    budget_limit_usd = 0
+  }
+
+  expect_failures = [var.budget_limit_usd]
+}
+
+run "budget_limit_usd_rejects_negative" {
+  command = plan
+
+  variables {
+    budget_limit_usd = -5
+  }
+
+  expect_failures = [var.budget_limit_usd]
+}
+
+run "budget_notification_emails_rejects_malformed_address" {
+  command = plan
+
+  variables {
+    budget_limit_usd           = 10
+    budget_notification_emails = ["not-an-email"]
+  }
+
+  expect_failures = [var.budget_notification_emails]
+}
+
+run "budget_notification_emails_rejects_duplicates" {
+  command = plan
+
+  variables {
+    budget_limit_usd           = 10
+    budget_notification_emails = ["admin@example.com", "admin@example.com"]
+  }
+
+  expect_failures = [var.budget_notification_emails]
+}
