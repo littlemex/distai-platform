@@ -173,14 +173,15 @@ aws ec2 describe-instances --region "${AWS_REGION}" \
   | tee -a "${RUN_LOG_DIR}/node.log"
 
 log "=== PHASE 7: stream logs until the Job finishes (deadline ~55min) ==="
-# The real-machine attempt that produced this PR's own Test Results (README.md "What actually
-# ran") lost every application log line this way, running this script's own predecessor: a
-# single `kubectl logs -f` started while the container was still ContainerCreating hit its own
-# client-side "context deadline exceeded" and exited for good BEFORE the container ever started,
-# with nothing there to restart it -- the container went on to run and fail (exit code 2, visible
-# only in `kubectl get events`/the Job's own status, never in that run's captured log) with zero
-# stdout recorded. This loop relaunches `kubectl logs -f` any time it exits early, as long as the
-# Job itself has not finished. Not re-verified against a real failure of this kind.
+# session 1's own predecessor of this script lost every application log line this way
+# (README.md "What actually ran", attempt 3): a single `kubectl logs -f` started while the
+# container was still ContainerCreating hit its own client-side "context deadline exceeded" and
+# exited for good BEFORE the container ever started, with nothing there to restart it -- the
+# container went on to run and fail with zero stdout recorded. This loop relaunches
+# `kubectl logs -f` any time it exits early, as long as the Job itself has not finished, and the
+# belt-and-suspenders plain `kubectl logs` below re-fetches the full buffered log once more after
+# the Job finishes. Re-verified working in session 2 (attempts 4-6 all captured the application
+# log in full, including the exact server-side error line each time).
 LOGS_PID=""
 relaunch_logs() {
   if [[ -n "${LOGS_PID}" ]] && kill -0 "${LOGS_PID}" 2>/dev/null; then return; fi
