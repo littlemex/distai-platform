@@ -15,6 +15,14 @@ STATE_BUCKET="${STATE_BUCKET:?set STATE_BUCKET}"
 STATE_REGION="${STATE_REGION:?set STATE_REGION}"
 ADMIN_PRINCIPAL_ARN="${ADMIN_PRINCIPAL_ARN:?set ADMIN_PRINCIPAL_ARN}"
 MY_CIDR="${MY_CIDR:?set MY_CIDR}"
+# bootstrap.sh requires the cell's own terraform output argocd_namespace to be
+# non-null (gitops/README.md "Bootstrapping a cell"), i.e. var.argocd must be
+# set at apply time -- attempt 1 (run-20261126T065549Z-23674) failed exactly
+# here. Mirrors gitops/tests/1.e2e.sh's own pattern: create one disposable
+# Identity Center group, map it to ADMIN, delete the group in teardown.
+ARGOCD_IDC_INSTANCE_ARN="${ARGOCD_IDC_INSTANCE_ARN:?set ARGOCD_IDC_INSTANCE_ARN}"
+ARGOCD_IDC_IDENTITY_STORE_ID="${ARGOCD_IDC_IDENTITY_STORE_ID:?set ARGOCD_IDC_IDENTITY_STORE_ID}"
+ARGOCD_IDC_REGION="${ARGOCD_IDC_REGION:?set ARGOCD_IDC_REGION}"
 export AWS_PROFILE="${AWS_PROFILE:-default}"
 
 REPO_ROOT="$(pwd)"
@@ -24,6 +32,7 @@ mkdir -p "${RUN_LOG_DIR}"
 log() { echo "[$(date -u +%H:%M:%SZ)] $*"; }
 
 VPC_ID=""
+IDC_GROUP_ID=""
 TEARDOWN_DONE=0
 
 teardown() {
@@ -34,6 +43,14 @@ teardown() {
   kubectl delete configmap miles-grpo-smoke-script -n distai-smoke --ignore-not-found 2>&1 | tee -a "${RUN_LOG_DIR}/teardown.log" || true
   cd "${REPO_ROOT}/infra/foundation"
   terraform destroy -auto-approve 2>&1 | tee -a "${RUN_LOG_DIR}/terraform-destroy.log" || log "WARN: terraform destroy exited non-zero, continuing to the read-only sweep anyway"
+  if [[ -n "${IDC_GROUP_ID}" ]]; then
+    if aws identitystore delete-group --identity-store-id "${ARGOCD_IDC_IDENTITY_STORE_ID}" \
+      --region "${ARGOCD_IDC_REGION}" --group-id "${IDC_GROUP_ID}" >>"${RUN_LOG_DIR}/teardown.log" 2>&1; then
+      log "deleted temporary Identity Center group ${IDC_GROUP_ID}"
+    else
+      log "WARN: could not delete temporary Identity Center group ${IDC_GROUP_ID}, remove it by hand"
+    fi
+  fi
   log "=== independent read-only leftover sweep (${NAME}) ==="
   for kind in instance eni nat volume launch-template; do
     out=""
@@ -75,12 +92,20 @@ teardown() {
 }
 trap teardown EXIT
 
+log "=== PHASE 0: temporary Identity Center group for the Argo CD capability ==="
+IDC_GROUP_ID="$(aws identitystore create-group --identity-store-id "${ARGOCD_IDC_IDENTITY_STORE_ID}" \
+  --region "${ARGOCD_IDC_REGION}" --display-name "${NAME}" \
+  --description "distai-platform miles-on-Trainium investigation, deleted at the end of this run" \
+  --query GroupId --output text)"
+log "created temporary Identity Center group ${IDC_GROUP_ID} (${NAME})"
+
 log "=== PHASE 1: terraform apply (infra/foundation), cell=${NAME} region=${AWS_REGION} ==="
 cd "${REPO_ROOT}/infra/foundation"
 export TF_VAR_name="${NAME}"
 export TF_VAR_region="${AWS_REGION}"
 export TF_VAR_endpoint_public_access_cidrs="[\"${MY_CIDR}\"]"
 export TF_VAR_admin_principal_arns="[\"${ADMIN_PRINCIPAL_ARN}\"]"
+export TF_VAR_argocd="{\"idc_instance_arn\":\"${ARGOCD_IDC_INSTANCE_ARN}\",\"idc_region\":\"${ARGOCD_IDC_REGION}\",\"role_mappings\":[{\"role\":\"ADMIN\",\"group_ids\":[\"${IDC_GROUP_ID}\"]}]}"
 terraform init -input=false \
   -backend-config="bucket=${STATE_BUCKET}" \
   -backend-config="key=distai-platform/${AWS_REGION}/${NAME}/foundation" \
