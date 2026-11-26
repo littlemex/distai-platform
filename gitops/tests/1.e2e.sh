@@ -2897,6 +2897,60 @@ run_bootstrap --revision "${GITOPS_REVISION}" || fail "bootstrap.sh (re-adopt af
 wait_until 600 15 "capacity-pool Application reappears and reaches Synced" app_synced "${APP_CAPACITY_POOL}" \
   || fail "${APP_CAPACITY_POOL} did not reappear and reach Synced after re-running bootstrap.sh"
 
+if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
+  # #87's second, previously-open hypothesis, confirmed here by reading
+  # the code and the cell's own fixture, not guessed: this cell's
+  # capacity-pool NodePool (${NODEPOOL}) is backed by
+  # karpenter.k8s.aws/instance-family in [g7, g6e, g5]
+  # (cells/dp-a19-gpu-r3/capacity-pool/gpu.yaml), so every node it
+  # launches -- including the one Kueue just admitted step 11's canary
+  # Job onto, and that step 14 above needed kept alive to prove the
+  # orphan/re-adopt survived with a real running instance -- carries
+  # karpenter.k8s.aws/instance-gpu-manufacturer=nvidia. That is the exact
+  # label both dcgm-exporter's own chart (values.yaml's nodeSelector) and
+  # step 14b-b's "zero NVIDIA nodes" precondition key on. Nothing before
+  # this point ever deleted that node, so step 14b-b's precondition was
+  # never actually starting from zero on this cell once step 11's canary
+  # had landed on an NVIDIA-labeled node -- independent of, and in
+  # addition to, the NodeClaim-deletion-timing cause already fixed above
+  # for check_accel_layer1's own probe node.
+  #
+  # Released here, not tolerated in step 14b's checks: an earlier
+  # version of this fix excluded this specific node from step 14b-b's
+  # precondition alone, and review found it incomplete -- the very next
+  # check (step 14b-b's own dcgm_desired == 0 assertion) makes the same
+  # "zero NVIDIA nodes" assumption and would still fail for the same
+  # reason, moving the failure a few lines down rather than fixing it.
+  # Deleting the node outright, now that step 14 is done needing it,
+  # makes both of step 14b-b's assumptions actually true instead of
+  # teaching every downstream check to carve out one more exception.
+  # Guarded into the same three outcomes check_accel_layer1 already
+  # distinguishes (found and delete accepted, found but delete rejected,
+  # lookup itself failed), fired with --wait=false: step 14b-b's own
+  # existing up-to-600s wait_until and nvidia_node_leftover_diagnostics
+  # already absorb and would diagnose this node's termination tail the
+  # same way they do check_accel_layer1's, so no second wait is added
+  # here. Step 15 (destroy) still needs its own running Karpenter
+  # instance from this NODEPOOL to prove the foundation's teardown guard
+  # -- a fresh one is submitted there instead (see step 15 below), since
+  # that need belongs to step 15 alone, not to keeping this node alive
+  # across all of step 14b for it.
+  k delete job canary -n "${SMOKE_NS}" --ignore-not-found --wait=false >/dev/null 2>&1 \
+    || fail "kubectl delete job ${SMOKE_NS}/canary (releasing step 14's own canary node before step 14b needs zero NVIDIA nodes)"
+  if canary_nc_lookup="$(k get nodeclaims -o jsonpath='{range .items[*]}{.status.nodeName}{"="}{.metadata.name}{"\n"}{end}' 2>&1)"; then
+    canary_nc_name="$(echo "${canary_nc_lookup}" | awk -F= -v n="${CANARY_NODE}" '$1==n{print $2}')"
+    if [[ -n "${canary_nc_name}" ]]; then
+      k delete nodeclaim "${canary_nc_name}" --ignore-not-found --wait=false >/dev/null 2>&1 \
+        || info "kubectl delete nodeclaim ${canary_nc_name} (step 14's own canary node ${CANARY_NODE}) did not accept; step 14b-b's own wait and diagnostics cover it either way"
+    else
+      info "no NodeClaim found for step 14's own canary node ${CANARY_NODE} (already gone, nothing to delete)"
+    fi
+  else
+    info "kubectl get nodeclaims failed while looking up step 14's own canary node ${CANARY_NODE} -- nothing deleted here, only consolidation or step 14b-b's own wait will catch it: ${canary_nc_lookup}"
+  fi
+  pass "released step 14's own canary Job and (if found) its NodeClaim for node ${CANARY_NODE}, ahead of step 14b-b's zero-NVIDIA-node precondition"
+fi
+
 # Exactly the capacity pool and optional-pool's own pair (step 10), both
 # orphaned and re-adopted by name -- anything else is a duplicate.
 expected_nodepools="$(printf '%s\n' "${NODEPOOL}" "${OPTIONAL_NODEPOOL}" | sort | tr '\n' ' ')"
@@ -3677,6 +3731,27 @@ report_leftovers() {
   done
   return "${bad}"
 }
+
+if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
+  # Step 14b above released step 11's own canary Job and node once step
+  # 14 was done needing it (so step 14b-b could start from a genuine
+  # zero NVIDIA nodes). This step's own proof below -- a real running
+  # Karpenter-launched instance from ${NODEPOOL}, confirmed terminated
+  # only by terraform destroy itself -- needs one of its own, so a fresh
+  # one is submitted here: the same canary.yaml this run already
+  # rendered for step 11 (same SMOKE_NS/SMOKE_LOCALQUEUE/accelerator
+  # resource request, if any), reusing the Job name now that step 14's
+  # own canary and its Workload are gone.
+  k apply -f "${WORK_DIR}/canary.yaml" || fail "kubectl apply the step 15 teardown-guard canary Job"
+  wait_until 300 10 "Kueue admits the step 15 teardown-guard canary Job" canary_admitted \
+    || fail "step 15 teardown-guard canary Job was never admitted (still suspended): $(k get job canary -n "${SMOKE_NS}" -o jsonpath='{.status}')"
+  wait_until 900 15 "a node launches for the step 15 teardown-guard canary Job" canary_running_on_node \
+    || fail "step 15 teardown-guard canary Job's pod never got a node: $(k get nodeclaims -o wide 2>&1)"
+  CANARY_NODE="$(canary_node)"
+  CANARY_INSTANCE_ID="$(instance_of_node "${CANARY_NODE}")"
+  [[ -n "${CANARY_INSTANCE_ID}" ]] || fail "could not resolve an instance ID for the step 15 teardown-guard canary's node ${CANARY_NODE}"
+  pass "step 15's own teardown-guard canary Job launched a fresh Karpenter node (${CANARY_NODE}, instance ${CANARY_INSTANCE_ID})"
+fi
 
 k delete job canary -n "${SMOKE_NS}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
 
