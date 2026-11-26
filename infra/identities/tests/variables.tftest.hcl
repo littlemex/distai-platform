@@ -250,7 +250,7 @@ run "multi_bucket_entry_list_statements_do_not_cross_pair" {
         s.actions == toset(["s3:ListBucket"]) &&
         s.resources == toset(["arn:aws:s3:::distai-platform-bucket-a"]) &&
         length(s.condition) == 1 &&
-        s.condition[0].values == ["a-prefix/*"]
+        one(s.condition).values == ["a-prefix/*"]
       )
     ]) == 1
     error_message = "bucket-a's own ListBucket statement must exist, naming only bucket-a's own ARN, with a condition scoped to exactly [\"a-prefix/*\"]."
@@ -263,7 +263,7 @@ run "multi_bucket_entry_list_statements_do_not_cross_pair" {
         s.actions == toset(["s3:ListBucket"]) &&
         s.resources == toset(["arn:aws:s3:::distai-platform-bucket-b"]) &&
         length(s.condition) == 1 &&
-        s.condition[0].values == ["b-prefix/*"]
+        one(s.condition).values == ["b-prefix/*"]
       )
     ]) == 1
     error_message = "bucket-b's own ListBucket statement must exist, naming only bucket-b's own ARN, with a condition scoped to exactly [\"b-prefix/*\"]."
