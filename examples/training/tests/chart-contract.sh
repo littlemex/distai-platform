@@ -18,18 +18,21 @@
 # shellcheck disable=SC2034 # read by the sourcing script
 
 # -> the JobSet's metadata.labels["kueue.x-k8s.io/queue-name"]
-TRAINING_KEY_QUEUE_NAME="queueName"
+TRAINING_KEY_QUEUE_NAME="kueue.queueName"
 # -> spec.replicatedJobs[0].replicas (pods, one per node, in the one group)
-TRAINING_KEY_REPLICAS="replicas"
+TRAINING_KEY_REPLICAS="workers.replicas"
 # -> the pod's own GPU limit and torchrun --nproc-per-node
-TRAINING_KEY_GPUS_PER_POD="gpusPerPod"
+TRAINING_KEY_GPUS_PER_POD="workers.gpusPerNode"
 # -> the pod template's serviceAccountName and the rendered ServiceAccount
 TRAINING_KEY_SERVICE_ACCOUNT="serviceAccount.name"
 # -> where the training script writes and reads its checkpoints
 TRAINING_KEY_CHECKPOINT_BUCKET="checkpoint.bucket"
 TRAINING_KEY_CHECKPOINT_PREFIX="checkpoint.prefix"
+# -> the AWS_REGION the training script's own S3 client uses; the
+# container's entrypoint exits before running anything if this is empty
+TRAINING_KEY_CHECKPOINT_REGION="checkpoint.region"
 # -> how often (in steps) a checkpoint is written, and how many steps run
-TRAINING_KEY_CHECKPOINT_EVERY="checkpoint.everySteps"
+TRAINING_KEY_CHECKPOINT_EVERY="training.checkpointEvery"
 TRAINING_KEY_TOTAL_STEPS="training.totalSteps"
 
 # NOTE: the training script's own observable contract, also chosen by the
@@ -46,4 +49,4 @@ TRAINING_KEY_TOTAL_STEPS="training.totalSteps"
 #     step it resumed from as the first capture group; when it finds none,
 #     it prints nothing matching that pattern.
 # 1.e2e.sh greps the restarted Pods' logs for exactly this pattern.
-TRAINING_RESUME_LOG_REGEX='resumed from step[ =:]*([0-9]+)'
+TRAINING_RESUME_LOG_REGEX='resuming from step ([0-9]+)'

@@ -306,11 +306,26 @@ def main(argv: list[str]) -> int:
             check(f"R5 container {n}: torchrun --nproc-per-node {nproc} equals its accelerator limit {acc}", int(nproc) == acc)
         else:
             info(f"container {n}: --nproc-per-node is not a literal number ({nproc!r}); not compared with the accelerator limit")
-        nnodes = flag_value(cmd, "--nnodes")
-        if nnodes is not None and nnodes.isdigit():
-            check(f"R5 container {n}: torchrun --nnodes {nnodes} equals replicatedJobs[0].replicas {replicas}", int(nnodes) == replicas)
+        # --nnodes is not always a literal in this command: a script that
+        # fast-paths the single-node case (`--standalone --nnodes=1`) and
+        # takes `--nnodes="$NNODES"` for every other case has no single
+        # literal --nnodes value to compare against replicas (for
+        # replicas=2 the first --nnodes token a naive scan finds is still
+        # the literal "1" belonging to the untaken single-node branch).
+        # Check the data flow instead: the container's own NNODES env var
+        # (set from replicatedJobs[0].replicas, confirmed by string value
+        # here, not by re-deriving it from the command text) must equal
+        # replicas, and the command must actually reference it.
+        nnodes_env = env.get("NNODES")
+        if nnodes_env is not None:
+            check(f"R5 container {n}: env NNODES={nnodes_env!r} equals replicatedJobs[0].replicas {replicas}", nnodes_env == str(replicas))
+            check(f"R5 container {n}: the command references $NNODES", "NNODES" in cmd)
         else:
-            info(f"container {n}: --nnodes is not a literal number ({nnodes!r}); not compared with the replica count")
+            nnodes = flag_value(cmd, "--nnodes")
+            if nnodes is not None and nnodes.isdigit():
+                check(f"R5 container {n}: torchrun --nnodes {nnodes} equals replicatedJobs[0].replicas {replicas}", int(nnodes) == replicas)
+            else:
+                check(f"R5 container {n}: torchrun's node count (env NNODES, or a literal --nnodes) is set and traceable to replicatedJobs[0].replicas {replicas}", False, f"no NNODES env var and --nnodes is {nnodes!r}")
 
     # R6
     sa_name = pod_spec.get("serviceAccountName")

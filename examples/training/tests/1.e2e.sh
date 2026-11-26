@@ -279,16 +279,26 @@ print(next((c["status"] for c in (w.get("status") or {}).get("conditions") or []
 }
 workload_exists() { [[ -n "$(workload_json)" ]]; }
 workload_admitted() { [[ "$(workload_condition Admitted)" == "True" ]]; }
-# running_pods ATTEMPT: names of non-terminating Running Pods of restart
-# attempt ATTEMPT (JobSet's own jobset.sigs.k8s.io/restart-attempt label).
+# running_pods: names of non-terminating Running Pods of this JobSet,
+# whatever attempt they belong to. There is no per-attempt label to
+# filter by for the restartStrategy this chart uses (BlockingRecreate):
+# JobSet's own well-known labels/annotations
+# (kubernetes-sigs/jobset v0.13.1, api/jobset/v1alpha2/jobset_types.go)
+# define jobset.sigs.k8s.io/in-place-restart-attempt only for the
+# InPlaceRestart strategy, nothing equivalent for Recreate/
+# BlockingRecreate -- there, a restart deletes and recreates the Job (and
+# therefore the Pod) objects themselves, so the Pod's own UID is the
+# per-attempt signal, not a label. Callers that need "this attempt only"
+# compare metadata.uid against a snapshot taken before the restart
+# (uids_before/first_attempt_gone below), not this function.
 running_pods() {
-  kn get pods -l "$(JOBSET_PODS_SELECTOR),jobset.sigs.k8s.io/restart-attempt=$1" -o json | py '
+  kn get pods -l "$(JOBSET_PODS_SELECTOR)" -o json | py '
 import json, sys
 for p in json.load(sys.stdin)["items"]:
     if not p["metadata"].get("deletionTimestamp") and (p.get("status") or {}).get("phase") == "Running":
         print(p["metadata"]["name"])'
 }
-all_running() { [[ "$(running_pods "$1" | wc -l | tr -d ' ')" -eq "${E2E_REPLICAS}" ]]; }
+all_running() { [[ "$(running_pods | wc -l | tr -d ' ')" -eq "${E2E_REPLICAS}" ]]; }
 
 # checkpoint_steps: one step number per checkpoint object under this
 # run's own prefix (chart-contract.sh: the last run of digits in the key,
@@ -400,6 +410,7 @@ helm_args+=(
   --set-string "${TRAINING_KEY_SERVICE_ACCOUNT}=${TRAINER_SA}"
   --set-string "${TRAINING_KEY_CHECKPOINT_BUCKET}=${CHECKPOINT_BUCKET}"
   --set-string "${TRAINING_KEY_CHECKPOINT_PREFIX}=${RUN_PREFIX}"
+  --set-string "${TRAINING_KEY_CHECKPOINT_REGION}=${AWS_REGION}"
   --set "${TRAINING_KEY_REPLICAS}=${E2E_REPLICAS}"
   --set "${TRAINING_KEY_GPUS_PER_POD}=${GPUS_PER_POD}"
   --set "${TRAINING_KEY_CHECKPOINT_EVERY}=${CHECKPOINT_EVERY}"
@@ -531,12 +542,12 @@ w = json.load(sys.stdin)
 print(sum(a.get("count", 0) for a in ((w.get("status") or {}).get("admission") or {}).get("podSetAssignments") or []))')"
 [[ "${admitted_count}" -eq "${E2E_REPLICAS}" ]] \
   || fail "step 3: the Workload was admitted for ${admitted_count} Pod(s), not all ${E2E_REPLICAS}"
-wait_until "${READY_TIMEOUT_SECONDS}" 15 "all ${E2E_REPLICAS} worker Pods Running" all_running 0 \
+wait_until "${READY_TIMEOUT_SECONDS}" 15 "all ${E2E_REPLICAS} worker Pods Running" all_running \
   || fail "step 3: not every worker Pod reached Running ($(kn get pods -l "$(JOBSET_PODS_SELECTOR)" -o wide 2>&1 | tr '\n' ';'))"
 pass "step 3: with the quota sized to fit, the Workload was admitted for all ${E2E_REPLICAS} Pods at once and every worker Pod is Running"
 
 # Criterion 4: a light-tier GPU pool on the expected capacity type.
-for pod in $(running_pods 0); do
+for pod in $(running_pods); do
   node="$(kn get pod "${pod}" -o jsonpath='{.spec.nodeName}')"
   itype="$(k get node "${node}" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}')"
   ctype="$(k get node "${node}" -o jsonpath='{.metadata.labels.karpenter\.sh/capacity-type}')"
@@ -551,14 +562,14 @@ pass "step 3: every worker runs on a light-tier family (${LIGHT_TIER_FAMILIES}) 
 
 wait_until "${CHECKPOINT_TIMEOUT_SECONDS}" 20 "a checkpoint under s3://${CHECKPOINT_BUCKET}/${RUN_PREFIX}/" have_checkpoint \
   || fail "step 4: no checkpoint object landed under s3://${CHECKPOINT_BUCKET}/${RUN_PREFIX}/ (criterion 1)"
-all_running 0 || fail "step 4: not every worker is still Running when the first checkpoint landed"
+all_running || fail "step 4: not every worker is still Running when the first checkpoint landed"
 pass "step 4: steady state, all ${E2E_REPLICAS} workers Running and checkpoint step $(latest_checkpoint) in S3 (criterion 1)"
 
 restarts_before="$(kn get jobsets.jobset.x-k8s.io "${JOBSET_NAME}" -o jsonpath='{.status.restarts}')"
 restarts_before="${restarts_before:-0}"
 mapfile -t uids_before < <(kn get pods -l "$(JOBSET_PODS_SELECTOR)" -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}')
 step_before_kill="$(latest_checkpoint)"
-victim="$(running_pods 0 | sort | tail -n1)"
+victim="$(running_pods | sort | tail -n1)"
 kn delete pod "${victim}" --wait=false >/dev/null || fail "step 4: deleting worker Pod ${victim}"
 info "deleted worker ${victim}; latest checkpoint before the kill: step ${step_before_kill}"
 
@@ -578,7 +589,7 @@ first_attempt_gone() {
 }
 wait_until "${RESTART_TIMEOUT_SECONDS}" 10 "every Pod of the first attempt gone" first_attempt_gone \
   || fail "step 4: a Pod of the first attempt survived -- only the deleted Pod was replaced, not the whole group (criterion 2)"
-wait_until "${READY_TIMEOUT_SECONDS}" 15 "all ${E2E_REPLICAS} Pods of restart attempt ${ATTEMPT} Running" all_running "${ATTEMPT}" \
+wait_until "${READY_TIMEOUT_SECONDS}" 15 "all ${E2E_REPLICAS} Pods of restart attempt ${ATTEMPT} Running (status.restarts=${ATTEMPT})" all_running \
   || fail "step 4: the restarted group did not reach Running ($(kn get pods -l "$(JOBSET_PODS_SELECTOR)" -o wide 2>&1 | tr '\n' ';'))"
 pass "step 4: deleting ${victim} restarted the whole group: every first-attempt Pod replaced, ${E2E_REPLICAS} Pods of attempt ${ATTEMPT} Running (criterion 2)"
 
@@ -588,7 +599,7 @@ pass "step 4: deleting ${victim} restarted the whole group: every first-attempt 
 # resume; a cold start prints no such line, or step 0.
 resumed_step() {
   local pod
-  for pod in $(running_pods "${ATTEMPT}"); do
+  for pod in $(running_pods); do  # first_attempt_gone already passed: every current Pod is this attempt
     kn logs "${pod}" -c "${WORKER_CONTAINER}" 2>/dev/null
   done | py '
 import re, sys
