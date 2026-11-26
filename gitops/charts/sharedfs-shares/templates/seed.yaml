@@ -7,28 +7,38 @@
 # the one piece of this chart's own objects that is not a direct render
 # of something sharedfs documents, because nothing else does it.
 #
-# Found missing on a real cluster (2026-11-26): the `datasets`
-# FilesystemShare's own `provision` field made that object fail CRD
-# admission outright (fixed - see templates/filesystemshares.yaml's own
-# header comment); `checkpoints/{namespace}` passes admission but its
+# Found missing by code review against sharedfs's own README (not on a
+# real cluster - no real-machine attempt has reached this code yet): the
+# `datasets` FilesystemShare's own `provision` field made that object
+# fail CRD admission outright (fixed - see templates/filesystemshares.yaml's
+# own header comment); `checkpoints/{namespace}` passes admission but its
 # own provisioning would still fail at runtime against an unseeded file
 # system, since `checkpoints` itself is the directory this Job creates,
 # not something `provision` creates on its own (`provision` creates only
 # the final path segment, assuming its parent already exists).
 #
-# An Argo CD PreSync hook, not a plain Job: this chart's own objects
-# (the FilesystemShare CRs, the reserving PVC) do not depend on this
-# directory existing to apply successfully (CRD admission does not check
-# the live file system at all), only to provision successfully later -
-# but running this before anything else in the same sync, rather than
-# relying on apply ordering within one manifest list, needs no separate
-# wave number and matches the natural dependency (seed the parents,
-# then declare shares under them). hook-delete-policy: HookSucceeded
-# removes the Pod once it has done its one-time work; a failed run is
-# left in place for one sync cycle so its own logs are inspectable,
-# cleared by the next PreSync attempt (BeforeHookCreation is implicit:
-# Argo CD deletes a hook resource of the same name before creating a new
-# one for the next sync).
+# An Argo CD PostSync hook, not PreSync: this Job needs sharedfs-source
+# (pv-pvc.yaml, a plain Sync-phase resource of this same Application) to
+# already be Bound before it can mount it at all - a PreSync hook runs
+# before the Sync phase even starts, so on a brand-new Application it
+# would stay Pending on a PVC that does not exist yet, forever (no
+# attribute here forces Argo CD to create that PVC first, and nothing
+# about a PreSync hook waits for it either). PostSync only runs once
+# every regular resource in this sync, including that PVC, is already
+# applied and healthy, which is exactly the ordering this Job needs -
+# the FilesystemShare objects do not themselves need this directory to
+# exist to apply successfully (CRD admission does not check the live
+# file system at all), only to provision successfully later, so running
+# this after them costs nothing. activeDeadlineSeconds and backoffLimit
+# together bound how long a stuck attempt (for example, a PVC that
+# somehow never actually mounts) can block the next sync, rather than
+# hanging indefinitely. hook-delete-policy: BeforeHookCreation,HookSucceeded
+# - HookSucceeded alone only removes a successful run, leaving a failed
+# Job of this same fixed name in place forever and blocking every later
+# sync from creating its replacement (Argo CD's own documented default,
+# BeforeHookCreation, only applies when no delete policy is set at all -
+# once one is set, only the policies actually listed apply); both
+# together let this Job retry cleanly after any outcome.
 #
 # mkdir -p is naturally idempotent: re-running this hook on a file
 # system that already has both directories changes nothing. chown/chmod
@@ -52,10 +62,11 @@ metadata:
   labels:
     app.kubernetes.io/name: sharedfs-shares
   annotations:
-    argocd.argoproj.io/hook: PreSync
-    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 spec:
   backoffLimit: 3
+  activeDeadlineSeconds: 300
   template:
     metadata:
       labels:
