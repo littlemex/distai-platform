@@ -89,14 +89,17 @@ jobs:
   # (a job's `if:` compares strings, not booleans, so this avoids YAML's
   # own truthy/falsy surprises for OFF).
   #
-  # Three cases beyond a plain prefix match, each found wrong in a real
-  # throwaway verification round before this version:
+  # Four cases beyond a plain one-prefix-per-area match, each found wrong
+  # (or, for the fourth, found real) in a real throwaway verification
+  # round before this version:
   #   1. A rename moves a file's own old path out of an area without ever
   #      naming that old path under `.filename` (the API reports only the
   #      new path there; the old one is `.previous_filename`, present only
-  #      on a renamed entry) -- both are matched below, so a rename that
-  #      empties an area still runs that area's own check once more
-  #      against what is left.
+  #      on a renamed entry) -- both are matched below, so a rename out of
+  #      `infra/foundation/`, for example, still turns `foundation` on,
+  #      the same as any other change under that path would. This does
+  #      not force every area to `true` by itself -- only whichever
+  #      area(s) the old and new paths belong to.
   #   2. The `pulls/.../files` endpoint pages up to 3,000 entries and never
   #      reports more, with no error -- a pull request at or past that cap
   #      would otherwise read as "nothing changed" for whatever files
@@ -117,6 +120,21 @@ jobs:
   #      five jobs it just changed, and `static` would pass on a change to
   #      itself that installed a broken tool or a wrong checksum. A change
   #      to this file forces every area to `true`.
+  #   4. `examples/training/tests/0.static.sh` itself reads two paths
+  #      under `gitops/`, not under `examples/training/`: it names
+  #      `gitops/bootstrap/team-onboard.sh` directly (`--team-onboard`,
+  #      checked against `check_training_render.py`'s own rendered
+  #      objects) and globs `gitops/charts/jobset-crd/crds/*.yaml` (the
+  #      vendored JobSet CRD it validates a render against) -- confirmed
+  #      by reading that script. A pull request changing only one of
+  #      those two paths touches no file under `examples/training/` or
+  #      `gitops/` as this workflow's own `gitops` area defines it (the
+  #      whole of `gitops/`), so it would otherwise skip `training`
+  #      while silently changing an input that script's own checks read.
+  #      Both paths are matched as further triggers for `training` below,
+  #      found by reading every one of the five scripts for a path
+  #      outside its own prefix; none of the other four read outside
+  #      their own.
   changed-paths:
     name: changed paths
     runs-on: ubuntu-24.04
@@ -174,15 +192,24 @@ jobs:
             echo "::notice::this workflow file is itself changed; treating every area as changed so the change to it is exercised for real"
             for name in "${!result[@]}"; do result[${name}]=true; done
           else
-            declare -A prefix=(
-              [foundation]="infra/foundation/"
-              [gitops]="gitops/"
-              [inference]="examples/inference/"
-              [training]="examples/training/"
-              [run_board]="examples/tools/run-board/"
+            # One area can have more than one trigger pattern (training
+            # has three: its own prefix, plus the two gitops/ paths its
+            # own 0.static.sh reads directly -- see this job's own header
+            # comment, point 4). A plain associative array could not hold
+            # that, hence a list of "area:pattern" pairs instead.
+            trigger_patterns=(
+              "foundation:infra/foundation/"
+              "gitops:gitops/"
+              "inference:examples/inference/"
+              "training:examples/training/"
+              "training:gitops/bootstrap/team-onboard\.sh"
+              "training:gitops/charts/jobset-crd/"
+              "run_board:examples/tools/run-board/"
             )
-            for name in "${!prefix[@]}"; do
-              if grep -qE "^${prefix[${name}]}" "${RUNNER_TEMP}/changed_files.txt"; then
+            for rule in "${trigger_patterns[@]}"; do
+              name="${rule%%:*}"
+              pattern="${rule#*:}"
+              if grep -qE "^${pattern}" "${RUNNER_TEMP}/changed_files.txt"; then
                 result[${name}]=true
               fi
             done
@@ -377,9 +404,25 @@ jobs:
           # not a grep/sed pattern on one quoting style: Chart.yaml is
           # free to write this value single-quoted, unquoted, or with a
           # trailing comment, all valid YAML a plain `grep -h '"https://'`
-          # would silently skip.
-          mapfile -t repo_urls < <(
-            uv run --no-project -q --with pyyaml python3 - gitops <<'PY' | sort -u
+          # would silently skip. pyyaml is pinned to the same version
+          # gitops/tests/0.static.sh's own PYTHON_YAML_VERSION defaults
+          # to, so this step and that script resolve the identical
+          # package.
+          #
+          # Written to a plain file, not read through `mapfile -t ... <
+          # <(...)`: a failure inside a process-substitution command (a
+          # malformed Chart.yaml the real `yaml.safe_load` above raises
+          # on, for example) does not propagate to the enclosing
+          # `mapfile`'s own exit status -- bash only ever sees whether
+          # `mapfile` itself could read the pipe, not why the writer
+          # stopped -- so a broken parse would have silently read as "0
+          # URLs found" under the version of this step that initially
+          # shipped on this pull request's own first push, never
+          # reaching the line below that is supposed to catch it. The
+          # `uv run` line below is now a plain redirection, so `set -e`
+          # catches its own exit status directly.
+          uv run --no-project -q --with "pyyaml==6.0.2" python3 - gitops \
+            > "${RUNNER_TEMP}/helm-repo-urls.txt" <<'PY'
           import glob, sys, yaml
           urls = set()
           for path in glob.glob(f"{sys.argv[1]}/**/Chart.yaml", recursive=True):
@@ -389,9 +432,22 @@ jobs:
                   repo = dep.get("repository", "")
                   if repo.startswith("https://"):
                       urls.add(repo)
-          print("\n".join(sorted(urls)))
+          for url in sorted(urls):
+              print(url)
           PY
-          )
+          # `mapfile` here only ever reads an already-written, complete
+          # file (never a live process substitution), and the python
+          # script above printed one URL per line with none at all when
+          # the set is empty -- repo_urls has exactly as many elements as
+          # real URLs found, including zero, unlike an earlier version of
+          # this step (print("\n".join(...)) on an empty set still
+          # printed one blank line, so `mapfile` read one empty-string
+          # element, the `-gt 0` guard below passed anyway, and
+          # `helm repo add ci-repo-1 ""` failed under `set -e` -- caught
+          # by reasoning about the empty case, since this repository has
+          # exactly one classic chart repository today and a real run
+          # cannot currently exercise zero).
+          mapfile -t repo_urls < "${RUNNER_TEMP}/helm-repo-urls.txt"
           echo "${#repo_urls[@]} classic chart repository URL(s) found under gitops/"
           n=0
           for url in "${repo_urls[@]}"; do
