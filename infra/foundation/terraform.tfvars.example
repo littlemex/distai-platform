@@ -29,6 +29,14 @@ admin_principal_arns = [
 #     { role = "VIEWER", group_ids = ["11111111-1111-1111-1111-111111111111"] },
 #   ]
 # }
+#
+# Cells that use sharedfs per-team checkpoint and shared dataset
+# directories (issue #18). deployment_type/storage_capacity_gib default to
+# the cheapest real deployment type (SCRATCH_2, 1200 GiB) if omitted.
+# shared_fsx_lustre = {
+#   deployment_type      = "SCRATCH_2"
+#   storage_capacity_gib = 1200
+# }
 
 tags = {
   "distai-platform/cell" = "example-cell"

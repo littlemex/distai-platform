@@ -87,6 +87,16 @@ tf_out() {
   echo "${v}"
 }
 
+# Like tf_out, but for an output that is legitimately null on every cell
+# that did not set var.shared_fsx_lustre (#18) - printing nothing rather
+# than aborting, since most cells have no shared FSx for Lustre file
+# system at all and this script must keep bootstrapping Argo CD for them
+# exactly as it did before #18 existed.
+tf_out_optional() {
+  local key="$1"
+  echo "${TF_JSON}" | jq -r --arg k "${key}" '.[$k].value // empty'
+}
+
 CLUSTER_NAME="$(tf_out cluster_name)"
 CLUSTER_ENDPOINT="$(tf_out cluster_endpoint)"
 CLUSTER_ARN="$(tf_out cluster_arn)"
@@ -94,6 +104,28 @@ REGION="$(tf_out region)"
 ARGOCD_NAMESPACE="$(tf_out argocd_namespace)"
 INTERRUPTION_QUEUE="$(tf_out karpenter_interruption_queue_name)"
 NODE_ROLE="$(tf_out karpenter_node_role_name)"
+
+# #18: empty string on a cell with no var.shared_fsx_lustre - see
+# tf_out_optional's own comment. gitops/charts/sharedfs-shares and the
+# sharedfs catalog entry's own marker file read these back through this
+# Secret's annotations (below), never a literal value in a committed
+# gitops/ file: the ECR repository URL contains this account's ID, and
+# the file-system identity is itself cell-specific.
+FSX_FILE_SYSTEM_ID="$(tf_out_optional shared_fsx_lustre_file_system_id)"
+FSX_DNS_NAME="$(tf_out_optional shared_fsx_lustre_dns_name)"
+FSX_MOUNT_NAME="$(tf_out_optional shared_fsx_lustre_mount_name)"
+FSX_STORAGE_CAPACITY_GIB="$(tf_out_optional shared_fsx_lustre_storage_capacity_gib)"
+SHAREDFS_CONTROLLER_ECR_REPOSITORY_URL="$(tf_out_optional sharedfs_controller_ecr_repository_url)"
+# Not a Terraform output at all: gitops/bootstrap/sharedfs-image-publish.sh
+# (run once per cell, after this script, only on a cell with
+# var.shared_fsx_lustre set) writes this annotation itself, the same
+# "read the live Secret, patch forward" idiom team-onboard.sh already uses
+# for its own impersonation flag. Empty here on a first run, and on every
+# cell that never runs that script at all.
+EXISTING_SHAREDFS_IMAGE=""
+if kubectl get secret cell-registration -n "${ARGOCD_NAMESPACE}" >/dev/null 2>&1; then
+  EXISTING_SHAREDFS_IMAGE="$(kubectl get secret cell-registration -n "${ARGOCD_NAMESPACE}" -o jsonpath='{.metadata.annotations.distai\.dev\.annotations/sharedfs-controller-image}' 2>/dev/null || true)"
+fi
 
 # --- Safety check 1: the kubeconfig in use really is this cell's own ------
 LIVE_SERVER="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)"
@@ -152,6 +184,12 @@ metadata:
     distai.dev.annotations/region: "${REGION}"
     distai.dev.annotations/karpenter-interruption-queue: "${INTERRUPTION_QUEUE}"
     distai.dev.annotations/karpenter-node-role: "${NODE_ROLE}"
+    distai.dev.annotations/sharedfs-fsx-file-system-id: "${FSX_FILE_SYSTEM_ID}"
+    distai.dev.annotations/sharedfs-fsx-dns-name: "${FSX_DNS_NAME}"
+    distai.dev.annotations/sharedfs-fsx-mount-name: "${FSX_MOUNT_NAME}"
+    distai.dev.annotations/sharedfs-fsx-storage-capacity-gib: "${FSX_STORAGE_CAPACITY_GIB}"
+    distai.dev.annotations/sharedfs-controller-ecr-repository-url: "${SHAREDFS_CONTROLLER_ECR_REPOSITORY_URL}"
+    distai.dev.annotations/sharedfs-controller-image: "${EXISTING_SHAREDFS_IMAGE}"
 type: Opaque
 stringData:
   name: "${CLUSTER_NAME}"
@@ -190,13 +228,15 @@ done <<< "${ADDON_REPOS}"
 # identity actually needs, since every admin-delivered Application's own
 # namespace is already a declared, reviewed fact in this checkout, not a
 # runtime choice.
-# Also scans gitops/cells/*/{capacity-pool,smoke}/*.yaml (#63, a
+# Also scans gitops/cells/*/{capacity-pool,smoke,sharedfs}/*.yaml (#63, a
 # review of an earlier version of this fix found that cells.
 # ApplicationSet.yaml's own per-cell parameter files - which use this same
 # AppProject - declare namespaces (distai-smoke, every capacity-pool
 # pool's own namespace) this grep did not scan at all, since it looked
-# only at gitops/addons/ and gitops/addon-catalog/).
-ADDON_NAMESPACES="$( { grep -h '^namespace:' "${REPO_ROOT}"/gitops/addons/*/addon.yaml "${REPO_ROOT}"/gitops/addon-catalog/*/addon.yaml "${REPO_ROOT}"/gitops/cells/*/capacity-pool/*.yaml "${REPO_ROOT}"/gitops/cells/*/smoke/*.yaml 2>/dev/null || true; } \
+# only at gitops/addons/ and gitops/addon-catalog/; #18 adds the sharedfs
+# glob to cells.ApplicationSet.yaml itself, so it is scanned here too, for
+# the same reason).
+ADDON_NAMESPACES="$( { grep -h '^namespace:' "${REPO_ROOT}"/gitops/addons/*/addon.yaml "${REPO_ROOT}"/gitops/addon-catalog/*/addon.yaml "${REPO_ROOT}"/gitops/cells/*/capacity-pool/*.yaml "${REPO_ROOT}"/gitops/cells/*/smoke/*.yaml "${REPO_ROOT}"/gitops/cells/*/sharedfs/*.yaml 2>/dev/null || true; } \
   | sed -E 's/^namespace:[[:space:]]*//; s/^"(.*)"$/\1/' | sort -u)"
 
 # kube-system is always included, not only when some addon.yaml happens to

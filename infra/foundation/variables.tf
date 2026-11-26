@@ -182,6 +182,45 @@ variable "tags" {
   nullable    = false
 }
 
+variable "shared_fsx_lustre" {
+  description = "Optional: create one shared FSx for Lustre file system for this cell (#18, #22 Decision 8): datasets, model weights and per-team checkpoint directories, delivered to tenants through the sharedfs controller (gitops/addon-catalog/sharedfs), never through Terraform's own state (gitops/README.md: Terraform's state graph never contains a Kubernetes object once a cell exists). null (the default) creates nothing -- fsx.tf's resources, the aws-fsx-csi-driver managed add-on and the sharedfs controller image's ECR repository all key off this being non-null, the same optional-capability shape as var.argocd. deployment_type SCRATCH_2 is this variable's own default: it is FSx's smallest real deployment type (no minimum capacity above 1200 GiB, no backup/replication machinery), chosen for this platform's own test cells (RFC #17/#22: 'the test cluster... may be destroyed and recreated'), not a production sizing recommendation -- a cell that needs PERSISTENT_1/PERSISTENT_2 (durability, higher baseline throughput) sets deployment_type explicitly. Lustre project quotas (sharedfs's own provision.quota) need Lustre 2.15 and are out of this variable's scope today (#18's own 'Deferred to a follow-up' note): this variable has no file_system_type_version argument, so every file system it creates uses FSx's own current default version for the chosen deployment_type."
+  type = object({
+    deployment_type             = optional(string, "SCRATCH_2")
+    storage_capacity_gib        = optional(number, 1200)
+    per_unit_storage_throughput = optional(number)
+  })
+  default  = null
+  nullable = true
+
+  validation {
+    condition     = var.shared_fsx_lustre == null || contains(["SCRATCH_1", "SCRATCH_2", "PERSISTENT_1", "PERSISTENT_2"], var.shared_fsx_lustre.deployment_type)
+    error_message = "shared_fsx_lustre.deployment_type must be one of SCRATCH_1, SCRATCH_2, PERSISTENT_1, PERSISTENT_2 (the FSx for Lustre deployment types the aws_fsx_lustre_file_system resource accepts)."
+  }
+
+  # FSx for Lustre's own minimum/increment: SCRATCH_1 is 1200 or 3600 GiB
+  # only; every other deployment type accepts any multiple of 1200 GiB at
+  # or above 1200. This validation states that constraint so a bad value
+  # fails `terraform validate`/`plan`, not a 20-plus-minute `apply` against
+  # the real FSx API (this platform's own real-machine budget is counted
+  # in attempts, not retries of an avoidable input error).
+  validation {
+    condition = (
+      var.shared_fsx_lustre == null ||
+      (
+        var.shared_fsx_lustre.deployment_type == "SCRATCH_1"
+        ? contains([1200, 3600], var.shared_fsx_lustre.storage_capacity_gib)
+        : (var.shared_fsx_lustre.storage_capacity_gib >= 1200 && var.shared_fsx_lustre.storage_capacity_gib % 1200 == 0)
+      )
+    )
+    error_message = "shared_fsx_lustre.storage_capacity_gib must be 1200 or 3600 for deployment_type SCRATCH_1, or a multiple of 1200 (at least 1200) for SCRATCH_2/PERSISTENT_1/PERSISTENT_2."
+  }
+
+  validation {
+    condition     = var.shared_fsx_lustre == null || var.shared_fsx_lustre.per_unit_storage_throughput == null || contains([50, 100, 125, 200, 250, 500, 1000], var.shared_fsx_lustre.per_unit_storage_throughput)
+    error_message = "shared_fsx_lustre.per_unit_storage_throughput, if set, must be one of the MB/s/TiB values FSx for Lustre documents for a PERSISTENT deployment type (50, 100, 125, 200, 250, 500, 1000); leave it null for SCRATCH_1/SCRATCH_2, which do not take this argument."
+  }
+}
+
 variable "test_invalid_karpenter_node_principal_arn" {
   type        = string
   default     = null

@@ -1,0 +1,36 @@
+# RFC #41 Decision 2(b)/3/5. Catalog entry for the sharedfs controller
+# (#18: per-team checkpoint directories and shared read-only datasets on
+# one FSx for Lustre file system). A cell opts in only once
+# infra/foundation's var.shared_fsx_lustre is set and
+# gitops/bootstrap/sharedfs-image-publish.sh has run (both named here
+# because this entry's own overridableKeys below cannot express "required
+# from a specific source", only "a marker may set this path" - the
+# chart's own values.yaml `required` check is what actually fails loudly
+# if a cell's marker opts in before either exists).
+#
+# dependsOn deliberately omitted, the same reason dcgm-exporter's own
+# addon.yaml omits it for `prometheus`: this component's only real
+# dependency - the aws-fsx-csi-driver EKS managed add-on - is
+# infra/foundation's (Terraform), never a gitops/addons/ or
+# gitops/addon-catalog/ entry, so there is no name this field could
+# resolve to (check (3), gitops/tests/check_addon_catalog_sync.py) at all.
+# The dependsOn mechanism orders platform-optional *GitOps* components
+# against each other; a Terraform-delivered EKS add-on is outside what it
+# can express, the same boundary RFC #17's own "Terraform creates" column
+# already draws.
+addon: sharedfs
+tier: platform-optional
+dir: gitops/charts/sharedfs-controller
+namespace: sharedfs-system
+# overridableKeys (RFC #41 Decision 3, mandatory): the only value path a
+# cell's marker may set. image is a plain string (kind: scalar, not
+# kind: object - gitops/tests/check_addon_catalog_sync.py's own KINDS),
+# with no safe default (see the chart's own values.yaml): every cell that
+# opts in MUST set it, through valuesFrom reading
+# distai.dev.annotations/sharedfs-controller-image
+# (gitops/bootstrap/bootstrap.sh), never a literal value in the marker
+# file itself.
+overridableKeys:
+  - path: image
+    kind: scalar
+wave: optional-1

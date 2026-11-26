@@ -1,0 +1,56 @@
+# The static PersistentVolume naming the shared FSx for Lustre file system,
+# and the PersistentVolumeClaim that reserves it (sharedfs's own README,
+# "Install"): "Each share names an existing static PersistentVolume of the
+# file system. It must be bound, or reserved with claimRef for a claim in
+# a namespace only admins use." This renders both ends of that bind (not
+# only the claimRef half) so the two are actually Bound, the stronger of
+# the two states sharedfs's own SourceUnreserved check accepts - there is
+# no race where some other namespace could bind this PV first, since the
+# PVC it is reserved for already exists in the same Application.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: sharedfs-source
+  labels:
+    app.kubernetes.io/name: sharedfs-shares
+spec:
+  capacity:
+    storage: {{ required "fsx.storageCapacityGib is required" .Values.fsx.storageCapacityGib }}Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions:
+    - flock
+  claimRef:
+    namespace: {{ .Values.adminNamespace }}
+    name: sharedfs-source
+  csi:
+    driver: fsx.csi.aws.com
+    volumeHandle: {{ required "fsx.fileSystemId is required" .Values.fsx.fileSystemId | quote }}
+    volumeAttributes:
+      dnsname: {{ required "fsx.dnsName is required" .Values.fsx.dnsName | quote }}
+      mountname: {{ required "fsx.mountName is required" .Values.fsx.mountName | quote }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sharedfs-source
+  namespace: {{ .Values.adminNamespace }}
+  labels:
+    app.kubernetes.io/name: sharedfs-shares
+spec:
+  accessModes:
+    - ReadWriteMany
+  # storageClassName: "" (not omitted): an omitted storageClassName falls
+  # back to the cluster's own default StorageClass if one is marked
+  # default, which would let the dynamic provisioner for that default
+  # class try to satisfy this claim instead of binding it to volumeName
+  # below. This platform's own cluster has no default StorageClass today
+  # (nothing in infra/foundation or gitops/ sets
+  # storageclass.kubernetes.io/is-default-class), but setting it
+  # explicitly does not depend on that staying true.
+  storageClassName: ""
+  volumeName: sharedfs-source
+  resources:
+    requests:
+      storage: {{ required "fsx.storageCapacityGib is required" .Values.fsx.storageCapacityGib }}Gi

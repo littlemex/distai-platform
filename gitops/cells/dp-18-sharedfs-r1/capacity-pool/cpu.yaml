@@ -1,0 +1,18 @@
+# Parameter file for cells.ApplicationSet.yaml's Git file generator
+# (RFC #25 Decision 2/3). #18's own light-tier, CPU-only fixture: two team
+# namespaces (gitops/bootstrap/team-onboard.sh) each need somewhere
+# untainted to run a Pod that mounts a sharedfs claim - this is the same
+# shape as gitops/cells/example-cell's own capacity-pool/cpu.yaml, copied
+# per gitops/README.md's own "Adding a cell" procedure, not a new pattern.
+addon: capacity-pool-cpu
+wave: capacity
+dir: gitops/charts/capacity-pool
+namespace: kube-system
+values:
+  pool:
+    name: cpu
+valuesFrom:
+  - helmKey: clusterName
+    param: name
+  - helmKey: nodeRole
+    annotationKey: distai.dev.annotations/karpenter-node-role

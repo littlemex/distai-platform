@@ -1,0 +1,18 @@
+# Parameter file for cells.ApplicationSet.yaml's Git file generator (#18,
+# the sharedfs wave added alongside capacity). gitops/charts/sharedfs-shares'
+# own fsx.*/adminNamespace values all come from infra/foundation's
+# var.shared_fsx_lustre outputs, carried by the cell-registration Secret's
+# annotations (gitops/bootstrap/bootstrap.sh) - never a literal value here.
+addon: sharedfs-shares
+wave: sharedfs
+dir: gitops/charts/sharedfs-shares
+namespace: fs-admin
+valuesFrom:
+  - helmKey: fsx.fileSystemId
+    annotationKey: distai.dev.annotations/sharedfs-fsx-file-system-id
+  - helmKey: fsx.dnsName
+    annotationKey: distai.dev.annotations/sharedfs-fsx-dns-name
+  - helmKey: fsx.mountName
+    annotationKey: distai.dev.annotations/sharedfs-fsx-mount-name
+  - helmKey: fsx.storageCapacityGib
+    annotationKey: distai.dev.annotations/sharedfs-fsx-storage-capacity-gib

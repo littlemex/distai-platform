@@ -1,0 +1,13 @@
+apiVersion: v2
+name: sharedfs-controller
+description: >-
+  littlemex/sharedfs's own controller, CRDs, RBAC and admission-policy guard
+  (#18), ported from its Kustomize manifest (no Helm chart upstream) at a
+  pinned commit. See templates/crds.yaml for the exact commit and the list
+  of edits from the literal upstream render.
+type: application
+version: 0.1.0
+appVersion: "c19eb1fd6b8a1d493081ec8b862b02955b015299"
+home: https://github.com/littlemex/sharedfs
+sources:
+  - https://github.com/littlemex/sharedfs

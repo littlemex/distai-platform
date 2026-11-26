@@ -1,0 +1,20 @@
+# No default is safe for any key below: every one is cell-specific,
+# coming from infra/foundation's var.shared_fsx_lustre outputs through the
+# cell-registration Secret's own annotations (gitops/bootstrap/bootstrap.sh),
+# via a cells/<cluster-name>/sharedfs/*.yaml parameter file's own
+# valuesFrom - the same pattern gitops/charts/capacity-pool's own
+# clusterName/nodeRole already use. See this chart's own README.
+fsx:
+  fileSystemId: ""
+  dnsName: ""
+  mountName: ""
+  storageCapacityGib: ""
+
+# distai.dev/team (team-onboard.sh) is the one label every team namespace
+# carries and tenants cannot change (gitops/bootstrap/team-namespace-guard.yaml
+# rules 1-2) - a platform-wide constant, not a per-cell choice, so it is
+# not a value at all: templates/filesystemshares.yaml hardcodes it, the
+# same way templates/namespace.yaml in sharedfs-controller hardcodes
+# sharedfs-system rather than exposing it as a knob with only one correct
+# setting.
+adminNamespace: fs-admin

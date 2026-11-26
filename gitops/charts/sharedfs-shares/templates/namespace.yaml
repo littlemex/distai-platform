@@ -1,0 +1,17 @@
+# Admin-only namespace reserving the shared FSx for Lustre file system's
+# static PersistentVolume (sharedfs's own README, "Install": "a namespace
+# only admins use"). No pod is ever created here by this chart or by any
+# team - only the reservation PersistentVolumeClaim in pv.yaml - so there
+# is no workload whose Pod Security level this label is actually enforcing
+# against; set anyway (restricted, the strictest built-in level) as a
+# standing fact about intent, not a control this chart's own objects
+# currently need: if a future PR ever runs a Pod here (a seeding Job, for
+# example), it starts out already bound by the strictest default rather
+# than inheriting whatever this namespace happened to default to.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.adminNamespace }}
+  labels:
+    app.kubernetes.io/name: sharedfs-shares
+    pod-security.kubernetes.io/enforce: restricted

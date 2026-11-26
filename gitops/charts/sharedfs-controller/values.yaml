@@ -1,0 +1,28 @@
+# image is required and has no safe platform-wide default: it must be the
+# self-published, per-cell sharedfs controller image (#18's own "sharedfs
+# ships no image of its own" finding) at a full repository@digest
+# reference - gitops/bootstrap/sharedfs-image-publish.sh produces exactly
+# this string and records it on the cell-registration Secret's own
+# distai.dev.annotations/sharedfs-controller-image annotation;
+# gitops/addon-catalog/sharedfs/addon.yaml's own cell marker file supplies
+# it here through valuesFrom, never as a literal in any committed file (it
+# contains this account's ID). A cell that opts into sharedfs without first
+# publishing an image fails the Helm template's own `required` check loudly
+# (see templates/manager.yaml), rather than rendering an Application Argo
+# CD then fails to pull forever.
+image: ""
+
+# Matches upstream's own default (sharedfs README, "Install": "two
+# replicas, spread across nodes when the scheduler can... only the leader
+# reconciles").
+replicaCount: 2
+
+# Same shape as gitops/charts/dcgm-exporter's own networkPolicy.allowedPeers
+# (RFC #25's "default deny, name the exception" convention): empty means no
+# peer may reach the controller's own metrics port (8443) at all. A cell
+# that actually scrapes it (no Prometheus catalog entry exists yet - see
+# gitops/addon-catalog/dcgm-exporter/addon.yaml's own comment on the same
+# gap) sets this to the scraper's own namespaceSelector/podSelector through
+# this chart's own overridableKeys.
+networkPolicy:
+  allowedPeers: []

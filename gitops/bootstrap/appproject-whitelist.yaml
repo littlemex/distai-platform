@@ -44,6 +44,21 @@
 clusterResourceWhitelist:
   - group: ""
     kind: Namespace
+  - group: ""
+    kind: PersistentVolume
+    # #18: gitops/charts/sharedfs-shares renders one static PersistentVolume
+    # reserving the shared FSx for Lustre file system for the fs-admin
+    # namespace's own claim (sharedfs's own SourceUnreserved check).
+  - group: "sharedfs.io"
+    kind: FilesystemShare
+    # #18: gitops/charts/sharedfs-shares renders the checkpoints/datasets
+    # FilesystemShare instances; the CRD *definition* is already covered by
+    # the generic CustomResourceDefinition entry below.
+    # FilesystemShareDirectory (also sharedfs.io, also Cluster-scoped) is
+    # deliberately not here: the sharedfs controller creates these records
+    # itself at runtime (one per claimed directory), never an Argo
+    # CD-synced Application - the same "only what Argo CD itself writes"
+    # reasoning this file already applies to NodeClaim/StorageClass.
   - group: "admissionregistration.k8s.io"
     kind: MutatingWebhookConfiguration
   - group: "admissionregistration.k8s.io"
@@ -104,6 +119,10 @@ namespaceResourceWhitelist:
     kind: ApplicationSet
   - group: ""
     kind: ConfigMap
+  - group: ""
+    kind: PersistentVolumeClaim
+    # #18: gitops/charts/sharedfs-shares' own fs-admin namespace reserves
+    # the shared PersistentVolume above with an ordinary PVC.
   - group: ""
     kind: Pod
   - group: ""

@@ -1,0 +1,682 @@
+# Ported, with the edits noted below, from littlemex/sharedfs's own
+# `kubectl kustomize config/default` output at the pinned commit
+# c19eb1fd6b8a1d493081ec8b862b02955b015299 (#18's own citation:
+# https://github.com/littlemex/sharedfs/tree/c19eb1fd6b8a1d493081ec8b862b02955b015299).
+# sharedfs ships no Helm chart of its own (Kustomize only); this is that
+# same, tested manifest set, not a re-derivation from its Go source. Names,
+# the sharedfs-system namespace and every CEL expression below are kept
+# byte-for-byte: the ValidatingAdmissionPolicy objects in policy.yaml
+# hardcode `system:serviceaccount:sharedfs-system:sharedfs-controller-manager`,
+# `sfs-prep-`/`sfs-quota-` name prefixes and the `sharedfs-guard` ConfigMap
+# name as literal strings in upstream's own source, not as values this
+# chart could safely template without diverging from the behavior upstream
+# itself tests - changing any of them here without changing them upstream
+# too would silently break the admission guard. Edits from the literal
+# render, each also noted at its own spot below:
+#  1. The `app.kubernetes.io/managed-by: kustomize` label is corrected to
+#     `helm` (cosmetic provenance only, no object reads it).
+#  2. The three ValidatingAdmissionPolicy and three
+#     ValidatingAdmissionPolicyBinding objects (policy.yaml) each lost a
+#     `namespace: sharedfs-system` field that kustomize's own namespace
+#     transformer had added: both kinds are Cluster-scoped (confirmed
+#     against their own CRD - admissionregistration.k8s.io/v1 ships no
+#     Namespaced ValidatingAdmissionPolicy[Binding] kind), so the API
+#     server ignores that field outright; dropped here to match this
+#     platform's own existing ValidatingAdmissionPolicy objects
+#     (gitops/bootstrap/team-rbac-guard.yaml), which carry no such field.
+#  3. The Deployment's image, replica count and the `sharedfs-guard`
+#     ConfigMap's `preparerRepository` are templated from .Values.image
+#     (required, no default: see this chart's own README) - upstream has
+#     no Helm values to template them from at all.
+#  4. A `--preparer-image` flag is added to the Deployment's own args
+#     (absent from upstream's own default manifest, which otherwise
+#     refuses to start the moment any FilesystemShare sets `provision` -
+#     exactly what gitops/charts/sharedfs-shares' checkpoints/datasets
+#     shares both do): set to the same value as the container's own image,
+#     matching the README's own documented default ("the controller's own
+#     image, pinned to the digest it runs").
+
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: filesystemsharedirectories.sharedfs.io
+spec:
+  group: sharedfs.io
+  names:
+    categories:
+    - sharedfs
+    kind: FilesystemShareDirectory
+    listKind: FilesystemShareDirectoryList
+    plural: filesystemsharedirectories
+    shortNames:
+    - fsd
+    singular: filesystemsharedirectory
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.shareRef.name
+      name: Share
+      type: string
+    - jsonPath: .spec.namespace
+      name: Namespace
+      type: string
+    - jsonPath: .spec.path
+      name: Path
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Prepared")].status
+      name: Prepared
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Prepared")].reason
+      name: Reason
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          FilesystemShareDirectory binds a per-namespace directory of a FilesystemShare to the namespace
+          (by UID) that first claimed it, and reports its preparation. The controller creates it;
+          deleting it is how an admin lets a recreated namespace take the directory over.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              FilesystemShareDirectorySpec records which namespace a per-namespace directory belongs to. The
+              controller writes it when the namespace first claims the share; the whole spec is immutable.
+            properties:
+              namespace:
+                description: namespace whose claims mount this directory.
+                type: string
+              namespaceUID:
+                description: |-
+                  namespaceUID of that namespace when the directory was first claimed. A namespace of the
+                  same name with another UID is a different tenant: its claims are not provisioned until an
+                  admin deletes this object.
+                type: string
+              path:
+                description: path is the expanded path inside the file system.
+                type: string
+              projectID:
+                description: |-
+                  projectID is the Lustre project ID given to the directory when it is created, unique among
+                  directory records; 0 for none. It can be set once, and never changes after.
+                format: int64
+                maximum: 4294967294
+                minimum: 0
+                type: integer
+              shareRef:
+                description: ShareReference identifies a FilesystemShare by name and
+                  UID.
+                properties:
+                  name:
+                    type: string
+                  uid:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+            required:
+            - namespace
+            - namespaceUID
+            - path
+            - shareRef
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable, except that a projectID can be set once
+              rule: self.shareRef == oldSelf.shareRef && self.__namespace__ == oldSelf.__namespace__
+                && self.namespaceUID == oldSelf.namespaceUID && self.path == oldSelf.path
+                && (!has(oldSelf.projectID) || (has(self.projectID) && self.projectID
+                == oldSelf.projectID))
+          status:
+            description: FilesystemShareDirectoryStatus is the observed state of the
+              directory.
+            properties:
+              conditions:
+                description: 'conditions: Prepared, and QuotaApplied for a share with
+                  a quota.'
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observed:
+                description: ObservedDirectory is what the preparer found or created.
+                properties:
+                  gid:
+                    format: int64
+                    type: integer
+                  mode:
+                    type: string
+                  projectID:
+                    description: projectID is the directory's Lustre project ID, 0
+                      for none.
+                    format: int64
+                    type: integer
+                  uid:
+                    format: int64
+                    type: integer
+                required:
+                - gid
+                - mode
+                - uid
+                type: object
+              preparer:
+                description: preparer is the history of preparer pods.
+                properties:
+                  failures:
+                    description: failures counts runs that did not succeed.
+                    format: int32
+                    type: integer
+                  lastFailureTime:
+                    description: lastFailureTime is when the latest failure was recorded.
+                    format: date-time
+                    type: string
+                  lastPod:
+                    description: |-
+                      lastPod is the UID of the latest pod whose outcome was recorded, so one pod is never
+                      counted twice.
+                    type: string
+                type: object
+              projectVerified:
+                description: |-
+                  projectVerified records that the project was checked to count nothing but this directory
+                  before its first limit; it is never checked again.
+                type: boolean
+              quota:
+                description: quota is the limit last set, when the share asks for
+                  one.
+                properties:
+                  inodes:
+                    format: int64
+                    type: integer
+                  storage:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                type: object
+              quotaSetter:
+                description: quotaSetter is the history of quota pods.
+                properties:
+                  failures:
+                    description: failures counts runs that did not succeed.
+                    format: int32
+                    type: integer
+                  lastFailureTime:
+                    description: lastFailureTime is when the latest failure was recorded.
+                    format: date-time
+                    type: string
+                  lastPod:
+                    description: |-
+                      lastPod is the UID of the latest pod whose outcome was recorded, so one pod is never
+                      counted twice.
+                    type: string
+                type: object
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: filesystemshares.sharedfs.io
+spec:
+  group: sharedfs.io
+  names:
+    categories:
+    - sharedfs
+    kind: FilesystemShare
+    listKind: FilesystemShareList
+    plural: filesystemshares
+    shortNames:
+    - fss
+    singular: filesystemshare
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.persistentVolumeRef.name
+      name: Volume
+      type: string
+    - jsonPath: .spec.path
+      name: Path
+      type: string
+    - jsonPath: .status.storageClasses.readWrite
+      name: RW-Class
+      priority: 1
+      type: string
+    - jsonPath: .status.storageClasses.readOnly
+      name: RO-Class
+      priority: 1
+      type: string
+    - jsonPath: .status.volumes
+      name: Volumes
+      type: integer
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          FilesystemShare offers one path of an existing file system to the namespaces its grants
+          select. Tenants claim it with an ordinary PersistentVolumeClaim of one of its two
+          StorageClasses. It is created by the platform admin.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              FilesystemShareSpec offers one path of an existing file system to the namespaces its grants
+              select. The whole spec except grants is immutable.
+            properties:
+              grants:
+                description: |-
+                  grants decide which namespaces may claim the share. A claim is provisioned only when a
+                  single grant selects its namespace and allows the access of the StorageClass it uses.
+                items:
+                  description: Grant lets the namespaces it selects claim the share
+                    with at most the given access.
+                  properties:
+                    access:
+                      description: access is the strongest mount the selected namespaces
+                        may claim.
+                      enum:
+                      - ReadOnly
+                      - ReadWrite
+                      type: string
+                    namespaceSelector:
+                      description: |-
+                        namespaceSelector matches namespace labels and must not be empty, so a selector whose
+                        fields were dropped by a typo does not grant every namespace. Tenants must not be able to
+                        edit the labels it reads.
+                      properties:
+                        matchExpressions:
+                          description: matchExpressions is a list of label selector
+                            requirements. The requirements are ANDed.
+                          items:
+                            description: |-
+                              A label selector requirement is a selector that contains values, a key, and an operator that
+                              relates the key and values.
+                            properties:
+                              key:
+                                description: key is the label key that the selector
+                                  applies to.
+                                type: string
+                              operator:
+                                description: |-
+                                  operator represents a key's relationship to a set of values.
+                                  Valid operators are In, NotIn, Exists and DoesNotExist.
+                                type: string
+                              values:
+                                description: |-
+                                  values is an array of string values. If the operator is In or NotIn,
+                                  the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                  the values array must be empty. This array is replaced during a strategic
+                                  merge patch.
+                                items:
+                                  type: string
+                                type: array
+                                x-kubernetes-list-type: atomic
+                            required:
+                            - key
+                            - operator
+                            type: object
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        matchLabels:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                            map is equivalent to an element of matchExpressions, whose key field is "key", the
+                            operator is "In", and the values array contains only "value". The requirements are ANDed.
+                          type: object
+                      type: object
+                      x-kubernetes-map-type: atomic
+                  required:
+                  - access
+                  - namespaceSelector
+                  type: object
+                  x-kubernetes-validations:
+                  - message: namespaceSelector must not be empty; to grant every namespace,
+                      match kubernetes.io/metadata.name with operator Exists
+                    rule: (has(self.namespaceSelector.matchLabels) && size(self.namespaceSelector.matchLabels)
+                      > 0) || (has(self.namespaceSelector.matchExpressions) && size(self.namespaceSelector.matchExpressions)
+                      > 0)
+                maxItems: 16
+                type: array
+                x-kubernetes-list-type: atomic
+              path:
+                description: |-
+                  path inside the file system that the share exposes: "/" for the root, or a relative path
+                  such as "datasets" or "checkpoints/{namespace}". "{namespace}" takes a whole segment and
+                  expands to the namespace of the claiming PersistentVolumeClaim. Drivers without
+                  sub-directory mounts accept only "/".
+                maxLength: 1024
+                type: string
+                x-kubernetes-validations:
+                - message: path must be "/" or relative segments of [A-Za-z0-9._-]
+                    (not starting with "." or "-") or "{namespace}"
+                  rule: self == '/' || (self.matches('^([{]namespace[}]|[A-Za-z0-9_][A-Za-z0-9._-]*)(/([{]namespace[}]|[A-Za-z0-9_][A-Za-z0-9._-]*))*$')
+                    && !self.matches('[^/]{256}') && !self.matches('^([^/]*/){32}'))
+              persistentVolumeRef:
+                description: |-
+                  persistentVolumeRef names the existing static PersistentVolume of the file system. It is
+                  only read. It must be bound or reserved with claimRef, otherwise any namespace could bind
+                  it directly.
+                properties:
+                  name:
+                    description: name of the PersistentVolume.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              provision:
+                description: |-
+                  provision creates the directory when a granted namespace first claims the share.
+                  Without it the directory must already exist; a missing one fails the mount.
+                properties:
+                  gid:
+                    description: |-
+                      gid is the group of the created directory. Pods write through it, for example with
+                      runAsGroup or supplementalGroups.
+                    format: int64
+                    maximum: 4294967294
+                    minimum: 0
+                    type: integer
+                  mode:
+                    default: "2770"
+                    description: |-
+                      mode of the created directory, octal; the setgid bit (2770) makes new files inherit gid.
+                      setuid and sticky are not allowed.
+                    pattern: ^0?[02]?[0-7]{3}$
+                    type: string
+                  quota:
+                    description: |-
+                      quota limits each created directory with a Lustre project quota. The directory gets a
+                      project ID of its own when it is created, inherited by everything below it; the limits may
+                      change later. Needs Lustre 2.15 and the controller's quota pods (--quota-image).
+                    properties:
+                      inodes:
+                        description: inodes is the most files and directories it may
+                          hold.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      storage:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: storage is the most data the directory may hold.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    type: object
+                    x-kubernetes-validations:
+                    - message: set storage, inodes or both
+                      rule: has(self.storage) || has(self.inodes)
+                    - message: storage must be positive
+                      rule: '!has(self.storage) || quantity(self.storage).isGreaterThan(quantity(''0''))'
+                  uid:
+                    default: 0
+                    description: uid owns the created directory.
+                    format: int64
+                    maximum: 4294967294
+                    minimum: 0
+                    type: integer
+                required:
+                - gid
+                type: object
+            required:
+            - path
+            - persistentVolumeRef
+            type: object
+            x-kubernetes-validations:
+            - message: only grants and quota limits can change; create a new FilesystemShare
+                instead
+              rule: self.persistentVolumeRef == oldSelf.persistentVolumeRef && self.path
+                == oldSelf.path && (has(self.provision) == has(oldSelf.provision))
+                && (!has(self.provision) || (self.provision.uid == oldSelf.provision.uid
+                && self.provision.gid == oldSelf.provision.gid && self.provision.mode
+                == oldSelf.provision.mode))
+          status:
+            description: FilesystemShareStatus is the observed state of a FilesystemShare.
+            properties:
+              conditions:
+                description: 'conditions: Ready.'
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                format: int64
+                type: integer
+              readWriteSince:
+                description: |-
+                  readWriteSince is when the controller first saw a ReadWrite grant on this share, cleared
+                  when none remains. Of two nested shares, the one that brought the conflict later gives way:
+                  an outer share by this time, an inner share by its creation.
+                format: date-time
+                type: string
+              resolved:
+                description: ResolvedSource shows what generated volumes are built
+                  from.
+                properties:
+                  capacity:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  driver:
+                    type: string
+                  mountOptions:
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  volumeAttributes:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  volumeHandle:
+                    type: string
+                required:
+                - capacity
+                - driver
+                - volumeHandle
+                type: object
+              storageClasses:
+                description: storageClasses tenants claim the share through.
+                properties:
+                  readOnly:
+                    type: string
+                  readWrite:
+                    type: string
+                required:
+                - readOnly
+                - readWrite
+                type: object
+              volumes:
+                description: volumes is the number of PersistentVolumes provisioned
+                  from this share.
+                format: int32
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: 'provision needs a path of two segments or more: the preparer mounts
+            the parent read-write, and the parent of a top-level directory is the
+            whole file system'
+          rule: '!has(self.spec.provision) || (self.spec.path != ''/'' && self.spec.path.contains(''/''))'
+        - message: 'name must be at most 250 characters: the StorageClasses are named
+            <name>-rw and <name>-ro'
+          rule: size(self.metadata.name) <= 250
+    served: true
+    storage: true
+    subresources:
+      status: {}
