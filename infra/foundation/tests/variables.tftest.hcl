@@ -316,6 +316,7 @@ run "budget_notification_emails_rejects_malformed_address" {
   variables {
     budget_limit_usd           = 10
     budget_notification_emails = ["not-an-email"]
+    tags                       = { "distai-platform/cell" = "example-cell" }
   }
 
   expect_failures = [var.budget_notification_emails]
@@ -327,6 +328,7 @@ run "budget_notification_emails_rejects_duplicates" {
   variables {
     budget_limit_usd           = 10
     budget_notification_emails = ["admin@example.com", "admin@example.com"]
+    tags                       = { "distai-platform/cell" = "example-cell" }
   }
 
   expect_failures = [var.budget_notification_emails]
