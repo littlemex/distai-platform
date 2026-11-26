@@ -139,6 +139,14 @@ EOF
 
 echo "building and pushing with ko (distroless/static:nonroot base, matching sharedfs's own Dockerfile)" >&2
 export KO_DOCKER_REPO="${ECR_REPOSITORY_URL}"
+# KO_DEFAULTBASEIMAGE (not a --base-image flag): `ko build --help` at
+# this pinned version (v0.19.1, confirmed on the runner, 2026-11-26) has
+# no such flag at all ("Error: unknown flag: --base-image") - ko's own
+# docs name the base image only as a .ko.yaml key (defaultBaseImage) or
+# this environment variable, which its own docs say takes precedence
+# over the YAML key; the environment variable needs no extra file in
+# this already-throwaway work directory.
+export KO_DEFAULTBASEIMAGE="gcr.io/distroless/static:nonroot"
 # --bare (not --tags): KO_DOCKER_REPO above is already this cell's one,
 # fixed ECR repository name; ko's default behavior without --bare appends
 # the Go import path ("/cmd") to it, which would push to a second,
@@ -149,7 +157,6 @@ export KO_DOCKER_REPO="${ECR_REPOSITORY_URL}"
 # MUTABLE, not IMMUTABLE, so re-running this script is safe).
 IMAGE_REF="$(cd "${WORK}/sharedfs" && ko build ./cmd \
   --platform=linux/amd64 \
-  --base-image=gcr.io/distroless/static:nonroot \
   --bare)"
 
 echo "published: ${IMAGE_REF}" >&2
