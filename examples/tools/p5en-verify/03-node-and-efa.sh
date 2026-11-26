@@ -74,9 +74,13 @@ aws ec2 describe-network-interfaces --region "${AWS_REGION}" \
 import json,sys
 rows=json.load(sys.stdin)
 rows.sort(key=lambda r:(r["NetworkCardIndex"], r["DeviceIndex"]))
-print(f"total ENIs attached: {len(rows)}")
+print("total ENIs attached:", len(rows))
 for r in rows:
-    print(f"  card={r[\"NetworkCardIndex\"]} device={r[\"DeviceIndex\"]} type={r[\"InterfaceType\"]} status={r[\"Status\"]}")
+    card = r["NetworkCardIndex"]
+    device = r["DeviceIndex"]
+    itype = r["InterfaceType"]
+    status = r["Status"]
+    print("  card=" + str(card) + " device=" + str(device) + " type=" + str(itype) + " status=" + str(status))
 '
 
 echo "=== [4/5] expected layout from the committed fixture (issue #50, PR #75) ==="
