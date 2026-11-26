@@ -27,7 +27,8 @@ aws ec2 describe-capacity-reservations --region "${AWS_REGION}" \
 
 echo "=== [2/4] terraform init (state key distai-platform/${AWS_REGION}/${NAME}/foundation) ==="
 MY_CIDR="$(curl -fsS https://checkip.amazonaws.com)/32"
-ADMIN_PRINCIPAL_ARN="$(aws sts get-caller-identity --query Arn --output text)"
+ADMIN_ROLE_NAME="$(aws sts get-caller-identity --query Arn --output text | cut -d/ -f2)"
+ADMIN_PRINCIPAL_ARN="$(aws iam get-role --role-name "${ADMIN_ROLE_NAME}" --query Role.Arn --output text)"
 echo "MY_CIDR=${MY_CIDR} ADMIN_PRINCIPAL_ARN=${ADMIN_PRINCIPAL_ARN}"
 
 export TF_VAR_name="${NAME}"

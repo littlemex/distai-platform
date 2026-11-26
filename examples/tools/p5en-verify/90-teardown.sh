@@ -19,7 +19,8 @@ kubectl delete namespace p5en-verify --ignore-not-found --wait=false 2>/dev/null
 
 echo "=== [2/4] terraform destroy ==="
 MY_CIDR="$(curl -fsS https://checkip.amazonaws.com)/32"
-ADMIN_PRINCIPAL_ARN="$(aws sts get-caller-identity --query Arn --output text)"
+ADMIN_ROLE_NAME="$(aws sts get-caller-identity --query Arn --output text | cut -d/ -f2)"
+ADMIN_PRINCIPAL_ARN="$(aws iam get-role --role-name "${ADMIN_ROLE_NAME}" --query Role.Arn --output text)"
 export TF_VAR_name="${NAME}"
 export TF_VAR_region="${AWS_REGION}"
 export TF_VAR_endpoint_public_access_cidrs="[\"${MY_CIDR}\"]"
