@@ -1,0 +1,115 @@
+# Parameter file for cells.ApplicationSet.yaml's Git file generator
+# (RFC #25 Decision 2/3), same shape as cells/dp-a19-gpu-r3's own gpu.yaml.
+# One-off real-hardware verification cell (not merged to main): a single
+# p5en.48xlarge, 8x H200 + 16 EFA interfaces, bound to one time-boxed
+# Capacity Reservation by tag (gitops/charts/capacity-pool's own
+# reservation.tags, #17 - never by reservation ID). The matching tag is
+# set on the reservation itself by the runner script that applies this
+# cell, not by Terraform or this chart.
+#
+# pool.capacityType: reserved, matched "targeted" (the chart's own
+# default): only an On-Demand launch that explicitly names this
+# reservation can consume it.
+#
+# accelerator.methodLabel/taint mirror cells/dp-a19-gpu-r3's own gpu.yaml
+# exactly (device-plugin method, #19 Decision 2) - GPU and Neuron take
+# the same shape here on purpose.
+#
+# pool.networkInterfaces is the full 17-entry layout
+# gitops/charts/capacity-pool/tools/fixtures/p5en.48xlarge.networkInterfaces.yaml
+# already carries (#50): every one of p5en.48xlarge's 16 network cards
+# carries EFA (E == C), so card 0 gets both the primary interface and an
+# efa-only entry, and every other card gets one efa-only entry. Copied
+# verbatim from the fixture, not regenerated here, so a diff against that
+# fixture is a diff against this pool's own real launch shape.
+addon: capacity-pool-gpu-rsv
+wave: capacity
+dir: gitops/charts/capacity-pool
+namespace: kube-system
+values:
+  pool:
+    name: gpu-rsv
+    capacityType: reserved
+    requirements:
+      - key: kubernetes.io/arch
+        operator: In
+        values: ["amd64"]
+      - key: node.kubernetes.io/instance-type
+        operator: In
+        values: ["p5en.48xlarge"]
+    limits:
+      cpu: "192"
+    disruption:
+      consolidationPolicy: WhenEmptyOrUnderutilized
+      consolidateAfter: 15m
+    rootVolumeSizeGi: "300Gi"
+    networkInterfaces:
+      - networkCardIndex: 0
+        deviceIndex: 0
+        interfaceType: interface
+      - networkCardIndex: 0
+        deviceIndex: 1
+        interfaceType: efa-only
+      - networkCardIndex: 1
+        deviceIndex: 1
+        interfaceType: efa-only
+      - networkCardIndex: 2
+        deviceIndex: 1
+        interfaceType: efa-only
+      - networkCardIndex: 3
+        deviceIndex: 1
+        interfaceType: efa-only
+      - networkCardIndex: 4
+        deviceIndex: 1
+        interfaceType: efa-only
+      - networkCardIndex: 5
+        deviceIndex: 1
+        interfaceType: efa-only
+      - networkCardIndex: 6
+        deviceIndex: 1
+        interfaceType: efa-only
+      - networkCardIndex: 7
+        deviceIndex: 1
+        interfaceType: efa-only
+      - networkCardIndex: 8
+        deviceIndex: 1
+        interfaceType: efa-only
+      - networkCardIndex: 9
+        deviceIndex: 1
+        interfaceType: efa-only
+      - networkCardIndex: 10
+        deviceIndex: 1
+        interfaceType: efa-only
+      - networkCardIndex: 11
+        deviceIndex: 1
+        interfaceType: efa-only
+      - networkCardIndex: 12
+        deviceIndex: 1
+        interfaceType: efa-only
+      - networkCardIndex: 13
+        deviceIndex: 1
+        interfaceType: efa-only
+      - networkCardIndex: 14
+        deviceIndex: 1
+        interfaceType: efa-only
+      - networkCardIndex: 15
+        deviceIndex: 1
+        interfaceType: efa-only
+  reservation:
+    tags:
+      distai-platform/reserved-pool: dp-p5en-efa-rsv
+    instanceMatchCriteria: targeted
+  accelerator:
+    resourceName: nvidia.com/gpu
+    taint:
+      key: nvidia.com/gpu
+      value: "true"
+      effect: NoSchedule
+    methodLabel:
+      key: distai.dev/nvidia-gpu-method
+      value: device-plugin
+valuesFrom:
+  - helmKey: clusterName
+    param: name
+  - helmKey: nodeRole
+    annotationKey: distai.dev.annotations/karpenter-node-role
