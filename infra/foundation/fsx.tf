@@ -137,7 +137,7 @@ resource "aws_security_group_rule" "cluster_fsx_lustre_ingress" {
   from_port                = each.value.from_port
   to_port                  = each.value.to_port
   source_security_group_id = aws_security_group.fsx_lustre[0].id
-  description              = "FSx for Lustre traffic from the shared file system's own security group (#18)"
+  description              = "FSx for Lustre traffic from the shared file system own security group (#18)"
 }
 
 resource "aws_fsx_lustre_file_system" "shared" {
