@@ -24,6 +24,10 @@
 # The EFA DRA driver (aws-dranet) is out of scope for both
 # accel-efa-device-plugin-* releases: see gitops/README.md's "Known
 # limits", and #19/#50 for where it is expected to be designed.
+#
+# tolerations adds distai.dev/startup-not-ready:NoSchedule (#96) -- same
+# reasoning as accel-efa-device-plugin-nvidia/addon.yaml, not repeated
+# here.
 addon: accel-efa-device-plugin-neuron
 tier: core
 chart: aws-efa-k8s-device-plugin
@@ -37,6 +41,10 @@ values:
   nodeSelector:
     distai.dev/neuron-method: device-plugin
     distai.dev/efa-attached: "true"
+  tolerations:
+    - key: distai.dev/startup-not-ready
+      operator: Exists
+      effect: NoSchedule
   securityContext:
     privileged: false
     allowPrivilegeEscalation: false

@@ -242,7 +242,7 @@ separate `ApplicationSet` objects.
 | `ApplicationSet` | Step (`wave`) | Delivered in this PR |
 | --- | --- | --- |
 | `platform` | `crds` (`karpenter-crd`, `jobset-crd`) | yes |
-| `platform` | `controllers` (`karpenter`, `kueue`, `optional-pool`) | yes |
+| `platform` | `controllers` (`karpenter`, `kueue`, `optional-pool`, `vigil-controller`) | yes |
 | `platform` | `accelerators` (`accel-nvidia-device-plugin`, `accel-nvidia-dra`, `accel-neuron-device-plugin`, `accel-neuron-dra`, `accel-device-classes`, `accel-efa-device-plugin-nvidia`, `accel-efa-device-plugin-neuron`) | yes |
 | `platform` | `extras` | no - [#18](https://github.com/littlemex/distai-platform/issues/18)/[#23](https://github.com/littlemex/distai-platform/issues/23) |
 | `cells` | `capacity` (`capacity-pool/*`, `smoke/*`) | yes |
@@ -286,6 +286,7 @@ semver):
 | `karpenter-crd` | `oci://public.ecr.aws/karpenter/karpenter-crd` | `1.15.2` |
 | `karpenter` | `oci://public.ecr.aws/karpenter/karpenter` | `1.15.2` |
 | `kueue` | `oci://registry.k8s.io/kueue/charts/kueue` | `0.20.6` |
+| `vigil-controller` | `vigil-controller` from `https://oss.nextdoor.com/vigil` (classic Helm repository) | `0.7.0` |
 
 Accelerator add-on pins, confirmed against each chart's upstream source on
 2026-11-19 ([#28](https://github.com/littlemex/distai-platform/issues/28),
@@ -339,6 +340,36 @@ this chart's own Pod crash-loops, not merely reports zero, on a
 method-labeled node with none (see "Known limits"). Real hardware
 (`p4d.24xlarge`, two nodes, `NET/Libfabric`/GDRDMA `all_reduce_perf`) is
 in this PR's own Test Results.
+
+## Node readiness (startupTaints), issue #96
+
+A freshly launched Karpenter node reaches `Ready: True` as soon as kubelet
+registers it, before its own accelerator device-plugin DaemonSet (or any
+future CSI driver) has advertised anything. A pool opts out of the race by
+setting `capacity-pool`'s `pool.startupTaints` to
+`distai.dev/startup-not-ready:NoSchedule` - a plain `NodePool`
+`spec.template.spec.startupTaints` entry, never mirrored as a `ResourceFlavor`
+toleration the way `accelerator.taint`/`tenancy.teamTaint` are (it is a
+node-readiness gate every Pod eventually tolerates, not a tenancy or
+accelerator-class scheduling boundary). `vigil-controller`, delivered in the
+`controllers` step, watches for that key, works out which DaemonSets a node
+is actually expected to run (the same scheduling predicates kube-scheduler
+itself uses, so adding a new accelerator add-on needs no change to this
+controller), waits for their Pods to go `Ready`, then removes the taint -
+or removes it anyway after `timeoutSeconds` if one never comes up, so a
+stuck DaemonSet degrades back to today's unprotected behavior rather than
+wedging the node forever.
+
+Every DaemonSet a pool with `pool.startupTaints` set actually depends on
+must tolerate `distai.dev/startup-not-ready` itself, or it can never become
+`Ready` while the taint is present and `vigil-controller` only ever removes
+it at the timeout: `accel-nvidia-device-plugin`, `accel-neuron-device-plugin`,
+`accel-efa-device-plugin-nvidia` and `accel-efa-device-plugin-neuron` already
+do (their own `addon.yaml`). The NVIDIA/Neuron DRA advertisers
+(`accel-nvidia-dra`, `accel-neuron-dra`) do not yet, deliberately: #19's own
+E2/E4c found a dynamically provisioned DRA pool never initializes at all, and
+a static NodePool for the DRA method is #27's own future scope, so there is
+no real pool to opt into `pool.startupTaints` through that method today.
 
 ## Adding a cell
 

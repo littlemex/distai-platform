@@ -79,6 +79,15 @@ least one efa-only entry is the actual signal.
       taints:
 {{ toYaml . | indent 8 }}
 {{- end }}
+{{- /*
+#96: pool.startupTaints, rendered on the NodePool only -- never mirrored
+on the ResourceFlavor (resourceflavor.yaml only ever mirrors
+capacity-pool.taints, not this helper).
+*/}}
+{{- with include "capacity-pool.startupTaints" . | fromJsonArray }}
+      startupTaints:
+{{ toYaml . | indent 8 }}
+{{- end }}
       terminationGracePeriod: 24h0m0s
   limits:
 {{ toYaml .Values.pool.limits | indent 4 }}

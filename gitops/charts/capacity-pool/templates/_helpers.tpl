@@ -85,6 +85,44 @@ team, may use it), so this check is scoped to tenancy.teamTaint only.
 {{- end -}}
 
 {{/*
+capacity-pool.startupTaints: pool.startupTaints as a validated JSON array
+of {key, value, effect} (#96). Unlike capacity-pool.taints above
+(accelerator.taint, tenancy.teamTaint), this list is a plain pass-through
+of whatever the pool declares -- not derived from any other field -- and
+is rendered on the NodePool only, never mirrored as a ResourceFlavor
+toleration: a startup taint is a node-readiness gate every Pod eventually
+tolerates once something external (gitops/addons/vigil-controller) removes
+it, not a tenancy or accelerator-class scheduling boundary Kueue admits
+against. Validated the same way capacity-pool.taints validates effect (an
+early, render-time failure instead of a later apply-time one) plus a
+within-list duplicate-key-and-effect check, since Kubernetes itself
+rejects two taints with the same key and effect on one NodePool.
+*/}}
+{{- define "capacity-pool.startupTaints" -}}
+{{- $out := list -}}
+{{- $seen := dict -}}
+{{- range .Values.pool.startupTaints -}}
+{{- if not .key -}}
+{{- fail "pool.startupTaints entries must set key" -}}
+{{- end -}}
+{{- if not (has .effect (list "NoSchedule" "PreferNoSchedule" "NoExecute")) -}}
+{{- fail (printf "pool.startupTaints entries' effect must be one of NoSchedule, PreferNoSchedule, NoExecute (got %q for key %q)" (toString .effect) .key) -}}
+{{- end -}}
+{{- $id := printf "%s:%s" .key .effect -}}
+{{- if hasKey $seen $id -}}
+{{- fail (printf "pool.startupTaints repeats the taint key %q with effect %s" .key .effect) -}}
+{{- end -}}
+{{- $_ := set $seen $id true -}}
+{{- $entry := dict "key" .key "effect" .effect -}}
+{{- if .value -}}
+{{- $_ := set $entry "value" (toString .value) -}}
+{{- end -}}
+{{- $out = append $out $entry -}}
+{{- end -}}
+{{- $out | toJson -}}
+{{- end -}}
+
+{{/*
 capacity-pool.annotations: the metadata.annotations block shared by the
 NodePool and the ResourceFlavor. Provenance only: no template branches on
 accelerator.resourceName's value. Renders nothing when it is empty.

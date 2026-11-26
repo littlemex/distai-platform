@@ -125,6 +125,17 @@
 # against both existing fixtures (neither renders the label, since
 # neither sets pool.networkInterfaces) and against this PR's own real
 # p4d.24xlarge test values (which do set it).
+# tolerations adds distai.dev/startup-not-ready:NoSchedule (#96): unlike
+# the NVIDIA/Neuron device-plugin charts, this chart's own template
+# appends .Values.tolerations onto one hardcoded CriticalAddonsOnly entry
+# (templates/daemonset.yaml, confirmed by reading the pinned chart
+# version) rather than replacing the whole list, so only the new entry
+# needs to be added here. Lets this DaemonSet's own Pod schedule onto a
+# node a capacity-pool NodePool opted into pool.startupTaints for --
+# without it, this Pod could never become Ready while the taint is
+# present, and vigil-controller (gitops/addons/vigil-controller) would
+# only ever remove that taint at its own timeout, not once this
+# advertiser is actually ready.
 addon: accel-efa-device-plugin-nvidia
 tier: core
 chart: aws-efa-k8s-device-plugin
@@ -138,6 +149,10 @@ values:
   nodeSelector:
     distai.dev/nvidia-gpu-method: device-plugin
     distai.dev/efa-attached: "true"
+  tolerations:
+    - key: distai.dev/startup-not-ready
+      operator: Exists
+      effect: NoSchedule
   securityContext:
     privileged: false
     allowPrivilegeEscalation: false

@@ -33,6 +33,7 @@ nodes while Kueue's quota on the flavor still describes the reservation.
 | `reservation.tags` | when `reserved` | `{}` | Tags selecting the Capacity Reservation(s) or Capacity Block(s) backing a `reserved` pool. Must be non-empty, with no empty key or value, when `pool.capacityType` is `reserved`; ignored otherwise |
 | `reservation.instanceMatchCriteria` | no | `targeted` | `targeted` or `open`; any other value fails the render. Used only when `pool.capacityType` is `reserved` |
 | `accelerator.resourceName` | no | `""` | When set, rendered as the annotation `distai.dev/accelerator-resource-name` on the `NodePool` and the `ResourceFlavor` (for example `nvidia.com/gpu`, `aws.amazon.com/neuron`). Provenance only: no template branches on its value |
+| `pool.startupTaints` | no | `[]` | A plain list of `{key, value, effect}`, rendered as `NodePool.spec.template.spec.startupTaints` exactly as given ([#96](https://github.com/littlemex/distai-platform/issues/96)). Never mirrored as a `ResourceFlavor` toleration, unlike `accelerator.taint`/`tenancy.teamTaint` below |
 | `accelerator.taint.key`, `.value`, `.effect` | no | `""` | When `key` is set, a `NodePool` taint, mirrored as a `ResourceFlavor` toleration |
 | `accelerator.methodLabel.key`, `.value` | no | `""` | When `key` is set, a label on the `NodePool`'s node template (`spec.template.metadata.labels`) -- the accelerator method label a matching `gitops/addons/accel-*` advertiser selects nodes by ([#19](https://github.com/littlemex/distai-platform/issues/19) Decision 2) |
 | `tenancy.teamTaint.key`, `.value`, `.effect` | no | `""` | When `key` is set, a team-exclusive `NodePool` taint, mirrored as a `ResourceFlavor` toleration, rendered exactly like `accelerator.taint` |
@@ -72,6 +73,20 @@ toleration. Each toleration uses `operator: Equal` with the taint's
 set, `effect` must be `NoSchedule`, `PreferNoSchedule` or `NoExecute`, and
 the two entries must not share the same key and effect; either mistake
 fails the render.
+
+`pool.startupTaints` ([#96](https://github.com/littlemex/distai-platform/issues/96))
+is a separate, plain pass-through list, validated the same way (`effect`
+must be one of the three Kubernetes values; no two entries may share the
+same key and effect) but **never mirrored as a `ResourceFlavor`
+toleration** - `resourceflavor.yaml` only ever reads `capacity-pool.taints`,
+not this value. A `NodePool.spec.template.spec.startupTaints` entry is
+Karpenter's own mechanism for a taint "some other system" (Karpenter's own
+docs' words) removes once the node is actually usable, not a tenancy or
+accelerator-class boundary Kueue needs to admit against; mirroring it would
+let a Kueue-admitted Pod tolerate a taint still meant to block it. This
+chart renders whatever key the value gives it - it does not know about
+`gitops/addons/vigil-controller`, the one controller this platform actually
+runs to remove it (`gitops/README.md`, "Node readiness (startupTaints)").
 
 ### GPU sub-device sharing (MPS), real-hardware result (2026-11-22)
 
