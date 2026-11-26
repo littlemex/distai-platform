@@ -13,12 +13,15 @@ names (not a hand-typed copy of its values):
 
   - each of the four device-plugin add-ons' own `addon.yaml` values,
     rendered with and without them: the set of DaemonSet names is
-    unchanged, and every DaemonSet's own tolerations gain exactly the one
-    `distai.dev/startup-not-ready` entry `check_startup_taint_keys.py`
-    also checks the add-on's declared values for -- nothing else differs,
-    so nothing this add-on depended on (CriticalAddonsOnly, the
-    vendor-specific taint, the SageMaker health-status toleration) was
-    silently dropped by this override;
+    unchanged, and every DaemonSet's own tolerations gain exactly this
+    add-on's own full declared `values.tolerations` list (one entry,
+    `distai.dev/startup-not-ready`, for three of the four add-ons today;
+    two for accel-efa-device-plugin-nvidia/-neuron, which also declare
+    an unrelated, permanent toleration for accelerator.taint/
+    tenancy.teamTaint, #102) -- nothing is ever dropped, and nothing
+    this add-on depended on (CriticalAddonsOnly, the vendor-specific
+    taint, the SageMaker health-status toleration) was silently dropped
+    by this override;
   - `vigil-controller`'s own rendered `ConfigMap` actually contains the
     `taintKey`/`taintEffect`/`timeoutSeconds`/`knownStartupTaintKeys` `addon.yaml` declares (a
     misnamed `config.*` key would otherwise pass `check_startup_taint_
@@ -149,6 +152,7 @@ def check_device_plugin_addon(repo_root: str, workdir: str, name: str, tol_path:
     if len(matches) != 1:
         return
     target = normalize_toleration(matches[0])
+    declared_set = {normalize_toleration(t) for t in declared if isinstance(t, dict)}
     common = sorted(set(before_ds) & set(after_ds))
     primary = [n for n in common if is_primary(n)]
     check(
@@ -161,17 +165,32 @@ def check_device_plugin_addon(repo_root: str, workdir: str, name: str, tol_path:
         after_set = {normalize_toleration(t) for t in after_ds[ds_name] if isinstance(t, dict)}
         added = after_set - before_set
         removed = before_set - after_set
+        # expected is this add-on's own full declared tolerations list,
+        # minus whatever this specific DaemonSet's own chart default
+        # already carried before any override (so a declared entry that
+        # happens to duplicate a default is not wrongly demanded in
+        # `added`) -- not only the one #96 entry `target` names: #102
+        # declares a second, independent entry in the same
+        # values.tolerations list (accelerator.taint/tenancy.teamTaint,
+        # an unrelated permanent taint, not #96's own startup one), so
+        # asserting the rendered diff against this add-on's own full
+        # declared set, computed per DaemonSet, keeps "exactly" as
+        # strict for an add-on that declares two entries as it already
+        # was for one, and gives the second entry real render coverage
+        # of its own (a silent drop of it would otherwise never be
+        # caught by anything that only checks for `target`).
+        expected = declared_set - before_set
         if ds_name in primary:
             check(
-                f"{rel}: the primary advertiser DaemonSet {ds_name} gains exactly {matches[0]}, nothing dropped",
-                not removed and added == {target},
-                f"removed={removed!r} added={added!r} (want removed == set() and added == {{{target!r}}})",
+                f"{rel}: the primary advertiser DaemonSet {ds_name} gains exactly this add-on's own declared tolerations {sorted(expected)}, nothing dropped",
+                not removed and target in expected and added == expected,
+                f"removed={removed!r} added={added!r} (want removed == set() and added == {expected!r})",
             )
         else:
             check(
-                f"{rel}: sibling DaemonSet {ds_name} either gains exactly {matches[0]} too (shares the same values path) or is unaffected, nothing dropped",
-                not removed and added in (set(), {target}),
-                f"removed={removed!r} added={added!r} (want removed == set() and added in (set(), {{{target!r}}}))",
+                f"{rel}: sibling DaemonSet {ds_name} either gains exactly this add-on's own declared tolerations {sorted(expected)} too (shares the same values path) or is unaffected, nothing dropped",
+                not removed and added in (set(), expected),
+                f"removed={removed!r} added={added!r} (want removed == set() and added in (set(), {expected!r}))",
             )
 
 
