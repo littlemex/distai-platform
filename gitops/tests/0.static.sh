@@ -183,6 +183,9 @@ fi
 
 mapfile -t cell_capacity_pool_files < <(find "${GITOPS_ROOT}/cells" -path '*/capacity-pool/*.yaml' 2>/dev/null | sort)
 mapfile -t cell_smoke_files < <(find "${GITOPS_ROOT}/cells" -path '*/smoke/*.yaml' 2>/dev/null | sort)
+# #18: cells/*/sharedfs/*.yaml, the new glob cells.ApplicationSet.yaml's own
+# sharedfs wave reads.
+mapfile -t cell_sharedfs_files < <(find "${GITOPS_ROOT}/cells" -path '*/sharedfs/*.yaml' 2>/dev/null | sort)
 if [[ "${#cell_capacity_pool_files[@]}" -ge 1 ]]; then
   echo "PASS at least one cells/*/capacity-pool/*.yaml exists"
 else
@@ -193,6 +196,12 @@ if [[ "${#cell_smoke_files[@]}" -ge 1 ]]; then
   echo "PASS at least one cells/*/smoke/*.yaml exists"
 else
   echo "FAIL no cells/*/smoke/*.yaml found"
+  failures=$((failures + 1))
+fi
+if [[ "${#cell_sharedfs_files[@]}" -ge 1 ]]; then
+  echo "PASS at least one cells/*/sharedfs/*.yaml exists"
+else
+  echo "FAIL no cells/*/sharedfs/*.yaml found"
   failures=$((failures + 1))
 fi
 
@@ -457,6 +466,29 @@ if [[ "${#cell_smoke_files[@]}" -ge 1 ]]; then
     extract_values "${smoke_file}" "${SMOKE_VALUES}"
     run_check "helm template charts/smoke (values from ${smoke_label}/$(basename "${smoke_file}"))" \
       bash -c "'${HELM}' template smoke-e2e '${GITOPS_ROOT}/charts/smoke' -f '${SMOKE_VALUES}' > '${RENDERED_DIR}/smoke-${smoke_label}.yaml'"
+  done
+fi
+if [[ "${#cell_sharedfs_files[@]}" -ge 1 ]]; then
+  run_check "helm lint charts/sharedfs-shares" "${HELM}" lint "${GITOPS_ROOT}/charts/sharedfs-shares"
+  for sfs_file in "${cell_sharedfs_files[@]}"; do
+    sfs_label="$(basename "$(dirname "$(dirname "${sfs_file}")")")-$(basename "${sfs_file}" .yaml)"
+    SFS_VALUES="${WORK_DIR}/sharedfs-shares-values-${sfs_label}.yaml"
+    extract_values "${sfs_file}" "${SFS_VALUES}"
+    # extract_values's own placeholder ("static-check-placeholder") is a
+    # plain string, correct for fsx.fileSystemId/dnsName/mountName (all
+    # quoted strings in gitops/charts/sharedfs-shares' own templates) but
+    # wrong for fsx.storageCapacityGib, which that chart's own
+    # templates/pv-pvc.yaml concatenates directly into a Kubernetes
+    # resource.Quantity ("{{ .Values.fsx.storageCapacityGib }}Gi") -
+    # "static-check-placeholderGi" is not a valid quantity and would fail
+    # kubeconform, not this chart's own helm template (Helm does no type
+    # checking). Every other extract_values() consumer in this script only
+    # ever feeds its placeholder into a plain string field, so this
+    # override is local to this one loop, not a change to extract_values()
+    # itself.
+    sed -i 's/storageCapacityGib: static-check-placeholder/storageCapacityGib: "1200"/' "${SFS_VALUES}"
+    run_check "helm template charts/sharedfs-shares (values from ${sfs_label}/$(basename "${sfs_file}"))" \
+      bash -c "'${HELM}' template sharedfs-shares-e2e '${GITOPS_ROOT}/charts/sharedfs-shares' -f '${SFS_VALUES}' > '${RENDERED_DIR}/sharedfs-shares-${sfs_label}.yaml'"
   done
 fi
 
