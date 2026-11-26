@@ -7,7 +7,18 @@
 apiVersion: v1
 data:
   preparerRepository: {{ index (splitList "@" .Values.image) 0 }}
-  quotaRepository: {{ index (splitList "@" .Values.image) 0 }}
+  # Empty, not .Values.image's own repository: quota pods are not
+  # delivered by this PR at all (#18's own "Deferred to a follow-up"
+  # note) - no image was ever built or published for that role. Setting
+  # this to the controller's own repository would let the admission
+  # guard below (line ~84, `c.image.split('@')[0] == params.data.
+  # quotaRepository`) admit a sfs-quota-* pod running the controller's
+  # own image, widening what that one image is trusted to do if a
+  # FilesystemShare ever sets provision.quota, which nothing this PR
+  # renders does. An empty string never equals a real image's own
+  # repository component, so the guard refuses every quota pod outright
+  # until a real quota image exists and this value is wired to it.
+  quotaRepository: ""
 kind: ConfigMap
 metadata:
   labels:

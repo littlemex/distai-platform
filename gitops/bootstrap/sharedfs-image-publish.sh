@@ -105,8 +105,22 @@ SECRET_JSON="$(kubectl get secret cell-registration -n "${ARGOCD_NAMESPACE}" -o 
   echo "no cell-registration Secret in namespace ${ARGOCD_NAMESPACE} - run bootstrap.sh against this context first" >&2
   exit 1
 }
+# Fail closed, not only on a mismatch: bootstrap.sh unconditionally
+# writes this annotation from its own terraform output whenever it runs
+# against a cell with var.shared_fsx_lustre set - the only case this
+# PR's own usage comment names for running this script at all - so an
+# EMPTY value here is itself a sign something is wrong (the wrong
+# cluster's kubeconfig, or bootstrap.sh ran against a cell with no
+# shared FSx for Lustre file system), not a case to let through. An
+# earlier version of this check only rejected a non-empty mismatch,
+# which silently passed the empty case - vacuously, since nothing here
+# is actually confirmed about the cluster this is running against.
 RECORDED_ECR_URL="$(echo "${SECRET_JSON}" | jq -r '.metadata.annotations["distai.dev.annotations/sharedfs-controller-ecr-repository-url"] // empty')"
-if [[ -n "${RECORDED_ECR_URL}" && "${RECORDED_ECR_URL}" != "${ECR_REPOSITORY_URL}" ]]; then
+if [[ -z "${RECORDED_ECR_URL}" ]]; then
+  echo "cell-registration Secret in namespace ${ARGOCD_NAMESPACE} carries no sharedfs-controller-ecr-repository-url annotation - run bootstrap.sh against a cell with var.shared_fsx_lustre set, against this same context, first" >&2
+  exit 1
+fi
+if [[ "${RECORDED_ECR_URL}" != "${ECR_REPOSITORY_URL}" ]]; then
   echo "cell-registration Secret in namespace ${ARGOCD_NAMESPACE} already names a different ECR repository (${RECORDED_ECR_URL}) than --ecr-repository-url (${ECR_REPOSITORY_URL}); this looks like the wrong cluster's kubeconfig context" >&2
   exit 1
 fi
