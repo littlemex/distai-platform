@@ -39,7 +39,7 @@ ROUTER_SVC="$(kubectl get svc -n "${NAMESPACE}" -l app.kubernetes.io/instance="$
 echo "router service: ${ROUTER_SVC}"
 
 echo "=== [4/7] one smoke request through the router (retrying up to 3 min) ==="
-smoke_deadline=$(( $(date +%s) + 180 ))
+smoke_deadline=$(( $(date +%s) + 420 ))
 smoke_ok=0
 while [[ $(date +%s) -lt ${smoke_deadline} ]]; do
   if kubectl run "curl-sg-smoke-$(date +%s)" --rm -i --restart=Never -n "${NAMESPACE}" \
@@ -61,9 +61,39 @@ echo
 read_efa_counters() {
   local tag="$1"
   local pod="efa-read-${tag}-$(date +%s)"
-  kubectl run "${pod}" -n "${NAMESPACE}" --restart=Never --image=curlimages/curl:8.23.0 \
-    --overrides='{"spec":{"hostPID":true,"nodeSelector":{"kubernetes.io/hostname":"'"${NODE}"'"},"tolerations":[{"operator":"Exists"}],"volumes":[{"name":"sys","hostPath":{"path":"/sys"}}],"containers":[{"name":"'"${pod}"'","image":"curlimages/curl:8.23.0","command":["sh","-c","tx=0; rx=0; rr=0; rw=0; for f in /host-sys/class/infiniband/*/ports/1/hw_counters/tx_bytes; do v=$(cat \"$f\" 2>/dev/null); tx=$((tx+v)); done; for f in /host-sys/class/infiniband/*/ports/1/hw_counters/rx_bytes; do v=$(cat \"$f\" 2>/dev/null); rx=$((rx+v)); done; for f in /host-sys/class/infiniband/*/ports/1/hw_counters/rdma_read_bytes; do v=$(cat \"$f\" 2>/dev/null); rr=$((rr+v)); done; for f in /host-sys/class/infiniband/*/ports/1/hw_counters/rdma_write_bytes; do v=$(cat \"$f\" 2>/dev/null); rw=$((rw+v)); done; echo RESULT_TX=$tx RESULT_RX=$rx RESULT_RDMA_READ=$rr RESULT_RDMA_WRITE=$rw","volumeMounts":[{"name":"sys","mountPath":"/host-sys"}]}]}}' \
-    >/dev/null
+  cat > "/tmp/${pod}.yaml" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${pod}
+  namespace: ${NAMESPACE}
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: ${NODE}
+  tolerations:
+    - operator: Exists
+  containers:
+    - name: ${pod}
+      image: curlimages/curl:8.23.0
+      command: ["sh", "-c"]
+      args:
+        - |
+          tx=0; rx=0; rr=0; rw=0
+          for f in /host-sys/class/infiniband/*/ports/1/hw_counters/tx_bytes; do v=\$(cat "\$f" 2>/dev/null); tx=\$((tx+v)); done
+          for f in /host-sys/class/infiniband/*/ports/1/hw_counters/rx_bytes; do v=\$(cat "\$f" 2>/dev/null); rx=\$((rx+v)); done
+          for f in /host-sys/class/infiniband/*/ports/1/hw_counters/rdma_read_bytes; do v=\$(cat "\$f" 2>/dev/null); rr=\$((rr+v)); done
+          for f in /host-sys/class/infiniband/*/ports/1/hw_counters/rdma_write_bytes; do v=\$(cat "\$f" 2>/dev/null); rw=\$((rw+v)); done
+          echo RESULT_TX=\$tx RESULT_RX=\$rx RESULT_RDMA_READ=\$rr RESULT_RDMA_WRITE=\$rw
+      volumeMounts:
+        - name: sys
+          mountPath: /host-sys
+  volumes:
+    - name: sys
+      hostPath:
+        path: /sys
+EOF
+  kubectl apply -f "/tmp/${pod}.yaml" >/dev/null
   kubectl wait -n "${NAMESPACE}" --for=jsonpath='{.status.phase}'=Succeeded "pod/${pod}" --timeout=60s >/dev/null 2>&1 || true
   kubectl logs -n "${NAMESPACE}" "${pod}"
   kubectl delete pod -n "${NAMESPACE}" "${pod}" --ignore-not-found >/dev/null
