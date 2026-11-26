@@ -252,9 +252,15 @@ real run (2026-11-22, both cells reached a final `RESULT PASS`). A base-suite-on
 run (the generic cell above, no accelerator extension) took
 1h22m on a real run against `main`'s own tip (2026-11-25). Four
 real runs of this extension in a row (2026-11-26, tracked in #87) each
-failed before completing -- treat 1h59m37s as the known-good order of
-magnitude for planning, not as a number this extension currently
-reproduces on demand.
+failed before completing, for three different reasons across two
+fixed defects (one in this extension's own node cleanup, one in the
+Trainium cell's own NodePool count) -- #87 has the full account. A
+fifth real run, with both fixes applied, reached a final `RESULT PASS`
+again (2h19m43s end to end, 2026-11-26): treat that and the 1h59m37s
+figure above as the known-good order of magnitude for planning, not as
+a number every run reproduces exactly -- the extra time against the
+2026-11-22 figure is this extension's own added waits and diagnostics,
+not a regression in the underlying infrastructure.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
