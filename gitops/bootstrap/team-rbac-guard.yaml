@@ -68,7 +68,8 @@
 #      (rbac.authorization.k8s.io, escalate/bind/impersonate, "*"), and
 #      "namespaces" itself, is denied outright. Allowed today:
 #        - apiGroups: "" (core), "apps", "batch", "policy",
-#          "networking.k8s.io"
+#          "networking.k8s.io" (plus the CRD groups named below:
+#          "inference.networking.k8s.io", "llm-d.ai", "jobset.x-k8s.io")
 #        - resources: serviceaccounts, configmaps, pods, services,
 #          deployments, statefulsets, daemonsets, jobs, cronjobs,
 #          poddisruptionbudgets, networkpolicies -- the ordinary
@@ -128,6 +129,30 @@
 #          namespaced-workload defaults narrowed to what is actually
 #          needed, not by the same full-CRUD default as everything
 #          else.
+#        - jobsets (apiGroup jobset.x-k8s.io, the JobSet CRD the core
+#          jobset-crd add-on installs and the platform-optional jobset
+#          catalog entry serves) were added for issue #34: a team submits
+#          its own multi-Pod training run as a JobSet (the worked example
+#          examples/training/pytorch-ddp renders one), so the team's own
+#          identity Role (gitops/bootstrap/team-onboard.sh step 3) needs
+#          to create and delete it, and a team's own chart may ship a Role
+#          that does the same. None of the groups above covered it: a
+#          JobSet is its own API group, not batch. Unlike the three
+#          inference resources below, it gets the same full verb set as
+#          jobs/deployments, not the read-only carve-out: a JobSet is an
+#          ordinary namespaced workload object its owner creates, updates
+#          and deletes, and the controller, not the team's Role, is what
+#          turns it into Jobs and Pods -- the Pods it creates are still
+#          bounded by the namespace's own Pod Security "restricted"
+#          label, exactly like a Job's. Only the jobsets resource itself
+#          is allowed; jobsets/status and every other subresource stay
+#          denied by the "/" rule above. This is one deliberate departure
+#          from "matching ... namespaceResourceWhitelist exactly" above:
+#          JobSet is NOT (yet) a kind in team-onboard.sh's own AppProject
+#          namespaceResourceWhitelist, because issue #34's worked example
+#          is applied directly by the team's identity, not synced through
+#          a team AppProject; adding the kind there is a separate decision
+#          for the first team chart that GitOps-delivers a JobSet.
 #        - verbs: get, list, watch, create, update, patch, delete for
 #          every resource above except inferencepools,
 #          inferenceobjectives and inferencemodelrewrites, which are
@@ -197,13 +222,13 @@ spec:
     - expression: >-
         request.resource.resource != 'roles' || !has(object.rules) ||
         object.rules.all(r,
-          r.apiGroups.all(g, g in ['', 'apps', 'batch', 'policy', 'networking.k8s.io', 'inference.networking.k8s.io', 'llm-d.ai']) &&
-          r.resources.all(x, x in ['serviceaccounts', 'configmaps', 'pods', 'services', 'deployments', 'statefulsets', 'daemonsets', 'jobs', 'cronjobs', 'poddisruptionbudgets', 'networkpolicies', 'inferencepools', 'inferenceobjectives', 'inferencemodelrewrites']) &&
+          r.apiGroups.all(g, g in ['', 'apps', 'batch', 'policy', 'networking.k8s.io', 'inference.networking.k8s.io', 'llm-d.ai', 'jobset.x-k8s.io']) &&
+          r.resources.all(x, x in ['serviceaccounts', 'configmaps', 'pods', 'services', 'deployments', 'statefulsets', 'daemonsets', 'jobs', 'cronjobs', 'poddisruptionbudgets', 'networkpolicies', 'jobsets', 'inferencepools', 'inferenceobjectives', 'inferencemodelrewrites']) &&
           (r.resources.exists(x, x in ['inferencepools', 'inferenceobjectives', 'inferencemodelrewrites'])
             ? r.verbs.all(v, v in ['get', 'list', 'watch'])
             : r.verbs.all(v, v in ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete']))
         )
-      message: "a Role in a team namespace may grant only {get,list,watch,create,update,patch,delete} on {serviceaccounts,configmaps,pods,services,deployments,statefulsets,daemonsets,jobs,cronjobs,poddisruptionbudgets,networkpolicies} (or {get,list,watch} only on {inferencepools,inferenceobjectives,inferencemodelrewrites}) in {core,apps,batch,policy,networking.k8s.io,inference.networking.k8s.io,llm-d.ai} -- this rule granted something outside that allow-list (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
+      message: "a Role in a team namespace may grant only {get,list,watch,create,update,patch,delete} on {serviceaccounts,configmaps,pods,services,deployments,statefulsets,daemonsets,jobs,cronjobs,poddisruptionbudgets,networkpolicies,jobsets} (or {get,list,watch} only on {inferencepools,inferenceobjectives,inferencemodelrewrites}) in {core,apps,batch,policy,networking.k8s.io,inference.networking.k8s.io,llm-d.ai,jobset.x-k8s.io} -- this rule granted something outside that allow-list (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

@@ -1,0 +1,139 @@
+jobset:
+  # Stable object names, independent of the Application name. Without
+  # this, the upstream chart's own fullname helper prefixes every object
+  # with the Helm release name, which Argo CD sets to the generated
+  # Application's name ("<cell>-jobset", addons-optional.ApplicationSet.yaml),
+  # so the controller Deployment's name would differ per cell. With it,
+  # every cell runs `jobset-controller` and `jobset-webhook-service` in
+  # `jobset-system`, the names the upstream project's own documentation
+  # uses, and the README's copy-pasteable commands work unchanged on any
+  # cell. The webhook configurations' own names are hard-coded by the
+  # upstream chart and are unaffected either way.
+  fullnameOverride: jobset
+
+  # Pinned by digest, the same discipline gitops/charts/dcgm-exporter/
+  # values.yaml documents for its own image: the upstream chart's default
+  # is the mutable tag v0.13.1 alone. The upstream Deployment template
+  # renders "<repository>:<tag>" verbatim, so a "tag@digest" value
+  # renders as "registry.k8s.io/jobset/jobset:v0.13.1@sha256:...".
+  # Digest confirmed against the registry's own v2 manifest API,
+  # 2026-11-26 (registry.k8s.io/v2/jobset/jobset/manifests/v0.13.1,
+  # docker-content-digest response header, and the sha256 of the response
+  # body itself). It is the digest of the multi-architecture image index
+  # (linux/amd64, linux/arm64, linux/s390x), not of one platform's
+  # manifest, so the same pin works on an amd64 or an arm64 system node.
+  #   registry.k8s.io/jobset/jobset:v0.13.1
+  #   sha256:f4cb85f3261bb141b94535e42a070f370459c6cd8ec07924705708bf7ca552aa
+  image:
+    repository: registry.k8s.io/jobset/jobset
+    tag: "v0.13.1@sha256:f4cb85f3261bb141b94535e42a070f370459c6cd8ec07924705708bf7ca552aa"
+
+  controller:
+    # Checked first, before overriding (`helm show values`, chart 0.13.1):
+    # the upstream chart's own defaults are `tolerations: []`,
+    # `affinity: {}` and `nodeSelector: {}` -- no placement rule at all.
+    # So nothing stops this Deployment's Pod from landing on any
+    # untainted node, including a team's own Karpenter-launched
+    # capacity-pool node or optional-pool's, and on a freshly built cell it
+    # has nowhere to land before the "capacity" step runs (the system node
+    # group is tainted CriticalAddonsOnly). Both values are set here,
+    # copying gitops/addons/kueue/addon.yaml's own reasoning and wording:
+    #
+    # RFC #25 Decision 4's own ordering table: "Both [karpenter and kueue]
+    # tolerate CriticalAddonsOnly and target the system node group, since
+    # no Karpenter-launched NodePool exists yet." The JobSet controller is
+    # the same kind of component -- a webhook on the admission path of
+    # every JobSet and every Pod a JobSet creates (the upstream chart's own
+    # MutatingWebhookConfiguration/ValidatingWebhookConfiguration, pod
+    # webhooks scoped by objectSelector to Pods carrying the
+    # jobset.sigs.k8s.io/jobset-name label) -- so it is placed the same
+    # way.
+    #
+    # Open question, not decided here: gitops/README.md's own Tiers
+    # section says a platform-optional component with no node-placement
+    # need of its own lands on the core optional-pool NodePool, never the
+    # system node group (charts/optional-pool/README.md's option (b),
+    # its current default). This file instead takes that README's option
+    # (a) -- tolerate CriticalAddonsOnly and run on the system node group
+    # -- for this one component, on the argument above that an admission
+    # webhook belongs with Kueue's, not with the platform-optional pods
+    # optional-pool exists for. Switching to optional-pool is a values-only
+    # change in this file (a nodeSelector on karpenter.sh/nodepool:
+    # optional-pool instead of the two rules below).
+    tolerations:
+      - key: CriticalAddonsOnly
+        operator: Exists
+    # A toleration grants eligibility, it does not exclude every other
+    # node (#63, filed as "SA3", the same finding kueue/addon.yaml's own
+    # affinity answers): every Karpenter-launched node is labelled
+    # karpenter.sh/nodepool by Karpenter itself, so DoesNotExist excludes
+    # any of them generically, not only today's system node group by name.
+    # Karpenter's own chart already carries this exact affinity by
+    # default; this matches that convention rather than inventing a
+    # different one.
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: karpenter.sh/nodepool
+                  operator: DoesNotExist
+
+    # Set explicitly rather than left to the upstream default, for the same
+    # reason dcgm-exporter/values.yaml pins its own: these are the upstream
+    # chart's own 0.13.1 defaults (confirmed with `helm show values`),
+    # copied here so a future version bump that changes them needs a
+    # reviewed diff in this repository before it takes effect. The 4Gi
+    # memory limit is large for a system node group sized for the critical
+    # boot path; it is a limit, not a request (the request the scheduler
+    # reserves is 500m CPU / 128Mi), and a cell can lower it through
+    # overridableKeys (gitops/addon-catalog/jobset/addon.yaml).
+    resources:
+      requests:
+        cpu: 500m
+        memory: 128Mi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+
+    # Upstream 0.13.1 defaults, pinned explicitly for the same reason as
+    # resources above: the Pod runs non-root with the RuntimeDefault
+    # seccomp profile, a read-only root filesystem and every capability
+    # dropped, which meets the Pod Security "restricted" level
+    # (confirmed against the rendered Deployment). A version bump that
+    # loosened any of these upstream would otherwise reach a cell with no
+    # diff here.
+    hostNetwork: false
+    podSecurityContext:
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+          - ALL
+
+  # No cert-manager in a cell: the upstream chart's own default
+  # (internal certificate management, the controller generates and
+  # rotates its own webhook serving certificate into the
+  # jobset-webhook-server-cert Secret) is kept, the same mechanism Kueue's
+  # own chart uses in this platform. Pinned explicitly so a future default
+  # flip to cert-manager (which would render cert-manager Certificate/Issuer
+  # objects this platform's AppProject does not allow) needs a reviewed
+  # diff.
+  certManager:
+    enable: false
+
+  # No Prometheus Operator CRDs exist in a cell yet (the same state
+  # dcgm-exporter's own serviceMonitor: false documents); a ServiceMonitor
+  # here would have no controller to read it.
+  prometheus:
+    enable: false
+
+# Default deny, name the exception (gitops/README.md "NetworkPolicy
+# defaults"): see templates/networkpolicy.yaml. This wrapper's own value,
+# not the upstream chart's -- the upstream chart ships no NetworkPolicy.
+networkPolicy:
+  enabled: true

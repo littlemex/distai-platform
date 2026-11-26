@@ -1,0 +1,162 @@
+{{- include "ddp.validate" . -}}
+{{- $name := include "ddp.name" . -}}
+{{- $w := .Values.workers -}}
+{{- $limits := dict $w.gpuResourceName (int $w.gpusPerNode) -}}
+{{- if gt (int $w.efaPerNode) 0 -}}
+{{- $_ := set $limits "vpc.amazonaws.com/efa" (int $w.efaPerNode) -}}
+{{- end -}}
+{{- $resources := deepCopy (default (dict) $w.resources) -}}
+{{- $_ := set $resources "limits" (merge $limits (default (dict) $resources.limits)) -}}
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "ddp.labels" . | nindent 4 }}
+    # Kueue admits the whole JobSet as one workload through this LocalQueue
+    # (Kueue's own jobset.x-k8s.io/jobset integration, on by default in the
+    # platform's pinned Kueue chart).
+    kueue.x-k8s.io/queue-name: {{ .Values.kueue.queueName | quote }}
+spec:
+  failurePolicy:
+    restartStrategy: {{ .Values.failurePolicy.restartStrategy }}
+    maxRestarts: {{ int .Values.failurePolicy.maxRestarts }}
+  network:
+    # Headless Service named after the JobSet; every Pod gets the stable
+    # host name <name>-worker-<job index>-0.<name>, which the two-node
+    # layout uses as the rendezvous address.
+    enableDNSHostnames: true
+  replicatedJobs:
+    - name: worker
+      # One Job, and one Pod, per node.
+      replicas: {{ int $w.replicas }}
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          completionMode: Indexed
+          # A failed Pod fails its Job at once, so the JobSet's own
+          # failurePolicy (not the Job's per-Pod retries) decides what
+          # happens next: every rank restarts together and resumes from the
+          # last checkpoint.
+          backoffLimit: 0
+          template:
+            metadata:
+              labels:
+                {{- include "ddp.labels" . | nindent 16 }}
+              annotations:
+                # Which version of files/train.py this JobSet was rendered
+                # with; a JobSet's Pod template cannot be changed in place,
+                # so a new script means uninstalling and installing again.
+                checksum/train-py: {{ .Files.Get "files/train.py" | sha256sum }}
+            spec:
+              restartPolicy: Never
+              serviceAccountName: {{ .Values.serviceAccount.name }}
+              {{- with $w.nodeSelector }}
+              nodeSelector:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              {{- with $w.tolerations }}
+              tolerations:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              securityContext:
+                {{- toYaml $w.podSecurityContext | nindent 16 }}
+              containers:
+                - name: trainer
+                  image: {{ include "ddp.image" . }}
+                  imagePullPolicy: {{ .Values.image.pullPolicy }}
+                  command:
+                    - /bin/bash
+                    - -ec
+                    - |
+                      if [ -z "$CHECKPOINT_BUCKET" ]; then
+                        echo "checkpoint.bucket is not set: install with --set checkpoint.bucket=BUCKET (README Prerequisites)" >&2
+                        exit 1
+                      fi
+                      if [ -z "${AWS_REGION:-}" ]; then
+                        echo "checkpoint.region is not set: install with --set checkpoint.region=REGION" >&2
+                        exit 1
+                      fi
+                      # No custom image: boto3 is installed at every Pod
+                      # start into an emptyDir (README Known issues).
+                      python -m pip install --no-cache-dir --disable-pip-version-check \
+                        --quiet --target /opt/deps "boto3==${BOTO3_VERSION}"
+                      export PYTHONPATH=/opt/deps
+                      if [ "$NNODES" = "1" ]; then
+                        exec torchrun --standalone --nnodes=1 \
+                          --nproc-per-node="$NPROC_PER_NODE" /opt/train/train.py
+                      fi
+                      exec torchrun --nnodes="$NNODES" --node-rank="$NODE_RANK" \
+                        --nproc-per-node="$NPROC_PER_NODE" \
+                        --master-addr="$MASTER_ADDR" --master-port="$MASTER_PORT" \
+                        /opt/train/train.py
+                  env:
+                    - name: NNODES
+                      value: {{ $w.replicas | quote }}
+                    - name: NPROC_PER_NODE
+                      value: {{ $w.gpusPerNode | quote }}
+                    # This Pod's Job index within the replicated job, set by
+                    # the JobSet controller: the torchrun node rank.
+                    - name: NODE_RANK
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: metadata.annotations['jobset.sigs.k8s.io/job-index']
+                    - name: MASTER_ADDR
+                      value: {{ printf "%s-worker-0-0.%s" $name $name | quote }}
+                    - name: MASTER_PORT
+                      value: {{ $w.masterPort | quote }}
+                    - name: BOTO3_VERSION
+                      value: {{ .Values.boto3Version | quote }}
+                    - name: CHECKPOINT_BUCKET
+                      value: {{ .Values.checkpoint.bucket | quote }}
+                    - name: CHECKPOINT_PREFIX
+                      value: {{ .Values.checkpoint.prefix | quote }}
+                    {{- with .Values.checkpoint.region }}
+                    - name: AWS_REGION
+                      value: {{ . | quote }}
+                    {{- end }}
+                    - name: TOTAL_STEPS
+                      value: {{ .Values.training.totalSteps | quote }}
+                    - name: CHECKPOINT_EVERY
+                      value: {{ .Values.training.checkpointEvery | quote }}
+                    - name: STEP_SLEEP_SECONDS
+                      value: {{ .Values.training.stepSleepSeconds | quote }}
+                    # The image's user does not exist in /etc/passwd for this
+                    # UID; give pip and Python a writable home.
+                    - name: HOME
+                      value: /tmp/home
+                    - name: PYTHONUNBUFFERED
+                      value: "1"
+                    {{- with $w.env }}
+                    {{- toYaml . | nindent 20 }}
+                    {{- end }}
+                    {{- with $w.extraEnv }}
+                    {{- toYaml . | nindent 20 }}
+                    {{- end }}
+                  resources:
+                    {{- toYaml $resources | nindent 20 }}
+                  securityContext:
+                    {{- toYaml $w.containerSecurityContext | nindent 20 }}
+                  volumeMounts:
+                    - name: train
+                      mountPath: /opt/train
+                      readOnly: true
+                    - name: deps
+                      mountPath: /opt/deps
+                    - name: home
+                      mountPath: /tmp/home
+                    - name: shm
+                      mountPath: /dev/shm
+              volumes:
+                - name: train
+                  configMap:
+                    name: {{ $name }}-train
+                - name: deps
+                  emptyDir: {}
+                - name: home
+                  emptyDir: {}
+                - name: shm
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: {{ $w.shmSizeLimit }}

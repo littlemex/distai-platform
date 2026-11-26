@@ -1,0 +1,68 @@
+# RFC #41 Decision 2(b)/3. Catalog entry for the JobSet controller and
+# webhook (issue #34): the training-workload API (jobset.x-k8s.io/v1alpha2,
+# kind JobSet) a cell opts into with a marker file
+# gitops/cells/<cluster-name>/addons/jobset.yaml. Kueue's own pinned chart
+# (gitops/addons/kueue/addon.yaml, 0.20.6) already lists
+# jobset.x-k8s.io/jobset in its default integrations.frameworks, so a
+# JobSet carrying a kueue.x-k8s.io/queue-name label is admitted through
+# Kueue with no change to that add-on.
+addon: jobset
+tier: platform-optional
+dir: gitops/charts/jobset
+# The upstream chart's own documented install namespace.
+namespace: jobset-system
+# The upstream chart carries the JobSet CRD in its crds/ folder, and Helm
+# renders a dependency's crds/ folder as part of the parent chart, so
+# without this the generated Application would render the same
+# CustomResourceDefinition that the core jobset-crd add-on
+# (gitops/addons/jobset-crd/addon.yaml) already delivers, and two
+# Applications would own one object. skipCrds sets
+# spec.source.helm.skipCrds on the generated Application (a field the
+# chart's own values can never reach) -- the same defensive reasoning
+# gitops/addons/karpenter/addon.yaml gives for its own skipCrds. The
+# situation is not identical: there the second copy is a second top-level
+# chart install, here it is a Helm dependency's crds/ folder. A local
+# `helm template` render shows the CRD only with --include-crds (which
+# Argo CD passes by default) and not without it; whether skipCrds is
+# load-bearing on the managed Argo CD capability, or a no-op, is left to
+# real-hardware verification.
+skipCrds: true
+# The CRD must exist before this chart's controller can start watching
+# JobSets. jobset-crd is core (gitops/addons/), so this always resolves
+# (check_addon_catalog_sync.py's two-step lookup, first step); like every
+# cross-ApplicationSet dependency in this platform it converges by retry,
+# not by an ordering guarantee (RFC #25 Decision 4).
+dependsOn:
+  - jobset-crd
+# overridableKeys (RFC #41 Decision 3, mandatory): the only value paths a
+# cell's marker may set. Every path carries the subchart's own "jobset."
+# prefix, since gitops/charts/jobset wraps the upstream chart as a Helm
+# dependency and a marker's values reach it through that key.
+#
+#   jobset.controller.resources -- the one thing a cell has a real reason
+#     to size differently: the upstream defaults (500m / 128Mi requested,
+#     a 2 CPU / 4Gi limit) are pinned in the wrapper's values.yaml, and a
+#     cell with a small system node group, or many JobSets, needs to move
+#     them without a platform-wide change.
+#
+# Deliberately absent, so a cell cannot change them:
+#   - jobset.image -- the digest pin is the point of the wrapper.
+#   - jobset.controller.tolerations/affinity/nodeSelector -- where an
+#     admission webhook runs is a platform decision (see values.yaml),
+#     not a per-cell one.
+#   - jobset.controller.securityContext/podSecurityContext/hostNetwork --
+#     the reduced-privilege defaults are pinned on purpose.
+#   - jobset.controller.replicas -- left out for now: the upstream chart's
+#     podDisruptionBudget defaults to disabled and the webhook's
+#     availability with more than one replica (leader election is on, but
+#     the webhook server runs in every replica) has not been checked on
+#     real hardware; add it, together with
+#     jobset.controller.podDisruptionBudget, once it has.
+#   - jobset.controller.featureGates -- upstream feature gates change the
+#     controller's own behavior for every team in the cell; turning one on
+#     is a reviewed platform change, not a cell override.
+#   - networkPolicy.enabled -- the wrapper's own default-deny policy; a
+#     cell cannot turn it off.
+overridableKeys:
+  - path: jobset.controller.resources
+    kind: object

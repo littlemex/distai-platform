@@ -1,0 +1,159 @@
+# A PyTorch DistributedDataParallel run submitted as one JobSet. The
+# default layout is one node with two GPUs (one Pod, torchrun starting one
+# process per GPU), sized for a single g5/g6e/g7 node with at least two
+# NVIDIA GPUs (for example g5.12xlarge or g6e.12xlarge). See "Layout" in
+# README.md for the two-node, one-GPU-per-node alternative.
+
+image:
+  # Public PyTorch image, used as is: no custom image is built for this
+  # example. CUDA 13.0 runtime builds cover the A10G (g5), L40S (g6e) and
+  # Blackwell (g7) GPUs and need an NVIDIA driver from the 580 series or
+  # later on the node. Tag and digest confirmed against Docker Hub's
+  # registry v2 API, 2026-11-26 (registry-1.docker.io/v2/pytorch/pytorch/
+  # manifests/2.14.1-cuda13.0-cudnn9-runtime, docker-content-digest). The
+  # tag is published for linux/amd64 only, so this digest is that one
+  # platform manifest, not a multi-architecture index.
+  repository: pytorch/pytorch
+  tag: 2.14.1-cuda13.0-cudnn9-runtime
+  digest: sha256:3c0b174a1339193a5bcc4b37d737c9f5ca3c4782a2293d3888e4271367eddf44
+  pullPolicy: IfNotPresent
+
+# The image has no boto3; it is installed at Pod start with
+# `pip install --no-cache-dir --target` into an emptyDir, pinned to this
+# version (README "Known issues": this needs egress to PyPI from every
+# Pod start).
+boto3Version: "1.44.12"
+
+kueue:
+  # Set this to your own cell's LocalQueue name, in the namespace you
+  # install into. It becomes the JobSet's kueue.x-k8s.io/queue-name label;
+  # Kueue keeps the JobSet suspended until that queue admits it, then
+  # injects the ResourceFlavor's node labels and tolerations into the Pods.
+  queueName: team-queue
+
+# One replicated job, "worker". workers.replicas is the number of nodes
+# (one Pod, and one Kubernetes Job, per node); workers.gpusPerNode is the
+# number of GPUs each Pod requests and the number of processes torchrun
+# starts in it. World size = replicas x gpusPerNode.
+#
+# Default: replicas 1, gpusPerNode 2 (one node, two GPUs).
+# Two nodes with one GPU each instead: replicas 2, gpusPerNode 1. That
+# layout is documented, not run as part of this example's own
+# verification; it relies on the JobSet's headless Service (Pod host name
+# <release>-worker-0-0.<release>) for the rendezvous address, and on
+# NCCL reaching the other node over TCP sockets, since the image carries
+# no EFA libraries (see efaPerNode below).
+workers:
+  replicas: 1
+  gpusPerNode: 2
+  resources:
+    requests:
+      cpu: "4"
+      memory: 16Gi
+  # Extended resource the GPU device plugin advertises.
+  gpuResourceName: nvidia.com/gpu
+  # vpc.amazonaws.com/efa devices to request per Pod. 0 (the default)
+  # requests none: the default layout is one node, where NCCL uses the GPUs'
+  # own peer-to-peer and shared-memory paths and never the network. Set it
+  # only together with an image that carries libfabric and the aws-ofi-nccl
+  # plugin (the public PyTorch image does not), on a pool whose NodePool
+  # attaches EFA interfaces.
+  efaPerNode: 0
+  # Empty by default: Kueue injects the admitting ResourceFlavor's node
+  # labels and tolerations (capacity-pool mirrors its own taints onto its
+  # ResourceFlavor) when it admits the JobSet. Set these only when
+  # installing without Kueue.
+  nodeSelector: {}
+  tolerations: []
+  # Memory-backed /dev/shm. NCCL's shared-memory transport between the GPUs
+  # of one Pod needs more than the container runtime's 64 MiB default.
+  shmSizeLimit: 8Gi
+  masterPort: 29500
+  podSecurityContext:
+    # The PyTorch image runs as root by default; a team namespace enforces
+    # Pod Security "restricted", which requires a non-root user. No user
+    # with this UID exists in the image; nothing here needs one (HOME is
+    # set to a writable emptyDir).
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+  # Environment for NCCL, libfabric and torch.distributed. Taken from
+  # awslabs/awsome-distributed-ai's FSDP Kubernetes recipe
+  # (examples/training/fsdp/kubernetes/fsdp.yaml-template at commit
+  # 94853e2d55cc541aa44088c5b1a80913762cb4e0), the variables that recipe
+  # sets or lists for EFA. Variables that recipe also sets but that are
+  # left out here: TORCH_DISTRIBUTED_DEBUG=DETAIL, TORCH_NCCL_* trace and
+  # dump settings (they write to a host path this example does not mount),
+  # PYTORCH_CUDA_ALLOC_CONF, TORCH_DIST_INIT_BARRIER and
+  # NCCL_SOCKET_TIMEOUT_MS (not confirmed against PyTorch's or NCCL's own
+  # documented variables), LOGLEVEL. FI_EFA_USE_DEVICE_RDMA=1 is left out
+  # too: that recipe enables it only for P4d/P5-class instances, whose EFA
+  # supports RDMA; it is not set for g5/g6e/g7.
+  #
+  # With the public PyTorch image, the FI_* variables have no effect: the
+  # image has no libfabric and no aws-ofi-nccl plugin, so NCCL never loads
+  # an EFA transport. They are set so that swapping in an EFA-enabled image
+  # is an image change only.
+  env:
+    - name: FI_PROVIDER
+      value: efa
+    - name: FI_EFA_FORK_SAFE
+      value: "1"
+    - name: NCCL_DEBUG
+      value: INFO
+    - name: NCCL_SOCKET_IFNAME
+      value: "^lo"
+    - name: GLOO_SOCKET_IFNAME
+      value: eth0
+    - name: TORCH_NCCL_ASYNC_ERROR_HANDLING
+      value: "1"
+  extraEnv: []
+
+# JobSet failure policy. BlockingRecreate: when any Job of the JobSet
+# fails, every Job is deleted and the controller waits until all their Pods
+# are gone before recreating any of them, so a restarted run never has an
+# old and a new rank alive at the same time. maxRestarts: 3 restarts, then
+# the JobSet fails.
+failurePolicy:
+  restartStrategy: BlockingRecreate
+  maxRestarts: 3
+
+training:
+  # Steps in total, counted across restarts.
+  totalSteps: 200
+  # Write a checkpoint every this many steps (and at the last step).
+  checkpointEvery: 20
+  # Pause after each step. 1 second x 200 steps keeps a run alive for a few
+  # minutes, long enough to delete a worker Pod mid-run and watch it resume.
+  stepSleepSeconds: 1
+
+checkpoint:
+  # Amazon S3 bucket and key prefix for checkpoints
+  # (s3://<bucket>/<prefix>/step-<n>.pt). No default bucket: the container
+  # exits with a message until it is set. The Pods' ServiceAccount needs
+  # read and write access to exactly this bucket and prefix (README
+  # "Prerequisites").
+  bucket: ""
+  prefix: pytorch-ddp
+  region: ""
+
+serviceAccount:
+  # The ServiceAccount the Pods run as. An EKS Pod Identity association for
+  # this name in the install namespace is what gives the Pods S3 access;
+  # this chart does not create the association or the IAM role (README
+  # "Prerequisites").
+  create: true
+  name: pytorch-ddp
+
+networkPolicy:
+  # Ingress to the training Pods only from Pods of the same JobSet
+  # (rendezvous and NCCL traffic between nodes in the two-node layout).
+  # Egress is not restricted: Pods reach Amazon S3 and PyPI.
+  enabled: true

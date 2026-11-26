@@ -1,0 +1,14 @@
+apiVersion: v2
+name: pytorch-ddp
+description: >-
+  A small PyTorch DistributedDataParallel training run submitted as one
+  JobSet (jobset.x-k8s.io/v1alpha2) through a Kueue LocalQueue. It writes a
+  checkpoint to Amazon S3 every few steps and resumes from the newest one
+  after the JobSet restarts. The worked example for the platform's JobSet
+  add-on (issue #34); a toy model, not a benchmark.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/littlemex/distai-platform
+sources:
+  - https://github.com/littlemex/distai-platform

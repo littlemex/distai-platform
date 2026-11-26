@@ -1,0 +1,28 @@
+apiVersion: v2
+name: jobset
+description: "Wrapper around the upstream JobSet chart (kubernetes-sigs/jobset), baking in this platform's required defaults; the controller-and-webhook half of the JobSet add-on split, whose CRD gitops/charts/jobset-crd delivers separately (issue #34)."
+version: 0.1.0
+dependencies:
+  - name: jobset
+    version: "0.13.1"
+    repository: "oci://registry.k8s.io/jobset/charts"
+# Chart source: https://github.com/kubernetes-sigs/jobset (tag v0.13.1),
+# published as an OCI artifact, not a classic Helm repository index.
+# Confirmed 2026-11-26 with `helm pull
+# oci://registry.k8s.io/jobset/charts/jobset --version 0.13.1`.
+#
+# The first digest below is the sha256 of the chart tarball itself
+# (jobset-0.13.1.tgz, the file `helm dependency build` writes into
+# charts/) -- the one gitops/tests/check_addon_catalog_sync.py re-hashes
+# on every run, so it must stay the first sha256 in this file:
+#   sha256:037a4ce31aad95456f30f69ec575028b77c94e14045e6bc271aab32400c29704
+# The OCI manifest digest `helm pull` printed for the same tag, recorded
+# for audit only (the same convention gitops/addons/kueue/addon.yaml uses
+# for its own OCI chart); it identifies the manifest, not the tarball:
+#   oci://registry.k8s.io/jobset/charts/jobset:0.13.1
+#   manifest sha256:811c65a9e8d5d96b7ec4cd15f0541bc849a8fdf168b9fece0e925687154d9fde
+#
+# A pull request bumping this version must replace
+# gitops/charts/jobset-crd/crds/jobset.x-k8s.io_jobsets.yaml with the
+# same tag's CRD file in the same change (see that file's own header):
+# the CRD and the controller that serves it are one release.

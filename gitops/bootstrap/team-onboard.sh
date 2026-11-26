@@ -381,6 +381,16 @@ EOF
 # create or edit a Role/RoleBinding, by direct caller or otherwise --
 # infra/foundation/tests/4.argocd-impersonation.sh's own check 6 checks
 # this directly (kubectl --as this ServiceAccount).
+#
+# jobsets (jobset.x-k8s.io), issue #34: a team submits a multi-Pod
+# training run as a JobSet (examples/training/pytorch-ddp), so this
+# identity gets the same full verb set on it as on jobs. team-rbac-guard.yaml
+# allows exactly this rule (see its own comment on the widening); without
+# that widening, this Role itself would be denied at apply time. The kind
+# is NOT added to the AppProject's namespaceResourceWhitelist in step 4:
+# issue #34's worked example is applied directly with this identity, not
+# synced through Argo CD, and whether a team ever GitOps-delivers its own
+# JobSet chart is a separate decision for the first chart that does.
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: ServiceAccount
@@ -408,6 +418,9 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

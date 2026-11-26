@@ -1,0 +1,6 @@
+apiVersion: v2
+name: jobset-crd
+description: "The JobSet CustomResourceDefinition only (jobsets.jobset.x-k8s.io, vendored from kubernetes-sigs/jobset v0.13.1): the CRD-only half of the JobSet add-on split, delivered one sync step ahead of the controller and webhook that gitops/charts/jobset deploys (issue #34)."
+type: application
+version: 0.1.0
+appVersion: "v0.13.1"
