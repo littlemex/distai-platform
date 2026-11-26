@@ -184,7 +184,10 @@ log "=== PHASE 7: stream logs until the Job finishes (deadline ~55min) ==="
 LOGS_PID=""
 relaunch_logs() {
   if [[ -n "${LOGS_PID}" ]] && kill -0 "${LOGS_PID}" 2>/dev/null; then return; fi
-  kubectl logs -f "${POD}" -n distai-smoke --timestamps >>"${RUN_LOG_DIR}/job.log" 2>&1 &
+  # Overwrite (>), not append (>>): kubectl logs -f dumps the container's FULL log from the
+  # start every time it (re-)attaches, so appending across relaunches would duplicate it once
+  # per relaunch; each relaunch's full dump fully supersedes the previous one.
+  kubectl logs -f "${POD}" -n distai-smoke --timestamps >"${RUN_LOG_DIR}/job.log" 2>&1 &
   LOGS_PID=$!
 }
 relaunch_logs
@@ -192,7 +195,12 @@ DEADLINE=$((SECONDS + 3300))
 STATUS="unknown"
 LAST_PHASE=""
 while (( SECONDS < DEADLINE )); do
-  STATUS="$(kubectl get job miles-trainium-grpo -n distai-smoke -o jsonpath='{.status.conditions[0].type}' 2>/dev/null || true)"
+  # .status.conditions[0].type is not reliable here: this script's own real-machine attempt 3
+  # saw conditions[0]=FailureTarget with Failed only second, which this loop originally checked
+  # for and therefore ran its full deadline instead of stopping. .status.succeeded/.status.failed
+  # are the Job controller's own terminal counters and do not depend on condition ordering.
+  SUCCEEDED="$(kubectl get job miles-trainium-grpo -n distai-smoke -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
+  FAILED_COUNT="$(kubectl get job miles-trainium-grpo -n distai-smoke -o jsonpath='{.status.failed}' 2>/dev/null || true)"
   PHASE_NOW="$(kubectl get pod "${POD}" -n distai-smoke -o jsonpath='{.status.phase}{" "}{.status.containerStatuses[0].state}' 2>/dev/null || true)"
   if [[ "${PHASE_NOW}" != "${LAST_PHASE}" ]]; then
     log "pod phase/state: ${PHASE_NOW}"
@@ -203,7 +211,12 @@ while (( SECONDS < DEADLINE )); do
     kubectl get events -n distai-smoke --field-selector involvedObject.name="${POD}" --sort-by='.lastTimestamp' 2>/dev/null \
       | tail -5 | tee -a "${RUN_LOG_DIR}/events.log" || true
   fi
-  if [[ "${STATUS}" == "Complete" || "${STATUS}" == "Failed" ]]; then
+  if [[ -n "${SUCCEEDED}" && "${SUCCEEDED}" -ge 1 ]]; then
+    STATUS="Complete"
+    break
+  fi
+  if [[ -n "${FAILED_COUNT}" && "${FAILED_COUNT}" -ge 1 ]]; then
+    STATUS="Failed"
     break
   fi
   sleep 15
@@ -213,7 +226,7 @@ kill "${LOGS_PID}" 2>/dev/null || true
 wait "${LOGS_PID}" 2>/dev/null || true
 # Belt-and-suspenders: a plain (non-follow) `kubectl logs` after the Job finished, in case every
 # `-f` attempt above still raced the container's own short lifetime.
-kubectl logs "${POD}" -n distai-smoke --timestamps >>"${RUN_LOG_DIR}/job.log" 2>&1 || true
+kubectl logs "${POD}" -n distai-smoke --timestamps >"${RUN_LOG_DIR}/job.log" 2>&1 || true
 log "=== JOB STATUS: ${STATUS} ==="
 kubectl get events -n distai-smoke --field-selector involvedObject.name="${POD}" --sort-by='.lastTimestamp' 2>&1 | tee "${RUN_LOG_DIR}/events-final.log" || true
 kubectl get job miles-trainium-grpo -n distai-smoke -o yaml | tee "${RUN_LOG_DIR}/job-final.yaml" >/dev/null

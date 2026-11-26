@@ -10,9 +10,11 @@
 # NodePool shape (a pod evicted while a multi-GB image was still pulling, root-caused there to
 # Karpenter consolidation) and raises consolidateAfter to mitigate it; this annotation is a
 # narrower, per-pod version of the same mitigation. During this PR's own three real-machine
-# attempts (README.md "What actually ran"), the only one that reached a node also saw one
-# TaintManagerEviction event -- not confirmed as the same cause, since no controller log line
-# was captured for it either way.
+# attempts (README.md "What actually ran"), the only one that reached a node did see a
+# TaintManagerEviction event, but about 24 minutes after the container had already started and
+# exited -- read as ordinary consolidation of the now-idle node after the Job had already
+# failed, not something this annotation needed to prevent that time. Left in place as a
+# precaution for a run that does take longer to pull its image.
 #
 # The ConfigMap (miles-trainium-script) is generated from train_grpo.py by 0.verify.sh, so the
 # two copies of the script (this file's mount and the Job that runs it) never drift apart; see
