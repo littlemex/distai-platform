@@ -409,6 +409,43 @@ print(FS.join([phase, message, retry_count, has_sync_result, resources_summary, 
 '
 }
 
+# app_diagnostics APP: everything a reviewer would ask for after a
+# "did not reach Synced/Healthy" failure, gathered before this script's
+# own fail()-triggered teardown destroys the cluster. Added after a real
+# run (2026-11-26) failed this exact class of check twice, at two
+# different Applications, with nothing but health/sync status to go on
+# -- not enough to tell a real defect in this platform from a transient
+# one (API throttling, a slow OCI/Helm chart pull, Argo CD's own
+# reconciliation lag), and the cluster was already gone by the time
+# anyone looked. Printed, not asserted on: this is diagnostic output for
+# a human or a later grep, never a pass/fail signal itself.
+#
+# Covers: health/sync status, operationState/conditions (via
+# app_operation_state, same single-snapshot-read guarantee), this
+# Application's own Kubernetes Events, and the managed Argo CD
+# capability's component pods -- best-effort, since the EKS managed
+# capability does not expose every internal object a self-managed Argo
+# CD install would (confirmed separately: platform.ApplicationSet's own
+# status.applicationStatus reads empty on this capability, gitops/README.md's
+# own Ordering section); a `kubectl get pods` with nothing matching is
+# itself diagnostic (it means the capability does not run its control
+# plane as namespace-visible pods here), not a script bug, so this
+# never fails on that being empty.
+app_diagnostics() {
+  local app="$1"
+  local events pods repo_logs controller_logs
+  events="$(k get events -n "${ARGOCD_NS}" \
+    --field-selector "involvedObject.name=${app},involvedObject.kind=Application" \
+    --sort-by='.lastTimestamp' \
+    -o jsonpath='{range .items[*]}{.reason}:{.message}|{end}' 2>&1)"
+  pods="$(k get pods -n "${ARGOCD_NS}" -o custom-columns=NAME:.metadata.name,STATUS:.status.phase --no-headers 2>&1 | tr '\n' ';')"
+  repo_logs="$(k logs -n "${ARGOCD_NS}" -l app.kubernetes.io/name=argocd-repo-server --tail=80 --all-containers 2>&1 | tr '\n' ' ')"
+  controller_logs="$(k logs -n "${ARGOCD_NS}" -l app.kubernetes.io/name=argocd-application-controller --tail=80 --all-containers 2>&1 | tr '\n' ' ')"
+  printf 'health=%s sync=%s operationState=[%s] events=[%s] argocd_pods=[%s] repo-server_logs=[%s] application-controller_logs=[%s]' \
+    "$(app_health "${app}")" "$(app_sync "${app}")" "$(app_operation_state "${app}")" \
+    "${events}" "${pods}" "${repo_logs}" "${controller_logs}"
+}
+
 # job_node NS JOB: prints the node name the Job's pod is bound to, or
 # fails if none is bound yet. "|", never " ", between nodeName and phase:
 # awk's default whitespace-splitting strips a line's leading blank before
@@ -1280,7 +1317,7 @@ run_bootstrap --revision "${PRISTINE_KUEUE_BROKEN_BRANCH}" \
   || fail "bootstrap.sh --revision ${PRISTINE_KUEUE_BROKEN_BRANCH}"
 
 wait_until 300 10 "karpenter-crd Application reaches Synced" app_synced "${APP_KARPENTER_CRD}" \
-  || fail "${APP_KARPENTER_CRD} did not reach Synced (sync=$(app_sync "${APP_KARPENTER_CRD}")) after fixing its own version"
+  || fail "${APP_KARPENTER_CRD} did not reach Synced after fixing its own version: $(app_diagnostics "${APP_KARPENTER_CRD}")"
 k get crd nodepools.karpenter.sh -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null | grep -q True \
   || fail "nodepools.karpenter.sh CRD is not Established even though ${APP_KARPENTER_CRD} reports Synced"
 # karpenter-crd's own CRDs (EC2NodeClass, NodePool) now exist. The
@@ -1473,14 +1510,14 @@ pass "pristine: fixing only karpenter-crd (now Established) does not unblock cap
 run_bootstrap --revision "${GITOPS_REVISION}" \
   || fail "bootstrap.sh (restoring --revision ${GITOPS_REVISION} after the pristine A/B/C experiment)"
 wait_until 300 10 "kueue Application reaches Synced" app_synced "${APP_KUEUE}" \
-  || fail "${APP_KUEUE} did not reach Synced (sync=$(app_sync "${APP_KUEUE}")) after restoring --revision"
+  || fail "${APP_KUEUE} did not reach Synced after restoring --revision: $(app_diagnostics "${APP_KUEUE}")"
 # Same reasoning as capacity-pool in stage B: kueue's own CRDs
 # (ResourceFlavor, ClusterQueue, ...) are also brand new here, and a
 # single refresh does not reliably outlast Argo CD's own sync-retry
 # backoff from the earlier failed attempts -- refresh on every poll.
 smoke_synced_refreshing() { hard_refresh_app "${APP_SMOKE}"; app_synced "${APP_SMOKE}"; }
 wait_until 600 15 "smoke Application reaches Synced" smoke_synced_refreshing \
-  || fail "${APP_SMOKE} did not reach Synced (sync=$(app_sync "${APP_SMOKE}")) after restoring --revision"
+  || fail "${APP_SMOKE} did not reach Synced after restoring --revision: $(app_diagnostics "${APP_SMOKE}")"
 # Closes the loop on stage B's own observation: capacity-pool's
 # Application stayed OutOfSync there specifically because its
 # ResourceFlavor object needed kueue's still-broken CRD; now that kueue
@@ -1488,7 +1525,7 @@ wait_until 600 15 "smoke Application reaches Synced" smoke_synced_refreshing \
 # should finally reach Synced.
 capacity_pool_synced_refreshing() { hard_refresh_app "${APP_CAPACITY_POOL}"; app_synced "${APP_CAPACITY_POOL}"; }
 wait_until 300 15 "capacity-pool Application reaches Synced" capacity_pool_synced_refreshing \
-  || fail "${APP_CAPACITY_POOL} did not reach Synced (sync=$(app_sync "${APP_CAPACITY_POOL}")) once both karpenter-crd and kueue were fixed"
+  || fail "${APP_CAPACITY_POOL} did not reach Synced once both karpenter-crd and kueue were fixed: $(app_diagnostics "${APP_CAPACITY_POOL}")"
 pass "restored --revision to ${GITOPS_REVISION}: kueue converges on its own (no refresh needed -- it never tried and failed to sync earlier in this sequence, so it has no cached discovery failure to invalidate); capacity-pool (now including ResourceFlavor) and the smoke ClusterQueue/LocalQueue converge once told to recheck (hard refresh), consistent with each having already tried and failed to sync in stage A/B while kueue's own CRDs did not exist yet, caching that failure until told otherwise -- this is not a claim that any brand-new CRD in general needs a refresh (2.upgrade.sh's own capacity-pool converges with no refresh call anywhere in that script, because its CRDs exist from that cell's own first bootstrap onward and it never cached a failed attempt against them), nor that either Application here converges unattended; this cell's first-ever bootstrap sequence is complete"
 
 # ------------------------------------------------- 4. first bootstrap
@@ -1729,9 +1766,9 @@ pass "${APP_KARPENTER_CRD}'s spec.syncPolicy.automated carries no allowEmpty -- 
 # -------------------------------------------------------------- 10. capacity
 
 wait_until 900 15 "capacity-pool Application Healthy and Synced" app_healthy_synced "${APP_CAPACITY_POOL}" \
-  || fail "${APP_CAPACITY_POOL} did not reach Healthy+Synced: health=$(app_health "${APP_CAPACITY_POOL}") sync=$(app_sync "${APP_CAPACITY_POOL}") operationState=[$(app_operation_state "${APP_CAPACITY_POOL}")] resources=[$(k get nodepool,ec2nodeclass,resourceflavor -A -o wide 2>&1 | tr '\n' ' ')]"
+  || fail "${APP_CAPACITY_POOL} did not reach Healthy+Synced: $(app_diagnostics "${APP_CAPACITY_POOL}") resources=[$(k get nodepool,ec2nodeclass,resourceflavor -A -o wide 2>&1 | tr '\n' ' ')]"
 wait_until 900 15 "smoke Application Healthy and Synced" app_healthy_synced "${APP_SMOKE}" \
-  || fail "${APP_SMOKE} did not reach Healthy+Synced: health=$(app_health "${APP_SMOKE}") sync=$(app_sync "${APP_SMOKE}") operationState=[$(app_operation_state "${APP_SMOKE}")]"
+  || fail "${APP_SMOKE} did not reach Healthy+Synced: $(app_diagnostics "${APP_SMOKE}")"
 pass "${APP_CAPACITY_POOL} and ${APP_SMOKE} (capacity step) reached Healthy+Synced"
 
 # Issue #41: optional-pool is a fourth core add-on (gitops/addons/,
