@@ -40,8 +40,15 @@ resource "aws_sns_topic_subscription" "budget_alert_email" {
 # cost_filter uses the tag key every resource this layer creates already
 # carries (infra/foundation/terraform.tfvars.example: tags =
 # { "distai-platform/cell" = "<name>" }, applied through the provider's
-# default_tags); "user:" is required for a user-defined cost allocation tag
-# (aws_budgets_budget's own TagKeyValue cost_filter documentation).
+# default_tags); "user:" and the "$" between the tag key and its value are
+# both AWS's own TagKeyValue format (aws_budgets_budget's own cost_filter
+# documentation), not an HCL interpolation. format(), not a quoted
+# "...cell$${var.name}" template literal, builds this: HCL's own escape rule
+# for a literal "$" immediately followed by "{" consumes the brace too, so
+# that literal would have rendered as the four literal characters
+# "${var.name}" instead of the cell name (caught on a real apply: issue #95
+# PR, CostFilters.TagKeyValue came back as
+# "user:distai-platform/cell${var.name}" verbatim).
 resource "aws_budgets_budget" "cell" {
   count = local.budget_enabled ? 1 : 0
 
@@ -53,7 +60,7 @@ resource "aws_budgets_budget" "cell" {
 
   cost_filter {
     name   = "TagKeyValue"
-    values = ["user:distai-platform/cell$${var.name}"]
+    values = [format("user:distai-platform/cell$%s", var.name)]
   }
 
   # ACTUAL, not FORECASTED: a forecast-based threshold needs a full billing

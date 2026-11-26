@@ -178,6 +178,15 @@ run "budget_limit_usd_accepts_a_positive_amount" {
     condition     = length(aws_sns_topic.budget_alerts) == 1
     error_message = "budget_limit_usd = 10 must create exactly one aws_sns_topic."
   }
+
+  # Regression check for a real bug an actual apply caught (issue #95 PR): an
+  # HCL template literal for this value rendered the four literal characters
+  # "${var.name}" instead of interpolating the cell name, because a literal
+  # "$" immediately followed by "{" is HCL's own escape for a literal "${".
+  assert {
+    condition     = aws_budgets_budget.cell[0].cost_filter[0].values[0] == "user:distai-platform/cell$example-cell"
+    error_message = "cost_filter TagKeyValue must interpolate var.name after the literal \"user:distai-platform/cell$\" prefix, not render \"\\${var.name}\" literally."
+  }
 }
 
 run "budget_limit_usd_rejects_zero" {
