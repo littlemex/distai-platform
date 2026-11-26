@@ -153,24 +153,58 @@ values:
   # healthy at the same moment (confirmed independently via lspci/
   # ibv_devices/fi_info).
   #
-  # A single blanket toleration (operator: Exists, no key) rather than
-  # naming nvidia.com/gpu specifically: this addon's own header comment
-  # already states the design intent ("EFA ... Follows the GPU's or
-  # Neuron's own method label, not a method label of its own") -- the
-  # advertiser is meant to follow whatever taint the accelerator pool it
-  # is paired with carries, not just the one capacity-pool pools happen
-  # to use today. A pool that also sets tenancy.teamTaint (#22,
-  # gitops/charts/capacity-pool/values.yaml) would hit the exact same
-  # class of gap with a key-specific toleration, since the DaemonSet
-  # controller evaluates every NoSchedule taint on a node regardless of
-  # which one this chart happens to know about; a blanket toleration
-  # closes that case too without needing to enumerate every taint key
-  # this platform might ever render. Replaces the chart's own default
-  # tolerations wholesale (Helm replaces lists, does not merge them), so
-  # CriticalAddonsOnly is covered by the blanket entry rather than kept
-  # as a separate, now-redundant line.
+  # A key-agnostic toleration (operator: Exists, no key) rather than
+  # naming nvidia.com/gpu specifically, scoped to effect: NoSchedule:
+  # this addon's own header comment states the design intent ("EFA ...
+  # Follows the GPU's or Neuron's own method label, not a method label
+  # of its own") for the *method* label; extending the same idea to "also
+  # follow whatever taint key that accelerator pool carries, not just the
+  # one key capacity-pool pools happen to use today" is this PR's own
+  # inference from that stated intent, not a second thing the header
+  # itself already says. A pool that also sets tenancy.teamTaint (#22,
+  # gitops/charts/capacity-pool/values.yaml, same taint shape as
+  # accelerator.taint) would hit the exact same class of gap with a
+  # key-specific toleration, since the DaemonSet controller evaluates
+  # every matching-effect taint on a node regardless of which key this
+  # chart happens to know about. Checked: no cell in this repository sets
+  # tenancy.teamTaint today (`grep -rn teamTaint gitops/cells/` only
+  # matches comments, 2026-11-27) -- this closes a real but not-yet-hit
+  # case by documented Kubernetes toleration semantics (an empty key with
+  # operator: Exists matches every taint key), not one independently
+  # reproduced on real hardware.
+  #
+  # effect: NoSchedule, not left unset: capacity-pool's own taint
+  # rendering accepts NoSchedule, PreferNoSchedule or NoExecute for
+  # either accelerator.taint or tenancy.teamTaint
+  # (gitops/charts/capacity-pool/templates/_helpers.tpl), and every real
+  # cell today uses NoSchedule only (same grep as above) -- an unscoped
+  # Exists (no effect) would also tolerate an unrelated NoExecute taint
+  # (for example an administrator's own drain/maintenance taint)
+  # indefinitely, which this Pod has no reason to resist and real review
+  # flagged as unintentional scope creep. Known limitation, not fixed
+  # here: a future pool that sets accelerator.taint or tenancy.teamTaint
+  # with effect: PreferNoSchedule or NoExecute would need this toleration
+  # widened again.
+  #
+  # One entry, not two: this chart's own template
+  # (aws-efa-k8s-device-plugin v0.5.35, templates/daemonset.yaml lines
+  # 34-39) hardcodes its own `- key: CriticalAddonsOnly, operator:
+  # Exists` toleration and appends `.Values.tolerations` after it with
+  # `{{- with .Values.tolerations }}{{ toYaml . | nindent 8 }}{{- end
+  # }}` -- it does not replace the list. Confirmed two ways: `helm
+  # template` against the pinned chart with this exact one-entry value
+  # renders both entries, and the live DaemonSet on real hardware
+  # (p5en.48xlarge) read spec.template.spec.tolerations as
+  # [{key: CriticalAddonsOnly, operator: Exists}, {operator: Exists,
+  # effect: NoSchedule}] after this same values change was applied (an
+  # earlier revision of this comment assumed Helm replaces the list
+  # wholesale for this chart; that assumption was wrong and is corrected
+  # here, not merely dropped). Listing CriticalAddonsOnly again in
+  # values would just duplicate what the chart's own template already
+  # keeps unconditionally.
   tolerations:
     - operator: Exists
+      effect: NoSchedule
   securityContext:
     privileged: false
     allowPrivilegeEscalation: false

@@ -39,18 +39,25 @@ values:
     distai.dev/efa-attached: "true"
   # #102: the identical gap and fix as
   # accel-efa-device-plugin-nvidia/addon.yaml's own tolerations comment
-  # (read that file for the full rationale, including why this is one
-  # blanket toleration rather than a taint-key-specific one) -- same
-  # chart/version/image, so the same live-rendered default
-  # ([{key: CriticalAddonsOnly, operator: Exists}] only) applies here
-  # too. Confirmed on real hardware for the NVIDIA release only
-  # (p5en.48xlarge); not independently re-run against a real trn2 node
-  # carrying aws.amazon.com/neuron:NoSchedule in this PR -- added here
-  # because the chart's own default is identical and the blanket form
-  # does not depend on which specific taint key a Neuron pool uses, not
-  # because this exact vendor/taint pairing was separately reproduced.
+  # (read that file for the full rationale: why this is a key-agnostic
+  # toleration rather than a taint-key-specific one, why effect:
+  # NoSchedule and not left unset, and the exact chart template lines
+  # this behavior comes from) -- same chart/version/image. Because the
+  # toleration is key-agnostic, the fix itself no longer depends on
+  # knowing the exact Neuron taint key at all, and `helm template`
+  # against the pinned chart with this exact value renders the same two
+  # entries ([{key: CriticalAddonsOnly, operator: Exists}, {operator:
+  # Exists, effect: NoSchedule}]) for this release as for the NVIDIA one
+  # -- confirmed statically, no Trainium hardware needed for that part.
+  # What is still unverified in this PR: whether a real trn2 node
+  # actually carries both distai.dev/neuron-method=device-plugin and
+  # distai.dev/efa-attached="true" as expected, and whether
+  # vpc.amazonaws.com/efa actually appears in that node's allocatable
+  # once this DaemonSet schedules there -- only the NVIDIA release's
+  # real-hardware behavior (p5en.48xlarge) was directly observed.
   tolerations:
     - operator: Exists
+      effect: NoSchedule
   securityContext:
     privileged: false
     allowPrivilegeEscalation: false
