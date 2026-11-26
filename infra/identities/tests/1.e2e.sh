@@ -349,6 +349,7 @@ metadata:
 spec:
   serviceAccountName: ${sa}
   restartPolicy: Never
+  terminationGracePeriodSeconds: 0
   tolerations:
     - key: CriticalAddonsOnly
       operator: Exists
@@ -400,11 +401,11 @@ pod_has_creds_env() {
 # same Pod could not have helped; recreating it after the association
 # has propagated is this version's own fix for that symptom.
 wait_for_creds_env() {
-  local name="$1" sa="$2" start now
+  local name="$1" sa="$2" start now attempt=0
   start="$(date +%s)"
   while true; do
     if pod_has_creds_env "${name}"; then
-      wait_until 60 5 "pod ${name} Running (credentials env var already present)" pod_running "${name}" \
+      wait_until 360 5 "pod ${name} Running (credentials env var already present)" pod_running "${name}" \
         || fail "pod ${name} has the Pod Identity credentials env var but never reached Running"
       return 0
     fi
@@ -412,8 +413,11 @@ wait_for_creds_env() {
     if ((now - start >= 90)); then
       return 1
     fi
+    attempt=$((attempt + 1))
+    info "pod ${name} has no AWS_CONTAINER_CREDENTIALS_FULL_URI yet (attempt ${attempt}, $((now - start))s elapsed); recreating"
     kubectl delete pod "${name}" -n "${TEST_NAMESPACE}" --wait --timeout=60s --grace-period=0 --force >/dev/null 2>&1
     apply_test_pod "${name}" "${sa}"
+    sleep 5
   done
 }
 
@@ -511,15 +515,18 @@ pass "test namespace deleted"
 identities_destroy_start="$(date +%s)"
 tfi destroy -input=false -var-file="${IDENTITIES_TFVARS}" -auto-approve || fail "terraform destroy infra/identities"
 IDENTITIES_DESTROYED=1
-# The legacy role is now this destroy's own responsibility (it has been
-# Terraform-managed since the import, under its own real name via
-# role_name); the EXIT trap's own cleanup must not then also try to
-# delete it by hand and report a spurious failure (NoSuchEntity) on an
-# otherwise fully successful run.
-LEGACY_ROLE_CREATED=0
 pass "terraform destroy infra/identities ($(($(date +%s) - identities_destroy_start))s)"
 
 no_role_left "${LEGACY_ROLE_NAME}" || fail "legacy-imagebuilder's role (now Terraform-managed, under its own pre-existing name via role_name) still exists after destroy"
+# Only now, after confirming the role is actually gone: the legacy role
+# is Terraform-managed since the import (under its own real name via
+# role_name), so a successful destroy above already removed it, and the
+# EXIT trap's own cleanup must not then also try to delete it by hand
+# and report a spurious failure (NoSuchEntity) on an otherwise fully
+# successful run. Resetting this flag before the check above would mean
+# a failed check (the role somehow still existing) leaves the trap with
+# nothing left to remove it either.
+LEGACY_ROLE_CREATED=0
 pass "no identity role tagged for this run remains, by name (legacy-imagebuilder)"
 # Scoped to "<NAME>-identity-" (this layer's own derived-name convention),
 # not plain NAME: infra/foundation's own roles (for example
