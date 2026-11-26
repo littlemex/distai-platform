@@ -341,7 +341,7 @@ method-labeled node with none (see "Known limits"). Real hardware
 (`p4d.24xlarge`, two nodes, `NET/Libfabric`/GDRDMA `all_reduce_perf`) is
 in this PR's own Test Results.
 
-## Node readiness (startupTaints), issue #96
+## Node readiness (startupTaints)
 
 A freshly launched Karpenter node reaches `Ready: True` as soon as kubelet
 registers it, before its own accelerator device-plugin DaemonSet (or any
@@ -380,7 +380,26 @@ do (their own `addon.yaml`). The NVIDIA/Neuron DRA advertisers
 (`accel-nvidia-dra`, `accel-neuron-dra`) do not yet, deliberately: #19's own
 E2/E4c found a dynamically provisioned DRA pool never initializes at all, and
 a static NodePool for the DRA method is #27's own future scope, so there is
-no real pool to opt into `pool.startupTaints` through that method today.
+no real pool to opt into `pool.startupTaints` through that method today --
+`check_startup_taint_keys.py` refuses the combination outright rather than
+leaving it an unverified claim.
+
+**What the gate actually guarantees, stated precisely:** `vigil-controller`
+removes the taint once a DaemonSet's own Pod reports `Ready`, nothing more.
+A DaemonSet whose readiness probe (or lack of one) says `Ready` before the
+resource it advertises is actually usable -- for example a device-plugin
+image that starts healthy but has not yet finished registering with kubelet
+-- removes the race this issue describes, not a guarantee that every
+resource the node is expected to provide is already live.
+
+**If `vigil-controller` itself is down** (or a cell has not yet picked up
+this PR through its own `bootstrap.sh` re-run, see "Versioning" above), no
+startup-tainted node it should have watched is ever untainted automatically.
+Confirm with `kubectl get node <node> -o jsonpath='{.spec.taints}'`, and
+recover by hand once the real cause is fixed: `kubectl taint node <node>
+distai.dev/startup-not-ready-` removes exactly the one taint this mechanism
+owns, the same no-op-if-absent `-`-suffix syntax a day-to-day operator
+already uses for any other taint.
 
 ## Adding a cell
 
