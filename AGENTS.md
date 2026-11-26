@@ -116,7 +116,7 @@ judgment alone.
 | `docs/workshop/` | Hands-on workshop chapters, English and Japanese |
 | `docs/deep-dives/` | Self-contained explainer pages `NNNNN-<slug>.html` (numbered from `00000`), English and Japanese |
 | `docs/design-notes/` | Short Markdown records with full, reproducible provenance for a specific public fact or a small set of related facts (for example, `spot-placement-scores.md`), each carrying a timestamp for approximately when its own facts were captured; narrower in scope than a `docs/workshop/` chapter or a `docs/deep-dives/` page |
-| `examples/` | References and tools outside the delivery mechanism: nothing in `infra/foundation/` or `gitops/` depends on anything under `examples/`, and nothing it contains is itself delivered to a cell by Argo CD. Each subtree is self-contained (its own README, its own tests) and held to a lower review bar than `infra/foundation/`/`gitops/` - a bug here cannot break what a cell runs, only the example itself. `examples/tools/<name>/` for a standalone script or CLI (`run-board`); `examples/inference/<engine>/<variant>/` for a reference Helm chart exercising a specific serving pattern. A subtree whose own failure *could* affect a cell (anything `infra/foundation`/`gitops` would need to depend on) does not belong here - it belongs in `gitops/` under the review bar that implies |
+| `examples/` | References and tools outside the delivery mechanism: nothing in `infra/foundation/` or `gitops/` depends on anything under `examples/`, and nothing it contains is itself delivered to a cell by Argo CD. Each subtree is self-contained (its own README, its own tests) and held to a lower review bar than `infra/foundation/`/`gitops/` - a bug here cannot break what a cell runs, only the example itself. `examples/tools/<name>/` for a standalone script or CLI (`tools/run-board`, `tools/gpu-healthcheck`); `examples/inference/<engine>/<variant>/` for a reference Helm chart exercising a specific serving pattern, one level deeper than training because more than one engine exists (`inference/vllm/disagg-pd`, `inference/sglang/agg-baseline`); `examples/training/<variant>/` for a reference Helm chart for one training recipe, with no engine level while only one training framework is in use (`training/pytorch-ddp`). A subtree whose own failure *could* affect a cell (anything `infra/foundation`/`gitops` would need to depend on) does not belong here - it belongs in `gitops/` under the review bar that implies |
 | `.github/` | Issue and pull request templates, workflows |
 
 Placement rules:
@@ -129,6 +129,52 @@ Placement rules:
   and is linked from the chapter.
 - Every component is self-contained: README with prerequisites,
   copy-pasteable instructions and known issues; pinned dependency versions.
+
+### Conventions documented at their point of definition, not here
+
+A contributor who copies a pattern from one part of the layout above into
+another can get that other part's own rule wrong, because the rule itself
+lives at the file that defines it, not in this table (#61). This repository
+writes each such rule once, at that file, and this list exists only so a
+reader starting from `AGENTS.md` can find it:
+
+- **Accelerator add-on Kubernetes namespaces.** The four accelerator
+  advertisers selected by a GPU or Neuron method label
+  (`gitops/README.md`'s "Accelerators" table) each set their own
+  `addon.yaml`'s `namespace:` field to their own add-on name with the
+  `accel-` prefix dropped: `accel-nvidia-device-plugin` ->
+  `nvidia-device-plugin`, `accel-nvidia-dra` -> `nvidia-dra`,
+  `accel-neuron-device-plugin` -> `neuron-device-plugin`,
+  `accel-neuron-dra` -> `neuron-dra` (the EFA and device-classes add-ons
+  under `gitops/addons/accel-*/` are not in that table and do not follow
+  this pattern; they stay in `kube-system`).
+  `gitops/tests/check_gitops_contract.py` checks each of these four
+  add-ons' own `addon.yaml` against this exact value, so an edit to one of
+  them away from this pattern fails that check.
+- **`wave` and "optional".** Both names mean more than one thing across
+  this platform; [the subsection of "Tiers" that lists every
+  meaning](./gitops/README.md#wave-and-optional-each-name-more-than-one-thing)
+  says so itself, rather than this file repeating it.
+- **`fail()`/`run_check()` in a test script.** `run_check()` in
+  `infra/foundation/tests/0.static.sh`, `gitops/tests/0.static.sh`,
+  `examples/inference/tests/0.static.sh` and
+  `examples/training/tests/0.static.sh` accumulates every failure in a
+  counter and keeps going, right for the independent, stateless checks
+  these four scripts run. The last two of those four also define their own
+  `fail()`, under the same accumulating contract as their `run_check()`,
+  for a check written as a direct pass/fail decision instead of one
+  wrapped by `run_check()`. `fail()` in `gitops/tests/1.e2e.sh`,
+  `gitops/tests/2.upgrade.sh`, `examples/inference/tests/1.e2e.sh`,
+  `examples/training/tests/1.e2e.sh`, and `infra/foundation/tests/1.e2e.sh`
+  (sourced from that script's own `tests/e2e-lib.sh`) instead exits at
+  once, because a stateful e2e step's own precondition depends on every
+  earlier step having already succeeded. The same name, `fail()`,
+  therefore carries two opposite contracts depending on the file; the
+  comment directly above each of the three `gitops/tests/` definitions
+  states that file's own contract, with the two in `0.static.sh` and
+  `2.upgrade.sh` pointing at `1.e2e.sh`'s comment, which names the others
+  in turn, but none of the four `examples/` files carries that
+  cross-reference (#61).
 
 ## 4. Development Workflow
 
