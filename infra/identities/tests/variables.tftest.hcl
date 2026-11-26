@@ -328,10 +328,14 @@ run "rejects_invalid_namespace" {
 run "rejects_role_name_over_64_chars" {
   command = plan
 
+  # cluster_name is a valid (<= 32 character) name on its own; the key
+  # below is also valid (<= 39 characters) on its own. Only the combined
+  # "<cluster_name>-identity-<key>" (32 + 10 + 30 = 72 here) exceeds IAM's
+  # 64-character role-name limit, which is what this run checks.
   variables {
-    cluster_name = "a-very-long-cluster-name-near-the-limit-ok"
+    cluster_name = "cell-xxxxxxxxxxxxxxxxxxxxxxxxxx1"
     platform_identities = {
-      an-unreasonably-long-add-on-identity-key-name = {
+      yyyyyyyyyyyyyyyyyyyyyyyyyyyyyy = {
         namespace       = "kube-system"
         service_account = "x"
         policy_arns     = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]
