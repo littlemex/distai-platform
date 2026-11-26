@@ -42,12 +42,25 @@ from check_pinned_crds import helm_template_chart  # noqa: E402
 FAILURES: list[str] = []
 
 # gitops/addons/<name>/addon.yaml -> dotted path to its own tolerations
-# list (same map check_startup_taint_keys.py uses).
+# list (same map check_startup_taint_keys.py uses), plus a substring that
+# names this add-on's own *primary* advertiser DaemonSet among the one or
+# two DaemonSets its pinned chart renders -- round 2's own finding: "at
+# least one DaemonSet gained it" passes even if a chart bump leaves only
+# a sibling DaemonSet (NVIDIA's own mps-control-daemon, Neuron's own npd)
+# gaining the entry while the advertiser itself loses it. NVIDIA's own
+# chart names its two DaemonSets "<release>" and "<release>-mps-control-
+# daemon" -- the advertiser is the one whose name does NOT contain
+# "mps-control-daemon". Neuron's own chart names its two "<release>" and
+# the fixed "node-problem-detector" (chart's own fullnameOverride, not
+# release-name-derived) -- the advertiser is the one whose name does NOT
+# contain "problem-detector". Both EFA add-ons' pinned chart renders
+# exactly one DaemonSet, so any non-empty substring every DaemonSet name
+# contains (its own chart name) identifies it.
 DEVICE_PLUGIN_TOLERATIONS_PATHS = {
-    "accel-nvidia-device-plugin": "tolerations",
-    "accel-neuron-device-plugin": "devicePlugin.tolerations",
-    "accel-efa-device-plugin-nvidia": "tolerations",
-    "accel-efa-device-plugin-neuron": "tolerations",
+    "accel-nvidia-device-plugin": ("tolerations", lambda name: "mps-control-daemon" not in name),
+    "accel-neuron-device-plugin": ("devicePlugin.tolerations", lambda name: "problem-detector" not in name),
+    "accel-efa-device-plugin-nvidia": ("tolerations", lambda name: True),
+    "accel-efa-device-plugin-neuron": ("tolerations", lambda name: True),
 }
 
 
@@ -92,7 +105,7 @@ def daemonset_tolerations(docs: list[dict]) -> dict[str, list[dict]]:
     return out
 
 
-def check_device_plugin_addon(repo_root: str, workdir: str, name: str, tol_path: str, taint_key: str, taint_effect: str) -> None:
+def check_device_plugin_addon(repo_root: str, workdir: str, name: str, tol_path: str, is_primary, taint_key: str, taint_effect: str) -> None:
     addon_path = os.path.join(repo_root, "gitops/addons", name, "addon.yaml")
     rel = os.path.relpath(addon_path, repo_root)
     if not os.path.isfile(addon_path):
@@ -136,23 +149,30 @@ def check_device_plugin_addon(repo_root: str, workdir: str, name: str, tol_path:
     if len(matches) != 1:
         return
     target = normalize_toleration(matches[0])
-    gained_it_somewhere = False
-    for ds_name in sorted(set(before_ds) & set(after_ds)):
+    common = sorted(set(before_ds) & set(after_ds))
+    primary = [n for n in common if is_primary(n)]
+    check(
+        f"{rel}: exactly one rendered DaemonSet is identified as this add-on's own primary advertiser, among {common}",
+        len(primary) == 1,
+        f"got {primary!r} among {common!r} -- the is_primary name rule needs updating for this chart's own DaemonSet names",
+    )
+    for ds_name in common:
         before_set = {normalize_toleration(t) for t in before_ds[ds_name] if isinstance(t, dict)}
         after_set = {normalize_toleration(t) for t in after_ds[ds_name] if isinstance(t, dict)}
         added = after_set - before_set
         removed = before_set - after_set
-        gained_it_somewhere = gained_it_somewhere or added == {target}
-        check(
-            f"{rel}: DaemonSet {ds_name} either gains exactly {matches[0]} or is unaffected, and nothing is ever dropped",
-            not removed and added in (set(), {target}),
-            f"removed={removed!r} added={added!r} (want removed == set() and added in (set(), {{{target!r}}}))",
-        )
-    check(
-        f"{rel}: at least one DaemonSet actually gained {matches[0]} (the override is not a no-op)",
-        gained_it_somewhere,
-        f"no DaemonSet among {sorted(set(before_ds) & set(after_ds))} gained it",
-    )
+        if ds_name in primary:
+            check(
+                f"{rel}: the primary advertiser DaemonSet {ds_name} gains exactly {matches[0]}, nothing dropped",
+                not removed and added == {target},
+                f"removed={removed!r} added={added!r} (want removed == set() and added == {{{target!r}}})",
+            )
+        else:
+            check(
+                f"{rel}: sibling DaemonSet {ds_name} either gains exactly {matches[0]} too (shares the same values path) or is unaffected, nothing dropped",
+                not removed and added in (set(), {target}),
+                f"removed={removed!r} added={added!r} (want removed == set() and added in (set(), {{{target!r}}}))",
+            )
 
 
 def check_vigil_controller(repo_root: str, workdir: str) -> tuple[str | None, str | None]:
@@ -224,8 +244,8 @@ def main(repo_root: str) -> int:
             print("FAIL could not determine vigil-controller's own taintKey/taintEffect; skipping the device-plugin checks")
             FAILURES.append("vigil-controller taintKey/taintEffect unavailable")
         else:
-            for name, tol_path in DEVICE_PLUGIN_TOLERATIONS_PATHS.items():
-                check_device_plugin_addon(repo_root, workdir, name, tol_path, taint_key, taint_effect)
+            for name, (tol_path, is_primary) in DEVICE_PLUGIN_TOLERATIONS_PATHS.items():
+                check_device_plugin_addon(repo_root, workdir, name, tol_path, is_primary, taint_key, taint_effect)
     finally:
         import shutil
 
