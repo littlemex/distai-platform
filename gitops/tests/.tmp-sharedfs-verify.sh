@@ -363,7 +363,26 @@ spec:
   resources: {requests: {storage: 1Gi}}
 EOF
 kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/datasets-seed -n fs-admin --timeout=120s
-run_test_pod seed fs-admin "" datasets-seed "echo shared-dataset-content > /mnt/data.txt"
+# Not run_test_pod (uid 1000/gid 1000 fixed): templates/seed.yaml
+# (#18's own AI-review fix round) creates `datasets` as root:root 0755,
+# not group-writable, since it carries no `provision` (and so no
+# provision.gid/mode) at all - only root can write directly under it.
+# fs-admin's own Pod Security is baseline, not restricted (the same
+# reason templates/seed.yaml itself runs as uid 0), so this one pod can
+# run as uid 0 too, matching the actual permissions the directory it
+# writes to was created with.
+kubectl run seed -n fs-admin --image="${IMAGE}" --restart=Never \
+  --overrides='{
+    "spec": {
+      "securityContext": {"runAsNonRoot": false, "runAsUser": 0, "seccompProfile": {"type": "RuntimeDefault"}},
+      "containers": [{"name": "seed", "image": "'"${IMAGE}"'",
+        "command": ["sh", "-c", "echo shared-dataset-content > /mnt/data.txt"],
+        "securityContext": {"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}},
+        "volumeMounts": [{"name": "v", "mountPath": "/mnt"}]}],
+      "volumes": [{"name": "v", "persistentVolumeClaim": {"claimName": "datasets-seed"}}],
+      "restartPolicy": "Never"
+    }
+  }'
 kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/seed -n fs-admin --timeout=180s
 for team in team-a team-b; do
   kubectl apply -n "${team}" --as="system:serviceaccount:${team}:${team}-deployer" -f - <<EOF
@@ -399,7 +418,7 @@ grep -q "^yes" "${RESULTS_DIR}/check4-own-namespace.log" || { log "CHECK 4 FAIL:
 grep -q "^no" "${RESULTS_DIR}/check4-cross-namespace.log" || { log "CHECK 4 FAIL: team-a-deployer can create a PVC in team-b's namespace"; exit 1; }
 log "CHECK 4 PASS: a team's own onboarding identity can create a PVC in its own namespace only (namespaced Role, no persistentvolumes grant)"
 
-log "check 5: a team claiming datasets-rw (not datasets-ro) never gets write access to the shared dataset - fs-admin's own reserving PVC (gitops/charts/sharedfs-shares) already holds the one PV this storageClassName can ever bind, so the object is created (RBAC grants create persistentvolumeclaims generically, same as check 1/2) but never Bound, the same shape as check 2b's ungranted-namespace case, not an admission-time rejection"
+log "check 5: a team claiming datasets-rw (not datasets-ro) never gets write access to the shared dataset - the datasets FilesystemShare's own grants list a ReadWrite grant for fs-admin specifically and a ReadOnly grant for any team namespace, never a ReadWrite grant for a team, so sharedfs's own controller has no matching grant to provision a team's datasets-rw claim against. The object is still created (RBAC grants create persistentvolumeclaims generically, same as check 1/2) but never Bound, the same shape as check 2b's ungranted-namespace case, not an admission-time rejection"
 kubectl apply -n team-a --as=system:serviceaccount:team-a:team-a-deployer -f - <<'EOF'
 apiVersion: v1
 kind: PersistentVolumeClaim
