@@ -343,11 +343,22 @@ teardown() {
     pass "no checkpoint object of this run remains in S3"
   fi
   if [[ "${GUARDS_PREEXISTED}" -eq 0 ]]; then
-    others="$(k get namespaces -l distai.dev/team -o name 2>/dev/null | grep -v "^namespace/${TEAM}$" || true)"
-    if [[ -z "${others}" ]]; then
+    # Fail closed, not open: if the list itself errors (a transient API
+    # problem, not "zero namespaces"), ns_list_ok stays 1 and the guards
+    # are left in place -- an earlier version of this check swallowed the
+    # command's own exit status (`2>/dev/null ... || true`), so an API
+    # error and "genuinely no other team" were indistinguishable, and
+    # this teardown could delete a cluster-wide guard while a real team
+    # namespace existed but merely failed to list.
+    ns_list_ok=0
+    ns_list="$(k get namespaces -l distai.dev/team -o name 2>/dev/null)" || ns_list_ok=1
+    others="$(grep -v "^namespace/${TEAM}$" <<<"${ns_list}" || true)"
+    if [[ "${ns_list_ok}" -eq 0 && -z "${others}" ]]; then
       info "teardown: removing the team guards this run's onboarding created (no other team namespace exists)"
       k delete -f "${REPO_ROOT}/gitops/bootstrap/team-rbac-guard.yaml" --ignore-not-found >/dev/null 2>&1 || bad=1
       k delete -f "${REPO_ROOT}/gitops/bootstrap/team-namespace-guard.yaml" --ignore-not-found >/dev/null 2>&1 || bad=1
+    elif [[ "${ns_list_ok}" -ne 0 ]]; then
+      log "WARN teardown: could not list team namespaces to check for others; leaving the team guards in place rather than risk deleting them while a real team namespace exists"
     else
       info "teardown: leaving the team guards in place (other team namespaces exist: $(tr '\n' ' ' <<<"${others}"))"
     fi
