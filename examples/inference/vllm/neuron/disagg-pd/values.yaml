@@ -292,6 +292,14 @@ networkPolicy:
 # a MultiConnector list the NIXL entry is rendered as NeuronNixlConnector
 # with its module path, because the plugin only rewrites a top-level
 # NixlConnector to its Neuron subclass (templates/engines.yaml).
+#
+# transport.kvRoleMode=producer_consumer combined with mode=local/remote is
+# untested and known inconsistent: disagg.lmcacheConnector's own
+# LMCacheMPConnector entry always renders kv_role: "kv_both", regardless of
+# transport.kvRoleMode, so the rendered MultiConnector would mix
+# kv_producer/kv_consumer on the NIXL entry with kv_both on the LMCache
+# entry. Not fixed here; use transport.kvRoleMode: kv_both (the default)
+# whenever kvCacheTier.mode is not gpu-only, until this is resolved.
 kvCacheTier:
   mode: gpu-only
   lmcache:

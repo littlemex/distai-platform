@@ -60,10 +60,17 @@ engine:
   # Model download cache (HF_HOME=/cache/huggingface).
   cacheVolume:
     emptyDir: {}
-  # Compile cache at /compile-cache (VLLM_CACHE_ROOT), Neuron-only. See
-  # ../disagg-pd/values.yaml, engine.compileCacheVolume: emptyDir re-traces
-  # and recompiles on every pod restart; use a PersistentVolumeClaim per pod
-  # if the engines restart often.
+  # Compile cache at /compile-cache (VLLM_CACHE_ROOT), Neuron-only. emptyDir
+  # re-traces and recompiles on every pod restart. A PersistentVolumeClaim
+  # override needs replicas: 1 (every replica of this one Deployment shares
+  # the same Pod template and so the same claim name -- a multi-attach
+  # failure for any access mode that is not many-writer, the same reason
+  # ../disagg-pd/values.yaml splits this field per role instead of sharing
+  # it across prefill and decode) or a multi-attach access mode such as an
+  # EFS-backed ReadWriteMany claim. A PVC override must also set emptyDir
+  # to null explicitly (Helm deep-merges a values-file map into the
+  # chart's default map, so leaving emptyDir: {} in place renders a volume
+  # carrying both sources, which the API server rejects).
   compileCacheVolume:
     emptyDir: {}
   startupTimeoutSeconds: 1800

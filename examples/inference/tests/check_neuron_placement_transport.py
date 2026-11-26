@@ -305,6 +305,8 @@ def check_disagg(R, chart):
           val("placement", "enforceAntiAffinity") is True, repr(val("placement", "enforceAntiAffinity")))
     check(f"{rel} values: prefill and decode nodeSelectorValues differ",
           sel_values["prefill"] != sel_values["decode"], json.dumps(sel_values))
+    check(f"{rel} values: transport.kvRoleMode defaults to kv_both",
+          val("transport", "kvRoleMode") == "kv_both", repr(val("transport", "kvRoleMode")))
     for r in ROLES:
         check(f"{rel} values: {r}.compileCacheVolume defaults to emptyDir: {{}}",
               val(r, "compileCacheVolume") == {"emptyDir": {}}, json.dumps(val(r, "compileCacheVolume")))
@@ -357,6 +359,11 @@ def check_disagg(R, chart):
                     check(f"{rel} default: {name_of(w)} ({r}) KV_TRANSFER_CONFIG sets "
                           'kv_buffer_device to "cuda" (the only value the plugin accepts for Neuron)',
                           kv_cfg.get("kv_buffer_device") == "cuda", json.dumps(kv_cfg))
+                    check(f"{rel} default: {name_of(w)} ({r}) KV_TRANSFER_CONFIG sets "
+                          'kv_role to "kv_both" at transport.kvRoleMode\'s own default '
+                          "(not kv_producer/kv_consumer, which only the producer_consumer "
+                          "scenario below should render)",
+                          kv_cfg.get("kv_role") == "kv_both", json.dumps(kv_cfg))
                     check(f"{rel} default: {name_of(w)} ({r}) sets VLLM_NEURON_BACKEND=neuron_native "
                           "(the precompile cache is off otherwise)",
                           envd.get("VLLM_NEURON_BACKEND") == "neuron_native", json.dumps(envd))
@@ -515,12 +522,13 @@ def check_disagg(R, chart):
              pdocs is not None and cdocs is not None, err or err2):
         scenarios["coresPerDevice override (default)"] = pdocs
         scenarios["coresPerDevice override (=2)"] = cdocs
-        proles = check_roles_present(f"{rel} coresPerDevice=4 (default), cores=3", pdocs, key, sel_values)
+        proles = check_roles_present(f"{rel} coresPerDevice={per_device} (default), cores=3", pdocs, key, sel_values)
         croles = check_roles_present(f"{rel} coresPerDevice=2, cores=3", cdocs, key, sel_values)
         if proles and croles:
             for r in ROLES:
                 for w in proles[r]:
-                    check_neuron_request(f"{rel} coresPerDevice=4 (default), cores=3 ({r})", w, 3, 4)
+                    check_neuron_request(f"{rel} coresPerDevice={per_device} (default), cores=3 ({r})",
+                                          w, 3, per_device)
                 for w in croles[r]:
                     check_neuron_request(f"{rel} coresPerDevice=2, cores=3 ({r})", w, 3, 2)
 
@@ -648,8 +656,10 @@ def check_agg(R, chart):
             envd = env_of(cs[0]) if cs else {}
             check(f"{rel} default: {name_of(w)} sets VLLM_NEURON_BACKEND=neuron_native",
                   envd.get("VLLM_NEURON_BACKEND") == "neuron_native", json.dumps(envd))
-            check(f"{rel} default: {name_of(w)} renders no KV_TRANSFER_CONFIG "
-                  "at the default kvCacheTier.mode=gpu-only (one aggregated process)",
+            check(f"{rel} default: {name_of(w)} renders KV_TRANSFER_CONFIG empty "
+                  "at the default kvCacheTier.mode=gpu-only (one aggregated process; the env var "
+                  "itself is always rendered, the entrypoint's own [ -z \"$KV_TRANSFER_CONFIG\" ] "
+                  "check is what skips --kv-transfer-config, not an absent env entry)",
                   not envd.get("KV_TRANSFER_CONFIG"), json.dumps(envd))
 
     per_device = val("accelerator", "coresPerDevice")
@@ -683,7 +693,7 @@ def check_agg(R, chart):
         scenarios["coresPerDevice override (default)"] = apdocs
         scenarios["coresPerDevice override (=2)"] = acdocs
         for w in workloads(apdocs):
-            check_neuron_request(f"{rel} coresPerDevice=4 (default), cores=3", w, 3, 4)
+            check_neuron_request(f"{rel} coresPerDevice={per_device} (default), cores=3", w, 3, per_device)
         for w in workloads(acdocs):
             check_neuron_request(f"{rel} coresPerDevice=2, cores=3", w, 3, 2)
 

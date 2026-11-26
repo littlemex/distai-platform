@@ -173,7 +173,7 @@ Run the load replay and scorer from [`../../../_shared/`](../../../_shared/) aga
 | `engine.port` | `8000` | Engine HTTP port, also serving `/metrics` |
 | `engine.shmSizeLimit` | `16Gi` | Size of the memory-backed `/dev/shm` |
 | `engine.cacheVolume` | `emptyDir: {}` | Volume for the model download cache (`HF_HOME`) |
-| `prefill.compileCacheVolume`, `decode.compileCacheVolume` | `emptyDir: {}` each | Volume for the compile cache (`VLLM_CACHE_ROOT`), one independent value per role. `emptyDir` is already one instance per Pod with no change needed; a `persistentVolumeClaim` override must use a different claim name per role (or an access mode that supports multiple attachers) since prefill and decode run on separate nodes |
+| `prefill.compileCacheVolume`, `decode.compileCacheVolume` | `emptyDir: {}` each | Volume for the compile cache (`VLLM_CACHE_ROOT`), one independent value per role. `emptyDir` is already one instance per Pod with no change needed; a `persistentVolumeClaim` override must use a different claim name per role (or an access mode that supports multiple attachers) since prefill and decode run on separate nodes, and must set `emptyDir: null` explicitly (Helm deep-merges a values-file map into the chart's default map, so leaving `emptyDir: {}` in place renders a volume carrying both sources, which the API server rejects) |
 | `engine.podSecurityContext`, `engine.containerSecurityContext` | non-root UID 2000, all capabilities dropped | Security context of the engine pods |
 | `engine.startupTimeoutSeconds` | `1800` | Time allowed for download, compile and load before a restart |
 | `proxy.replicas` | `1` | Proxy pods |

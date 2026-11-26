@@ -79,7 +79,7 @@ Run the same load replay and scorer from [`../../../_shared/`](../../../_shared/
 | `engine.port` | `8000` | Engine HTTP port, also serving `/metrics` |
 | `engine.shmSizeLimit` | `16Gi` | Size of the memory-backed `/dev/shm` |
 | `engine.cacheVolume` | `emptyDir: {}` | Volume for the model download cache (`HF_HOME`) |
-| `engine.compileCacheVolume` | `emptyDir: {}` | Volume for the compile cache (`VLLM_CACHE_ROOT`); one per pod, not shared |
+| `engine.compileCacheVolume` | `emptyDir: {}` | Volume for the compile cache (`VLLM_CACHE_ROOT`). `emptyDir` is already one instance per Pod; a `persistentVolumeClaim` override needs `replicas: 1` (every replica of this one Deployment shares the same Pod template and the same claim name otherwise) or a multi-attach access mode, and must set `emptyDir: null` explicitly or the rendered volume carries both sources |
 | `engine.startupTimeoutSeconds` | `1800` | Time allowed for download, compile and load before a restart |
 | `engine.podSecurityContext`, `engine.containerSecurityContext` | non-root UID 2000, all capabilities dropped | Security context of the engine pods |
 | `service.type` / `.port` | `ClusterIP` / `8000` | Client-facing Service |
