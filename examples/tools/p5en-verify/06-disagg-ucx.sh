@@ -100,8 +100,13 @@ spec:
         path: /sys
 EOF
   kubectl apply -f "/tmp/${pod}.yaml" >/dev/null
-  kubectl wait -n "${NAMESPACE}" --for=jsonpath='"'"'{.status.phase}'"'"'=Succeeded "pod/${pod}" --timeout=60s >/dev/null 2>&1 || true
-  kubectl logs -n "${NAMESPACE}" "${pod}"
+  kubectl wait -n "${NAMESPACE}" --for=jsonpath='"'"'{.status.phase}'"'"'=Succeeded "pod/${pod}" --timeout=120s >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5 6; do
+    out="$(kubectl logs -n "${NAMESPACE}" "${pod}" 2>/dev/null || true)"
+    [[ -n "${out}" ]] && break
+    sleep 10
+  done
+  echo "${out}"
   kubectl delete pod -n "${NAMESPACE}" "${pod}" --ignore-not-found >/dev/null
 }
 
