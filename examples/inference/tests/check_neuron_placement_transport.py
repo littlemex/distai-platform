@@ -380,7 +380,8 @@ def check_disagg(R, chart):
                 zreq, _ = affinity_terms(pod_spec(w))
                 zone_terms = [t for t in zreq if t.get("topologyKey") == "topology.kubernetes.io/zone"]
                 ok = bool(zone_terms) and all(
-                    any(term_hits(t, pod_labels(o)) for t in zone_terms) for o in roles["prefill"])
+                    any(term_hits(t, pod_labels(o), topology_key="topology.kubernetes.io/zone")
+                        for t in zone_terms) for o in roles["prefill"])
                 check(f"{rel} default: {name_of(w)} (decode) has a required podAffinity term, "
                       "topologyKey topology.kubernetes.io/zone, selecting the prefill pods' labels",
                       ok, f"podAffinity required terms={json.dumps(zreq)}")
