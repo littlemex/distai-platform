@@ -28,12 +28,22 @@ name: Neuron CPU-mode compile check
 # runner's own pre-installed tooling. The pip wheels below total under 1
 # GiB and install in under a minute.
 #
-# Only the Neuron compiler and the CPU-only PyTorch/XLA framework packages
-# are installed -- never the Neuron driver (aws-neuronx-dkms) or runtime
-# (aws-neuronx-runtime-lib/aws-neuronx-collectives), which this workflow's
-# cited "how to generate a NEFF" prerequisites do not list as required for
-# compilation, and which a kernel-module install would make meaningless on
-# a GitHub-hosted runner with no Neuron device.
+# The Neuron driver (aws-neuronx-dkms, a kernel module) is never installed
+# -- it has nothing to attach to on a GitHub-hosted runner with no Neuron
+# device, and this workflow's cited "how to generate a NEFF" prerequisites
+# do not list it as required for compilation.
+#
+# The Neuron runtime library (aws-neuronx-runtime-lib, a plain userspace
+# .so, no kernel module) IS installed, found the hard way on a real run of
+# this workflow (2026-11-26): torch_neuronx's own __init__ chain
+# (torch_xla -> torch_neuronx.xla.init() -> enable_neuron_custom_calls())
+# unconditionally ctypes.CDLLs a PJRT plugin library that dynamically
+# links against libnrt.so.1, before cpu_backend=True ever comes into
+# play, regardless of the NEURON_INTERNAL_SKIP_LIBNRT_CHECK=1 escape
+# hatch the compile script itself sets (which only skips a separate,
+# earlier Python-level path check inside libneuronxla). The package
+# being present on disk is enough; nothing here ever opens a real
+# Neuron device.
 
 on:
   pull_request:
@@ -53,6 +63,21 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Install the Neuron runtime library (no driver, no kernel module)
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          sudo install -m 0755 -d /etc/apt/keyrings
+          wget -qO - https://apt.repos.neuron.amazonaws.com/GPG-PUB-KEY-AMAZON-AWS-NEURON.PUB \
+            | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/neuron.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/neuron.gpg] https://apt.repos.neuron.amazonaws.com ${VERSION_CODENAME} main" \
+            | sudo tee /etc/apt/sources.list.d/neuron.list > /dev/null
+          sudo apt-get update -y
+          # Same Neuron 2.33 runtime line as the compiler/framework pins
+          # below; aws-neuronx-dkms (the driver) is deliberately not
+          # installed, see this workflow's own header comment.
+          sudo apt-get install -y aws-neuronx-runtime-lib=2.35.*
 
       - name: Install the Neuron compiler and CPU-only TorchNeuron packages
         run: |
