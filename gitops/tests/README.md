@@ -231,9 +231,9 @@ extension's own device plugin, DRA, `accel-device-classes` or either
 accelerator cell fixture; this is not hypothetical, it happened against
 `main`'s own tip on 2026-11-25, predating the dcgm-exporter/14b step
 below (#46, merged later that same day) (cell `dp-main-e2e-r1`, 89
-PASS / 0 FAIL, no accelerator step at all). The base suite's own,
-separately-gated `accelerators`/dcgm-exporter step (#41, unconditional,
-not controlled by this flag) does launch a real GPU-family instance on
+PASS / 0 FAIL, no accelerator step at all). The base suite's own
+step 14b (`dcgm-exporter`, #41, unconditional, not
+controlled by this flag) does launch a real GPU-family instance on
 every generic-cell run too, now that #46 has landed -- a known gap
 tracked in #87, not fixed here, and distinct from the device-plugin/DRA
 code this flag actually controls. Nothing in this script stops a
