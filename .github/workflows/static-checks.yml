@@ -19,20 +19,36 @@ name: Static checks
 # name meant to be set as a required status check (see issue #53).
 #
 # Every job here needs no AWS credentials: no job assumes a role, reads an
-# AWS secret, or calls an AWS API. A pull request from a fork gets the same
-# read-only GITHUB_TOKEN as one from this repository, with no secrets
-# reachable either way (issue #12's first acceptance criterion).
+# AWS secret, or calls an AWS API, and no job's own `permissions:` block
+# grants anything beyond `contents: read` (the five tool-install/script
+# jobs) or `pull-requests: read` (`changed-paths`, which never checks the
+# repository out at all); `static` itself needs neither and declares
+# `permissions: {}`. By GitHub's own documented default for a plain
+# `pull_request` trigger, a pull request from a fork gets exactly this same
+# token shape as one from this repository -- this is not separately
+# exercised with an actual fork pull request here (this automation has no
+# second account to open one from), so this claim rests on that documented
+# default, not on a run of this workflow against a fork.
 #
-# Every tool each job needs is pinned to one version and installed from a
-# checksum-verified download, never apt/the runner image's own copy, which
-# GitHub documents as changing without notice
-# (https://github.com/actions/runner-images, read 2026-11-26) -- "pinned"
-# must not mean "pinned to whatever the image happens to carry this week".
-# The versions and SHA-256 sums below are the same ones already verified
-# and in use on this repository's own EC2 test runner
-# (runner/runner.yaml in the distai-platform skill directory, not part of
-# this repository); reusing them here means one set of pins to keep
-# current instead of two.
+# Every tool a job installs by name below (Terraform, TFLint, TFLint's own
+# "aws" ruleset plugin, Helm, shellcheck, uv) is pinned to one version and
+# installed from its own checksum-verified download, never from apt or the
+# runner image's own pre-installed copy (Helm happens to already be on
+# `ubuntu-24.04` at the same version this workflow pins, checked
+# 2026-11-26, but GitHub documents a hosted image's own pre-installed
+# versions as changing on their own schedule --
+# https://github.com/actions/runner-images -- so relying on that copy
+# would make "pinned" track whatever the image carries this week instead
+# of a version this workflow chose). The exact versions were chosen to
+# match this repository's own EC2 test runner at the time this workflow
+# was written (`runner/runner.yaml`, a file in the distai-platform skill
+# directory, not part of this repository and not something a reviewer of
+# this repository can open); nothing here depends on that file staying in
+# sync going forward, and each version/checksum pair appears inline, once
+# per job that needs it (no composite action or shared file extracts it
+# into one place -- a real duplication this file accepts rather than adds
+# a new kind of file to review, see the Caveat on the matching `## Changes`
+# item in the pull request this workflow shipped with).
 #
 # awsome-distributed-ai's own workflows use a version tag for each action
 # and `ubuntu-latest` for `runs-on` (checked against
@@ -72,11 +88,40 @@ jobs:
   # gives directly. Each output is the literal string "true" or "false"
   # (a job's `if:` compares strings, not booleans, so this avoids YAML's
   # own truthy/falsy surprises for OFF).
+  #
+  # Three cases beyond a plain prefix match, each found wrong in a real
+  # throwaway verification round before this version:
+  #   1. A rename moves a file's own old path out of an area without ever
+  #      naming that old path under `.filename` (the API reports only the
+  #      new path there; the old one is `.previous_filename`, present only
+  #      on a renamed entry) -- both are matched below, so a rename that
+  #      empties an area still runs that area's own check once more
+  #      against what is left.
+  #   2. The `pulls/.../files` endpoint pages up to 3,000 entries and never
+  #      reports more, with no error -- a pull request at or past that cap
+  #      would otherwise read as "nothing changed" for whatever files
+  #      pagination cut off. `github.event.pull_request.changed_files` is
+  #      the pull request's own true count; a mismatch forces every area
+  #      to `true` rather than trust a partial list (the same "a count
+  #      mismatch is a hard stop, not a lower bound" rule
+  #      tool-attribution-check.yml already applies to its own commit
+  #      list, with the difference that endpoint's own 250-commit cap is
+  #      treated as an acceptable, warned partial check, not a forced
+  #      "run everything": a partial list of commit messages to scan for
+  #      an AI tool's name is still real evidence for every commit it did
+  #      cover, where a partial list of changed files is not real evidence
+  #      that any area it omitted did not change).
+  #   3. This workflow file is in no area's own prefix, so a pull request
+  #      that only edits `.github/workflows/static-checks.yml` (including
+  #      every one that shipped it) would otherwise never run any of the
+  #      five jobs it just changed, and `static` would pass on a change to
+  #      itself that installed a broken tool or a wrong checksum. A change
+  #      to this file forces every area to `true`.
   changed-paths:
     name: changed paths
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
-      contents: read
       pull-requests: read
     outputs:
       foundation: ${{ steps.paths.outputs.foundation }}
@@ -91,26 +136,59 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
         run: |
           set -euo pipefail
-          gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" --jq '.[].filename' \
-            > "${RUNNER_TEMP}/changed_files.txt"
-          echo "::group::changed files"
+          # Two calls to the same read-only, same-token endpoint (cheap;
+          # this is not the GitHub API's own anonymous rate limit
+          # infra/foundation's own step below used to hit): the first,
+          # raw_entries.txt, is one filename per line, one per changed
+          # file regardless of rename -- api_count below counts these
+          # lines, compared against the pull request's own true count.
+          # The second appends a renamed entry's own previous_filename as
+          # a further line of changed_files.txt, for the prefix match
+          # below.
+          gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" --jq '.[] | .filename' \
+            > "${RUNNER_TEMP}/raw_entries.txt"
+          cp "${RUNNER_TEMP}/raw_entries.txt" "${RUNNER_TEMP}/changed_files.txt"
+          gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+            --jq '.[] | select(.previous_filename != null) | .previous_filename' \
+            >> "${RUNNER_TEMP}/changed_files.txt"
+          echo "::group::changed (and, for a rename, previous) file paths"
           cat "${RUNNER_TEMP}/changed_files.txt"
           echo "::endgroup::"
-          declare -A prefix=(
-            [foundation]="infra/foundation/"
-            [gitops]="gitops/"
-            [inference]="examples/inference/"
-            [training]="examples/training/"
-            [run_board]="examples/tools/run-board/"
+
+          declare -A result=(
+            [foundation]=false
+            [gitops]=false
+            [inference]=false
+            [training]=false
+            [run_board]=false
           )
-          for name in "${!prefix[@]}"; do
-            if grep -qE "^${prefix[${name}]}" "${RUNNER_TEMP}/changed_files.txt"; then
-              echo "${name}=true" >> "${GITHUB_OUTPUT}"
-            else
-              echo "${name}=false" >> "${GITHUB_OUTPUT}"
-            fi
+
+          api_count=$(wc -l < "${RUNNER_TEMP}/raw_entries.txt" | tr -d ' ')
+          if [[ "${api_count}" != "${PR_CHANGED_FILES}" ]]; then
+            echo "::warning::pulls/.../files listed ${api_count} file(s), the pull request itself reports ${PR_CHANGED_FILES}; treating every area as changed rather than trusting a partial list (likely the endpoint's own 3,000-file cap)"
+            for name in "${!result[@]}"; do result[${name}]=true; done
+          elif grep -qxF '.github/workflows/static-checks.yml' "${RUNNER_TEMP}/changed_files.txt"; then
+            echo "::notice::this workflow file is itself changed; treating every area as changed so the change to it is exercised for real"
+            for name in "${!result[@]}"; do result[${name}]=true; done
+          else
+            declare -A prefix=(
+              [foundation]="infra/foundation/"
+              [gitops]="gitops/"
+              [inference]="examples/inference/"
+              [training]="examples/training/"
+              [run_board]="examples/tools/run-board/"
+            )
+            for name in "${!prefix[@]}"; do
+              if grep -qE "^${prefix[${name}]}" "${RUNNER_TEMP}/changed_files.txt"; then
+                result[${name}]=true
+              fi
+            done
+          fi
+          for name in "${!result[@]}"; do
+            echo "${name}=${result[${name}]}" >> "${GITHUB_OUTPUT}"
           done
 
   # ----------------------------------------------------------------------
@@ -171,22 +249,45 @@ jobs:
           sudo install -m 0755 "${RUNNER_TEMP}/shellcheck-${SC_VER}/shellcheck" /usr/local/bin/shellcheck
           shellcheck --version
 
-      - name: Run infra/foundation/tests/0.static.sh
-        # GITHUB_TOKEN: `tflint --init` fetches the pinned
-        # terraform-linters/tflint-ruleset-aws release from the GitHub API
-        # to install it (infra/foundation's own .tflint.hcl pins
-        # version = "0.50.0"); a real run of this exact step on
-        # 2026-11-26 failed with "403 API rate limit exceeded" against
-        # GitHub-hosted runners' own shared, unauthenticated IP pool.
-        # tflint's own plugin installer reads GITHUB_TOKEN when present
-        # and uses it to authenticate that request, which gets the
-        # authenticated (much higher) rate limit instead of the
-        # anonymous one; the default, read-only `github.token` is enough
-        # for that (it only needs to prove the request is authenticated,
-        # not that it can write anything), and this step requests no
-        # wider permission for it.
+      - name: Pre-install TFLint's own "aws" ruleset plugin (pinned, checksum-verified)
+        # infra/foundation/tests/0.static.sh runs `tflint --chdir=... --init`,
+        # which -- with no plugin already in place -- fetches
+        # terraform-linters/tflint-ruleset-aws's own pinned release
+        # (infra/foundation's own .tflint.hcl: version = "0.50.0") from the
+        # GitHub API. A real run of this exact step on 2026-11-26 failed
+        # that fetch with "403 API rate limit exceeded" against
+        # GitHub-hosted runners' own shared, unauthenticated IP pool. An
+        # earlier version of this step instead passed GITHUB_TOKEN through
+        # so `tflint` could authenticate that one request itself; this
+        # version avoids the question that raised (a read-only token,
+        # still handed to a step whose own script this pull request's
+        # head can edit) by never letting `tflint --init` make that
+        # network call at all: the plugin is placed, checksum-verified,
+        # exactly where `tflint --init` itself places it (confirmed on a
+        # real run with no plugin pre-installed: `~/.tflint.d/plugins/
+        # github.com/terraform-linters/tflint-ruleset-aws/<version>/
+        # tflint-ruleset-aws`, with no further `_<os>_<arch>` suffix on
+        # the binary name, and the release archive's own single file
+        # already has that same bare name once unzipped), so `tflint --init`
+        # finds "All plugins are already installed" and never calls out at
+        # all -- the same checksum-verified-download shape every other
+        # tool in this workflow uses, consistent with this file's own
+        # header comment.
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          TFLINT_RULESET_AWS_VER: 0.50.0
+          TFLINT_RULESET_AWS_SHA256: cdd433fdbc0929e7b9f9709dd9e72237fdfe1fc235674445c284b1e4b94a5c26
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/tflint-ruleset-aws.zip" \
+            "https://github.com/terraform-linters/tflint-ruleset-aws/releases/download/v${TFLINT_RULESET_AWS_VER}/tflint-ruleset-aws_linux_amd64.zip"
+          got="$(sha256sum "${RUNNER_TEMP}/tflint-ruleset-aws.zip" | awk '{print $1}')"
+          [[ "${got}" == "${TFLINT_RULESET_AWS_SHA256}" ]] || { echo "FAIL tflint-ruleset-aws ${TFLINT_RULESET_AWS_VER} checksum mismatch: got ${got}, want ${TFLINT_RULESET_AWS_SHA256}"; exit 1; }
+          unzip -o "${RUNNER_TEMP}/tflint-ruleset-aws.zip" -d "${RUNNER_TEMP}/tflint-ruleset-aws-extracted"
+          plugin_dir="${HOME}/.tflint.d/plugins/github.com/terraform-linters/tflint-ruleset-aws/${TFLINT_RULESET_AWS_VER}"
+          mkdir -p "${plugin_dir}"
+          install -m 0755 "${RUNNER_TEMP}/tflint-ruleset-aws-extracted/tflint-ruleset-aws" "${plugin_dir}/tflint-ruleset-aws"
+
+      - name: Run infra/foundation/tests/0.static.sh
         run: bash infra/foundation/tests/0.static.sh
 
   # ----------------------------------------------------------------------
@@ -272,10 +373,24 @@ jobs:
         # matching edit here.
         run: |
           set -euo pipefail
+          # A real YAML parse (every dependencies[].repository field),
+          # not a grep/sed pattern on one quoting style: Chart.yaml is
+          # free to write this value single-quoted, unquoted, or with a
+          # trailing comment, all valid YAML a plain `grep -h '"https://'`
+          # would silently skip.
           mapfile -t repo_urls < <(
-            find gitops -name 'Chart.yaml' -exec grep -h '^\s*repository:\s*"https://' {} \; \
-              | sed -E 's/^\s*repository:\s*"([^"]+)"\s*$/\1/' \
-              | sort -u
+            uv run --no-project -q --with pyyaml python3 - gitops <<'PY' | sort -u
+          import glob, sys, yaml
+          urls = set()
+          for path in glob.glob(f"{sys.argv[1]}/**/Chart.yaml", recursive=True):
+              with open(path, encoding="utf-8") as f:
+                  doc = yaml.safe_load(f) or {}
+              for dep in doc.get("dependencies", []) or []:
+                  repo = dep.get("repository", "")
+                  if repo.startswith("https://"):
+                      urls.add(repo)
+          print("\n".join(sorted(urls)))
+          PY
           )
           echo "${#repo_urls[@]} classic chart repository URL(s) found under gitops/"
           n=0
@@ -495,8 +610,11 @@ jobs:
       - run-board-tests
     if: always()
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
+    timeout-minutes: 5
+    # No checkout, no API call: this job only compares the other jobs' own
+    # recorded results (`needs.*.result`), already provided by the
+    # workflow run itself with no permission needed to read them.
+    permissions: {}
     steps:
       - name: Every selected check succeeded; everything else was legitimately skipped
         env:
