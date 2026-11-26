@@ -34,8 +34,42 @@
 # device-plugin image, both taking several minutes on a cold node -- a
 # shorter timeout would make this controller fail open before a slow
 # cold pull finishes, losing the protection on exactly the nodes that
-# need it most. Checked against a real cold-start device-plugin image
-# pull in this PR's own Test Results.
+# need it most. Not independently re-measured against the chart's own
+# default 120 in this PR's own real-hardware run -- see the Test Plan's
+# own negative phase and the Test Results for what that run actually
+# showed.
+#
+# config.knownStartupTaintKeys also carries node.kubernetes.io/not-ready
+# and node.kubernetes.io/unreachable, not only this platform's own
+# startup-taint key -- a real defect found on real hardware (two separate
+# runs), not a hypothetical. The chart's own discovery logic
+# (internal/discovery/discovery.go's ExpectedDaemonSets) builds a
+# synthetic Pod straight from each DaemonSet's own pod template and
+# checks it against node.Spec.Taints with only knownStartupTaintKeys
+# stripped -- it never goes through the API server's own admission-time
+# default-toleration injection, the step that normally gives every real
+# DaemonSet Pod an implicit toleration for the built-in
+# node.kubernetes.io/not-ready/unreachable taints kubelet itself clears.
+# A DaemonSet whose own template has no *explicit* toleration for them --
+# accel-nvidia-device-plugin's own rendered tolerations are exactly
+# CriticalAddonsOnly/nvidia.com/gpu/distai.dev/startup-not-ready, none of
+# which matches -- is therefore wrongly excluded from the expected set
+# while the node is still freshly registered (node.kubernetes.io/not-ready
+# present), with no later re-inclusion once it clears: two real runs both
+# showed the taint removed in lockstep with the three EKS-managed
+# DaemonSets alone (aws-node/kube-proxy/eks-pod-identity-agent, each with
+# a bare `operator: Exists` toleration that matches anything, so this gap
+# never affects them), never actually waiting on
+# accel-nvidia-device-plugin at all -- confirmed directly on a third run,
+# with the device plugin deliberately broken, where the taint was removed
+# anyway. This is exactly the documented purpose of knownStartupTaintKeys
+# ("new nodes often have additional temporary taints set by other
+# controllers... this list is used... to strip [them] before evaluating
+# which DaemonSets should run on a node in steady state" -- the chart's
+# own config.example.yaml, whose own example entries name CSI-driver
+# taints, not this one): node.kubernetes.io/not-ready is exactly such a
+# temporary, self-clearing taint, just one Kubernetes sets itself rather
+# than a CSI driver.
 #
 # config.excludeDaemonSets is left empty: no DaemonSet in this platform
 # has been measured to need excluding from the readiness wait (Neuron's
@@ -89,4 +123,6 @@ values:
     taintEffect: "NoSchedule"
     knownStartupTaintKeys:
       - "distai.dev/startup-not-ready"
+      - "node.kubernetes.io/not-ready"
+      - "node.kubernetes.io/unreachable"
     timeoutSeconds: 300
