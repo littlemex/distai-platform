@@ -147,7 +147,7 @@ tf init -input=false -reconfigure \
   -backend-config="use_lockfile=true" \
   || fail "terraform init"
 
-existing="$(tf state list 2>/dev/null | wc -l | tr -d ' ')"
+existing="$(tf state list 2>/dev/null | wc -l | tr -d ' ')" || true
 [[ "${existing}" == "0" ]] || fail "state at ${STATE_KEY} is not empty (${existing} resources) -- refusing to apply on top of someone else's state"
 pass "state at ${STATE_KEY} is empty before apply"
 
