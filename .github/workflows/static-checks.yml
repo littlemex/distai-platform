@@ -1,0 +1,450 @@
+name: Static checks
+
+# Runs this repository's own existing static-check scripts
+# (infra/foundation/tests/0.static.sh, gitops/tests/0.static.sh,
+# examples/inference/tests/0.static.sh, examples/training/tests/0.static.sh,
+# examples/tools/run-board/tests/run_tests.sh) on every pull request. None
+# of the five needs AWS credentials or a real cluster (each one's own
+# header comment says so; confirmed by reading every one on 2026-11-26) --
+# that is exactly why these five, and not the *.e2e.sh / 1.e2e.sh scripts
+# next to them, are wired up here. A workflow-level `on.pull_request.paths`
+# filter is deliberately not used: if a pull request touches none of the
+# listed paths, GitHub never starts the workflow at all, so a required
+# status check named after it would sit pending forever and block the
+# pull request. Instead, every pull request starts this workflow, one job
+# (`changed-paths`) computes which of the five areas actually changed, each
+# check job is skipped (not failed) when its own area did not change, and
+# the final `static` job always runs and fails if anything it depends on
+# neither succeeded nor was legitimately skipped. `static` is the one job
+# name meant to be set as a required status check (see issue #53).
+#
+# Every job here needs no AWS credentials: no job assumes a role, reads an
+# AWS secret, or calls an AWS API. A pull request from a fork gets the same
+# read-only GITHUB_TOKEN as one from this repository, with no secrets
+# reachable either way (issue #12's first acceptance criterion).
+#
+# Every tool each job needs is pinned to one version and installed from a
+# checksum-verified download, never apt/the runner image's own copy, which
+# GitHub documents as changing without notice
+# (https://github.com/actions/runner-images, read 2026-11-26) -- "pinned"
+# must not mean "pinned to whatever the image happens to carry this week".
+# The versions and SHA-256 sums below are the same ones already verified
+# and in use on this repository's own EC2 test runner
+# (runner/runner.yaml in the distai-platform skill directory, not part of
+# this repository); reusing them here means one set of pins to keep
+# current instead of two.
+#
+# awsome-distributed-ai's own workflows use a version tag for each action
+# and `ubuntu-latest` for `runs-on` (checked against
+# awslabs/awsome-distributed-ai's .github/workflows/ on 2026-11-26). This
+# workflow instead pins every action to a commit SHA and runs on the fixed
+# `ubuntu-24.04` label, matching this repository's own existing workflows
+# (.github/workflows/tool-attribution-check.yml,
+# .github/workflows/neuron-cpu-compile-check.yml) and AGENTS.md section 7
+# ("Actions are pinned by commit SHA; the runner is fixed, like
+# ubuntu-24.04") rather than awsome's convention -- a floating tag can be
+# moved to point at different code after review, and `ubuntu-latest` is
+# itself a moving target GitHub repoints at a new image on its own
+# schedule.
+#
+# `pull_request_target` is never used here, for the same reason
+# .github/workflows/tool-attribution-check.yml's own header gives: it would
+# run this workflow's own code against head-controlled inputs with a token
+# that can be granted write access, which is the shape of risk this
+# repository's rule against it exists to avoid. A plain `pull_request`
+# trigger checks out the pull request's own merge ref, which is fine here
+# because every job's permissions stay read-only and nothing here reads a
+# secret.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # ----------------------------------------------------------------------
+  # Decide which of the five areas changed, from the pull request's own
+  # file list (the `pulls/.../files` API), the same source
+  # tool-attribution-check.yml already uses for the commit list -- not a
+  # `git diff` against a locally fetched base, which would need a deeper
+  # checkout (`fetch-depth: 0`) just to compute something the API already
+  # gives directly. Each output is the literal string "true" or "false"
+  # (a job's `if:` compares strings, not booleans, so this avoids YAML's
+  # own truthy/falsy surprises for OFF).
+  changed-paths:
+    name: changed paths
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      foundation: ${{ steps.paths.outputs.foundation }}
+      gitops: ${{ steps.paths.outputs.gitops }}
+      inference: ${{ steps.paths.outputs.inference }}
+      training: ${{ steps.paths.outputs.training }}
+      run_board: ${{ steps.paths.outputs.run_board }}
+    steps:
+      - name: List the files changed in this pull request
+        id: paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" --jq '.[].filename' \
+            > "${RUNNER_TEMP}/changed_files.txt"
+          echo "::group::changed files"
+          cat "${RUNNER_TEMP}/changed_files.txt"
+          echo "::endgroup::"
+          declare -A prefix=(
+            [foundation]="infra/foundation/"
+            [gitops]="gitops/"
+            [inference]="examples/inference/"
+            [training]="examples/training/"
+            [run_board]="examples/tools/run-board/"
+          )
+          for name in "${!prefix[@]}"; do
+            if grep -qE "^${prefix[${name}]}" "${RUNNER_TEMP}/changed_files.txt"; then
+              echo "${name}=true" >> "${GITHUB_OUTPUT}"
+            else
+              echo "${name}=false" >> "${GITHUB_OUTPUT}"
+            fi
+          done
+
+  # ----------------------------------------------------------------------
+  foundation-static:
+    name: infra/foundation static checks
+    needs: changed-paths
+    if: needs.changed-paths.outputs.foundation == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Terraform (pinned, checksum-verified; same pin as the EC2 test runner)
+        env:
+          TF_VER: 1.17.2
+          TF_SHA256: e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/terraform.zip" \
+            "https://releases.hashicorp.com/terraform/${TF_VER}/terraform_${TF_VER}_linux_amd64.zip"
+          got="$(sha256sum "${RUNNER_TEMP}/terraform.zip" | awk '{print $1}')"
+          [[ "${got}" == "${TF_SHA256}" ]] || { echo "FAIL terraform ${TF_VER} checksum mismatch: got ${got}, want ${TF_SHA256}"; exit 1; }
+          sudo unzip -o "${RUNNER_TEMP}/terraform.zip" -d /usr/local/bin terraform
+          sudo chmod 0755 /usr/local/bin/terraform
+          terraform version
+
+      - name: Install TFLint (pinned, checksum-verified; same pin as the EC2 test runner)
+        env:
+          TFLINT_VER: 0.66.0
+          TFLINT_SHA256: 22be11cadc25cd02401e94c0ccc91aa63467debb8485c2a755d98f4c0a9d1e2e
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/tflint.zip" \
+            "https://github.com/terraform-linters/tflint/releases/download/v${TFLINT_VER}/tflint_linux_amd64.zip"
+          got="$(sha256sum "${RUNNER_TEMP}/tflint.zip" | awk '{print $1}')"
+          [[ "${got}" == "${TFLINT_SHA256}" ]] || { echo "FAIL tflint ${TFLINT_VER} checksum mismatch: got ${got}, want ${TFLINT_SHA256}"; exit 1; }
+          sudo unzip -o "${RUNNER_TEMP}/tflint.zip" -d /usr/local/bin tflint
+          sudo chmod 0755 /usr/local/bin/tflint
+          tflint --version
+
+      - name: Install shellcheck (pinned, checksum-verified; same pin as the EC2 test runner)
+        env:
+          SC_VER: v0.11.0
+          SC_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SC_VER}/shellcheck-${SC_VER}.linux.x86_64.tar.xz"
+          got="$(sha256sum "${RUNNER_TEMP}/shellcheck.tar.xz" | awk '{print $1}')"
+          [[ "${got}" == "${SC_SHA256}" ]] || { echo "FAIL shellcheck ${SC_VER} checksum mismatch: got ${got}, want ${SC_SHA256}"; exit 1; }
+          tar -xJf "${RUNNER_TEMP}/shellcheck.tar.xz" -C "${RUNNER_TEMP}" "shellcheck-${SC_VER}/shellcheck"
+          sudo install -m 0755 "${RUNNER_TEMP}/shellcheck-${SC_VER}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Run infra/foundation/tests/0.static.sh
+        run: bash infra/foundation/tests/0.static.sh
+
+  # ----------------------------------------------------------------------
+  gitops-static:
+    name: gitops static checks
+    needs: changed-paths
+    if: needs.changed-paths.outputs.gitops == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Helm (pinned, checksum-verified; same pin as the EC2 test runner, not the runner image's own copy)
+        env:
+          HELM_VER: v3.22.1
+          HELM_SHA256: 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/helm.tgz" "https://get.helm.sh/helm-${HELM_VER}-linux-amd64.tar.gz"
+          got="$(sha256sum "${RUNNER_TEMP}/helm.tgz" | awk '{print $1}')"
+          [[ "${got}" == "${HELM_SHA256}" ]] || { echo "FAIL helm ${HELM_VER} checksum mismatch: got ${got}, want ${HELM_SHA256}"; exit 1; }
+          tar -xzf "${RUNNER_TEMP}/helm.tgz" -C "${RUNNER_TEMP}" "linux-amd64/helm"
+          sudo install -m 0755 "${RUNNER_TEMP}/linux-amd64/helm" /usr/local/bin/helm
+          helm version --short
+
+      - name: Install uv (pinned, checksum-verified; same pin as the EC2 test runner)
+        env:
+          UV_VER: 0.13.9
+          UV_SHA256: a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/uv.tar.gz" \
+            "https://github.com/astral-sh/uv/releases/download/${UV_VER}/uv-x86_64-unknown-linux-gnu.tar.gz"
+          got="$(sha256sum "${RUNNER_TEMP}/uv.tar.gz" | awk '{print $1}')"
+          [[ "${got}" == "${UV_SHA256}" ]] || { echo "FAIL uv ${UV_VER} checksum mismatch: got ${got}, want ${UV_SHA256}"; exit 1; }
+          tar -xzf "${RUNNER_TEMP}/uv.tar.gz" -C "${RUNNER_TEMP}" "uv-x86_64-unknown-linux-gnu/uv"
+          sudo install -m 0755 "${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu/uv" /usr/local/bin/uv
+          uv --version
+
+      - name: Install shellcheck (pinned, checksum-verified; same pin as the EC2 test runner)
+        env:
+          SC_VER: v0.11.0
+          SC_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SC_VER}/shellcheck-${SC_VER}.linux.x86_64.tar.xz"
+          got="$(sha256sum "${RUNNER_TEMP}/shellcheck.tar.xz" | awk '{print $1}')"
+          [[ "${got}" == "${SC_SHA256}" ]] || { echo "FAIL shellcheck ${SC_VER} checksum mismatch: got ${got}, want ${SC_SHA256}"; exit 1; }
+          tar -xJf "${RUNNER_TEMP}/shellcheck.tar.xz" -C "${RUNNER_TEMP}" "shellcheck-${SC_VER}/shellcheck"
+          sudo install -m 0755 "${RUNNER_TEMP}/shellcheck-${SC_VER}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Run gitops/tests/0.static.sh
+        run: bash gitops/tests/0.static.sh
+
+  # ----------------------------------------------------------------------
+  inference-static:
+    name: examples/inference static checks
+    needs: changed-paths
+    if: needs.changed-paths.outputs.inference == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Helm (pinned, checksum-verified; same pin as gitops-static above and the EC2 test runner)
+        env:
+          HELM_VER: v3.22.1
+          HELM_SHA256: 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/helm.tgz" "https://get.helm.sh/helm-${HELM_VER}-linux-amd64.tar.gz"
+          got="$(sha256sum "${RUNNER_TEMP}/helm.tgz" | awk '{print $1}')"
+          [[ "${got}" == "${HELM_SHA256}" ]] || { echo "FAIL helm ${HELM_VER} checksum mismatch: got ${got}, want ${HELM_SHA256}"; exit 1; }
+          tar -xzf "${RUNNER_TEMP}/helm.tgz" -C "${RUNNER_TEMP}" "linux-amd64/helm"
+          sudo install -m 0755 "${RUNNER_TEMP}/linux-amd64/helm" /usr/local/bin/helm
+          helm version --short
+
+      - name: Install uv (pinned, checksum-verified; same pin as gitops-static above and the EC2 test runner)
+        env:
+          UV_VER: 0.13.9
+          UV_SHA256: a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/uv.tar.gz" \
+            "https://github.com/astral-sh/uv/releases/download/${UV_VER}/uv-x86_64-unknown-linux-gnu.tar.gz"
+          got="$(sha256sum "${RUNNER_TEMP}/uv.tar.gz" | awk '{print $1}')"
+          [[ "${got}" == "${UV_SHA256}" ]] || { echo "FAIL uv ${UV_VER} checksum mismatch: got ${got}, want ${UV_SHA256}"; exit 1; }
+          tar -xzf "${RUNNER_TEMP}/uv.tar.gz" -C "${RUNNER_TEMP}" "uv-x86_64-unknown-linux-gnu/uv"
+          sudo install -m 0755 "${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu/uv" /usr/local/bin/uv
+          uv --version
+
+      - name: Install shellcheck (pinned, checksum-verified; same pin as the EC2 test runner)
+        env:
+          SC_VER: v0.11.0
+          SC_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SC_VER}/shellcheck-${SC_VER}.linux.x86_64.tar.xz"
+          got="$(sha256sum "${RUNNER_TEMP}/shellcheck.tar.xz" | awk '{print $1}')"
+          [[ "${got}" == "${SC_SHA256}" ]] || { echo "FAIL shellcheck ${SC_VER} checksum mismatch: got ${got}, want ${SC_SHA256}"; exit 1; }
+          tar -xJf "${RUNNER_TEMP}/shellcheck.tar.xz" -C "${RUNNER_TEMP}" "shellcheck-${SC_VER}/shellcheck"
+          sudo install -m 0755 "${RUNNER_TEMP}/shellcheck-${SC_VER}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Run examples/inference/tests/0.static.sh
+        run: bash examples/inference/tests/0.static.sh
+
+  # ----------------------------------------------------------------------
+  training-static:
+    name: examples/training static checks
+    needs: changed-paths
+    if: needs.changed-paths.outputs.training == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Helm (pinned, checksum-verified; same pin as gitops-static above and the EC2 test runner)
+        env:
+          HELM_VER: v3.22.1
+          HELM_SHA256: 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/helm.tgz" "https://get.helm.sh/helm-${HELM_VER}-linux-amd64.tar.gz"
+          got="$(sha256sum "${RUNNER_TEMP}/helm.tgz" | awk '{print $1}')"
+          [[ "${got}" == "${HELM_SHA256}" ]] || { echo "FAIL helm ${HELM_VER} checksum mismatch: got ${got}, want ${HELM_SHA256}"; exit 1; }
+          tar -xzf "${RUNNER_TEMP}/helm.tgz" -C "${RUNNER_TEMP}" "linux-amd64/helm"
+          sudo install -m 0755 "${RUNNER_TEMP}/linux-amd64/helm" /usr/local/bin/helm
+          helm version --short
+
+      - name: Install uv (pinned, checksum-verified; same pin as gitops-static above and the EC2 test runner)
+        env:
+          UV_VER: 0.13.9
+          UV_SHA256: a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/uv.tar.gz" \
+            "https://github.com/astral-sh/uv/releases/download/${UV_VER}/uv-x86_64-unknown-linux-gnu.tar.gz"
+          got="$(sha256sum "${RUNNER_TEMP}/uv.tar.gz" | awk '{print $1}')"
+          [[ "${got}" == "${UV_SHA256}" ]] || { echo "FAIL uv ${UV_VER} checksum mismatch: got ${got}, want ${UV_SHA256}"; exit 1; }
+          tar -xzf "${RUNNER_TEMP}/uv.tar.gz" -C "${RUNNER_TEMP}" "uv-x86_64-unknown-linux-gnu/uv"
+          sudo install -m 0755 "${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu/uv" /usr/local/bin/uv
+          uv --version
+
+      - name: Install shellcheck (pinned, checksum-verified; same pin as the EC2 test runner)
+        env:
+          SC_VER: v0.11.0
+          SC_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SC_VER}/shellcheck-${SC_VER}.linux.x86_64.tar.xz"
+          got="$(sha256sum "${RUNNER_TEMP}/shellcheck.tar.xz" | awk '{print $1}')"
+          [[ "${got}" == "${SC_SHA256}" ]] || { echo "FAIL shellcheck ${SC_VER} checksum mismatch: got ${got}, want ${SC_SHA256}"; exit 1; }
+          tar -xJf "${RUNNER_TEMP}/shellcheck.tar.xz" -C "${RUNNER_TEMP}" "shellcheck-${SC_VER}/shellcheck"
+          sudo install -m 0755 "${RUNNER_TEMP}/shellcheck-${SC_VER}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Run examples/training/tests/0.static.sh
+        run: bash examples/training/tests/0.static.sh
+
+  # ----------------------------------------------------------------------
+  run-board-tests:
+    name: run-board unit tests
+    needs: changed-paths
+    if: needs.changed-paths.outputs.run_board == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install uv (pinned, checksum-verified; same pin as the EC2 test runner)
+        env:
+          UV_VER: 0.13.9
+          UV_SHA256: a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/uv.tar.gz" \
+            "https://github.com/astral-sh/uv/releases/download/${UV_VER}/uv-x86_64-unknown-linux-gnu.tar.gz"
+          got="$(sha256sum "${RUNNER_TEMP}/uv.tar.gz" | awk '{print $1}')"
+          [[ "${got}" == "${UV_SHA256}" ]] || { echo "FAIL uv ${UV_VER} checksum mismatch: got ${got}, want ${UV_SHA256}"; exit 1; }
+          tar -xzf "${RUNNER_TEMP}/uv.tar.gz" -C "${RUNNER_TEMP}" "uv-x86_64-unknown-linux-gnu/uv"
+          sudo install -m 0755 "${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu/uv" /usr/local/bin/uv
+          uv --version
+
+      - name: Run examples/tools/run-board/tests/run_tests.sh
+        run: bash examples/tools/run-board/tests/run_tests.sh
+
+  # ----------------------------------------------------------------------
+  # The one job meant to be set as a required status check (issue #53).
+  # Runs on every pull request regardless of which paths changed, and
+  # treats each of the five checks above as acceptable only if it
+  # succeeded or was skipped because its own area did not change -- never
+  # because `changed-paths` itself failed, which also leaves a
+  # downstream job's result as "skipped" and must not read as a pass.
+  static:
+    name: static
+    needs:
+      - changed-paths
+      - foundation-static
+      - gitops-static
+      - inference-static
+      - training-static
+      - run-board-tests
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Every selected check succeeded; everything else was legitimately skipped
+        env:
+          R_CHANGED_PATHS: ${{ needs.changed-paths.result }}
+          R_FOUNDATION: ${{ needs.foundation-static.result }}
+          R_GITOPS: ${{ needs.gitops-static.result }}
+          R_INFERENCE: ${{ needs.inference-static.result }}
+          R_TRAINING: ${{ needs.training-static.result }}
+          R_RUN_BOARD: ${{ needs.run-board-tests.result }}
+        run: |
+          set -euo pipefail
+          failures=0
+          # changed-paths itself must have actually succeeded: if it
+          # failed or was cancelled, every job below reads "skipped" too
+          # (a failed dependency skips its dependents, the exact same
+          # result a false `if:` produces), which must not pass here.
+          if [[ "${R_CHANGED_PATHS}" != "success" ]]; then
+            echo "FAIL changed-paths: ${R_CHANGED_PATHS}"
+            failures=$((failures + 1))
+          else
+            echo "PASS changed-paths: ${R_CHANGED_PATHS}"
+          fi
+          for pair in "foundation-static:${R_FOUNDATION}" "gitops-static:${R_GITOPS}" \
+            "inference-static:${R_INFERENCE}" "training-static:${R_TRAINING}" \
+            "run-board-tests:${R_RUN_BOARD}"; do
+            name="${pair%%:*}"
+            result="${pair#*:}"
+            if [[ "${result}" == "success" || "${result}" == "skipped" ]]; then
+              echo "PASS ${name}: ${result}"
+            else
+              echo "FAIL ${name}: ${result}"
+              failures=$((failures + 1))
+            fi
+          done
+          echo
+          if [[ "${failures}" -eq 0 ]]; then
+            echo "RESULT PASS: every selected static check passed"
+          else
+            echo "RESULT FAIL: ${failures} job(s) failed or were skipped for the wrong reason"
+            exit 1
+          fi
