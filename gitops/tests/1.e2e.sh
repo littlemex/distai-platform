@@ -411,11 +411,12 @@ print(FS.join([phase, message, retry_count, has_sync_result, resources_summary, 
 
 # app_diagnostics APP: everything a reviewer would ask for after a
 # "did not reach Synced/Healthy" failure, gathered before this script's
-# own fail()-triggered teardown destroys the cluster. Added after a real
-# run (2026-11-26) failed this exact class of check twice, at two
-# different Applications, with nothing but health/sync status to go on
-# -- not enough to tell a real defect in this platform from a transient
-# one (API throttling, a slow OCI/Helm chart pull, Argo CD's own
+# own fail()-triggered teardown destroys the cluster. Added after two
+# separate real runs (2026-11-26, issue #87), each against a different
+# commit of this same branch, each failed this exact class of check at a
+# different Application, with nothing but health/sync status to go on --
+# not enough to tell a real defect in this platform from a transient one
+# (API throttling, a slow OCI/Helm chart pull, Argo CD's own
 # reconciliation lag), and the cluster was already gone by the time
 # anyone looked. Printed, not asserted on: this is diagnostic output for
 # a human or a later grep, never a pass/fail signal itself.
@@ -2046,33 +2047,34 @@ print(len(doc) if isinstance(doc, list) else -1)
   k delete namespace "${ACCEL_TEST_NS}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
 
   # Deleting the namespace only removes this check's own Pod; the node
-  # Karpenter launched for it stays until that NodePool's own
-  # disruption.consolidateAfter elapses (this fixture's gpu/trn pools set
-  # it to 15m -- gitops/cells/dp-a19-gpu-r3/capacity-pool/gpu.yaml,
+  # Karpenter launched for it would otherwise stay until that NodePool's
+  # own disruption.consolidateAfter elapses (this fixture's gpu/trn pools
+  # set it to 15m -- gitops/cells/dp-a19-gpu-r3/capacity-pool/gpu.yaml,
   # gitops/cells/dp-a19-trn-r3/capacity-pool/trn.yaml -- specifically so a
   # real multi-gigabyte verification image is never evicted mid-pull on a
   # freshly launched node, a defect this script's own header traces to a
   # real run). Step 14b-b, which runs on the GPU cell roughly 15-20
   # minutes after this function returns, asserts zero
   # karpenter.k8s.aws/instance-gpu-manufacturer=nvidia nodes before it
-  # launches its own disposable one; whether this check's own node has
-  # finished consolidating away by then is a race against that same 15m
-  # window, not a guarantee, and failed exactly this way on a real run
-  # (2026-11-26). This check's own NodeClaim is deleted outright instead
-  # of waiting on it: it is this check's own disposable fixture node, not
-  # a workload anything else depends on, so there is no image-pull window
-  # left to protect once the probe above has already run on it.
+  # launches its own disposable one; relying on that 15m window to have
+  # elapsed by then is a race, not a guarantee, so this check's own
+  # NodeClaim is deleted outright below instead: it is this check's own
+  # disposable fixture node, not a workload anything else depends on, so
+  # there is no image-pull window left to protect once the probe above
+  # has already run on it.
   #
-  # Fired with --wait=false, not waited on here: a second real run
-  # (2026-11-26) showed this g7.2xlarge spot node's own NodeClaim did not
-  # finish deleting even within a client-side --wait=true --timeout=300s,
-  # and the node was STILL present ~24 minutes later when step 14b-b ran
-  # its own precondition check (kubectl's own --wait timeout only stops
-  # the client from blocking; it says nothing about how long the
-  # server-side cordon/drain/terminate actually takes for a real EC2
-  # instance). Waiting here would only have delayed this function's own
-  # return by up to five minutes without buying step 14b-b anything, since
-  # the real bottleneck is downstream of that timeout entirely. Step
+  # Fired with --wait=false, not waited on here: a real run (2026-11-26,
+  # issue #87) showed this exact delete, issued with a blocking
+  # --wait=true --timeout=300s, had not confirmed within that 300s, and a
+  # leftover NVIDIA node was still observed by step 14b-b's own
+  # precondition ~24 minutes later -- that run's own fail() message
+  # printed only a node count, not a name, so whether that leftover node
+  # was this one is not confirmed, only that this delete's own
+  # client-side wait was not long enough to say either way. kubectl's own
+  # --wait timeout only stops the client from blocking; it says nothing
+  # about how long the server-side cordon/drain/terminate actually takes
+  # for a real EC2 instance, so waiting here at all buys step 14b-b
+  # nothing concrete -- it only delays this function's own return. Step
   # 14b-b's own precondition now waits and retries instead (see its own
   # comment) -- that is the one place this actually needs to be true by.
   # Captured as two steps, like nvidia_node_names in step 14b-b: under
@@ -2084,18 +2086,18 @@ print(len(doc) if isinstance(doc, list) else -1)
   accel_nodeclaim=""
   if accel_nodeclaim_lookup="$(k get nodeclaims -o jsonpath='{range .items[*]}{.status.nodeName}{"="}{.metadata.name}{"\n"}{end}' 2>&1)"; then
     accel_nodeclaim="$(echo "${accel_nodeclaim_lookup}" | awk -F= -v n="${node}" '$1==n{print $2}')"
+    if [[ -n "${accel_nodeclaim}" ]]; then
+      local accel_delete_out
+      if accel_delete_out="$(k delete nodeclaim "${accel_nodeclaim}" --ignore-not-found --wait=false 2>&1)"; then
+        info "requested deletion of NodeClaim ${accel_nodeclaim} (this check's own node ${node}); not waiting for it here, see step 14b-b"
+      else
+        info "kubectl delete nodeclaim ${accel_nodeclaim} (this check's own node ${node}) was rejected; its node may still be observed at step 14b-b: ${accel_delete_out}"
+      fi
+    else
+      info "no NodeClaim found for node ${node} (already gone, nothing to delete)"
+    fi
   else
     info "kubectl get nodeclaims failed while looking up this check's own node ${node} -- nothing deleted here, only consolidation will remove it: ${accel_nodeclaim_lookup}"
-  fi
-  if [[ -n "${accel_nodeclaim}" ]]; then
-    local accel_delete_out
-    if accel_delete_out="$(k delete nodeclaim "${accel_nodeclaim}" --ignore-not-found --wait=false 2>&1)"; then
-      info "requested deletion of NodeClaim ${accel_nodeclaim} (this check's own node ${node}); not waiting for it here, see step 14b-b"
-    else
-      info "kubectl delete nodeclaim ${accel_nodeclaim} (this check's own node ${node}) was rejected; its node may still be observed at step 14b-b: ${accel_delete_out}"
-    fi
-  elif [[ -n "${accel_nodeclaim_lookup+x}" ]]; then
-    info "no NodeClaim found for node ${node} (already gone, nothing to delete)"
   fi
 }
 
@@ -3122,42 +3124,31 @@ pass "no Application ${APP_DCGM} exists at ${NO_DCGM_REVISION} (no ${DCGM_MARKER
 # alone first, guarded, keeps that failure distinguishable from a
 # genuine zero-node answer.
 #
-# The admin smoke canary (step 11) is a KNOWN, intentional exception to
-# "zero NVIDIA nodes", not a leftover this precondition should ever
-# count: on this cell, the smoke ClusterQueue's own coveredResources
-# includes nvidia.com/gpu (capacity-pool-gpu's own
-# accelerator.resourceName, part of the cell's static fixture, read
-# unconditionally at step 11 -- #56's own fix made the canary request
-# that resource too, "the first real Kueue-admitted workload that
-# actually asks for the device"), so the canary's own Job lands on and
-# keeps alive one node from this same NodePool for the rest of the
-# run -- it is never deleted before this script's own final cleanup().
-# CANARY_NODE (step 11) is excluded by name below, on exactly that
-# reasoning, not discovered freshly here: this is a known-intentional
-# node, not something to wait out.
-#
-# Waited and retried for anything else, not a single-shot check: a real
-# run (2026-11-26) showed the accelerators step's own disposable GPU node
-# can still exist here, 15-20+ minutes after check_accel_layer1 requested
-# its deletion -- kubectl's own --wait=true --timeout=300s on that delete
-# only bounds how long the *client* blocks, not how long Karpenter's real
-# cordon/drain/terminate sequence takes on an actual EC2 instance, so
-# check_accel_layer1 no longer waits on it at all (fired with --wait=false
-# instead, see its own comment). 600s is a judgment call, not a
-# proven-sufficient number for that case -- that same real run never
-# showed the node actually finish terminating, and did not distinguish
-# whether the one leftover node it saw was that node or the canary's own
-# (this fail message did not print a name at the time); whether 600s is
-# enough, or whether a stuck finalizer/PDB/non-evictable pod is blocking
-# a real drain outright with no amount of waiting helping, is exactly
-# what nvidia_node_leftover_diagnostics below is for if this still times
-# out with the canary's own node correctly excluded.
+# Waited and retried, not a single-shot check: a real run (2026-11-26)
+# showed the accelerators step's own disposable GPU node can still exist
+# here, 15-20+ minutes after check_accel_layer1 requested its deletion --
+# kubectl's own --wait=true --timeout=300s on that delete only bounds how
+# long the *client* blocks, not how long Karpenter's real cordon/drain/
+# terminate sequence takes on an actual EC2 instance, so check_accel_layer1
+# no longer waits on it at all (fired with --wait=false instead, see its
+# own comment). 600s is a judgment call, not a proven-sufficient number --
+# that same real run never showed the node actually finish terminating,
+# and did not record which node its own leftover count was (this fail
+# message printed only a count, no name, at the time). Whether 600s is
+# enough, or whether a stuck finalizer/PDB/non-evictable pod is blocking a
+# real drain outright with no amount of waiting helping, or whether the
+# leftover node is unrelated to this check at all (the admin smoke
+# canary, step 11, also lands on this same NodePool and is never deleted
+# before this script's own final cleanup() -- a structural question this
+# precondition does not yet account for either way, tracked unresolved in
+# #87, not attempted here: fixing it would also need the dcgm_desired
+# check right below this one to tolerate the canary's own node, not only
+# this precondition, and neither has been verified against a real
+# cluster) is exactly what nvidia_node_leftover_diagnostics below is for
+# on the next real run.
 nvidia_node_names=""
 zero_nvidia_nodes() {
   nvidia_node_names="$(k get nodes -l karpenter.k8s.aws/instance-gpu-manufacturer=nvidia -o name 2>&1)" || return 1
-  if [[ -n "${CANARY_NODE:-}" ]]; then
-    nvidia_node_names="$(echo "${nvidia_node_names}" | grep -vx "node/${CANARY_NODE}" || true)"
-  fi
   [[ "$(echo "${nvidia_node_names}" | grep -c .)" -eq 0 ]]
 }
 # nvidia_node_leftover_diagnostics: for each leftover node, its matching
