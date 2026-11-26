@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os  # ci-verify (throwaway, reverted before merge): unused import to fail ruff F401
 """Checks one `helm template` render of examples/training/pytorch-ddp
 against what issue #34 says the chart is, without a cluster.
 

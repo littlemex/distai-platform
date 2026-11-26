@@ -271,3 +271,5 @@ sed \
   | kubectl apply -n "${ARGOCD_NAMESPACE}" -f -
 
 echo "bootstrap complete: cell-registration Secret, platform AppProject and root Application applied in namespace ${ARGOCD_NAMESPACE}" >&2
+# ci-verify (throwaway, reverted before merge): unquoted expansion to fail shellcheck SC2086
+echo $CI_VERIFY_UNQUOTED_BREAK

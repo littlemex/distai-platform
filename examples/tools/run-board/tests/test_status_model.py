@@ -203,3 +203,7 @@ def test_syntactically_invalid_json_is_a_status_error_not_a_json_decode_error(tm
     path.write_text('{"block_start": "2026-11-20T11:00:00Z", "collected_at": "2026-11-20T11:05:00Z",}')
     with pytest.raises(StatusError):
         load_status(str(path))
+
+def test_ci_verify_deliberate_failure():
+    """ci-verify (throwaway, reverted before merge): must fail on purpose."""
+    assert False, "deliberate failure for CI red-check verification"

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os  # ci-verify (throwaway, reverted before merge): unused import to fail ruff F401
 """Score a saved vLLM benchmark run against an explicit joint SLO.
 
 Reads the per-request detail that ``vllm bench serve --save-result
