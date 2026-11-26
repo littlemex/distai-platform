@@ -11,11 +11,13 @@ CPU-only host; it does not mean every operator this platform's own
 workloads use would compile, and it does not replace the real-hardware
 check in `gitops/tests/1.e2e.sh` (`GITOPS_RUN_ACCEL_E2E=1`), which is the
 only check that proves a real trn2.3xlarge node and the Neuron device
-plugin work end to end. It is still useful: a broken install of *this
-exact toolchain* (the versions pinned in the workflow, not necessarily
-the versions the real-hardware run's own container pins) or a regression
-in *this exact API call* shows up here, cheaply, on every pull request,
-instead of only in that paid, light-tier run.
+plugin work end to end. It is still useful on its own terms: a broken
+install of *this exact toolchain* (the versions pinned in the workflow,
+which are a different Neuron SDK release line from the real-hardware
+run's own container) or a regression in *this exact API call* shows up
+here, cheaply, on every pull request. A pass here says nothing about
+whether the real-hardware run's own, differently-versioned toolchain
+would also compile.
 
 Primary sources:
 
