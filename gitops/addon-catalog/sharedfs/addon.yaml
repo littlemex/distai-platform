@@ -22,14 +22,22 @@ addon: sharedfs
 tier: platform-optional
 dir: gitops/charts/sharedfs-controller
 namespace: sharedfs-system
-# overridableKeys (RFC #41 Decision 3, mandatory): the only value path a
+# overridableKeys (RFC #41 Decision 3, mandatory): the only value paths a
 # cell's marker may set. image is a plain string (kind: scalar, not
 # kind: object - gitops/tests/check_addon_catalog_sync.py's own KINDS),
 # with no safe default (see the chart's own values.yaml): every cell that
 # opts in MUST set it, through valuesFrom reading
 # distai.dev.annotations/sharedfs-controller-image
 # (gitops/bootstrap/bootstrap.sh), never a literal value in the marker
-# file itself.
+# file itself. networkPolicy.allowedPeers matches dcgm-exporter's own
+# addon.yaml precedent (RFC #25's "default deny, name the exception"):
+# the chart's own values.yaml already documents a cell setting this
+# "through this chart's own overridableKeys" to let a scraper reach the
+# controller's metrics port - omitting it here would silently reject
+# every such marker at check_addon_catalog_sync.py's own validation,
+# contradicting that comment.
 overridableKeys:
   - path: image
     kind: scalar
+  - path: networkPolicy.allowedPeers
+    kind: object
