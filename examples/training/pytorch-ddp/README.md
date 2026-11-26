@@ -93,7 +93,8 @@ aws iam put-role-policy --role-name "${ROLE_NAME}" \
   --policy-name pytorch-ddp-checkpoints \
   --policy-document file:///tmp/pytorch-ddp-s3.json
 
-export ROLE_ARN="$(aws iam get-role --role-name "${ROLE_NAME}" --query Role.Arn --output text)"
+export ROLE_ARN=""
+ROLE_ARN="$(aws iam get-role --role-name "${ROLE_NAME}" --query Role.Arn --output text)"
 aws eks create-pod-identity-association --region "${AWS_REGION}" \
   --cluster-name "${CLUSTER_NAME}" --namespace "${NAMESPACE}" \
   --service-account "${SERVICE_ACCOUNT}" --role-arn "${ROLE_ARN}"

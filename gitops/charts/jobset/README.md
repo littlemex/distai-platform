@@ -91,7 +91,12 @@ fails, because the webhook's `failurePolicy` is the Kubernetes default
   (leader election, and its own webhook certificate `Secret`), and two
   unbound `ClusterRole`s, `jobset-jobset-editor-role` and
   `jobset-jobset-viewer-role`, with no aggregation labels, so they add
-  nothing to the built-in `edit`/`view` roles.
+  nothing to the built-in `edit`/`view` roles. On a real cell (issue
+  #34's own pull request Test Results) the `jobset` Application's own
+  `status.resources` lists 5 `ClusterRole`s and 3
+  `ClusterRoleBinding`s in total -- 2 `ClusterRole`s beyond the three
+  named above, not yet individually enumerated here; none of this
+  wrapper's own values control any of them.
 - A team's own identity gets `JobSet` access only through its namespaced
   `Role`: `gitops/bootstrap/team-onboard.sh` step 3 grants `jobsets` in
   the team namespace, and `gitops/bootstrap/team-rbac-guard.yaml` allows a
