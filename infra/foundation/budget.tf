@@ -16,14 +16,16 @@
 # system node group's EC2 instances and EBS volumes, eks.tf -- a managed
 # node group's own tags do not propagate to either, per the Amazon EKS User
 # Guide). The precondition below only checks that var.tags itself carries
-# the key; it cannot verify every individual AWS-side resource actually
-# received it. It does not yet match EC2 instances Karpenter launches into
-# a capacity-pool (gitops/charts/capacity-pool's EC2NodeClass sets no
-# spec.tags), which is the Issue's own two accident scenarios and the
-# larger, more variable share of a cell's spend. Closing that needs a
-# chart-level change with its own real-machine verification on a cluster
-# with Karpenter actually running, outside this layer's own Terraform and
-# this PR's real-machine budget.
+# the key with the value var.name; it cannot verify every individual
+# AWS-side resource actually received it. It does not yet match EC2
+# instances Karpenter launches into a capacity-pool (gitops/charts/
+# capacity-pool's EC2NodeClass sets no spec.tags), which is the Issue's own
+# two accident scenarios and the larger, more variable share of a cell's
+# spend, nor anything an in-cluster controller provisions from a Kubernetes
+# object (a CSI-provisioned EBS volume, a load-balancer-controller-created
+# ELB). Closing the Karpenter gap needs a chart-level change with its own
+# real-machine verification on a cluster with Karpenter actually running,
+# outside this layer's own Terraform and this PR's real-machine budget.
 
 locals {
   budget_enabled = var.budget_limit_usd != null
@@ -98,10 +100,11 @@ resource "aws_budgets_budget" "cell" {
   # The budget's own arguments reference the topic, never the policy, so
   # nothing here would otherwise order this resource after it; the same
   # kind of missing edge let an unrelated AssociateAccessPolicy call race
-  # ahead of the access entry it targets elsewhere in this layer (Argo CD,
-  # this README's own Design notes) once the two resources shared no
-  # attribute. Budgets accepting a topic with no publish permission yet is
-  # not known to fail the same way, but there is no reason to find out.
+  # ahead of the access entry it targets elsewhere in this layer (see
+  # README.md's Design notes, the Argo CD access-policy association)
+  # once the two resources shared no attribute. Budgets accepting a topic
+  # with no publish permission yet is not known to fail the same way, but
+  # there is no reason to find out.
   depends_on = [aws_sns_topic_policy.budget_alerts]
 
   name         = "${var.name}-cell-cost"
@@ -141,10 +144,11 @@ resource "aws_budgets_budget" "cell" {
   # specific case (the key missing from var.tags) at plan time. It cannot
   # catch the other way a cost_filter on a tag tracks $0 forever: AWS Cost
   # Explorer only reports spend under a user-defined tag key once that key
-  # is activated as a cost allocation tag in Billing (account-wide, up to
-  # 24 hours after first use, not retroactive) -- a one-time, admin-done
-  # prerequisite this layer's own Terraform cannot activate on a per-cell
-  # basis (infra/foundation/README.md's own Known limits).
+  # is activated as a cost allocation tag in Billing, from the
+  # organization's management (payer) account if there is one -- a
+  # one-time, account-wide, admin-done prerequisite this layer's own
+  # Terraform cannot activate on a per-cell basis (infra/foundation/
+  # README.md's own Known limits has the two separate activation delays).
   lifecycle {
     precondition {
       condition     = lookup(var.tags, "distai-platform/cell", null) == var.name

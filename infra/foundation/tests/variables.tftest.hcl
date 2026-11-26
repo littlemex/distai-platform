@@ -66,6 +66,30 @@ run "system_node_launch_template_tags_instances_and_volumes" {
   }
 }
 
+run "system_node_launch_template_tag_specifications_never_empty" {
+  command = plan
+
+  # var.tags defaults to {} here (not overridden): each tag_specifications
+  # block must still carry at least one tag (its own Name), since the EC2
+  # API rejects a TagSpecification with zero tags. merge() in eks.tf must
+  # never send var.tags alone.
+  assert {
+    condition = alltrue([
+      for ts in aws_launch_template.system_node.tag_specifications :
+      length(ts.tags) > 0
+    ])
+    error_message = "every tag_specifications block must carry at least one tag even when var.tags is {}."
+  }
+
+  assert {
+    condition = length([
+      for ts in aws_launch_template.system_node.tag_specifications :
+      true if ts.resource_type == "instance" && lookup(ts.tags, "Name", null) == "example-cell-system-node"
+    ]) == 1
+    error_message = "the instance tag_specifications must carry its own Name tag regardless of var.tags."
+  }
+}
+
 run "argocd_accepts_all_three_roles" {
   command = plan
 
