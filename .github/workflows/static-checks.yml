@@ -1,18 +1,20 @@
 name: Static checks
 
 # Runs this repository's own existing static-check scripts
-# (infra/foundation/tests/0.static.sh, gitops/tests/0.static.sh,
-# examples/inference/tests/0.static.sh, examples/training/tests/0.static.sh,
+# (infra/foundation/tests/0.static.sh, infra/identities/tests/0.static.sh,
+# gitops/tests/0.static.sh, examples/inference/tests/0.static.sh,
+# examples/training/tests/0.static.sh,
 # examples/tools/run-board/tests/run_tests.sh) on every pull request. None
-# of the five needs AWS credentials or a real cluster (each one's own
-# header comment says so; confirmed by reading every one on 2026-11-26) --
-# that is exactly why these five, and not the *.e2e.sh / 1.e2e.sh scripts
-# next to them, are wired up here. A workflow-level `on.pull_request.paths`
-# filter is deliberately not used: if a pull request touches none of the
-# listed paths, GitHub never starts the workflow at all, so a required
-# status check named after it would sit pending forever and block the
-# pull request. Instead, every pull request starts this workflow, one job
-# (`changed-paths`) computes which of the five areas actually changed, each
+# of the six needs AWS credentials or a real cluster (each one's own
+# header comment says so; confirmed by reading every one on 2026-11-26,
+# infra/identities/tests/0.static.sh added 2026-11-27) -- that is exactly
+# why these six, and not the *.e2e.sh / 1.e2e.sh scripts next to them, are
+# wired up here. A workflow-level `on.pull_request.paths` filter is
+# deliberately not used: if a pull request touches none of the listed
+# paths, GitHub never starts the workflow at all, so a required status
+# check named after it would sit pending forever and block the pull
+# request. Instead, every pull request starts this workflow, one job
+# (`changed-paths`) computes which of the six areas actually changed, each
 # check job is skipped (not failed) when its own area did not change, and
 # the final `static` job always runs and fails if anything it depends on
 # neither succeeded nor was legitimately skipped. `static` is the one job
@@ -20,7 +22,7 @@ name: Static checks
 #
 # Every job here needs no AWS credentials: no job assumes a role, reads an
 # AWS secret, or calls an AWS API, and no job's own `permissions:` block
-# grants anything beyond `contents: read` (the five tool-install/script
+# grants anything beyond `contents: read` (the six tool-install/script
 # jobs) or `pull-requests: read` (`changed-paths`, which never checks the
 # repository out at all); `static` itself needs neither and declares
 # `permissions: {}`. By GitHub's own documented default for a plain
@@ -80,7 +82,7 @@ permissions:
 
 jobs:
   # ----------------------------------------------------------------------
-  # Decide which of the five areas changed, from the pull request's own
+  # Decide which of the six areas changed, from the pull request's own
   # file list (the `pulls/.../files` API), the same source
   # tool-attribution-check.yml already uses for the commit list -- not a
   # `git diff` against a locally fetched base, which would need a deeper
@@ -120,7 +122,7 @@ jobs:
   #   3. This workflow file is in no area's own prefix, so a pull request
   #      that only edits `.github/workflows/static-checks.yml` (including
   #      every one that shipped it) would otherwise never run any of the
-  #      five jobs it just changed, and `static` would pass on a change to
+  #      six jobs it just changed, and `static` would pass on a change to
   #      itself that installed a broken tool or a wrong checksum. A change
   #      to this file forces every area to `true`.
   #   4. `examples/training/tests/0.static.sh` itself reads two paths
@@ -140,8 +142,8 @@ jobs:
   #      without this case it would skip `training` while silently
   #      changing an input that script's own checks read.
   #      Both paths are matched as further triggers for `training` below,
-  #      found by reading every one of the five scripts for a path
-  #      outside its own prefix; none of the other four read outside
+  #      found by reading every one of the six scripts for a path
+  #      outside its own prefix; none of the other five read outside
   #      their own.
   changed-paths:
     name: changed paths
@@ -151,6 +153,7 @@ jobs:
       pull-requests: read
     outputs:
       foundation: ${{ steps.paths.outputs.foundation }}
+      identities: ${{ steps.paths.outputs.identities }}
       gitops: ${{ steps.paths.outputs.gitops }}
       inference: ${{ steps.paths.outputs.inference }}
       training: ${{ steps.paths.outputs.training }}
@@ -186,6 +189,7 @@ jobs:
 
           declare -A result=(
             [foundation]=false
+            [identities]=false
             [gitops]=false
             [inference]=false
             [training]=false
@@ -207,6 +211,7 @@ jobs:
             # that, hence a list of "area:pattern" pairs instead.
             trigger_patterns=(
               "foundation:infra/foundation/"
+              "identities:infra/identities/"
               "gitops:gitops/"
               "inference:examples/inference/"
               "training:examples/training/"
@@ -326,6 +331,82 @@ jobs:
 
       - name: Run infra/foundation/tests/0.static.sh
         run: bash infra/foundation/tests/0.static.sh
+
+  # ----------------------------------------------------------------------
+  identities-static:
+    name: infra/identities static checks
+    needs: changed-paths
+    if: needs.changed-paths.outputs.identities == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Terraform (pinned, checksum-verified; same pin as foundation-static above and the EC2 test runner)
+        env:
+          TF_VER: 1.17.2
+          TF_SHA256: e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/terraform.zip" \
+            "https://releases.hashicorp.com/terraform/${TF_VER}/terraform_${TF_VER}_linux_amd64.zip"
+          got="$(sha256sum "${RUNNER_TEMP}/terraform.zip" | awk '{print $1}')"
+          [[ "${got}" == "${TF_SHA256}" ]] || { echo "FAIL terraform ${TF_VER} checksum mismatch: got ${got}, want ${TF_SHA256}"; exit 1; }
+          sudo unzip -o "${RUNNER_TEMP}/terraform.zip" -d /usr/local/bin terraform
+          sudo chmod 0755 /usr/local/bin/terraform
+          terraform version
+
+      - name: Install TFLint (pinned, checksum-verified; same pin as foundation-static above and the EC2 test runner)
+        env:
+          TFLINT_VER: 0.66.0
+          TFLINT_SHA256: 22be11cadc25cd02401e94c0ccc91aa63467debb8485c2a755d98f4c0a9d1e2e
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/tflint.zip" \
+            "https://github.com/terraform-linters/tflint/releases/download/v${TFLINT_VER}/tflint_linux_amd64.zip"
+          got="$(sha256sum "${RUNNER_TEMP}/tflint.zip" | awk '{print $1}')"
+          [[ "${got}" == "${TFLINT_SHA256}" ]] || { echo "FAIL tflint ${TFLINT_VER} checksum mismatch: got ${got}, want ${TFLINT_SHA256}"; exit 1; }
+          sudo unzip -o "${RUNNER_TEMP}/tflint.zip" -d /usr/local/bin tflint
+          sudo chmod 0755 /usr/local/bin/tflint
+          tflint --version
+
+      - name: Install shellcheck (pinned, checksum-verified; same pin as foundation-static above and the EC2 test runner)
+        env:
+          SC_VER: v0.11.0
+          SC_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SC_VER}/shellcheck-${SC_VER}.linux.x86_64.tar.xz"
+          got="$(sha256sum "${RUNNER_TEMP}/shellcheck.tar.xz" | awk '{print $1}')"
+          [[ "${got}" == "${SC_SHA256}" ]] || { echo "FAIL shellcheck ${SC_VER} checksum mismatch: got ${got}, want ${SC_SHA256}"; exit 1; }
+          tar -xJf "${RUNNER_TEMP}/shellcheck.tar.xz" -C "${RUNNER_TEMP}" "shellcheck-${SC_VER}/shellcheck"
+          sudo install -m 0755 "${RUNNER_TEMP}/shellcheck-${SC_VER}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Pre-install TFLint's own "aws" ruleset plugin (pinned, checksum-verified; same reasoning as foundation-static above)
+        env:
+          TFLINT_RULESET_AWS_VER: 0.50.0
+          TFLINT_RULESET_AWS_SHA256: cdd433fdbc0929e7b9f9709dd9e72237fdfe1fc235674445c284b1e4b94a5c26
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/tflint-ruleset-aws.zip" \
+            "https://github.com/terraform-linters/tflint-ruleset-aws/releases/download/v${TFLINT_RULESET_AWS_VER}/tflint-ruleset-aws_linux_amd64.zip"
+          got="$(sha256sum "${RUNNER_TEMP}/tflint-ruleset-aws.zip" | awk '{print $1}')"
+          [[ "${got}" == "${TFLINT_RULESET_AWS_SHA256}" ]] || { echo "FAIL tflint-ruleset-aws ${TFLINT_RULESET_AWS_VER} checksum mismatch: got ${got}, want ${TFLINT_RULESET_AWS_SHA256}"; exit 1; }
+          unzip -o "${RUNNER_TEMP}/tflint-ruleset-aws.zip" -d "${RUNNER_TEMP}/tflint-ruleset-aws-extracted"
+          plugin_dir="${HOME}/.tflint.d/plugins/github.com/terraform-linters/tflint-ruleset-aws/${TFLINT_RULESET_AWS_VER}"
+          mkdir -p "${plugin_dir}"
+          install -m 0755 "${RUNNER_TEMP}/tflint-ruleset-aws-extracted/tflint-ruleset-aws" "${plugin_dir}/tflint-ruleset-aws"
+
+      - name: Run infra/identities/tests/0.static.sh
+        run: bash infra/identities/tests/0.static.sh
 
   # ----------------------------------------------------------------------
   gitops-static:
@@ -661,7 +742,7 @@ jobs:
   # ----------------------------------------------------------------------
   # The one job meant to be set as a required status check (issue #53).
   # Runs on every pull request regardless of which paths changed, and
-  # treats each of the five checks above as acceptable only if it
+  # treats each of the six checks above as acceptable only if it
   # succeeded or was skipped because its own area did not change -- never
   # because `changed-paths` itself failed, which also leaves a
   # downstream job's result as "skipped" and must not read as a pass.
@@ -670,6 +751,7 @@ jobs:
     needs:
       - changed-paths
       - foundation-static
+      - identities-static
       - gitops-static
       - inference-static
       - training-static
@@ -686,6 +768,7 @@ jobs:
         env:
           R_CHANGED_PATHS: ${{ needs.changed-paths.result }}
           R_FOUNDATION: ${{ needs.foundation-static.result }}
+          R_IDENTITIES: ${{ needs.identities-static.result }}
           R_GITOPS: ${{ needs.gitops-static.result }}
           R_INFERENCE: ${{ needs.inference-static.result }}
           R_TRAINING: ${{ needs.training-static.result }}
@@ -703,7 +786,8 @@ jobs:
           else
             echo "PASS changed-paths: ${R_CHANGED_PATHS}"
           fi
-          for pair in "foundation-static:${R_FOUNDATION}" "gitops-static:${R_GITOPS}" \
+          for pair in "foundation-static:${R_FOUNDATION}" "identities-static:${R_IDENTITIES}" \
+            "gitops-static:${R_GITOPS}" \
             "inference-static:${R_INFERENCE}" "training-static:${R_TRAINING}" \
             "run-board-tests:${R_RUN_BOARD}"; do
             name="${pair%%:*}"
