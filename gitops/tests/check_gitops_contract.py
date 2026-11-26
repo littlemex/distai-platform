@@ -373,7 +373,9 @@ def main(root: str) -> int:
         return doc
 
     check_applicationset(os.path.join(gitops, "appsets/platform.ApplicationSet.yaml"), {"crds", "controllers", "accelerators"})
-    check_applicationset(os.path.join(gitops, "appsets/cells.ApplicationSet.yaml"), {"capacity"})
+    # #18 adds a third wave, sharedfs (cells/<cluster>/sharedfs/*.yaml ->
+    # gitops/charts/sharedfs-shares), alongside capacity.
+    check_applicationset(os.path.join(gitops, "appsets/cells.ApplicationSet.yaml"), {"capacity", "sharedfs"})
     check_applicationset(
         os.path.join(gitops, "appsets/addons-optional.ApplicationSet.yaml"),
         {"optional-1", "optional-2", "optional-3", "optional-4"},
