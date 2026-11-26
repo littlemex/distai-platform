@@ -5,12 +5,14 @@
 # platform's capacity-pool + accel-neuron-device-plugin pattern (README.md "Accelerators";
 # aws.amazon.com/neuron, never aws.amazon.com/neuroncore).
 #
-# karpenter.sh/do-not-disrupt: an earlier real-machine attempt on this same NodePool shape saw
-# the pod marked for eviction (TaintManagerEviction) shortly after it started, while the 11.7 GB
-# image was still pulling. This annotation is a defensive opt-out for this one workload, the
-# same mechanism this platform's own capacity-pool/trn.yaml fixture already documents raising
-# consolidateAfter for. Not confirmed to be the specific cause of that one eviction event (no
-# controller log line was captured proving it); applied as a precaution either way.
+# karpenter.sh/do-not-disrupt: a defensive opt-out for this one workload. This platform's own
+# capacity-pool/trn.yaml fixture documents a prior, separate real-machine finding on this same
+# NodePool shape (a pod evicted while a multi-GB image was still pulling, root-caused there to
+# Karpenter consolidation) and raises consolidateAfter to mitigate it; this annotation is a
+# narrower, per-pod version of the same mitigation. During this PR's own three real-machine
+# attempts (README.md "What actually ran"), the only one that reached a node also saw one
+# TaintManagerEviction event -- not confirmed as the same cause, since no controller log line
+# was captured for it either way.
 #
 # The ConfigMap (miles-trainium-script) is generated from train_grpo.py by 0.verify.sh, so the
 # two copies of the script (this file's mount and the Job that runs it) never drift apart; see

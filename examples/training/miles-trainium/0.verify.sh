@@ -53,6 +53,10 @@ teardown() {
     fi
   fi
   log "=== independent read-only leftover sweep (${NAME}) ==="
+  # Known limitation: every query below swallows its own errors (2>/dev/null || true), so an API
+  # error or an unexpectedly-missing tag prints the same "<none>" a genuinely clean sweep would.
+  # "Independently re-verified torn down clean" in this PR's own Test Results rests on this sweep
+  # plus terraform destroy's own reported resource count agreeing, not on this sweep alone.
   for kind in instance eni nat volume launch-template; do
     out=""
     case "${kind}" in
@@ -169,13 +173,14 @@ aws ec2 describe-instances --region "${AWS_REGION}" \
   | tee -a "${RUN_LOG_DIR}/node.log"
 
 log "=== PHASE 7: stream logs until the Job finishes (deadline ~55min) ==="
-# verify_sglang_neuron.sh's own attempt 3 (run-20261126T111349Z-83541) lost every application
-# log line this way: a single `kubectl logs -f` started while the container was still
-# ContainerCreating hit its own client-side "context deadline exceeded" and exited for good
-# BEFORE the container ever started, with nothing here to restart it -- the container went on to
-# run and fail (exitCode 2, visible only in `kubectl get events`/the Job's own status, never in
-# this file) with zero captured stdout. This loop relaunches `kubectl logs -f` any time it exits
-# early, as long as the Job itself has not finished.
+# The real-machine attempt that produced this PR's own Test Results (README.md "What actually
+# ran") lost every application log line this way, running this script's own predecessor: a
+# single `kubectl logs -f` started while the container was still ContainerCreating hit its own
+# client-side "context deadline exceeded" and exited for good BEFORE the container ever started,
+# with nothing there to restart it -- the container went on to run and fail (exit code 2, visible
+# only in `kubectl get events`/the Job's own status, never in that run's captured log) with zero
+# stdout recorded. This loop relaunches `kubectl logs -f` any time it exits early, as long as the
+# Job itself has not finished. Not re-verified against a real failure of this kind.
 LOGS_PID=""
 relaunch_logs() {
   if [[ -n "${LOGS_PID}" ]] && kill -0 "${LOGS_PID}" 2>/dev/null; then return; fi

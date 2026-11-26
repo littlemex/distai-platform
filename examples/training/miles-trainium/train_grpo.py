@@ -15,13 +15,13 @@ Design, and why:
     (docs/model-recipes -- "What is refused"); there is no documented live-reload API, unlike
     upstream SGLang's /update_weights_from_disk. The only officially-supported way to pick up new
     weights is to restart the server pointing at a new checkpoint directory -- slow (the public
-    third-party measurement cited in README.md put this around 7-8 minutes), but it needs no
+    third-party measurement cited in README.md put a comparable reload around 455-460 seconds), but it needs no
     patch, so this script uses exactly that, not an unofficial live-reload hack.
   - Training runs as plain CPU transformers (eager, variable-length batches, ordinary HF padding)
     specifically so it does NOT need torch-neuronx's fixed-shape compilation discipline at all:
     sglang-neuron's own tp-size=4 flag for Qwen3-0.6B already claims every NeuronCore the device
     plugin advertises for this node, so a second NeuronCore-bound process has nowhere to run. A 0.6B
-    model's forward+backward for a handful of short sequences is cheap enough on CPU that this
+    model's forward+backward for a handful of short sequences was expected to be cheap enough on CPU that this
     is a legitimate choice for a correctness smoke test, not a performance shortcut that hides a
     real blocker.
 
@@ -125,7 +125,7 @@ def wait_health(proc: subprocess.Popen, timeout_s: int) -> bool:
 
 def generate_completions(prompt: str, n: int) -> list[str]:
     """OpenAI-compatible route (stable across SGLang versions), not the native /generate
-    schema, which has changed shape between releases -- see README.md Caveats if this 404s."""
+    schema, which has changed shape between releases -- see README.md "Still not working" if this 404s."""
     resp = requests.post(
         f"{SERVER_URL}/v1/completions",
         json={
