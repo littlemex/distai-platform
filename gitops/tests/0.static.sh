@@ -728,7 +728,7 @@ kept = [
 with open(dst, "w", encoding="utf-8") as f:
     yaml.safe_dump_all(kept, f)
 PY
-    kubeconform_targets[$i]="${FILTERED_SHAREDFS}"
+    kubeconform_targets[i]="${FILTERED_SHAREDFS}"
   fi
 done
 
