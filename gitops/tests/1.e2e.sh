@@ -1729,9 +1729,9 @@ pass "${APP_KARPENTER_CRD}'s spec.syncPolicy.automated carries no allowEmpty -- 
 # -------------------------------------------------------------- 10. capacity
 
 wait_until 900 15 "capacity-pool Application Healthy and Synced" app_healthy_synced "${APP_CAPACITY_POOL}" \
-  || fail "${APP_CAPACITY_POOL} did not reach Healthy+Synced: health=$(app_health "${APP_CAPACITY_POOL}") sync=$(app_sync "${APP_CAPACITY_POOL}")"
+  || fail "${APP_CAPACITY_POOL} did not reach Healthy+Synced: health=$(app_health "${APP_CAPACITY_POOL}") sync=$(app_sync "${APP_CAPACITY_POOL}") operationState=[$(app_operation_state "${APP_CAPACITY_POOL}")] resources=[$(k get nodepool,ec2nodeclass,resourceflavor -A -o wide 2>&1 | tr '\n' ' ')]"
 wait_until 900 15 "smoke Application Healthy and Synced" app_healthy_synced "${APP_SMOKE}" \
-  || fail "${APP_SMOKE} did not reach Healthy+Synced: health=$(app_health "${APP_SMOKE}") sync=$(app_sync "${APP_SMOKE}")"
+  || fail "${APP_SMOKE} did not reach Healthy+Synced: health=$(app_health "${APP_SMOKE}") sync=$(app_sync "${APP_SMOKE}") operationState=[$(app_operation_state "${APP_SMOKE}")]"
 pass "${APP_CAPACITY_POOL} and ${APP_SMOKE} (capacity step) reached Healthy+Synced"
 
 # Issue #41: optional-pool is a fourth core add-on (gitops/addons/,
