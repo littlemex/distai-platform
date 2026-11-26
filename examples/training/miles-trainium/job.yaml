@@ -1,0 +1,111 @@
+# Runs train_grpo.py (mounted from a ConfigMap of the same name in this directory) on one
+# trn2.3xlarge node: sgl-project/sglang-neuron serves Qwen3-0.6B for rollout (all four
+# NeuronCores, --tp-size 4, the plugin's own validated flags for this model size), a CPU
+# transformers copy of the same model trains. nodeSelector/toleration/resource match this
+# platform's capacity-pool + accel-neuron-device-plugin pattern (README.md "Accelerators";
+# aws.amazon.com/neuron, never aws.amazon.com/neuroncore).
+#
+# karpenter.sh/do-not-disrupt: a defensive opt-out for this one workload. This platform's own
+# capacity-pool/trn.yaml fixture documents a prior, separate real-machine finding on this same
+# NodePool shape (a pod evicted while a multi-GB image was still pulling, root-caused there to
+# Karpenter consolidation) and raises consolidateAfter to mitigate it; this annotation is a
+# narrower, per-pod version of the same mitigation. Across this PR's six real-machine attempts
+# (README.md "What actually ran"), the four that reached a node, including the one that closed
+# the loop end to end, never saw consolidation interrupt a Job in progress; the one
+# TaintManagerEviction event observed (session 1, attempt 3) came about 24 minutes after that
+# attempt's container had already started and exited -- ordinary consolidation of the now-idle
+# node after the Job had already failed, not something this annotation needed to prevent that
+# time. Left in place as a precaution for a run that does take longer to pull its image.
+#
+# The ConfigMap (miles-trainium-script) is generated from train_grpo.py by 0.verify.sh, so the
+# two copies of the script (this file's mount and the Job that runs it) never drift apart; see
+# that script for the exact kubectl commands.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: miles-trainium-grpo
+  namespace: distai-smoke
+  labels:
+    app: miles-trainium-grpo
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        app: miles-trainium-grpo
+      annotations:
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        distai.dev/neuron-method: device-plugin
+      tolerations:
+        - key: aws.amazon.com/neuron
+          operator: Exists
+          effect: NoSchedule
+      imagePullSecrets:
+        - name: ecr-public-pull
+      containers:
+        - name: grpo
+          image: public.ecr.aws/neuron/pytorch-inference-sglang-neuron:v0.1.0-neuron-py314-sdk-2.33.0-ubuntu26.04
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              echo "[setup] pip install transformers requests huggingface_hub"
+              pip install -q --no-cache-dir "transformers==5.24.1" "requests==2.34.2" "huggingface_hub==2.4.0"
+              echo "[setup] downloading Qwen/Qwen3-0.6B"
+              python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Qwen/Qwen3-0.6B', local_dir='/models/Qwen3-0.6B')"
+              echo "[setup] starting train_grpo.py"
+              python3 /opt/rl/train_grpo.py
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: HF_HOME
+              value: /models/_hf-cache
+            - name: BASE_MODEL_DIR
+              value: /models/Qwen3-0.6B
+            - name: WORK_DIR
+              value: /models/_steps
+            - name: STEPS
+              value: "2"
+            - name: GROUP_SIZE
+              value: "4"
+            - name: MAX_NEW_TOKENS
+              value: "24"
+            - name: SGLANG_NEURON_SAMPLER
+              # sglang-neuron's own sampling.py defaults SGLANG_NEURON_SAMPLER to "greedy" when unset, and its
+              # general_plugin.py admission hook (validate_device_sampling_request) then refuses any request that
+              # is not greedy (temperature below 1e-6 or top_k=1) with HTTP 400 at the first /v1/completions call --
+              # confirmed as the real-machine root cause of a 400 from /v1/completions (README.md "What actually
+              # ran", session 2's first attempt, HTTP 400 at the first generate call) by reading sglang-neuron's
+              # source (sglang_neuron/sampling.py's sampler_mode()/validate_device_sampling_request, commit
+              # 4e2432622bfab2c6663d12286a6813ef1a40bfe6), not by guessing from an exit code alone. This fix does
+              # NOT explain session 1's own earlier exit code 2 (~72s, no application log captured) -- that
+              # attempt's cause remains unconfirmed; see README.md "Known limits". "topk_topp" serves this script's
+              # sampled request (temperature=1.0, no top_k/top_p/min_p set, so the unrestricted path applies) and
+              # additionally supports top_k/top_p/min_p if a future change to train_grpo.py needs them; "temperature"
+              # would also serve this exact request shape but refuses any filtering at all.
+              value: "topk_topp"
+          resources:
+            requests:
+              cpu: "4"
+              memory: "24Gi"
+              aws.amazon.com/neuron: "1"
+            limits:
+              cpu: "8"
+              memory: "40Gi"
+              aws.amazon.com/neuron: "1"
+          volumeMounts:
+            - name: script
+              mountPath: /opt/rl
+            - name: models
+              mountPath: /models
+      volumes:
+        - name: script
+          configMap:
+            name: miles-trainium-script
+        - name: models
+          emptyDir:
+            sizeLimit: 40Gi
