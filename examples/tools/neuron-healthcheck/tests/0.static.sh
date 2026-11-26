@@ -620,7 +620,7 @@ PYEOF
         rm -rf "${results_dir}"
         mkdir -p "${results_dir}"
         FAKE_TORCH_NEURONX_MODE="${mode}" RESULTS_DIR="${results_dir}" PYTHONPATH="${FAKE_DIR}" \
-            uv run --with torch --index https://download.pytorch.org/whl/cpu --no-progress -- \
+            uv run --with "torch==2.15.0+cpu" --index https://download.pytorch.org/whl/cpu --no-progress -- \
             python3 "${BASE_DIR}/lib/checks/1-neff-compile-load-check.py" --target trn2 \
             >"${WORK}/check1-fake.out" 2>&1
         echo "$?"
