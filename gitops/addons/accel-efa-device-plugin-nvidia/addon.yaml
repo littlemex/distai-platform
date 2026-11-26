@@ -138,36 +138,39 @@ values:
   nodeSelector:
     distai.dev/nvidia-gpu-method: device-plugin
     distai.dev/efa-attached: "true"
-  # Verification-branch-only addition (p5en real-hardware run, not for
-  # merge to main): confirmed on real hardware that this release's own
-  # DaemonSet, unmodified, renders tolerations: [{key:
-  # CriticalAddonsOnly, operator: Exists}] only (the chart's own default,
-  # no override here before this edit) -- it does NOT tolerate
-  # capacity-pool's own accelerator.taint (nvidia.com/gpu:NoSchedule,
-  # #63/#56's own fix so a GPU-tainted node is not used for free by an
-  # ordinary pod). A pool that sets both accelerator.methodLabel and
-  # accelerator.taint (gitops/cells/dp-a19-gpu-r3's own gpu.yaml does
-  # both already) therefore gets a Node-Selector match with
-  # desiredNumberScheduled staying 0 for this DaemonSet: the device
-  # plugin never runs there, vpc.amazonaws.com/efa stays absent from
-  # that node's allocatable even though the physical EFA devices are
-  # present and healthy (confirmed the same moment on the same node via
-  # lspci/ibv_devices/fi_info, examples/tools/gpu-healthcheck). A manual
-  # `kubectl patch` of the live DaemonSet is reverted within about a
-  # minute by this Application's own selfHeal: true. This override adds
-  # the missing toleration, scoped to this one verification branch only
-  # (this addon is core tier, delivered unmodified to every other cell on
-  # main) so the same-node EFA-forced measurement in
-  # examples/tools/p5en-verify/04-disagg.sh can actually request
-  # vpc.amazonaws.com/efa. Whether to carry an equivalent toleration on
-  # main (and whether accel-efa-device-plugin-neuron has the identical
-  # gap) is left to a separate decision, not made here.
+  # #102, confirmed on real hardware (p5en.48xlarge): this release's own
+  # live DaemonSet rendered tolerations: [{key: CriticalAddonsOnly,
+  # operator: Exists}] only (read directly with `kubectl get daemonset
+  # ... -o jsonpath='{.spec.template.spec.tolerations}'` against the
+  # pinned chart/image above, not merely read from the chart's own
+  # values.yaml default). That does not cover nvidia.com/gpu:NoSchedule,
+  # the taint accelerator.taint renders (gitops/cells/dp-a19-gpu-r3's own
+  # gpu.yaml sets both accelerator.methodLabel and accelerator.taint
+  # already, #63/#56), so a pool that sets both got a nodeSelector match
+  # whose DaemonSet never actually scheduled there: desiredNumberScheduled
+  # stayed 0, and vpc.amazonaws.com/efa never appeared in that node's
+  # allocatable, even though every physical EFA device was present and
+  # healthy at the same moment (confirmed independently via lspci/
+  # ibv_devices/fi_info).
+  #
+  # A single blanket toleration (operator: Exists, no key) rather than
+  # naming nvidia.com/gpu specifically: this addon's own header comment
+  # already states the design intent ("EFA ... Follows the GPU's or
+  # Neuron's own method label, not a method label of its own") -- the
+  # advertiser is meant to follow whatever taint the accelerator pool it
+  # is paired with carries, not just the one capacity-pool pools happen
+  # to use today. A pool that also sets tenancy.teamTaint (#22,
+  # gitops/charts/capacity-pool/values.yaml) would hit the exact same
+  # class of gap with a key-specific toleration, since the DaemonSet
+  # controller evaluates every NoSchedule taint on a node regardless of
+  # which one this chart happens to know about; a blanket toleration
+  # closes that case too without needing to enumerate every taint key
+  # this platform might ever render. Replaces the chart's own default
+  # tolerations wholesale (Helm replaces lists, does not merge them), so
+  # CriticalAddonsOnly is covered by the blanket entry rather than kept
+  # as a separate, now-redundant line.
   tolerations:
-    - key: CriticalAddonsOnly
-      operator: Exists
-    - key: nvidia.com/gpu
-      operator: Exists
-      effect: NoSchedule
+    - operator: Exists
   securityContext:
     privileged: false
     allowPrivilegeEscalation: false
