@@ -144,6 +144,26 @@ resource "aws_fsx_lustre_file_system" "shared" {
   tags = {
     Name = "${var.name}-shared"
   }
+
+  # Explicit depends_on, even though no argument above references any of
+  # these four rules directly (only aws_security_group.fsx_lustre[0].id,
+  # the group itself, which exists before any of its own rules do): with
+  # no attribute in common, Terraform's graph has no edge forcing the
+  # rules to attach before CreateFileSystem fires, so it schedules the two
+  # concurrently - a CreateFileSystem that wins the race sees a security
+  # group with no Lustre rules yet. Reproduced twice on the runner,
+  # 2026-11-26: attempt 2 (CreateFileSystem happened to run after the
+  # rules attached) succeeded; attempt 3, same code, failed with the
+  # identical "does not permit Lustre LNET network traffic on port 988"
+  # this file's own security-group comment already names - the same
+  # shape of gap argocd.tf's own aws_eks_access_policy_association.argocd
+  # documents and fixes the same way.
+  depends_on = [
+    aws_security_group_rule.fsx_lustre_self_ingress,
+    aws_security_group_rule.fsx_lustre_self_egress,
+    aws_security_group_rule.fsx_lustre_client_ingress,
+    aws_security_group_rule.fsx_lustre_client_egress,
+  ]
 }
 
 output "shared_fsx_lustre_file_system_id" {

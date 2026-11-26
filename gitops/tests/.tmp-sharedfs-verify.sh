@@ -26,14 +26,26 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STATE_KEY="distai-platform/${AWS_REGION}/${NAME}/foundation"
 IDC_GROUP_NAME="dp18-sfs-$(date +%s)"
 IDC_GROUP_ID=""
-APPLIED=0
+# Set right after `terraform init` (not after `terraform apply`): a
+# PARTIALLY failed apply still records every resource that did complete
+# into the state file before the failing resource is reached (confirmed
+# the hard way, 2026-11-26 - two attempts whose own apply failed at FSx
+# creation, after already creating a real EKS cluster, VPC and Argo CD
+# capability, both skipped this cleanup's own terraform destroy entirely
+# because this flag was gated on apply succeeding, leaving those real,
+# billable resources running with no further attempt of this script
+# left to clean them up). `terraform destroy` against an initialized
+# root with a non-empty state is always the right call once init has
+# happened, whether or not apply ever finished; destroy on an empty
+# state is a harmless no-op.
+INITIALIZED=0
 IMAGE="public.ecr.aws/docker/library/busybox:1.37"
 
 log() { echo "[sharedfs-verify] $*" >&2; }
 
 cleanup() {
   log "cleanup: start"
-  if [[ "${APPLIED}" == "1" ]]; then
+  if [[ "${INITIALIZED}" == "1" ]]; then
     ( cd "${ROOT}/infra/foundation" && terraform destroy -auto-approve \
       -var "name=${NAME}" -var "region=${AWS_REGION}" \
       -var "endpoint_public_access_cidrs=[\"${MY_CIDR}\"]" \
@@ -103,6 +115,7 @@ log "terraform init (state key ${STATE_KEY})"
 terraform init -input=false \
   -backend-config="bucket=${STATE_BUCKET}" -backend-config="key=${STATE_KEY}" \
   -backend-config="region=${STATE_REGION}" -backend-config="use_lockfile=true"
+INITIALIZED=1
 
 log "creating disposable Identity Center group ${IDC_GROUP_NAME}"
 IDC_GROUP_ID="$(aws identitystore create-group --identity-store-id "${ARGOCD_IDC_IDENTITY_STORE_ID}" \
@@ -118,7 +131,6 @@ terraform apply -auto-approve -input=false \
   -var "admin_principal_arns=[\"${ADMIN_PRINCIPAL_ARN}\"]" \
   -var "argocd={idc_instance_arn=\"${ARGOCD_IDC_INSTANCE_ARN}\",idc_region=\"${ARGOCD_IDC_REGION}\",role_mappings=[{role=\"ADMIN\",group_ids=[\"${IDC_GROUP_ID}\"]}]}" \
   -var "shared_fsx_lustre={deployment_type=\"SCRATCH_2\",storage_capacity_gib=1200}"
-APPLIED=1
 
 aws eks update-kubeconfig --name "${NAME}" --region "${AWS_REGION}"
 
