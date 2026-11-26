@@ -125,6 +125,16 @@ namespaceResourceWhitelist:
     # the shared PersistentVolume above with an ordinary PVC.
   - group: ""
     kind: Pod
+  - group: "batch"
+    kind: Job
+    # #18: gitops/charts/sharedfs-shares' own templates/seed.yaml, a
+    # PostSync hook Job seeding the top-level checkpoints/datasets
+    # directories the FilesystemShare objects above need already exist.
+    # Found missing by a review round, not rendered-and-collected before
+    # this entry was added (check_appproject_whitelist.py now covers it
+    # the same way as every other kind here) - without it Argo CD
+    # rejects the Job outright as not permitted in this project, failing
+    # sharedfs-shares' own sync before the Job ever runs.
   - group: ""
     kind: Secret
   - group: ""
