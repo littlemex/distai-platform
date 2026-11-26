@@ -13,10 +13,13 @@ names (not a hand-typed copy of its values):
 
   - each of the four device-plugin add-ons' own `addon.yaml` values,
     rendered with and without them: the set of DaemonSet names is
-    unchanged, and every DaemonSet's own tolerations gain exactly the one
-    `distai.dev/startup-not-ready` entry `check_startup_taint_keys.py`
-    also checks the add-on's declared values for -- nothing else differs,
-    so nothing this add-on depended on (CriticalAddonsOnly, the
+    unchanged, and every DaemonSet's own tolerations gain at least the
+    one `distai.dev/startup-not-ready` entry `check_startup_taint_keys.py`
+    also checks the add-on's declared values for (#102 found that
+    accel-efa-device-plugin-nvidia/-neuron also need a second,
+    independent toleration in the same values path, for an unrelated
+    permanent taint -- "at least", not "exactly", on purpose) -- nothing
+    is ever dropped, so nothing this add-on depended on (CriticalAddonsOnly, the
     vendor-specific taint, the SageMaker health-status toleration) was
     silently dropped by this override;
   - `vigil-controller`'s own rendered `ConfigMap` actually contains the
@@ -162,16 +165,28 @@ def check_device_plugin_addon(repo_root: str, workdir: str, name: str, tol_path:
         added = after_set - before_set
         removed = before_set - after_set
         if ds_name in primary:
+            # "at least" target, not "exactly": #102 found that
+            # accel-efa-device-plugin-nvidia/-neuron also need a second,
+            # independent toleration (accelerator.taint/tenancy.teamTaint,
+            # an unrelated permanent taint, not #96's own startup one) in
+            # the same values.tolerations list -- more than one add-on's
+            # own real entry can legitimately land in `added` at once.
+            # What this check must still never allow is `target` missing
+            # from `added` (the #96 entry silently not taking effect) or
+            # anything in `removed` (an existing toleration silently
+            # dropped) -- both still fail below exactly as before for an
+            # add-on that declares only the one #96 entry, since `added`
+            # then equals `{target}` either way.
             check(
-                f"{rel}: the primary advertiser DaemonSet {ds_name} gains exactly {matches[0]}, nothing dropped",
-                not removed and added == {target},
-                f"removed={removed!r} added={added!r} (want removed == set() and added == {{{target!r}}})",
+                f"{rel}: the primary advertiser DaemonSet {ds_name} gains at least {matches[0]}, nothing dropped",
+                not removed and target in added,
+                f"removed={removed!r} added={added!r} (want removed == set() and {target!r} in added)",
             )
         else:
             check(
-                f"{rel}: sibling DaemonSet {ds_name} either gains exactly {matches[0]} too (shares the same values path) or is unaffected, nothing dropped",
-                not removed and added in (set(), {target}),
-                f"removed={removed!r} added={added!r} (want removed == set() and added in (set(), {{{target!r}}}))",
+                f"{rel}: sibling DaemonSet {ds_name} either gains at least {matches[0]} too (shares the same values path) or is unaffected, nothing dropped",
+                not removed and (not added or target in added),
+                f"removed={removed!r} added={added!r} (want removed == set() and (added == set() or {target!r} in added))",
             )
 
 
