@@ -34,11 +34,19 @@ locals {
   # to satisfy this check, since the self-referencing rules this
   # validation wants are a different, and genuinely missing, pair of
   # rules, not a question of return traffic). That same table also lists
-  # self-referencing and to-client egress as required; both are strict
-  # subsets of "all traffic to anywhere", already covered by the default
-  # allow-all-egress rule every new EC2 security group gets (EC2 User
-  # Guide, "Security group rules") - see aws_security_group.fsx_lustre's
-  # own comment on why this file manages ingress only, not egress.
+  # self-referencing and to-client egress as required, and this is not
+  # covered by any default rule: the Terraform AWS provider's own
+  # aws_security_group resource documentation is explicit that it
+  # removes AWS's own default allow-all-egress rule on creation
+  # regardless of whether the egress argument is present or absent in
+  # the resource configuration at all - "Terraform will remove this
+  # default rule, and require you specifically re-create it if you
+  # desire that rule." (An earlier version of this file assumed omitting
+  # the egress argument entirely left that default rule in place and
+  # dropped the explicit egress rules below on that basis - wrong, and
+  # corrected before being exercised against a case that would have
+  # caught it; see the egress rule resources below for what replaces
+  # that assumption.)
   fsx_lustre_ports = [
     { protocol = "tcp", from_port = 988, to_port = 988 },
     { protocol = "tcp", from_port = 1018, to_port = 1023 },
@@ -49,29 +57,25 @@ resource "aws_security_group" "fsx_lustre" {
   count = var.shared_fsx_lustre == null ? 0 : 1
 
   name        = "${var.name}-fsx-lustre"
-  description = "Lustre traffic for the shared FSx for Lustre file system (#18): self-referencing and from this cell own node/cluster security group (ingress); the default allow-all egress covers both return paths this group needs."
+  description = "Lustre traffic for the shared FSx for Lustre file system (#18): self-referencing and to/from this cell own node/cluster security group."
   vpc_id      = aws_vpc.this.id
 
-  # No egress argument here at all, not even egress = []. AWS's own
-  # required-rules table (this file's own header comment above) also
-  # lists self-referencing egress and egress to the client security
-  # group as required, but both are strict subsets of "all traffic to
-  # anywhere" - the default allow-all-IPv4-egress rule every new EC2
-  # security group gets already satisfies them, so no narrower egress
-  # rule is needed to reach that requirement. Writing egress = [] to
-  # manage the rule set down to only two narrower rules was tried first
-  # and reverted: it tells Terraform's AWS provider the security group's
-  # egress rules are fully described by this resource's own egress
-  # argument (zero of them), while two separate aws_security_group_rule
-  # egress resources also claimed ownership of specific egress rules on
-  # the same security group - mixing a security group's own inline
-  # egress attribute (even an explicit empty list) with separate
+  # No egress argument here at all, not even egress = [] - the egress
+  # rules this group needs (self-referencing, to the client security
+  # group) are declared below as separate aws_security_group_rule
+  # resources instead, never as this resource's own inline egress
+  # argument. Combining an aws_security_group's own inline
+  # ingress/egress attribute (even an explicit empty list) with separate
   # aws_security_group_rule resources for the same group is the AWS
   # provider's own documented anti-pattern ("we recommend using one or
-  # the other, never both"), and produced a perpetual plan diff on the
-  # runner. Dropping the egress argument and those two rule resources
-  # entirely removes the conflict and the extra resources together,
-  # since the default already covers what they were for.
+  # the other, never both") and produces a perpetual plan diff; using
+  # only separate rule resources, with no inline attribute at all on
+  # this resource, is "the other" side of that choice and has no such
+  # conflict. Per the Terraform AWS provider's own documentation (this
+  # file's own locals block above), omitting the argument here does not
+  # leave AWS's own default allow-all-egress rule in place - Terraform
+  # removes it on creation either way - so the rules below are not
+  # redundant with anything already present.
   tags = {
     Name = "${var.name}-fsx-lustre"
   }
@@ -81,10 +85,9 @@ locals {
   fsx_lustre_port_map = { for p in local.fsx_lustre_ports : "${p.protocol}-${p.from_port}" => p }
 }
 
-# Self-referencing ingress: the file system's own network interfaces talk
-# to each other over these ports (AWS's own required-rules table, this
-# file's own header comment above). Egress is not managed here - see
-# aws_security_group.fsx_lustre's own comment on why.
+# Self-referencing ingress and egress: the file system's own network
+# interfaces talk to each other over these ports (AWS's own
+# required-rules table, this file's own header comment above).
 resource "aws_security_group_rule" "fsx_lustre_self_ingress" {
   for_each = var.shared_fsx_lustre == null ? {} : local.fsx_lustre_port_map
 
@@ -97,11 +100,25 @@ resource "aws_security_group_rule" "fsx_lustre_self_ingress" {
   description              = "FSx for Lustre file servers to each other (self-referencing, required by CreateFileSystem)"
 }
 
+resource "aws_security_group_rule" "fsx_lustre_self_egress" {
+  for_each = var.shared_fsx_lustre == null ? {} : local.fsx_lustre_port_map
+
+  type                     = "egress"
+  security_group_id        = aws_security_group.fsx_lustre[0].id
+  protocol                 = each.value.protocol
+  from_port                = each.value.from_port
+  to_port                  = each.value.to_port
+  source_security_group_id = aws_security_group.fsx_lustre[0].id
+  description              = "FSx for Lustre file servers to each other (self-referencing, required by CreateFileSystem)"
+}
+
 # Client traffic: this cell's node/cluster security group (every
 # Karpenter-launched node and the system node group share it, eks.tf).
-# Ingress only - the return path and this group's own egress to the
-# client security group are both covered by the default allow-all egress
-# rule (see aws_security_group.fsx_lustre's own comment).
+# Ingress and egress both declared: a Lustre mount is initiated by the
+# client, but the file system's own servers also open connections back
+# for some of the LNET traffic (AWS's own required-rules table lists
+# this as its own rule, not something a client-initiated connection's
+# own statefulness already covers either direction).
 resource "aws_security_group_rule" "fsx_lustre_client_ingress" {
   for_each = var.shared_fsx_lustre == null ? {} : local.fsx_lustre_port_map
 
@@ -112,6 +129,18 @@ resource "aws_security_group_rule" "fsx_lustre_client_ingress" {
   to_port                  = each.value.to_port
   source_security_group_id = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
   description              = "FSx for Lustre client traffic from this cell own node-cluster security group"
+}
+
+resource "aws_security_group_rule" "fsx_lustre_client_egress" {
+  for_each = var.shared_fsx_lustre == null ? {} : local.fsx_lustre_port_map
+
+  type                     = "egress"
+  security_group_id        = aws_security_group.fsx_lustre[0].id
+  protocol                 = each.value.protocol
+  from_port                = each.value.from_port
+  to_port                  = each.value.to_port
+  source_security_group_id = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
+  description              = "FSx for Lustre client traffic to this cell own node-cluster security group"
 }
 
 # The matching half on the client side: AWS's own required-rules table
@@ -148,6 +177,10 @@ resource "aws_fsx_lustre_file_system" "shared" {
   security_group_ids          = [aws_security_group.fsx_lustre[0].id]
   deployment_type             = var.shared_fsx_lustre.deployment_type
   per_unit_storage_throughput = var.shared_fsx_lustre.per_unit_storage_throughput
+  # Pinned, not left at FSx's own implicit default (2.10, except
+  # PERSISTENT_2) - see var.shared_fsx_lustre's own file_system_type_version
+  # field description for why.
+  file_system_type_version = var.shared_fsx_lustre.file_system_type_version
 
   # PERSISTENT_1/PERSISTENT_2 take a final backup on deletion unless this is
   # set; SCRATCH_1/SCRATCH_2 do not support backups at all, and the FSx API
@@ -165,8 +198,8 @@ resource "aws_fsx_lustre_file_system" "shared" {
     Name = "${var.name}-shared"
   }
 
-  # Explicit depends_on, even though no argument above references either
-  # of these two rules directly (only aws_security_group.fsx_lustre[0].id,
+  # Explicit depends_on, even though no argument above references any of
+  # these four rules directly (only aws_security_group.fsx_lustre[0].id,
   # the group itself, which exists before any of its own rules do): with
   # no attribute in common, Terraform's graph has no edge forcing the
   # rules to attach before CreateFileSystem fires, so it schedules the two
@@ -180,7 +213,9 @@ resource "aws_fsx_lustre_file_system" "shared" {
   # documents and fixes the same way.
   depends_on = [
     aws_security_group_rule.fsx_lustre_self_ingress,
+    aws_security_group_rule.fsx_lustre_self_egress,
     aws_security_group_rule.fsx_lustre_client_ingress,
+    aws_security_group_rule.fsx_lustre_client_egress,
   ]
 }
 
