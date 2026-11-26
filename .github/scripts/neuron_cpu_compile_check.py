@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Compile a tiny model to a Neuron NEFF, with no Trainium/Inferentia hardware present.
+"""Compile a tiny, fixed model to a Neuron NEFF, with no Trainium/Inferentia
+hardware present.
 
-This is a static (CPU-only) check: it never touches a real accelerator, never
-talks to AWS, and does not replace the real-hardware check in
-`gitops/tests/1.e2e.sh` (`GITOPS_RUN_ACCEL_E2E=1`). It catches the class of
-defect a CPU host CAN catch before any real-hardware run: an unsupported
-operator, a compiler crash, or a broken Neuron toolchain install -- cheaply,
-on every pull request.
+This is a toolchain smoke test, not a representativeness check: the model
+is fixed in this file (see `build_example_model`) and nothing in this
+repository ties it to any chart or example this platform ships -- none of
+`examples/` currently has Trainium-specific model code. A pass means the
+Neuron compiler toolchain installs and compiles *this* model on a
+CPU-only host; it does not mean every operator this platform's own
+workloads use would compile, and it does not replace the real-hardware
+check in `gitops/tests/1.e2e.sh` (`GITOPS_RUN_ACCEL_E2E=1`), which is the
+only check that proves a real trn2.3xlarge node and the Neuron device
+plugin work end to end. It is still useful: a broken toolchain install or
+an API-usage regression in this exact call shows up here, cheaply, on
+every pull request, instead of only in that paid, light-tier run.
 
-Primary source for "compilation needs no Trainium/Inferentia hardware":
+Primary sources:
 
 - https://awsdocs-neuron.readthedocs-hosted.com/en/latest/compiler/neuronx-cc/how-to-generate-neff.html
   ("A target instance family: one of trn1, trn1n, inf2, or trn2. You can run
@@ -18,25 +25,47 @@ Primary source for "compilation needs no Trainium/Inferentia hardware":
   "A boolean indicating whether CPU should be used for tracing. If set to
   True, tracing can be done completely on CPU. This keyword needs to be used
   with the compiler_args option to set the --target flag.")
+- https://awsdocs-neuron.readthedocs-hosted.com/en/latest/torch/get-started/quickstart-build-first-model.html
+  (`build_example_model`'s TinyMLP shape is taken from this quickstart's
+  "Step 1: Run a model in eager mode"; that page's own example runs on
+  real Trainium hardware, this one does not).
 
 `import torch_neuronx` alone (before `cpu_backend` ever comes into play)
-pulls in `torch_xla`, which probes for the real Neuron runtime shared
-library (`/opt/aws/neuron/lib/libnrt.so.1`) at import time and raises
-`OSError` if it is absent -- confirmed on a real run of this check on a
-GitHub-hosted runner (2026-11-26) with no such library installed (by
-design: this check never installs the Neuron driver or runtime, see the
-workflow's own header comment). `libneuronxla`'s own `libnrt.py`
-(`check_compatible_libnrt()`, read from the installed package's source,
-`libneuronxla==2.2.17544.0+fb9962bf` at the time this was found) honors
-`NEURON_INTERNAL_SKIP_LIBNRT_CHECK=1` to skip exactly this probe, which is
-set below before the import for exactly that reason.
+pulls in `torch_xla`, which goes on to `ctypes.CDLL` a PJRT plugin library
+that dynamically links `libnrt.so.1` -- confirmed by two real, failed runs
+of this check on a GitHub-hosted runner (2026-11-26):
+
+1. Without `aws-neuronx-runtime-lib` installed at all, `libneuronxla`'s own
+   `libnrt.py` (`check_compatible_libnrt()`, read from the installed
+   package's source, `libneuronxla==2.2.17544.0+fb9962bf`) raised `OSError`
+   itself, before the native loader was even reached, unless
+   `NEURON_INTERNAL_SKIP_LIBNRT_CHECK=1` is set first (an internal,
+   undocumented switch found only by reading that source file; set below).
+2. With that switch set but the runtime library still not installed, the
+   native loader itself (`ctypes.CDLL`) raised `OSError: libnrt.so.1:
+   cannot open shared object file`, from `torch_neuronx`'s own
+   `xla.init()` -> `enable_neuron_custom_calls()`. Installing
+   `aws-neuronx-runtime-lib` (see the workflow's own install step) fixed
+   this one; once it is installed, `libnrt.so.1` exists on disk and
+   `check_compatible_libnrt()`'s own path check passes on its own, making
+   `NEURON_INTERNAL_SKIP_LIBNRT_CHECK=1` a no-op in this specific
+   configuration -- kept anyway as a documented, inexpensive guard against
+   a future Neuron release moving that check earlier again, not because a
+   real run currently needs it.
+
+A third real run went past both of those and produced a real NEFF, then
+failed in `torch.jit.save()`/`torch.jit.load()` (not in `trace()` itself,
+and not in anything this file still does): `torch.jit.load()` went on to
+initialize the Neuron Runtime and failed with no device present. That
+round-trip was removed; this check now stops at confirming the `.neff`
+file `trace()` already wrote.
 
 Usage:
     neuron_cpu_compile_check.py [--target TARGET]
 
-Exits 0 with a non-empty .neff file written to a temporary directory on
-success; exits 1 with a GitHub Actions error annotation on any failure
-(import or trace).
+Exits 0 once a non-empty .neff file has been confirmed on disk; exits 1
+with a GitHub Actions error annotation on any failure (import, trace, or
+the file not being there).
 """
 from __future__ import annotations
 
@@ -46,27 +75,25 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Must be set before `import torch_neuronx` (see the module docstring):
-# that import chain checks for the real Neuron runtime library and raises
-# OSError if it is not installed, which is always true on this CPU-only
-# runner.
-os.environ.setdefault("NEURON_INTERNAL_SKIP_LIBNRT_CHECK", "1")
+# Must be set before `import torch_neuronx` (see the module docstring,
+# finding 1): a documented guard, not currently load-bearing in this exact
+# package configuration (finding 2).
+# TEMP TEST: verifying whether this is still needed now that the runtime lib is installed
+# os.environ.setdefault("NEURON_INTERNAL_SKIP_LIBNRT_CHECK", "1")
 
 
 def error(message: str) -> None:
-    print(f"::error::{message}", file=sys.stderr)
+    for line in message.splitlines() or [""]:
+        print(f"::error::{line}", file=sys.stderr)
 
 
 def build_example_model() -> tuple[object, tuple[object, ...]]:
-    """A tiny two-layer MLP, deliberately minimal.
+    """A tiny two-layer MLP, deliberately minimal and fixed.
 
-    This is not a stand-in for any model this platform's example charts run
-    (none of `examples/` currently ships Trainium-specific model code, see
-    the issue this check was added under); it exists only to exercise the
-    Neuron compiler's tracing and lowering path end to end with a model
-    small enough to compile in a few seconds on a shared CI runner. Its
-    shape matches the AWS Neuron SDK's own "build your first model"
-    quickstart tutorial, cited above.
+    See the module docstring: this shape is taken from the Neuron SDK's
+    own quickstart, chosen only because it is small enough to compile in a
+    few seconds on a shared CI runner, and is not a stand-in for anything
+    this platform ships for Trainium.
     """
     import torch
     import torch.nn as nn
@@ -99,14 +126,18 @@ def main() -> int:
     try:
         import torch
         import torch_neuronx
-    except ImportError as exc:
+    except Exception as exc:  # noqa: BLE001 - an import-time OSError is a documented failure mode here, not only ImportError
         error(f"could not import torch / torch_neuronx: {exc}")
         return 1
 
     print(f"torch {torch.__version__}, torch_neuronx {torch_neuronx.__version__}")
     print(f"compiling for --target {args.target} with cpu_backend=True (no Neuron device on this host)")
 
-    model, example_inputs = build_example_model()
+    try:
+        model, example_inputs = build_example_model()
+    except Exception as exc:  # noqa: BLE001
+        error(f"build_example_model() failed: {exc}")
+        return 1
 
     with tempfile.TemporaryDirectory(prefix="neuron-cpu-compile-") as workdir:
         try:
@@ -121,6 +152,16 @@ def main() -> int:
             error(f"torch_neuronx.trace(cpu_backend=True) failed: {exc}")
             return 1
 
+        if traced is None:
+            error("torch_neuronx.trace() returned None without raising")
+            return 1
+
+        # Deliberately stops here, at the NEFF trace() already wrote to
+        # disk. See the module docstring's third finding for why a
+        # torch.jit.save()/torch.jit.load() round-trip was tried and
+        # removed: torch.jit.load() itself goes on to initialize the
+        # Neuron Runtime, which is real-hardware territory this check has
+        # no business depending on.
         neff_candidates = sorted(Path(workdir).rglob("*.neff"))
         if not neff_candidates:
             error(f"trace() returned without raising, but no .neff file was written under {workdir}")
@@ -131,19 +172,6 @@ def main() -> int:
             if size == 0:
                 error(f"{neff} is empty")
                 return 1
-
-        # Deliberately stops here, at the NEFF on disk. torch.jit.save()
-        # followed by torch.jit.load() was tried as an extra round-trip
-        # check and, on a real run of this workflow (2026-11-26), made
-        # torch.jit.load() itself initialize the Neuron Runtime (NRT) --
-        # which fails with no device present, exactly the failure this
-        # check exists to avoid depending on. The traced ScriptModule's
-        # embedded neuron::Model op is apparently prepared for execution
-        # at load time, not purely deserialized; that is real-hardware
-        # territory and out of scope for a CPU-only compile check.
-        if traced is None:
-            error("torch_neuronx.trace() returned None")
-            return 1
 
     print("OK: compiled a tiny model to a NEFF with no Neuron device present")
     return 0
