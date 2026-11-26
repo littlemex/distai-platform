@@ -12,10 +12,11 @@ image:
   # Not the NVIDIA vllm/vllm-openai image with a flag: a separate build.
   repository: public.ecr.aws/neuron/pytorch-inference-vllm-neuronx
   tag: 0.29.0.1.2.0-neuronx-py314-sdk2.33.1-ubuntu26.04
-  # Empty until the digest is confirmed by pulling this tag on the
-  # verification runner; pin it then (repository:tag@digest), the same way
-  # the NVIDIA chart pins its image.
-  digest: ""
+  # Confirmed against the registry's own v2 manifest API (Docker-Content-Digest
+  # header on a GET of this exact tag, 2026-11-26) -- a metadata-only query,
+  # the same thing `docker manifest inspect`/`crane digest` do, not a layer
+  # pull. Single-platform manifest (this image is not a multi-arch index).
+  digest: "sha256:7e44e4f610c37bd0db785154d9ce44d78deafcadd0cd3a04e3dd6ca8b6eb8a88"
   pullPolicy: IfNotPresent
 
 model:
