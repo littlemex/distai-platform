@@ -327,7 +327,7 @@ run "budget_limit_usd_rejects_a_cell_tag_mismatch" {
   # key's absence.
   variables {
     budget_limit_usd = 10
-    tags              = { "distai-platform/cell" = "some-other-cell" }
+    tags             = { "distai-platform/cell" = "some-other-cell" }
   }
 
   expect_failures = [aws_budgets_budget.cell[0]]
