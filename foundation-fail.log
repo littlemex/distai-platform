@@ -1,0 +1,183 @@
+infra/foundation static checks	UNKNOWN STEP	﻿2026-11-26T09:59:05.5519032Z Current runner version: '2.338.2'
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5538555Z ##[group]Runner Image Provisioner
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5539166Z Hosted Compute Agent
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5539635Z Version: 20261111.635
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5540169Z Commit: b8a594ea514ff44cadb5342986c68b1eac6e22ed
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5540707Z Build Date: 2026-11-11T01:49:01Z
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5541209Z Worker ID: {f99f7d87-9b29-4cab-b18d-37751bbf3a64}
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5541703Z Region: us-east-1
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5542116Z Cloud: AWS
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5542488Z ##[endgroup]
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5543368Z ##[group]Operating System
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5543833Z Ubuntu
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5544187Z 24.04.5
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5544575Z LTS
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5544960Z ##[endgroup]
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5545360Z ##[group]Runner Image
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5545786Z Image: ubuntu-24.04
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5546178Z Version: 20261116.133.1
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5547334Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20261116.133/images/ubuntu/Ubuntu2404-Readme.md
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5548449Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20261116.133
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5549136Z ##[endgroup]
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5549946Z ##[group]GITHUB_TOKEN Permissions
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5551536Z Contents: read
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5551973Z Metadata: read
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5552369Z ##[endgroup]
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5554060Z Secret source: Actions
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5554681Z Cache mode: write
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5555263Z Prepare workflow directory
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5861097Z Prepare all required actions
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.5913799Z Getting action download info
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:05.7231777Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.2868499Z Complete job name: infra/foundation static checks
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3630550Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3632094Z with:
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3632815Z   fetch-depth: 1
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3633647Z   persist-credentials: false
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3634563Z   repository: littlemex/distai-platform
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3641194Z   token: ***
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3642181Z   ssh-strict: true
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3642936Z   ssh-user: git
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3643647Z   clean: true
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3644624Z   sparse-checkout-cone-mode: true
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3645562Z   fetch-tags: false
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3646380Z   show-progress: true
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3647343Z   lfs: false
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3648078Z   submodules: false
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3648936Z   set-safe-directory: true
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3649824Z   allow-unsafe-pr-checkout: false
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:07.3650981Z ##[endgroup]
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:08.8394699Z Syncing repository: littlemex/distai-platform
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:08.8396130Z ##[group]Getting Git version info
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:08.8396676Z Working directory is '/home/runner/work/distai-platform/distai-platform'
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:08.8397989Z [command]/usr/bin/git version
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:08.9166505Z git version 2.56.1
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:08.9180076Z ##[endgroup]
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:08.9188181Z Temporarily overriding HOME='/home/runner/work/_temp/b60a412f-fac3-4075-bdaa-a7fa60346c38' before making global git config changes
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:08.9189154Z Adding repository directory to the temporary git global config as a safe directory
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:08.9191543Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/distai-platform/distai-platform
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:08.9242347Z Deleting the contents of '/home/runner/work/distai-platform/distai-platform'
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:08.9244387Z ##[group]Determining repository object format
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:08.9246788Z ##[endgroup]
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:08.9247976Z ##[group]Initializing the repository
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:08.9249466Z [command]/usr/bin/git init /home/runner/work/distai-platform/distai-platform
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0113385Z hint: Using 'master' as the name for the initial branch. This default branch name
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0114849Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0115324Z hint: to use in all of your new repositories, which will suppress this warning,
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0115704Z hint: call:
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0115967Z hint:
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0116332Z hint: 	git config --global init.defaultBranch <name>
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0116651Z hint:
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0117259Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0117743Z hint: 'development'. The just-created branch can be renamed via this command:
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0118141Z hint:
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0118406Z hint: 	git branch -m <name>
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0118675Z hint:
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0119021Z hint: Disable this message with "git config set advice.defaultBranchName false"
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0125202Z Initialized empty Git repository in /home/runner/work/distai-platform/distai-platform/.git/
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0135401Z [command]/usr/bin/git remote add origin https://github.com/littlemex/distai-platform
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0184576Z ##[endgroup]
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0185286Z ##[group]Disabling automatic garbage collection
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0187545Z [command]/usr/bin/git config --local gc.auto 0
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0213439Z ##[endgroup]
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0214272Z ##[group]Setting up auth
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0214621Z Removing SSH command configuration
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0217609Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.0244732Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.2072443Z Removing HTTP extra header
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.2077391Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.2109748Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.2255496Z Removing includeIf entries pointing to credentials config files
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.2259829Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.2283596Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.2436240Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-840a6c44-7f4a-47b5-baf8-e9e56f24e67b.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.2464593Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/distai-platform/distai-platform/.git.path /home/runner/work/_temp/git-credentials-840a6c44-7f4a-47b5-baf8-e9e56f24e67b.config
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.2486339Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/distai-platform/distai-platform/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-840a6c44-7f4a-47b5-baf8-e9e56f24e67b.config
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.2508098Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-840a6c44-7f4a-47b5-baf8-e9e56f24e67b.config
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.2530646Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-840a6c44-7f4a-47b5-baf8-e9e56f24e67b.config
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.2551043Z ##[endgroup]
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.2551512Z ##[group]Fetching the repository
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.2555543Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +16cccbd7ac861fade2a921f8c512ac6999a4ceaa:refs/remotes/pull/83/merge
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6569698Z From https://github.com/littlemex/distai-platform
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6570696Z  * [new ref]         16cccbd7ac861fade2a921f8c512ac6999a4ceaa -> pull/83/merge
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6572486Z ##[endgroup]
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6573026Z ##[group]Determining the checkout info
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6573450Z ##[endgroup]
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6574884Z [command]/usr/bin/git sparse-checkout disable
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6635634Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6661627Z ##[group]Checking out the ref
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6665029Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/83/merge
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6877103Z Note: switching to 'refs/remotes/pull/83/merge'.
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6877448Z 
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6877708Z You are in 'detached HEAD' state. You can look around, make experimental
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6878622Z changes and commit them, and you can discard any commits you make in this
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6879100Z state without impacting any branches by switching back to a branch.
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6879363Z 
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6879541Z If you want to create a new branch to retain commits you create, you may
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6879959Z do so (now or later) by using -c with the switch command. Example:
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6880153Z 
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6880302Z   git switch -c <new-branch-name>
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6880448Z 
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6880562Z Or undo this operation with:
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6880713Z 
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6880835Z   git switch -
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6881000Z 
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6881171Z Turn off this advice by setting config variable advice.detachedHead to false
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6881412Z 
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6881695Z HEAD is now at 16cccbd Merge 8c84bf783f5d65ea60d3d551e197b91ba4b27650 into 85be777b8b4edb60e090dc020d1302c52c166d10
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6889469Z ##[endgroup]
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6925249Z [command]/usr/bin/git log -1 --format=%H
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6942167Z 16cccbd7ac861fade2a921f8c512ac6999a4ceaa
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6947449Z ##[group]Removing auth
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6947784Z Removing SSH command configuration
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6950253Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.6972291Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7123267Z Removing HTTP extra header
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7123807Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7145508Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7291198Z Removing includeIf entries pointing to credentials config files
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7293459Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7315614Z includeif.gitdir:/home/runner/work/distai-platform/distai-platform/.git.path
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7316462Z includeif.gitdir:/home/runner/work/distai-platform/distai-platform/.git/worktrees/*.path
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7317464Z includeif.gitdir:/github/workspace/.git.path
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7318078Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7321818Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/distai-platform/distai-platform/.git.path
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7339117Z /home/runner/work/_temp/git-credentials-840a6c44-7f4a-47b5-baf8-e9e56f24e67b.config
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7346559Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/distai-platform/distai-platform/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-840a6c44\-7f4a\-47b5\-baf8\-e9e56f24e67b\.config
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7371594Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/distai-platform/distai-platform/.git/worktrees/*.path
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7389514Z /home/runner/work/_temp/git-credentials-840a6c44-7f4a-47b5-baf8-e9e56f24e67b.config
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7394628Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/distai-platform/distai-platform/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-840a6c44\-7f4a\-47b5\-baf8\-e9e56f24e67b\.config
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7418312Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7435089Z /github/runner_temp/git-credentials-840a6c44-7f4a-47b5-baf8-e9e56f24e67b.config
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7439516Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-840a6c44\-7f4a\-47b5\-baf8\-e9e56f24e67b\.config
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7463631Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7481811Z /github/runner_temp/git-credentials-840a6c44-7f4a-47b5-baf8-e9e56f24e67b.config
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7486237Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-840a6c44\-7f4a\-47b5\-baf8\-e9e56f24e67b\.config
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7509701Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7653806Z Removing credentials config '/home/runner/work/_temp/git-credentials-840a6c44-7f4a-47b5-baf8-e9e56f24e67b.config'
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7660098Z ##[endgroup]
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7817636Z ##[group]Run set -euo pipefail
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7818090Z ^[[36;1mset -euo pipefail^[[0m
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7818440Z ^[[36;1mcurl -fsSL -o "${RUNNER_TEMP}/terraform.zip" \^[[0m
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7818899Z ^[[36;1m  "https://releases.hashicorp.com/terraform/${TF_VER}/terraform_${TF_VER}_linux_amd64.zip"^[[0m
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7819385Z ^[[36;1mgot="$(sha256sum "${RUNNER_TEMP}/terraform.zip" | awk '{print $1}')"^[[0m
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7819892Z ^[[36;1m[[ "${got}" == "${TF_SHA256}" ]] || { echo "FAIL terraform ${TF_VER} checksum mismatch: got ${got}, want ${TF_SHA256}"; exit 1; }^[[0m
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7820401Z ^[[36;1msudo unzip -o "${RUNNER_TEMP}/terraform.zip" -d /usr/local/bin terraform^[[0m
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7820775Z ^[[36;1msudo chmod 0755 /usr/local/bin/terraform^[[0m
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.7821076Z ^[[36;1mterraform version^[[0m
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.8708269Z shell: /usr/bin/bash -e {0}
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.8708677Z env:
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.8708887Z   TF_VER: 1.17.2
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.8709371Z   TF_SHA256: e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:09.8709720Z ##[endgroup]
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:10.0684771Z Archive:  /home/runner/work/_temp/terraform.zip
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:10.7611807Z   inflating: /usr/local/bin/terraform  
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:10.8631215Z Terraform v1.17.2
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:10.8632969Z on linux_amd64
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:10.8633363Z 
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:10.8679876Z ##[group]Run set -euo pipefail
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:10.8680279Z ^[[36;1mset -euo pipefail^[[0m
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:10.8680542Z ^[[36;1mcurl -fsSL -o "${RUNNER_TEMP}/tflint.zip" \^[[0m
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:10.8681056Z ^[[36;1m  "https://github.com/terraform-linters/tflint/releases/download/v${TFLINT_VER}/tflint_linux_amd64.zip"^[[0m
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:10.8681530Z ^[[36;1mgot="$(sha256sum "${RUNNER_TEMP}/tflint.zip" | awk '{print $1}')"^[[0m
+infra/foundation static checks	UNKNOWN STEP	2026-11-26T09:59:10.8682027Z ^[[36;1m[[ "${got}" == "${TFLINT_SHA256}" ]] || { echo "FAIL--output truncated--	

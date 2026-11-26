@@ -201,3 +201,8 @@ variable "test_invalid_coredns_version" {
     error_message = "test_invalid_coredns_version must not be an empty string; use null to disable."
   }
 }
+# ci-verify: deliberately bad indentation to fail `terraform fmt -check` (throwaway, reverted before merge)
+    variable "ci_verify_bad_indent" {
+  type    = string
+  default = "x"
+    }
