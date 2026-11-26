@@ -79,9 +79,9 @@ spec:
               fi
               cd /opt/gpu-healthcheck
               export INSTANCE_TYPE="__INSTANCE_TYPE__"
-              echo "=== running lightweight suite (checks 0-3) ==="
+              echo "=== running suite: __SUITE_ARGS__ ==="
               RESULT=0
-              ./gpu-healthcheck.sh --suite lightweight --json --results-dir /tmp/gpu-healthcheck-results || RESULT=$?
+              ./gpu-healthcheck.sh __SUITE_ARGS__ --json --results-dir /tmp/gpu-healthcheck-results || RESULT=$?
               echo "=== summary.json ==="
               cat /tmp/gpu-healthcheck-results/summary.json || true
               echo "=== per-check results ==="

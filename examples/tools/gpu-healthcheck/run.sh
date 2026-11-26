@@ -36,6 +36,13 @@
 #                     INSTANCE_TYPE's own EFA_COUNT off by +1, for this
 #                     tool's own deliberate-failure Test Plan step only.
 #                     Never set for a real pre-flight.
+#   SUITE_ARGS        Passed to gpu-healthcheck.sh verbatim (default
+#                     "--suite lightweight", checks 0-3, the pre-flight's
+#                     own scope). "--suite intensive --exclusive" also
+#                     runs checks 4-6 (DCGM L4, NCCL allreduce, EFA
+#                     loopback); upstream itself refuses --suite intensive
+#                     without --exclusive, since those checks assume no
+#                     other GPU workload is on the node at the same time.
 #   KUBECTL           (kubectl)
 set -euo pipefail
 
@@ -47,6 +54,16 @@ NAMESPACE="${NAMESPACE:-gpu-healthcheck}"
 QUEUE_NAME="${QUEUE_NAME:-}"
 BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/cloud-native/dcgm:3.3.7-1-ubuntu22.04}"
 RUN_ID="${RUN_ID:-$(date +%s)}"
+# The arguments gpu-healthcheck.sh itself is invoked with, verbatim
+# (upstream's own --suite/--check/--exclusive/--dry-run flags). Default
+# matches this script's own previous, hardcoded behavior exactly (checks
+# 0-3, the pre-flight's own stated scope) -- no behavior change for a
+# caller that does not set this. Set to "--suite intensive --exclusive"
+# to also run checks 4-6 (DCGM L4, NCCL allreduce, EFA loopback); upstream
+# itself refuses --suite intensive without --exclusive, since those
+# checks assume no other GPU workload is running on the node at the same
+# time -- true that, not merely pass it, before setting this.
+SUITE_ARGS="${SUITE_ARGS:---suite lightweight}"
 INJECT_BAD_EFA_COUNT="${INJECT_BAD_EFA_COUNT:-0}"
 
 WORK="$(mktemp -d)"
@@ -126,6 +143,7 @@ sed -i.bak \
     -e "s/__NAMESPACE__/${NAMESPACE}/g" \
     -e "s/__INSTANCE_TYPE__/${INSTANCE_TYPE}/g" \
     -e "s#__BASE_IMAGE__#${BASE_IMAGE}#g" \
+    -e "s#__SUITE_ARGS__#${SUITE_ARGS}#g" \
     "${job_tmpl}"
 grep -q '^#' "${job_tmpl}" && sed -i.bak '/^#/d' "${job_tmpl}"
 cat "${job_tmpl}" >> "${RENDERED}"
