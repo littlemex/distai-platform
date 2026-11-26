@@ -346,12 +346,23 @@ in this PR's own Test Results.
 A freshly launched Karpenter node reaches `Ready: True` as soon as kubelet
 registers it, before its own accelerator device-plugin DaemonSet (or any
 future CSI driver) has advertised anything. A pool opts out of the race by
-setting `capacity-pool`'s `pool.startupTaints` to
-`distai.dev/startup-not-ready:NoSchedule` - a plain `NodePool`
-`spec.template.spec.startupTaints` entry, never mirrored as a `ResourceFlavor`
-toleration the way `accelerator.taint`/`tenancy.teamTaint` are (it is a
-node-readiness gate every Pod eventually tolerates, not a tenancy or
-accelerator-class scheduling boundary). `vigil-controller`, delivered in the
+setting `capacity-pool`'s `pool.startupTaints` to the one key/effect
+`vigil-controller` (below) is configured to watch -
+`check_startup_taint_keys.py` fails the static checks if the two ever
+disagree:
+
+```yaml
+pool:
+  startupTaints:
+    - key: distai.dev/startup-not-ready
+      effect: NoSchedule
+```
+
+A plain `NodePool.spec.template.spec.startupTaints` entry, never mirrored
+as a `ResourceFlavor` toleration the way `accelerator.taint`/
+`tenancy.teamTaint` are (it is a node-readiness gate every Pod eventually
+tolerates, not a tenancy or accelerator-class scheduling boundary).
+`vigil-controller`, delivered in the
 `controllers` step, watches for that key, works out which DaemonSets a node
 is actually expected to run (the same scheduling predicates kube-scheduler
 itself uses, so adding a new accelerator add-on needs no change to this

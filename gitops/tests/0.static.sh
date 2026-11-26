@@ -17,6 +17,11 @@
 #      overridableKeys sub-check runs `helm dependency build` on a
 #      temporary copy of each wrapper chart, so it needs network access to
 #      that chart's upstream repository);
+#   4a. every gitops/cells/*/capacity-pool/*.yaml's pool.startupTaints entry
+#      names the same key and effect gitops/addons/vigil-controller/addon.yaml
+#      is configured to watch, so a typo or a second, unwatched key wedges a
+#      node permanently instead of being caught here (check_startup_taint_keys.py,
+#      issue #96);
 #   5. `helm lint` and `helm template` of charts/capacity-pool and
 #      charts/smoke, each against one real cells/*/{capacity-pool,smoke}/*.yaml
 #      parameter file's own `values:`; charts/accel-device-classes (#28)
@@ -244,6 +249,18 @@ fi
 run_check "gitops contract (check_gitops_contract.py)" \
   "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
   python3 "${SCRIPT_DIR}/check_gitops_contract.py" "${REPO_ROOT}"
+
+# -------------------------------------------- 4a. startup-taint key cross-check (#96)
+#
+# capacity-pool's own pool.startupTaints is a generic pass-through on
+# purpose (the chart does not know vigil-controller exists); this is the
+# one place that keeps every cell's own startupTaints entry pointed at
+# the key/effect vigil-controller actually watches, so a typo or a
+# second, unwatched key wedges a node silently instead of failing a
+# review here.
+run_check "startup-taint keys match vigil-controller (check_startup_taint_keys.py, #96)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_startup_taint_keys.py" "${REPO_ROOT}"
 
 # -------------------------------------- 4b. issue #27's contract checks
 #
