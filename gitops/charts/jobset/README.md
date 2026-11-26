@@ -127,9 +127,15 @@ are no longer reconciled.
   dependency of a Git-sourced chart without a repository credential is
   confirmed only for `dcgm-exporter`'s classic Helm repository
   dependency, not for an OCI one; real-hardware verification settles it.
-- Whether `skipCrds: true` is load-bearing on the managed capability or a
-  no-op is likewise left to real-hardware verification (see the catalog
-  entry's comment).
+- `skipCrds: true` is confirmed load-bearing, not a no-op (`helm template
+  --include-crds` renders the CustomResourceDefinition from the upstream
+  dependency's own `crds/` folder, without the flag it does not render
+  at all -- checked locally, no cluster needed). What real-hardware
+  verification settles is narrower: whether setting it on the generated
+  Argo CD Application actually keeps that Application from listing the
+  CustomResourceDefinition as one of its own owned resources, so
+  `jobset-crd`'s own Application stays the CRD's only owner (see the
+  catalog entry's comment).
 - The controller's webhook certificate is generated and rotated by the
   controller itself into a `Secret` this chart renders empty, and its CA
   bundle is patched into the two webhook configurations at runtime. Argo

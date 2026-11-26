@@ -92,10 +92,26 @@ spec:
                         --master-addr="$MASTER_ADDR" --master-port="$MASTER_PORT" \
                         /opt/train/train.py
                   env:
+                    # int before quote everywhere on this page (also
+                    # TOTAL_STEPS/CHECKPOINT_EVERY/STEP_SLEEP_SECONDS/
+                    # MASTER_PORT below): Helm's YAML decoder reads a
+                    # values-FILE integer as float64 (go-yaml has no
+                    # separate int type for a plain scalar), and Go's
+                    # default float-to-string formatting switches to
+                    # scientific notation once the value is large enough
+                    # (confirmed: training.totalSteps: 1000000 from a -f
+                    # values file renders "1e+06" with a bare `| quote`,
+                    # which Python's `int()` then rejects) -- `--set`
+                    # alone never shows this, because its own parser
+                    # infers int directly, which is why this was not
+                    # caught by a `--set`-only render. `int` (Sprig)
+                    # converts the float back to Go's int type first, so
+                    # `quote` always prints a plain decimal string
+                    # whichever way the value was supplied.
                     - name: NNODES
-                      value: {{ $w.replicas | quote }}
+                      value: {{ $w.replicas | int | quote }}
                     - name: NPROC_PER_NODE
-                      value: {{ $w.gpusPerNode | quote }}
+                      value: {{ $w.gpusPerNode | int | quote }}
                     # This Pod's Job index within the replicated job, set by
                     # the JobSet controller: the torchrun node rank.
                     - name: NODE_RANK
@@ -105,7 +121,7 @@ spec:
                     - name: MASTER_ADDR
                       value: {{ printf "%s-worker-0-0.%s" $name $name | quote }}
                     - name: MASTER_PORT
-                      value: {{ $w.masterPort | quote }}
+                      value: {{ $w.masterPort | int | quote }}
                     - name: BOTO3_VERSION
                       value: {{ .Values.boto3Version | quote }}
                     - name: CHECKPOINT_BUCKET
@@ -117,11 +133,11 @@ spec:
                       value: {{ . | quote }}
                     {{- end }}
                     - name: TOTAL_STEPS
-                      value: {{ .Values.training.totalSteps | quote }}
+                      value: {{ .Values.training.totalSteps | int | quote }}
                     - name: CHECKPOINT_EVERY
-                      value: {{ .Values.training.checkpointEvery | quote }}
+                      value: {{ .Values.training.checkpointEvery | int | quote }}
                     - name: STEP_SLEEP_SECONDS
-                      value: {{ .Values.training.stepSleepSeconds | quote }}
+                      value: {{ .Values.training.stepSleepSeconds | int | quote }}
                     # The image's user does not exist in /etc/passwd for this
                     # UID; give pip and Python a writable home.
                     - name: HOME

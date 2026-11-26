@@ -262,12 +262,18 @@ fi
 # 1.e2e.sh step 4 proves "resumed, not restarted from scratch" by finding
 # this line in the restarted Pods' logs; a script that never prints it
 # would make that step time out on real hardware instead of failing here.
-# Looked for in every file of the chart (the script may live in files/,
-# in a ConfigMap template, or as a Python file next to it).
-if [[ -d "${CHART}" ]] && grep -rqF "${TRAINING_RESUME_LOG_PREFIX}" "${CHART}"; then
+# Looked for in the chart's own code/template files only (the script may
+# live in files/, in a ConfigMap template, or as a Python file next to
+# it) -- *.md is deliberately excluded: this chart's own README quotes
+# the exact log line as documentation, which made an earlier version of
+# this check pass even when it was pointed at a *.py/*.tpl glob that
+# excluded train.py by mistake, because the README match alone was
+# enough. Excluding docs here means the only way to pass is a real code
+# file containing the line, not a description of it.
+if [[ -d "${CHART}" ]] && grep -rqF --include='*.py' --include='*.tpl' --include='*.yaml' --include='*.yml' --include='*.sh' "${TRAINING_RESUME_LOG_PREFIX}" "${CHART}"; then
   pass "the chart's training code prints the resume line 1.e2e.sh greps for ('${TRAINING_RESUME_LOG_REGEX}')"
 else
-  fail "no file under examples/training/pytorch-ddp/ contains '${TRAINING_RESUME_LOG_PREFIX}' -- the training script must log the step it resumed from (tests/chart-contract.sh's TRAINING_RESUME_LOG_REGEX)"
+  fail "no code/template file under examples/training/pytorch-ddp/ contains '${TRAINING_RESUME_LOG_PREFIX}' -- the training script must log the step it resumed from (tests/chart-contract.sh's TRAINING_RESUME_LOG_REGEX; *.md is deliberately excluded, see this check's own comment)"
 fi
 
 echo

@@ -227,10 +227,16 @@ def check_crd_chart(root: str, helm: str) -> tuple[list[str] | None, str | None]
     check(f"{rel} spec.scope is Namespaced (a team applies it into its own namespace)", spec.get("scope") == "Namespaced", f"got {spec.get('scope')!r}")
     versions = {v.get("name"): v for v in spec.get("versions") or [] if isinstance(v, dict)}
     v = versions.get(JOBSET_VERSION) or {}
+    # Built outside the f-string on purpose, not nested inside one with the
+    # same quote character: a same-quote nested f-string only parses on
+    # Python 3.12+ (PEP 701), and nothing else in this repository's static
+    # checks pins a Python version that high (gitops/tests/0.static.sh runs
+    # this file the same way as every other uv-run check here).
+    versions_summary = ", ".join(f"{n}: served={x.get('served')} storage={x.get('storage')}" for n, x in versions.items())
     check(
         f"{rel} serves and stores {JOBSET_VERSION} (the apiVersion the worked example's JobSet uses)",
         v.get("served") is True and v.get("storage") is True,
-        f"versions: {{{', '.join(f'{n}: served={x.get('served')} storage={x.get('storage')}' for n, x in versions.items())}}}",
+        f"versions: {{{versions_summary}}}",
     )
 
     header, body = split_header(text)

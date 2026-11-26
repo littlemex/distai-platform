@@ -567,7 +567,13 @@ pass "step 4: steady state, all ${E2E_REPLICAS} workers Running and checkpoint s
 
 restarts_before="$(kn get jobsets.jobset.x-k8s.io "${JOBSET_NAME}" -o jsonpath='{.status.restarts}')"
 restarts_before="${restarts_before:-0}"
-mapfile -t uids_before < <(kn get pods -l "$(JOBSET_PODS_SELECTOR)" -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}')
+# while read, not mapfile -t: mapfile needs Bash 4+ (0.static.sh's own
+# shell_scripts/python_files arrays already use this same while-read
+# form elsewhere in this chart's tests, for the same reason -- this
+# script's own shebang does not pin a minimum Bash version, and macOS
+# still ships Bash 3.2 by default).
+uids_before=()
+while IFS= read -r u; do uids_before+=("${u}"); done < <(kn get pods -l "$(JOBSET_PODS_SELECTOR)" -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}')
 step_before_kill="$(latest_checkpoint)"
 victim="$(running_pods | sort | tail -n1)"
 kn delete pod "${victim}" --wait=false >/dev/null || fail "step 4: deleting worker Pod ${victim}"
