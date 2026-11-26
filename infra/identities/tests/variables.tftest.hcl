@@ -208,6 +208,51 @@ run "two_entries_get_two_independent_roles_and_associations" {
   }
 }
 
+run "role_name_override_lets_import_target_match_an_existing_role" {
+  command = plan
+
+  variables {
+    platform_identities = {
+      legacy-imagebuilder = {
+        namespace       = "image-builder"
+        service_account = "image-builder"
+        role_name       = "example-cell-legacy-imagebuilder"
+        s3 = [{
+          bucket   = "distai-platform-images"
+          prefixes = ["manifests/"]
+        }]
+      }
+    }
+  }
+
+  assert {
+    condition     = aws_iam_role.entry["legacy-imagebuilder"].name == "example-cell-legacy-imagebuilder"
+    error_message = "an entry with role_name set must name its role exactly that value, not the derived <cluster_name>-identity-<key> default (the whole point: letting an already-existing role's real name be imported without a replacement)."
+  }
+}
+
+run "rejects_role_name_collision" {
+  command = plan
+
+  variables {
+    platform_identities = {
+      a = {
+        namespace       = "kube-system"
+        service_account = "a"
+        role_name       = "example-cell-identity-b"
+        policy_arns     = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]
+      }
+      b = {
+        namespace       = "kube-system"
+        service_account = "b"
+        policy_arns     = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]
+      }
+    }
+  }
+
+  expect_failures = [var.platform_identities]
+}
+
 run "rejects_entry_with_no_grant_at_all" {
   command = plan
 

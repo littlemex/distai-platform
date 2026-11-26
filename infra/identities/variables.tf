@@ -27,10 +27,22 @@ variable "platform_identities" {
     #22 Decision 2's single shared, ABAC-scoped role, a deliberately
     different mechanism (see README.md).
 
-    Each map key is a short, stable name for the add-on (becomes part of
-    its IAM role's name); each value declares:
+    Each map key is a short, stable, logical name for the add-on (by
+    default also becomes part of its IAM role's name - see role_name);
+    each value declares:
       namespace       - Kubernetes namespace of the add-on's ServiceAccount.
       service_account  - name of that ServiceAccount.
+      role_name       - optional. The entry's own IAM role is named
+                         "<cluster_name>-identity-<key>" by default; set
+                         role_name to adopt an already-existing role under
+                         its own real name instead (for example when
+                         importing a role created by hand before this
+                         mechanism existed - see README.md "Adopting an
+                         already-existing, hand-rolled identity"). IAM role
+                         names cannot be changed in place, so a map key
+                         that happens not to match an existing role's real
+                         name must not force a replacement; this field is
+                         the escape hatch for that mismatch.
       s3              - list of { bucket, prefixes, write }. Every bucket
                          grants s3:GetObject/s3:ListBucket scoped to exactly
                          the listed key prefixes; write = true additionally
@@ -57,6 +69,7 @@ variable "platform_identities" {
   type = map(object({
     namespace       = string
     service_account = string
+    role_name       = optional(string, null)
     s3 = optional(list(object({
       bucket   = string
       prefixes = list(string)
@@ -74,8 +87,30 @@ variable "platform_identities" {
   }
 
   validation {
-    condition     = alltrue([for k in keys(var.platform_identities) : length("${var.cluster_name}-identity-${k}") <= 64])
-    error_message = "cluster_name plus every platform_identities key must fit IAM's 64-character role-name limit as \"<cluster_name>-identity-<key>\"; shorten cluster_name or the key."
+    condition = alltrue([
+      for k, v in var.platform_identities :
+      v.role_name != null || length("${var.cluster_name}-identity-${k}") <= 64
+    ])
+    error_message = "cluster_name plus every platform_identities key must fit IAM's 64-character role-name limit as \"<cluster_name>-identity-<key>\" unless that entry sets its own role_name; shorten cluster_name or the key, or set role_name explicitly."
+  }
+
+  validation {
+    condition = alltrue([
+      for v in values(var.platform_identities) :
+      v.role_name == null || can(regex("^[\\w+=,.@-]{1,64}$", v.role_name))
+    ])
+    error_message = "Every entry's role_name, when set, must be 1 to 64 characters and match IAM's own role-name character set (letters, digits, and + = , . @ _ -)."
+  }
+
+  validation {
+    condition = alltrue([
+      for k, v in var.platform_identities :
+      length([
+        for k2, v2 in var.platform_identities :
+        k2 if k2 != k && coalesce(v2.role_name, "${var.cluster_name}-identity-${k2}") == coalesce(v.role_name, "${var.cluster_name}-identity-${k}")
+      ]) == 0
+    ])
+    error_message = "Two entries of platform_identities resolve to the same IAM role name (either the same explicit role_name, or the derived \"<cluster_name>-identity-<key>\" name colliding with another entry's role_name); every entry must have a distinct role name."
   }
 
   validation {

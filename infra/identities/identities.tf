@@ -10,6 +10,19 @@
 # cell's own foundation lifetime, not an independently added/removed
 # add-on), and this layer does not reproduce it.
 
+locals {
+  # "<cluster_name>-identity-<key>" by default; an entry's own role_name
+  # overrides it so an already-existing, hand-rolled role (whose real name
+  # does not follow that convention) can be imported under its own name
+  # without a replacement - IAM role names cannot be changed in place, so
+  # the role's own `name` argument below must equal the already-existing
+  # role's real name exactly for `terraform import` to plan an update
+  # instead of a destroy-and-recreate.
+  role_names = {
+    for key, entry in var.platform_identities : key => coalesce(entry.role_name, "${var.cluster_name}-identity-${key}")
+  }
+}
+
 # --- Trust policy: only this entry's own namespace+service_account -------
 #
 # Same shape as infra/foundation/karpenter.tf's own
@@ -62,7 +75,7 @@ data "aws_iam_policy_document" "identity_assume" {
 resource "aws_iam_role" "entry" {
   for_each = var.platform_identities
 
-  name               = "${var.cluster_name}-identity-${each.key}"
+  name               = local.role_names[each.key]
   description        = "distai-platform add-on identity (issue #8): ${each.key}, ${each.value.namespace}/${each.value.service_account}"
   assume_role_policy = data.aws_iam_policy_document.identity_assume[each.key].json
 }

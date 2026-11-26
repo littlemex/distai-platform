@@ -167,7 +167,14 @@ tff init -input=false \
   || fail "terraform init infra/foundation (key ${FOUNDATION_STATE_KEY})"
 pass "terraform init infra/foundation, key ${FOUNDATION_STATE_KEY}"
 
-existing_state="$(tff state list 2>&1)" || fail "terraform state list (foundation): ${existing_state}"
+# terraform state list exits 0 with empty output for an empty state; for a
+# backend with no state object at all yet it prints "No state file was
+# found!" to stderr and exits non-zero (same as
+# infra/foundation/tests/1.e2e.sh's own equivalent check) - also "empty".
+if ! existing_state="$(tff state list 2>&1)"; then
+  [[ "${existing_state}" == *"No state file"* ]] || fail "terraform state list (foundation): ${existing_state}"
+  existing_state=""
+fi
 [[ -z "${existing_state}" ]] || fail "foundation state already has resources, refusing to apply over it: $(tr '\n' ' ' <<<"${existing_state}")"
 pass "state at key ${FOUNDATION_STATE_KEY} has no resources before apply"
 
@@ -180,7 +187,8 @@ CLUSTER_NAME="$(tff output -raw cluster_name)"
 tff output -raw cluster_certificate_authority_data >/dev/null || fail "foundation output cluster_certificate_authority_data missing"
 aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --kubeconfig "${KUBECONFIG}" >/dev/null \
   || fail "aws eks update-kubeconfig"
-wait_until 180 10 "kubectl reaches the cluster" kubectl get nodes >/dev/null 2>&1
+wait_until 180 10 "kubectl reaches the cluster" kubectl get nodes >/dev/null 2>&1 \
+  || fail "kubectl did not reach the cluster through the access entry within 180s"
 pass "kubectl reaches the cluster through the access entry"
 two_ready_nodes() {
   [[ "$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l | tr -d ' ')" -ge 2 ]]
@@ -241,7 +249,10 @@ tfi init -input=false \
   || fail "terraform init infra/identities (key ${IDENTITIES_STATE_KEY})"
 pass "terraform init infra/identities, key ${IDENTITIES_STATE_KEY}"
 
-existing_identities_state="$(tfi state list 2>&1)" || fail "terraform state list (identities): ${existing_identities_state}"
+if ! existing_identities_state="$(tfi state list 2>&1)"; then
+  [[ "${existing_identities_state}" == *"No state file"* ]] || fail "terraform state list (identities): ${existing_identities_state}"
+  existing_identities_state=""
+fi
 [[ -z "${existing_identities_state}" ]] || fail "identities state already has resources, refusing to apply over it: $(tr '\n' ' ' <<<"${existing_identities_state}")"
 pass "state at key ${IDENTITIES_STATE_KEY} has no resources before apply"
 
@@ -257,6 +268,7 @@ write_identities_tfvars() {
     "legacy-imagebuilder": {
       "namespace": "${TEST_NAMESPACE}",
       "service_account": "reader",
+      "role_name": "${LEGACY_ROLE_NAME}",
       "s3": [{"bucket": "${BUCKET}", "prefixes": ["allowed/"]}]
     }$([[ "${include_writer}" -eq 1 ]] && cat <<JSON2
 ,
@@ -355,7 +367,7 @@ for p in reader writer undeclared; do
 done
 pass "reader, writer and undeclared pods are Running"
 
-kexec() { kubectl exec -n "${TEST_NAMESPACE}" "$1" -- "${@:2}"; }
+kexec() { kubectl exec -i -n "${TEST_NAMESPACE}" "$1" -- "${@:2}"; }
 
 kexec reader aws s3 cp "s3://${BUCKET}/allowed/ok.txt" - >/dev/null \
   || fail "reader could not read s3://${BUCKET}/allowed/ok.txt (its own declared prefix)"
@@ -428,7 +440,7 @@ tfi destroy -input=false -var-file="${IDENTITIES_TFVARS}" -auto-approve || fail 
 IDENTITIES_DESTROYED=1
 pass "terraform destroy infra/identities ($(($(date +%s) - identities_destroy_start))s)"
 
-no_role_left "${NAME}-identity-legacy-imagebuilder" || fail "legacy-imagebuilder's role (now Terraform-managed) still exists after destroy"
+no_role_left "${LEGACY_ROLE_NAME}" || fail "legacy-imagebuilder's role (now Terraform-managed, under its own pre-existing name via role_name) still exists after destroy"
 pass "no identity role tagged for this run remains, by name (legacy-imagebuilder)"
 wait_until "${E2E_LEFTOVER_GRACE_SECONDS}" 10 "no IAM role tagged ${TEST_TAG_KEY}=${RUN_ID}" no_role_tagged_for_run \
   || fail "an IAM role tagged ${TEST_TAG_KEY}=${RUN_ID} still exists after destroy"

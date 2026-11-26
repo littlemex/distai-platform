@@ -29,8 +29,8 @@ This layer is deliberately the opposite shape - one role **per entry**, scoped i
 
 An add-on identity created by hand before this layer existed (exactly the shape issue #8's own Motivation describes) can be brought under Terraform without recreating it:
 
-1. Add its entry to `platform_identities`, matching its real `namespace`/`service_account` and the access it actually needs (this is usually narrower than what the hand-rolled version grants - that narrowing is the point).
-2. Import the existing role: `terraform import 'aws_iam_role.entry["<key>"]' <existing-role-name>` (the role name, not its ARN).
+1. Add its entry to `platform_identities`, matching its real `namespace`/`service_account` and the access it actually needs (this is usually narrower than what the hand-rolled version grants - that narrowing is the point). Set `role_name` to the already-existing role's own real name: IAM role names cannot be changed in place, so unless the map key you chose happens to equal `"<key>" == "<existing-role-name>"` minus the `"<cluster_name>-identity-"` prefix, the default derived name will not match the role being imported, and the next step's plan will show a replacement instead of an update.
+2. Import the existing role: `terraform import 'aws_iam_role.entry["<key>"]' <existing-role-name>` (the role name, not its ARN - must equal the `role_name` set in step 1).
 3. Run `terraform plan` and read it before applying: expect an in-place **update** of the role's trust policy and of its attached/inline policies, never a replacement (a replacement would mean the import target did not match, for example a role name typo). If the plan shows `-/+` (replace) for the role, stop and fix the entry before applying.
 4. Apply. The role's ARN does not change, so no Pod Identity association recreation is needed; a workload already using this role through the hand-rolled path keeps working, now under this layer's own narrower policy.
 
