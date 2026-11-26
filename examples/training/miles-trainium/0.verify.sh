@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# Private verification script for this investigation -- NOT part of the example's own
-# "copy-paste" procedure in README.md, which assumes a cell already exists. This script builds
-# one from scratch (same infra/foundation + gitops bootstrap lifecycle as
-# experiments/miles-trainium-smoke/run_experiment.sh) so the example can be verified end to end
-# without touching a shared cell, then always tears the cell down (trap on EXIT) with an
-# independent tag-based leftover sweep.
+# This investigation's own end-to-end verification -- NOT the example's "copy-paste" procedure
+# in README.md, which assumes a cell already exists. This script builds a disposable cell from
+# scratch (infra/foundation + the platform's own gitops bootstrap) so the example can be
+# verified without touching a shared cell, then always tears the cell down (trap on EXIT) with
+# an independent tag-based leftover sweep.
+#
+# Needs a gitops/cells/${NAME}/capacity-pool/*.yaml with a trn2.3xlarge light-tier pool to exist
+# on whatever revision GITOPS_REVISION names (gitops/README.md "Adding a cell" -- this example
+# does not add one of its own, since a new permanent cell fixture is a separate decision from
+# this one example). Point NAME/GITOPS_REVISION at an existing fixture, or add your own cell
+# directory first.
 set -euo pipefail
 
 NAME="${NAME:?set NAME, the cell name}"
@@ -16,6 +21,7 @@ MY_CIDR="${MY_CIDR:?set MY_CIDR}"
 ARGOCD_IDC_INSTANCE_ARN="${ARGOCD_IDC_INSTANCE_ARN:?set ARGOCD_IDC_INSTANCE_ARN}"
 ARGOCD_IDC_IDENTITY_STORE_ID="${ARGOCD_IDC_IDENTITY_STORE_ID:?set ARGOCD_IDC_IDENTITY_STORE_ID}"
 ARGOCD_IDC_REGION="${ARGOCD_IDC_REGION:?set ARGOCD_IDC_REGION}"
+GITOPS_REVISION="${GITOPS_REVISION:-stable}"
 export AWS_PROFILE="${AWS_PROFILE:-default}"
 
 REPO_ROOT="$(pwd)"
@@ -110,10 +116,10 @@ terraform apply -auto-approve | tee "${RUN_LOG_DIR}/terraform-apply.log"
 VPC_ID="$(terraform output -raw vpc_id)"
 log "vpc_id=${VPC_ID}"
 
-log "=== PHASE 2: kubeconfig + gitops bootstrap (revision exp/miles-trainium) ==="
+log "=== PHASE 2: kubeconfig + gitops bootstrap (revision ${GITOPS_REVISION}) ==="
 aws eks update-kubeconfig --name "${NAME}" --region "${AWS_REGION}"
 kubectl get nodes
-"${REPO_ROOT}/gitops/bootstrap/bootstrap.sh" --tf-outputs <(terraform output -json) --revision exp/miles-trainium
+"${REPO_ROOT}/gitops/bootstrap/bootstrap.sh" --tf-outputs <(terraform output -json) --revision "${GITOPS_REVISION}"
 
 log "=== PHASE 3: wait for Argo CD to render the trn NodePool/EC2NodeClass ==="
 for i in $(seq 1 60); do

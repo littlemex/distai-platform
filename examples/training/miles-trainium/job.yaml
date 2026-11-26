@@ -5,16 +5,16 @@
 # platform's capacity-pool + accel-neuron-device-plugin pattern (README.md "Accelerators";
 # aws.amazon.com/neuron, never aws.amazon.com/neuroncore).
 #
-# karpenter.sh/do-not-disrupt: an earlier probe on this same pool (dp-miles-trn-a9k2 attempt 2,
-# see the Issue) was evicted by Karpenter's own consolidation controller shortly after the pod
-# started, before the (15.5 GB) image had even finished pulling -- this pool's own
-# capacity-pool/trn.yaml already raises consolidateAfter to 15m for exactly this reason, and
-# this annotation is the same mitigation the platform's own RayCluster head uses
-# (examples/training/miles in awsome-distributed-ai's kubernetes/raycluster.yaml).
-# The ConfigMap (miles-trainium-script) is generated from train_grpo.py by run.sh, the same way
-# experiments/miles-trainium-smoke/run_experiment.sh built the first probe's ConfigMap -- not
-# hand-embedded here, so the two copies of the script (this file and the running Job) can never
-# drift out of sync with each other.
+# karpenter.sh/do-not-disrupt: an earlier real-machine attempt on this same NodePool shape saw
+# the pod marked for eviction (TaintManagerEviction) shortly after it started, while the 11.7 GB
+# image was still pulling. This annotation is a defensive opt-out for this one workload, the
+# same mechanism this platform's own capacity-pool/trn.yaml fixture already documents raising
+# consolidateAfter for. Not confirmed to be the specific cause of that one eviction event (no
+# controller log line was captured proving it); applied as a precaution either way.
+#
+# The ConfigMap (miles-trainium-script) is generated from train_grpo.py by 0.verify.sh, so the
+# two copies of the script (this file's mount and the Job that runs it) never drift apart; see
+# that script for the exact kubectl commands.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -49,7 +49,7 @@ spec:
             - |
               set -euo pipefail
               echo "[setup] pip install transformers requests huggingface_hub"
-              pip install -q --no-cache-dir "transformers>=4.46,<5" "requests>=2.31" "huggingface_hub>=0.24"
+              pip install -q --no-cache-dir "transformers==5.24.1" "requests==2.34.2" "huggingface_hub==2.4.0"
               echo "[setup] downloading Qwen/Qwen3-0.6B"
               python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Qwen/Qwen3-0.6B', local_dir='/models/Qwen3-0.6B')"
               echo "[setup] starting train_grpo.py"

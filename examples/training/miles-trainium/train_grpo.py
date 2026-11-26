@@ -20,7 +20,7 @@ Design, and why:
   - Training runs as plain CPU transformers (eager, variable-length batches, ordinary HF padding)
     specifically so it does NOT need torch-neuronx's fixed-shape compilation discipline at all:
     sglang-neuron's own tp-size=4 flag for Qwen3-0.6B already claims every NeuronCore the device
-    plugin advertises for this node, so a second Neuron-side process has nowhere to run. A 0.6B
+    plugin advertises for this node, so a second NeuronCore-bound process has nowhere to run. A 0.6B
     model's forward+backward for a handful of short sequences is cheap enough on CPU that this
     is a legitimate choice for a correctness smoke test, not a performance shortcut that hides a
     real blocker.
@@ -86,12 +86,29 @@ def stop_server(proc: subprocess.Popen) -> None:
         proc.wait(timeout=30)
 
 
+def _dump_server_log() -> None:
+    # Unverified fix: the one real-machine attempt that reached this far (see README.md "What
+    # actually ran") lost the server's own reason for failing along with the container -- its
+    # log stayed in a file (below) that kubectl logs never sees. Printing it to this script's own
+    # stdout on failure means a future `kubectl logs` capture carries it even if the container is
+    # gone by the time anyone looks.
+    try:
+        with open("/tmp/sglang-neuron-server.log") as f:
+            tail = f.readlines()[-200:]
+        log("=== /tmp/sglang-neuron-server.log (last 200 lines) ===")
+        for line in tail:
+            print(line, end="", flush=True)
+        log("=== end of server log ===")
+    except OSError as exc:
+        log(f"could not read /tmp/sglang-neuron-server.log: {exc!r}")
+
+
 def wait_health(proc: subprocess.Popen, timeout_s: int) -> bool:
     t0 = time.time()
     while time.time() - t0 < timeout_s:
         if proc.poll() is not None:
-            log(f"FATAL: server process exited early with code {proc.returncode}; "
-                f"see /tmp/sglang-neuron-server.log")
+            log(f"FATAL: server process exited early with code {proc.returncode}")
+            _dump_server_log()
             return False
         try:
             r = requests.get(f"{SERVER_URL}/health", timeout=5)
@@ -102,6 +119,7 @@ def wait_health(proc: subprocess.Popen, timeout_s: int) -> bool:
             pass
         time.sleep(10)
     log(f"FATAL: server did not become healthy within {timeout_s}s")
+    _dump_server_log()
     return False
 
 
