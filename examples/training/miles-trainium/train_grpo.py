@@ -148,10 +148,12 @@ def generate_completions(prompt: str, n: int) -> list[str]:
         timeout=180,
     )
     if resp.status_code >= 400:
-        # Unverified fix, not yet exercised on real hardware: the real-machine attempt that found
-        # this PR's own sampler-mode defect (README.md "On the two defects this found") predates
-        # this check, so it only recovered the cause from `requests.HTTPError`'s own exception
-        # message ("400 Client Error: Bad Request"), which carries no response body -- the actual
+        # Unverified fix, not yet exercised on real hardware: this check was added in the same
+        # commit as the sampler fix it responds to (fd64395), so the real-machine attempt that
+        # found the sampler-mode defect (README.md "On the two launch-configuration gaps this
+        # found") ran before this check existed and only recovered the cause from
+        # `requests.HTTPError`'s own exception message ("400 Client Error: Bad Request"), which
+        # carries no response body -- the actual
         # cause (SGLANG_NEURON_SAMPLER defaulting to "greedy") was found by reading sglang-neuron's
         # source after the fact, not from anything this script itself captured that run.
         # sglang-neuron answers an admission refusal with a JSON body naming the setting at fault

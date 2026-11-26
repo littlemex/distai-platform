@@ -216,26 +216,45 @@ log "=== PHASE 7: stream logs until the Job finishes (deadline ~55min) ==="
 # `kubectl logs -f` any time it exits early, as long as the Job itself has not finished, and the
 # belt-and-suspenders plain `kubectl logs` below re-fetches the full buffered log once more after
 # the Job finishes. Re-verified working in session 2 (attempts 4-6 all captured the application
-# log in full, including this script's own stdout/stderr -- this does not by itself mean every
-# attempt's own root cause was visible without also reading sglang-neuron's source: attempt 4
-# only got a client-side `requests.HTTPError` message with no response body, since the response-
-# body logging below predates that run; attempt 5's FATAL did carry sglang-neuron's own dumped
-# server log verbatim, which is where that attempt's exact error line came from).
+# log in full) -- this does not by itself mean every attempt's own root cause was visible without
+# also reading sglang-neuron's source: attempt 4 only got a client-side `requests.HTTPError`
+# message with no response body, since the response-body logging (train_grpo.py's
+# generate_completions, commit fd64395) postdates that attempt; attempt 5's FATAL did carry
+# sglang-neuron's own dumped server log verbatim, which is where that attempt's exact error line
+# came from.
+#
+# A previous version of this loop promoted a relaunch's capture to job.log whenever it was
+# merely non-empty, which a round of review found still loses evidence: a client-side error
+# after the pod is gone (for example, a spot reclaim) is itself non-empty (one line), and that
+# one line would overwrite an earlier, fuller capture. Fixed two ways: stdout and stderr go to
+# separate files (a connection-level kubectl error -- "Error from server (NotFound)" and similar
+# -- is kubectl's own stderr, so it no longer lands in the stdout file at all), and promotion
+# additionally never shrinks job.log (every capture dumps the container's FULL log from the
+# start, so a genuinely fuller capture is never smaller in bytes than an earlier one; a partial
+# capture cut short mid-stream is). Not re-verified against a real failure of this kind -- this
+# session's real-machine budget was already spent confirming the underlying defects, not this
+# specific robustness fix.
+rm -f "${RUN_LOG_DIR}"/job.log* "${RUN_LOG_DIR}/RESULT.txt"
 LOGS_PID=""
 LOG_TMP="${RUN_LOG_DIR}/job.log.tmp"
+LOG_TMP_ERR="${RUN_LOG_DIR}/job.log.tmp.err"
+promote_log() {
+  local candidate="$1"
+  [[ -s "${candidate}" ]] || return 0
+  local cur_size=0 new_size
+  [[ -f "${RUN_LOG_DIR}/job.log" ]] && cur_size="$(wc -c <"${RUN_LOG_DIR}/job.log")"
+  new_size="$(wc -c <"${candidate}")"
+  if (( new_size >= cur_size )); then
+    cp "${candidate}" "${RUN_LOG_DIR}/job.log"
+  fi
+}
 relaunch_logs() {
   if [[ -n "${LOGS_PID}" ]] && kill -0 "${LOGS_PID}" 2>/dev/null; then return; fi
-  # Promote the PREVIOUS attempt's capture to job.log before starting a new one, and only if it
-  # is not empty: `kubectl logs -f` truncates its own output file to empty the instant it starts,
-  # then dumps the container's FULL log from the start -- a later relaunch that only manages a
-  # client-side error line (for example, the pod already gone after a spot reclaim) would
-  # otherwise overwrite an earlier relaunch's complete capture with that one line. Writing every
-  # attempt to the same job.log directly (the previous form of this loop) could lose evidence
-  # this way; writing to a separate temp file and promoting it only when non-empty cannot.
-  if [[ -s "${LOG_TMP}" ]]; then
-    cp "${LOG_TMP}" "${RUN_LOG_DIR}/job.log"
+  if [[ -n "${LOGS_PID}" ]]; then
+    wait "${LOGS_PID}" 2>/dev/null || true
+    promote_log "${LOG_TMP}"
   fi
-  kubectl logs -f "${POD}" -n distai-smoke --timestamps >"${LOG_TMP}" 2>&1 &
+  kubectl logs -f "${POD}" -n distai-smoke --timestamps >"${LOG_TMP}" 2>"${LOG_TMP_ERR}" &
   LOGS_PID=$!
 }
 relaunch_logs
@@ -272,18 +291,14 @@ done
 sleep 5
 kill "${LOGS_PID}" 2>/dev/null || true
 wait "${LOGS_PID}" 2>/dev/null || true
-if [[ -s "${LOG_TMP}" ]]; then
-  cp "${LOG_TMP}" "${RUN_LOG_DIR}/job.log"
-fi
+promote_log "${LOG_TMP}"
 # Belt-and-suspenders: a plain (non-follow) `kubectl logs` after the Job finished, in case every
-# `-f` attempt above still raced the container's own short lifetime. Written to its own file and
-# promoted only if non-empty, for the same reason as relaunch_logs above: a Pod gone by now (for
-# example, after a spot reclaim) would make this call print nothing or a client-side error, which
-# must not overwrite a job.log that already holds a real capture from the loop above.
-kubectl logs "${POD}" -n distai-smoke --timestamps >"${RUN_LOG_DIR}/job.log.final" 2>&1 || true
-if [[ -s "${RUN_LOG_DIR}/job.log.final" ]]; then
-  cp "${RUN_LOG_DIR}/job.log.final" "${RUN_LOG_DIR}/job.log"
-fi
+# `-f` attempt above still raced the container's own short lifetime. Same promotion rule as
+# relaunch_logs (never shrinks job.log; stdout and stderr kept apart) -- a Pod gone by now (for
+# example, after a spot reclaim) would make this call print nothing on stdout or exit non-zero,
+# either of which already leaves job.log exactly as the loop above left it.
+kubectl logs "${POD}" -n distai-smoke --timestamps >"${RUN_LOG_DIR}/job.log.final" 2>"${RUN_LOG_DIR}/job.log.final.err" || true
+promote_log "${RUN_LOG_DIR}/job.log.final"
 log "=== JOB STATUS: ${STATUS} ==="
 kubectl get events -n distai-smoke --field-selector involvedObject.name="${POD}" --sort-by='.lastTimestamp' 2>&1 | tee "${RUN_LOG_DIR}/events-final.log" || true
 kubectl get job miles-trainium-grpo -n distai-smoke -o yaml | tee "${RUN_LOG_DIR}/job-final.yaml" >/dev/null
