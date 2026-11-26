@@ -20,7 +20,7 @@ names (not a hand-typed copy of its values):
     vendor-specific taint, the SageMaker health-status toleration) was
     silently dropped by this override;
   - `vigil-controller`'s own rendered `ConfigMap` actually contains the
-    `taintKey`/`taintEffect`/`timeoutSeconds` `addon.yaml` declares (a
+    `taintKey`/`taintEffect`/`timeoutSeconds`/`knownStartupTaintKeys` `addon.yaml` declares (a
     misnamed `config.*` key would otherwise pass `check_startup_taint_
     keys.py` while the chart silently falls back to its own default), and
     its rendered `Deployment` carries the declared `tolerations`/`affinity`.
@@ -211,6 +211,14 @@ def check_vigil_controller(repo_root: str, workdir: str) -> tuple[str | None, st
             f"{rel}: rendered ConfigMap's config.yaml has timeoutSeconds == {timeout_seconds!r}",
             rendered_config.get("timeoutSeconds") == timeout_seconds,
             f"got {rendered_config.get('timeoutSeconds')!r}",
+        )
+        want_known_keys = config.get("knownStartupTaintKeys") or []
+        check(
+            f"{rel}: rendered ConfigMap's config.yaml has knownStartupTaintKeys == {want_known_keys!r} "
+            "(must include every temporary built-in/CSI taint the device-plugin add-ons' own tolerations "
+            "do not explicitly list, or they are wrongly excluded from the expected set while present)",
+            rendered_config.get("knownStartupTaintKeys") == want_known_keys,
+            f"got {rendered_config.get('knownStartupTaintKeys')!r}",
         )
 
     deployments = [d for d in docs if d.get("kind") == "Deployment"]
