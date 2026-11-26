@@ -25,7 +25,7 @@ export TF_VAR_name="${NAME}"
 export TF_VAR_region="${AWS_REGION}"
 export TF_VAR_endpoint_public_access_cidrs="[\"${MY_CIDR}\"]"
 export TF_VAR_admin_principal_arns="[\"${ADMIN_PRINCIPAL_ARN}\"]"
-export TF_VAR_argocd="{idc_instance_arn=\"arn:aws:sso:::instance/ssoins-7223037211dc5301\",idc_region=\"us-east-1\",role_mappings=[{role=\"ADMIN\",group_ids=[\"00000000-0000-0000-0000-000000000000\"]}]}"
+export TF_VAR_argocd="{idc_instance_arn=\"arn:aws:sso:::instance/ssoins-7223037211dc5301\",idc_region=\"us-east-1\",role_mappings=[{role=\"ADMIN\",group_ids=[\"f46844c8-1001-7075-33e6-4829e64a7500\"]}]}"
 export TF_VAR_tags="{\"distai-platform/cell\"=\"${NAME}\"}"
 
 cd infra/foundation
