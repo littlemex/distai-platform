@@ -22,19 +22,23 @@ locals {
   # Groups", fetched 2026-11-26): TCP 988 for the Lustre protocol itself,
   # TCP 1018-1023 for the LNET/LND transport. That same page's own
   # required-rules table is explicit that this is not ingress-from-clients
-  # alone: the file system's own security group needs ALL FOUR of
-  # self-referencing ingress, self-referencing egress, ingress from the
-  # client security group and egress to the client security group - the
-  # file system's own network interfaces talk to each other over these
-  # same ports, not only to a mounting client, and
-  # CreateFileSystem's own server-side validation enforces this
-  # (confirmed on the runner, 2026-11-26: a security group with ingress
-  # from the client security group only, no self-reference, failed
-  # CreateFileSystem outright with "InvalidNetworkSettings: ... does not
-  # permit Lustre LNET network traffic on port 988" - security groups
-  # being stateful was not enough to satisfy this check, since the
-  # self-referencing rules this validation wants are a different, and
-  # genuinely missing, pair of rules, not a question of return traffic).
+  # alone: the file system's own security group needs self-referencing
+  # ingress and ingress from the client security group - the file
+  # system's own network interfaces talk to each other over these same
+  # ports, not only to a mounting client, and CreateFileSystem's own
+  # server-side validation enforces this (confirmed on the runner,
+  # 2026-11-26: a security group with ingress from the client security
+  # group only, no self-reference, failed CreateFileSystem outright with
+  # "InvalidNetworkSettings: ... does not permit Lustre LNET network
+  # traffic on port 988" - security groups being stateful was not enough
+  # to satisfy this check, since the self-referencing rules this
+  # validation wants are a different, and genuinely missing, pair of
+  # rules, not a question of return traffic). That same table also lists
+  # self-referencing and to-client egress as required; both are strict
+  # subsets of "all traffic to anywhere", already covered by the default
+  # allow-all-egress rule every new EC2 security group gets (EC2 User
+  # Guide, "Security group rules") - see aws_security_group.fsx_lustre's
+  # own comment on why this file manages ingress only, not egress.
   fsx_lustre_ports = [
     { protocol = "tcp", from_port = 988, to_port = 988 },
     { protocol = "tcp", from_port = 1018, to_port = 1023 },
@@ -45,19 +49,29 @@ resource "aws_security_group" "fsx_lustre" {
   count = var.shared_fsx_lustre == null ? 0 : 1
 
   name        = "${var.name}-fsx-lustre"
-  description = "Lustre traffic for the shared FSx for Lustre file system (#18): self-referencing, and to/from this cell own node/cluster security group."
+  description = "Lustre traffic for the shared FSx for Lustre file system (#18): self-referencing and from this cell own node/cluster security group (ingress); the default allow-all egress covers both return paths this group needs."
   vpc_id      = aws_vpc.this.id
 
-  # Every newly created EC2 security group gets one default rule: allow
-  # all IPv4 egress (EC2 User Guide, "Security group rules" - an API-level
-  # default, not a Terraform artifact). Writing egress = [] here, rather
-  # than omitting the argument, tells Terraform to manage the egress rule
-  # set as a whole and removes that default rule on apply, replaced below
-  # by the exact egress AWS's own required-rules table lists - the same
-  # least-privilege reasoning vpc.tf's aws_default_security_group.this
-  # already applies to the VPC's default security group.
-  egress = []
-
+  # No egress argument here at all, not even egress = []. AWS's own
+  # required-rules table (this file's own header comment above) also
+  # lists self-referencing egress and egress to the client security
+  # group as required, but both are strict subsets of "all traffic to
+  # anywhere" - the default allow-all-IPv4-egress rule every new EC2
+  # security group gets already satisfies them, so no narrower egress
+  # rule is needed to reach that requirement. Writing egress = [] to
+  # manage the rule set down to only two narrower rules was tried first
+  # and reverted: it tells Terraform's AWS provider the security group's
+  # egress rules are fully described by this resource's own egress
+  # argument (zero of them), while two separate aws_security_group_rule
+  # egress resources also claimed ownership of specific egress rules on
+  # the same security group - mixing a security group's own inline
+  # egress attribute (even an explicit empty list) with separate
+  # aws_security_group_rule resources for the same group is the AWS
+  # provider's own documented anti-pattern ("we recommend using one or
+  # the other, never both"), and produced a perpetual plan diff on the
+  # runner. Dropping the egress argument and those two rule resources
+  # entirely removes the conflict and the extra resources together,
+  # since the default already covers what they were for.
   tags = {
     Name = "${var.name}-fsx-lustre"
   }
@@ -67,9 +81,10 @@ locals {
   fsx_lustre_port_map = { for p in local.fsx_lustre_ports : "${p.protocol}-${p.from_port}" => p }
 }
 
-# Self-referencing ingress and egress: the file system's own network
-# interfaces talk to each other over these ports (AWS's own required-rules
-# table, this file's own header comment above).
+# Self-referencing ingress: the file system's own network interfaces talk
+# to each other over these ports (AWS's own required-rules table, this
+# file's own header comment above). Egress is not managed here - see
+# aws_security_group.fsx_lustre's own comment on why.
 resource "aws_security_group_rule" "fsx_lustre_self_ingress" {
   for_each = var.shared_fsx_lustre == null ? {} : local.fsx_lustre_port_map
 
@@ -82,20 +97,11 @@ resource "aws_security_group_rule" "fsx_lustre_self_ingress" {
   description              = "FSx for Lustre file servers to each other (self-referencing, required by CreateFileSystem)"
 }
 
-resource "aws_security_group_rule" "fsx_lustre_self_egress" {
-  for_each = var.shared_fsx_lustre == null ? {} : local.fsx_lustre_port_map
-
-  type                     = "egress"
-  security_group_id        = aws_security_group.fsx_lustre[0].id
-  protocol                 = each.value.protocol
-  from_port                = each.value.from_port
-  to_port                  = each.value.to_port
-  source_security_group_id = aws_security_group.fsx_lustre[0].id
-  description              = "FSx for Lustre file servers to each other (self-referencing, required by CreateFileSystem)"
-}
-
 # Client traffic: this cell's node/cluster security group (every
 # Karpenter-launched node and the system node group share it, eks.tf).
+# Ingress only - the return path and this group's own egress to the
+# client security group are both covered by the default allow-all egress
+# rule (see aws_security_group.fsx_lustre's own comment).
 resource "aws_security_group_rule" "fsx_lustre_client_ingress" {
   for_each = var.shared_fsx_lustre == null ? {} : local.fsx_lustre_port_map
 
@@ -108,16 +114,30 @@ resource "aws_security_group_rule" "fsx_lustre_client_ingress" {
   description              = "FSx for Lustre client traffic from this cell own node-cluster security group"
 }
 
-resource "aws_security_group_rule" "fsx_lustre_client_egress" {
+# The matching half on the client side: AWS's own required-rules table
+# names this as its own rule, not something the ingress rule above and
+# plain TCP statefulness already cover between them - a Lustre mount is
+# initiated by the client, but the file system's own servers also open
+# connections back for some of the LNET traffic, which the client side's
+# security group must itself allow as ingress, not only rely on being the
+# stateful return path of a connection it opened (the whole reason AWS's
+# table lists this as a fourth, separate rule rather than three). Added
+# directly to the cluster security group (every Karpenter-launched node
+# and the system node group's own shared security group, eks.tf) rather
+# than to that security group's own inline rule set, the same technique
+# fsx_lustre_client_ingress above and argocd.tf's own documented resource
+# pair already use: a separate aws_security_group_rule only adds a rule,
+# it does not take over managing the whole group EKS itself created.
+resource "aws_security_group_rule" "cluster_fsx_lustre_ingress" {
   for_each = var.shared_fsx_lustre == null ? {} : local.fsx_lustre_port_map
 
-  type                     = "egress"
-  security_group_id        = aws_security_group.fsx_lustre[0].id
+  type                     = "ingress"
+  security_group_id        = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
   protocol                 = each.value.protocol
   from_port                = each.value.from_port
   to_port                  = each.value.to_port
-  source_security_group_id = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
-  description              = "FSx for Lustre client traffic to this cell own node-cluster security group"
+  source_security_group_id = aws_security_group.fsx_lustre[0].id
+  description              = "FSx for Lustre traffic from the shared file system's own security group (#18)"
 }
 
 resource "aws_fsx_lustre_file_system" "shared" {
@@ -134,19 +154,19 @@ resource "aws_fsx_lustre_file_system" "shared" {
   # ignores this argument for those deployment types (confirmed against the
   # aws_fsx_lustre_file_system resource schema - the argument is accepted
   # regardless of deployment_type, with no provider-side validation tying
-  # the two together). Set unconditionally to true: this platform's own
-  # test cells are destroyed and recreated (infra/foundation/README.md),
-  # and a final backup left behind by a PERSISTENT cell's teardown would be
-  # exactly the kind of untracked, billed leftover the real-machine
-  # verification sweep (#18's own Test Results) exists to catch.
-  skip_final_backup = true
+  # the two together). Sourced from the variable (default false, AWS's own
+  # CreateFileSystem default), not hardcoded true here: see
+  # var.shared_fsx_lustre's own skip_final_backup field description for why
+  # the safe default is kept for every cell except the ones that opt out of
+  # it explicitly (this platform's own disposable test fixtures do).
+  skip_final_backup = var.shared_fsx_lustre.skip_final_backup
 
   tags = {
     Name = "${var.name}-shared"
   }
 
-  # Explicit depends_on, even though no argument above references any of
-  # these four rules directly (only aws_security_group.fsx_lustre[0].id,
+  # Explicit depends_on, even though no argument above references either
+  # of these two rules directly (only aws_security_group.fsx_lustre[0].id,
   # the group itself, which exists before any of its own rules do): with
   # no attribute in common, Terraform's graph has no edge forcing the
   # rules to attach before CreateFileSystem fires, so it schedules the two
@@ -160,9 +180,7 @@ resource "aws_fsx_lustre_file_system" "shared" {
   # documents and fixes the same way.
   depends_on = [
     aws_security_group_rule.fsx_lustre_self_ingress,
-    aws_security_group_rule.fsx_lustre_self_egress,
     aws_security_group_rule.fsx_lustre_client_ingress,
-    aws_security_group_rule.fsx_lustre_client_egress,
   ]
 }
 
@@ -304,6 +322,18 @@ resource "aws_ecr_repository" "sharedfs_controller" {
   count = var.shared_fsx_lustre == null ? 0 : 1
 
   name = "${var.name}-sharedfs-controller"
+  # force_delete = true: this platform's own cells are destroyed and
+  # recreated by design (infra/foundation/README.md), and ECR's own
+  # default refuses DeleteRepository outright while any image remains
+  # inside it ("RepositoryNotEmptyException") - every real-machine run
+  # that reaches gitops/bootstrap/sharedfs-image-publish.sh pushes at
+  # least one image here, so without this, `terraform destroy` on any
+  # such run would fail at this one resource and leave a real, billed
+  # repository behind for the next real-machine sweep to catch instead of
+  # this run's own teardown. The same reasoning as skip_final_backup
+  # above: a disposable fixture's own teardown should not depend on a
+  # human remembering to empty a registry by hand first.
+  force_delete = true
   # MUTABLE, not IMMUTABLE: every consumer of this image (the sharedfs
   # addon-catalog entry's own cell marker, through
   # distai.dev.annotations/sharedfs-controller-image) addresses it by

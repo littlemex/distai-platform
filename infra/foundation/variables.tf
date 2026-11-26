@@ -188,6 +188,18 @@ variable "shared_fsx_lustre" {
     deployment_type             = optional(string, "SCRATCH_2")
     storage_capacity_gib        = optional(number, 1200)
     per_unit_storage_throughput = optional(number)
+    # false (AWS's own CreateFileSystem default) unless set true: a
+    # PERSISTENT_1/PERSISTENT_2 file system takes a final backup on
+    # deletion unless this is set, and that is the safe default to keep
+    # for any cell this variable's own default did not already describe
+    # as disposable (this variable's own description above: SCRATCH_2,
+    # "chosen for this platform's own test cells... not a production
+    # sizing recommendation"). A cell whose own fixture is destroyed and
+    # recreated on every real-machine run sets this true explicitly
+    # (infra/foundation/tests' own SCRATCH_2 fixture does); nothing here
+    # defaults every cell, including a future PERSISTENT one, to the
+    # less-safe choice.
+    skip_final_backup = optional(bool, false)
   })
   default  = null
   nullable = true
@@ -218,6 +230,20 @@ variable "shared_fsx_lustre" {
   validation {
     condition     = var.shared_fsx_lustre == null || var.shared_fsx_lustre.per_unit_storage_throughput == null || contains([50, 100, 125, 200, 250, 500, 1000], var.shared_fsx_lustre.per_unit_storage_throughput)
     error_message = "shared_fsx_lustre.per_unit_storage_throughput, if set, must be one of the MB/s/TiB values FSx for Lustre documents for a PERSISTENT deployment type (50, 100, 125, 200, 250, 500, 1000); leave it null for SCRATCH_1/SCRATCH_2, which do not take this argument."
+  }
+
+  # Stated above (per_unit_storage_throughput's own validation) as a
+  # PERSISTENT-only argument; FSx's CreateFileSystem API rejects it for
+  # SCRATCH_1/SCRATCH_2 outright, so failing this at `terraform
+  # validate`/`plan` instead saves the same avoidable-apply cost the
+  # storage_capacity_gib validation above states its reason for.
+  validation {
+    condition = (
+      var.shared_fsx_lustre == null ||
+      !contains(["SCRATCH_1", "SCRATCH_2"], var.shared_fsx_lustre.deployment_type) ||
+      var.shared_fsx_lustre.per_unit_storage_throughput == null
+    )
+    error_message = "shared_fsx_lustre.per_unit_storage_throughput must be null for deployment_type SCRATCH_1/SCRATCH_2; FSx for Lustre only accepts it for PERSISTENT_1/PERSISTENT_2."
   }
 }
 
