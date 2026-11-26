@@ -12,7 +12,7 @@ set -euo pipefail
 NAME="${NAME:-dp-p5en-efa}"
 AWS_REGION="${AWS_REGION:-us-east-2}"
 NODE="${NODE:?export NODE (the p5en node name from stage 3)}"
-MODEL_ID="${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}"
+export MODEL_ID="${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}"
 NAMESPACE=pd-demo
 RELEASE=pd
 export AWS_PROFILE=default
