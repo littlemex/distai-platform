@@ -34,9 +34,9 @@ set below before the import for exactly that reason.
 Usage:
     neuron_cpu_compile_check.py [--target TARGET]
 
-Exits 0 with a NEFF-bearing ScriptModule written to a temporary directory on
+Exits 0 with a non-empty .neff file written to a temporary directory on
 success; exits 1 with a GitHub Actions error annotation on any failure
-(import, trace, save, or reload).
+(import or trace).
 """
 from __future__ import annotations
 
@@ -132,19 +132,20 @@ def main() -> int:
                 error(f"{neff} is empty")
                 return 1
 
-        saved_path = Path(workdir) / "tiny_mlp_neuron.pt"
-        try:
-            torch.jit.save(traced, str(saved_path))
-            reloaded = torch.jit.load(str(saved_path))
-        except Exception as exc:  # noqa: BLE001
-            error(f"saving/reloading the traced ScriptModule failed: {exc}")
+        # Deliberately stops here, at the NEFF on disk. torch.jit.save()
+        # followed by torch.jit.load() was tried as an extra round-trip
+        # check and, on a real run of this workflow (2026-11-26), made
+        # torch.jit.load() itself initialize the Neuron Runtime (NRT) --
+        # which fails with no device present, exactly the failure this
+        # check exists to avoid depending on. The traced ScriptModule's
+        # embedded neuron::Model op is apparently prepared for execution
+        # at load time, not purely deserialized; that is real-hardware
+        # territory and out of scope for a CPU-only compile check.
+        if traced is None:
+            error("torch_neuronx.trace() returned None")
             return 1
 
-        if reloaded is None:
-            error("torch.jit.load returned None after a successful save")
-            return 1
-
-    print("OK: compiled a tiny model to a NEFF-embedded ScriptModule with no Neuron device present")
+    print("OK: compiled a tiny model to a NEFF with no Neuron device present")
     return 0
 
 
