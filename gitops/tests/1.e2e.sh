@@ -1852,7 +1852,7 @@ check_accel_layer1() {
   local cell="$1" nodepool="$2" advertiser_addon="$3" other_addon="$4" label="$5" resource="$6" image="$7" probe="$8"
   local app="${cell}-${advertiser_addon}" other_app="${cell}-${other_addon}"
   local label_jp="${label//./\\.}" resource_jp="${resource//./\\.}"
-  local advertiser_ns other_ns wave np_label node node_label allocatable probe_out count pods_on_node node_capacity_type instance_type karpenter_log_file karpenter_log_pid accel_pod_trace_file accel_pod_trace_pid
+  local advertiser_ns other_ns wave np_label node node_label allocatable probe_out count pods_on_node node_capacity_type instance_type karpenter_log_file karpenter_log_pid accel_pod_trace_file accel_pod_trace_pid accel_nodeclaim_lookup accel_nodeclaim
 
   # Criterion 5: the accelerators step's device-plugin release is
   # Healthy+Synced before anything is asserted about it.
@@ -2075,12 +2075,26 @@ print(len(doc) if isinstance(doc, list) else -1)
   # the real bottleneck is downstream of that timeout entirely. Step
   # 14b-b's own precondition now waits and retries instead (see its own
   # comment) -- that is the one place this actually needs to be true by.
-  accel_nodeclaim="$(k get nodeclaims -o jsonpath='{range .items[*]}{.status.nodeName}{"="}{.metadata.name}{"\n"}{end}' 2>/dev/null \
-    | awk -F= -v n="${node}" '$1==n{print $2}')"
-  if [[ -n "${accel_nodeclaim}" ]]; then
-    k delete nodeclaim "${accel_nodeclaim}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-    info "requested deletion of NodeClaim ${accel_nodeclaim} (this check's own node ${node}); not waiting for it here, see step 14b-b"
+  # Captured as two steps, like nvidia_node_names in step 14b-b: under
+  # this script's own set -euo pipefail, a bare
+  # `x="$(cmd1 | cmd2)"` with no guard aborts the whole script with no
+  # message the instant cmd1 fails (an API hiccup, not "no NodeClaims"),
+  # which is exactly the hazard that check's own comment already warns
+  # about -- the same guard belongs here too.
+  accel_nodeclaim=""
+  if accel_nodeclaim_lookup="$(k get nodeclaims -o jsonpath='{range .items[*]}{.status.nodeName}{"="}{.metadata.name}{"\n"}{end}' 2>&1)"; then
+    accel_nodeclaim="$(echo "${accel_nodeclaim_lookup}" | awk -F= -v n="${node}" '$1==n{print $2}')"
   else
+    info "kubectl get nodeclaims failed while looking up this check's own node ${node} -- nothing deleted here, only consolidation will remove it: ${accel_nodeclaim_lookup}"
+  fi
+  if [[ -n "${accel_nodeclaim}" ]]; then
+    local accel_delete_out
+    if accel_delete_out="$(k delete nodeclaim "${accel_nodeclaim}" --ignore-not-found --wait=false 2>&1)"; then
+      info "requested deletion of NodeClaim ${accel_nodeclaim} (this check's own node ${node}); not waiting for it here, see step 14b-b"
+    else
+      info "kubectl delete nodeclaim ${accel_nodeclaim} (this check's own node ${node}) was rejected; its node may still be observed at step 14b-b: ${accel_delete_out}"
+    fi
+  elif [[ -n "${accel_nodeclaim_lookup+x}" ]]; then
     info "no NodeClaim found for node ${node} (already gone, nothing to delete)"
   fi
 }
@@ -3108,23 +3122,67 @@ pass "no Application ${APP_DCGM} exists at ${NO_DCGM_REVISION} (no ${DCGM_MARKER
 # alone first, guarded, keeps that failure distinguishable from a
 # genuine zero-node answer.
 #
-# Waited and retried, not a single-shot check: a real run (2026-11-26)
-# showed the accelerators step's own disposable GPU node can still exist
-# here, 15-20+ minutes after check_accel_layer1 requested its deletion --
-# kubectl's own --wait=true --timeout=300s on that delete only bounds how
-# long the *client* blocks, not how long Karpenter's real cordon/drain/
-# terminate sequence takes on an actual EC2 instance, so check_accel_layer1
-# no longer waits on it at all (fired with --wait=false instead, see its
-# own comment). 600s gives that drain a fair chance to finish before this
-# precondition is declared violated, polling rather than sleeping the
-# whole window so a fast-converging run is not slowed down by it.
+# The admin smoke canary (step 11) is a KNOWN, intentional exception to
+# "zero NVIDIA nodes", not a leftover this precondition should ever
+# count: on this cell, the smoke ClusterQueue's own coveredResources
+# includes nvidia.com/gpu (capacity-pool-gpu's own
+# accelerator.resourceName, part of the cell's static fixture, read
+# unconditionally at step 11 -- #56's own fix made the canary request
+# that resource too, "the first real Kueue-admitted workload that
+# actually asks for the device"), so the canary's own Job lands on and
+# keeps alive one node from this same NodePool for the rest of the
+# run -- it is never deleted before this script's own final cleanup().
+# CANARY_NODE (step 11) is excluded by name below, on exactly that
+# reasoning, not discovered freshly here: this is a known-intentional
+# node, not something to wait out.
+#
+# Waited and retried for anything else, not a single-shot check: a real
+# run (2026-11-26) showed the accelerators step's own disposable GPU node
+# can still exist here, 15-20+ minutes after check_accel_layer1 requested
+# its deletion -- kubectl's own --wait=true --timeout=300s on that delete
+# only bounds how long the *client* blocks, not how long Karpenter's real
+# cordon/drain/terminate sequence takes on an actual EC2 instance, so
+# check_accel_layer1 no longer waits on it at all (fired with --wait=false
+# instead, see its own comment). 600s is a judgment call, not a
+# proven-sufficient number for that case -- that same real run never
+# showed the node actually finish terminating, and did not distinguish
+# whether the one leftover node it saw was that node or the canary's own
+# (this fail message did not print a name at the time); whether 600s is
+# enough, or whether a stuck finalizer/PDB/non-evictable pod is blocking
+# a real drain outright with no amount of waiting helping, is exactly
+# what nvidia_node_leftover_diagnostics below is for if this still times
+# out with the canary's own node correctly excluded.
 nvidia_node_names=""
 zero_nvidia_nodes() {
   nvidia_node_names="$(k get nodes -l karpenter.k8s.aws/instance-gpu-manufacturer=nvidia -o name 2>&1)" || return 1
+  if [[ -n "${CANARY_NODE:-}" ]]; then
+    nvidia_node_names="$(echo "${nvidia_node_names}" | grep -vx "node/${CANARY_NODE}" || true)"
+  fi
   [[ "$(echo "${nvidia_node_names}" | grep -c .)" -eq 0 ]]
 }
+# nvidia_node_leftover_diagnostics: for each leftover node, its matching
+# NodeClaim's deletionTimestamp/finalizers/conditions (a non-nil
+# deletionTimestamp with a stuck finalizer means Karpenter has been
+# trying and failing to finish the drain, not merely taking a while), the
+# pods still bound to it (a non-evictable pod or a restrictive
+# PodDisruptionBudget would show up here), and the node's own Events.
+nvidia_node_leftover_diagnostics() {
+  local node_name short_name nc_name
+  for node_name in ${nvidia_node_names}; do
+    short_name="${node_name#node/}"
+    nc_name="$(k get nodeclaims -o jsonpath='{range .items[*]}{.status.nodeName}{"="}{.metadata.name}{"\n"}{end}' 2>&1 \
+      | awk -F= -v n="${short_name}" '$1==n{print $2}')"
+    printf 'node=%s nodeclaim=[%s] ' "${short_name}" "${nc_name}"
+    if [[ -n "${nc_name}" ]]; then
+      printf 'nodeclaim_status=[%s] ' "$(k get nodeclaim "${nc_name}" -o jsonpath='deletionTimestamp={.metadata.deletionTimestamp} finalizers={.metadata.finalizers} conditions={.status.conditions}' 2>&1)"
+    fi
+    printf 'pods=[%s] events=[%s] ' \
+      "$(k get pods -A --field-selector "spec.nodeName=${short_name}" -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}:{.status.phase}|{end}' 2>&1)" \
+      "$(k get events -A --field-selector "involvedObject.name=${short_name}" --sort-by='.lastTimestamp' -o jsonpath='{range .items[*]}{.reason}:{.message}|{end}' 2>&1)"
+  done
+}
 wait_until 600 15 "zero NVIDIA nodes before step 14b-c launches one (accelerators step's own disposable node finishing termination)" zero_nvidia_nodes \
-  || fail "NVIDIA node precondition for step 14b-c not met within 600s: ${nvidia_node_names}"
+  || fail "NVIDIA node precondition for step 14b-c not met within 600s: ${nvidia_node_names} -- $(nvidia_node_leftover_diagnostics)"
 run_bootstrap --revision "${ADD_DCGM_REVISION}" || fail "bootstrap.sh --revision ${ADD_DCGM_REVISION}"
 wait_until 300 10 "dcgm-exporter Application generated from its marker file" app_exists "${APP_DCGM}" \
   || fail "no Application ${APP_DCGM} appeared at ${ADD_DCGM_REVISION} (addons-optional ApplicationSet did not generate it)"
