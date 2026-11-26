@@ -17,11 +17,15 @@
 #      overridableKeys sub-check runs `helm dependency build` on a
 #      temporary copy of each wrapper chart, so it needs network access to
 #      that chart's upstream repository);
-#   4a. every gitops/cells/*/capacity-pool/*.yaml's pool.startupTaints entry
-#      names the same key and effect gitops/addons/vigil-controller/addon.yaml
-#      is configured to watch, so a typo or a second, unwatched key wedges a
-#      node permanently instead of being caught here (check_startup_taint_keys.py,
-#      issue #96);
+#   4a. issue #96: every gitops/cells/*/capacity-pool/*.yaml's own
+#      pool.startupTaints entry, and every one of the four device-plugin
+#      add-ons' own tolerations, names the same key and effect
+#      gitops/addons/vigil-controller/addon.yaml is configured to watch --
+#      this check catches the drift (a typo, a second unwatched key, a
+#      device-plugin add-on that stopped tolerating the key) before it
+#      wedges a real node with no automatic recovery
+#      (check_startup_taint_keys.py; --selftest first, same reason as
+#      check_addon_tiers.py below);
 #   5. `helm lint` and `helm template` of charts/capacity-pool and
 #      charts/smoke, each against one real cells/*/{capacity-pool,smoke}/*.yaml
 #      parameter file's own `values:`; charts/accel-device-classes (#28)
@@ -57,6 +61,11 @@
 #      serves
 #      (check_pinned_crds.py; needs network access to each add-on's own
 #      OCI registry, the same one Argo CD itself pulls from).
+#   8a. issue #96: the pinned chart version each of the four device-plugin
+#      add-ons and vigil-controller name is `helm template`-d fresh, with
+#      and without that add-on's own declared values, and the rendered
+#      output checked directly (check_startup_taint_renders.py; same
+#      network requirement as 7 above).
 #   4c. issue #34: the jobset-crd/jobset add-on pair's own shape
 #      (check_jobset_addon.py; --network for the upstream-CRD drift check,
 #      the wrapper render and the pinned Kueue integrations list), and
@@ -252,12 +261,20 @@ run_check "gitops contract (check_gitops_contract.py)" \
 
 # -------------------------------------------- 4a. startup-taint key cross-check (#96)
 #
-# capacity-pool's own pool.startupTaints is a generic pass-through on
-# purpose (the chart does not know vigil-controller exists); this is the
-# one place that keeps every cell's own startupTaints entry pointed at
-# the key/effect vigil-controller actually watches, so a typo or a
-# second, unwatched key wedges a node silently instead of failing a
-# review here.
+# capacity-pool's own pool.startupTaints, and each of the four
+# device-plugin add-ons' own tolerations, are generic values on purpose
+# (none of them knows vigil-controller exists); this is the one place
+# that keeps every cell's startupTaints entry and every device-plugin
+# add-on's tolerations pointed at the key/effect vigil-controller
+# actually watches, so a typo or a drifted key fails here instead of
+# wedging a real node with no automatic recovery. --selftest first, same
+# reason as check_addon_tiers.py above: this check had never actually
+# failed before the selftest existed (no tracked file gave it anything to
+# reject).
+run_check "startup-taint keys self-test (check_startup_taint_keys.py --selftest, #96)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_startup_taint_keys.py" --selftest
+
 run_check "startup-taint keys match vigil-controller (check_startup_taint_keys.py, #96)" \
   "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
   python3 "${SCRIPT_DIR}/check_startup_taint_keys.py" "${REPO_ROOT}"
@@ -743,6 +760,27 @@ run_check "pinned-chart-version CRDs (check_pinned_crds.py)" \
 run_check "platform AppProject whitelist (check_appproject_whitelist.py)" \
   "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
   python3 "${SCRIPT_DIR}/check_appproject_whitelist.py" "${REPO_ROOT}"
+
+# ------------------------------------ 8a. startup-taint render check (#96)
+#
+# check_startup_taint_keys.py (section 4a) only reads each addon.yaml's
+# own declared values: -- a chart bump that silently stops reading a
+# values key, or a typo in vigil-controller's config.* name, passes that
+# check while the real chart falls back to its own default. This section
+# actually helm-templates the pinned chart version each of the four
+# device-plugin add-ons and vigil-controller name (network access
+# required, same as check_pinned_crds.py/check_appproject_whitelist.py
+# above), once with that add-on's own declared values and once with the
+# chart's bare defaults, and checks the rendered output directly: the
+# four add-ons each gain exactly the one shared toleration with nothing
+# dropped, and vigil-controller's own rendered ConfigMap/Deployment carry
+# what its addon.yaml declares. A hand-run, one-time `helm template`
+# diff is not committed anywhere else in this repository and goes stale
+# at the next chart version bump; this is the committed, repeatable form
+# of it.
+run_check "startup-taint renders (check_startup_taint_renders.py, #96)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_startup_taint_renders.py" "${REPO_ROOT}"
 
 # --------------------------------------- 9. EFA network-interface layout
 #
