@@ -1,0 +1,92 @@
+# Runs train_grpo.py (mounted from a ConfigMap of the same name in this directory) on one
+# trn2.3xlarge node: sgl-project/sglang-neuron serves Qwen3-0.6B for rollout (all four
+# NeuronCores, --tp-size 4, the plugin's own validated flags for this model size), a CPU
+# transformers copy of the same model trains. nodeSelector/toleration/resource match this
+# platform's capacity-pool + accel-neuron-device-plugin pattern (README.md "Accelerators";
+# aws.amazon.com/neuron, never aws.amazon.com/neuroncore).
+#
+# karpenter.sh/do-not-disrupt: an earlier probe on this same pool (dp-miles-trn-a9k2 attempt 2,
+# see the Issue) was evicted by Karpenter's own consolidation controller shortly after the pod
+# started, before the (15.5 GB) image had even finished pulling -- this pool's own
+# capacity-pool/trn.yaml already raises consolidateAfter to 15m for exactly this reason, and
+# this annotation is the same mitigation the platform's own RayCluster head uses
+# (examples/training/miles in awsome-distributed-ai's kubernetes/raycluster.yaml).
+# The ConfigMap (miles-trainium-script) is generated from train_grpo.py by run.sh, the same way
+# experiments/miles-trainium-smoke/run_experiment.sh built the first probe's ConfigMap -- not
+# hand-embedded here, so the two copies of the script (this file and the running Job) can never
+# drift out of sync with each other.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: miles-trainium-grpo
+  namespace: distai-smoke
+  labels:
+    app: miles-trainium-grpo
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        app: miles-trainium-grpo
+      annotations:
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        distai.dev/neuron-method: device-plugin
+      tolerations:
+        - key: aws.amazon.com/neuron
+          operator: Exists
+          effect: NoSchedule
+      imagePullSecrets:
+        - name: ecr-public-pull
+      containers:
+        - name: grpo
+          image: public.ecr.aws/neuron/pytorch-inference-sglang-neuron:v0.1.0-neuron-py314-sdk-2.33.0-ubuntu26.04
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              echo "[setup] downloading Qwen/Qwen3-0.6B"
+              hf download Qwen/Qwen3-0.6B --local-dir /models/Qwen3-0.6B
+              echo "[setup] pip install transformers requests"
+              pip install -q --no-cache-dir "transformers>=4.46,<5" "requests>=2.31"
+              echo "[setup] starting train_grpo.py"
+              python3 /opt/rl/train_grpo.py
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: HF_HOME
+              value: /models/_hf-cache
+            - name: BASE_MODEL_DIR
+              value: /models/Qwen3-0.6B
+            - name: WORK_DIR
+              value: /models/_steps
+            - name: STEPS
+              value: "2"
+            - name: GROUP_SIZE
+              value: "4"
+            - name: MAX_NEW_TOKENS
+              value: "24"
+          resources:
+            requests:
+              cpu: "4"
+              memory: "24Gi"
+              aws.amazon.com/neuron: "1"
+            limits:
+              cpu: "8"
+              memory: "40Gi"
+              aws.amazon.com/neuron: "1"
+          volumeMounts:
+            - name: script
+              mountPath: /opt/rl
+            - name: models
+              mountPath: /models
+      volumes:
+        - name: script
+          configMap:
+            name: miles-trainium-script
+        - name: models
+          emptyDir:
+            sizeLimit: 40Gi
