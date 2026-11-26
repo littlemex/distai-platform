@@ -25,9 +25,20 @@
 # accel-efa-device-plugin-* releases: see gitops/README.md's "Known
 # limits", and #19/#50 for where it is expected to be designed.
 #
-# tolerations adds distai.dev/startup-not-ready:NoSchedule (#96) -- same
-# reasoning as accel-efa-device-plugin-nvidia/addon.yaml, not repeated
-# here.
+# tolerations (#96, #102) -- same reasoning as
+# accel-efa-device-plugin-nvidia/addon.yaml's own tolerations comment,
+# not repeated here: the #96 entry (distai.dev/startup-not-ready) is
+# kept because gitops/tests/check_startup_taint_keys.py asserts on that
+# literal key by name; the second, key-agnostic, effect: NoSchedule
+# entry added by #102 additionally covers accelerator.taint/
+# tenancy.teamTaint (and, incidentally, already subsumes the #96 entry
+# at the real Kubernetes scheduler level on its own). `helm template`
+# against the pinned chart with this exact two-entry value renders the
+# identical three-entry list ([{key: CriticalAddonsOnly, operator:
+# Exists}, {key: distai.dev/startup-not-ready, operator: Exists,
+# effect: NoSchedule}, {operator: Exists, effect: NoSchedule}]) as the
+# NVIDIA release -- confirmed statically; not independently re-run
+# against a real trn2 node in this change.
 addon: accel-efa-device-plugin-neuron
 tier: core
 chart: aws-efa-k8s-device-plugin
@@ -44,6 +55,8 @@ values:
   tolerations:
     - key: distai.dev/startup-not-ready
       operator: Exists
+      effect: NoSchedule
+    - operator: Exists
       effect: NoSchedule
   securityContext:
     privileged: false

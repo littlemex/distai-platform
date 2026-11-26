@@ -125,17 +125,63 @@
 # against both existing fixtures (neither renders the label, since
 # neither sets pool.networkInterfaces) and against this PR's own real
 # p4d.24xlarge test values (which do set it).
-# tolerations adds distai.dev/startup-not-ready:NoSchedule (#96): unlike
-# the NVIDIA/Neuron device-plugin charts, this chart's own template
-# appends .Values.tolerations onto one hardcoded CriticalAddonsOnly entry
-# (templates/daemonset.yaml, confirmed by reading the pinned chart
-# version) rather than replacing the whole list, so only the new entry
-# needs to be added here. Lets this DaemonSet's own Pod schedule onto a
-# node a capacity-pool NodePool opted into pool.startupTaints for --
-# without it, this Pod could never become Ready while the taint is
-# present, and vigil-controller (gitops/addons/vigil-controller) would
-# only ever remove that taint at its own timeout, not once this
-# advertiser is actually ready.
+# tolerations (#96, #102): this chart's own template appends
+# .Values.tolerations onto one hardcoded CriticalAddonsOnly entry
+# (aws-efa-k8s-device-plugin v0.5.35 templates/daemonset.yaml lines
+# 34-39, confirmed both by reading the pinned chart's own template
+# source and by `helm template` against it) rather than replacing the
+# whole list, so only the entries actually needed have to be added
+# here. #96 needed one (distai.dev/startup-not-ready:NoSchedule, so
+# this Pod can become Ready while a capacity-pool NodePool's own
+# pool.startupTaints is still held -- without it, vigil-controller,
+# gitops/addons/vigil-controller, would only ever release that taint at
+# its own timeout, never once this advertiser is actually ready).
+#
+# #102 found a second, unrelated taint this Pod also needs to tolerate:
+# accelerator.taint (gitops/charts/capacity-pool, nvidia.com/gpu by
+# convention, NoSchedule, permanent for the node's whole lifetime --
+# not released once ready the way pool.startupTaints is). Confirmed on
+# real hardware (p5en.48xlarge) that a pool setting both
+# accelerator.methodLabel and accelerator.taint (gitops/cells/
+# dp-a19-gpu-r3's own gpu.yaml does both already, #63/#56) left this
+# DaemonSet's desiredNumberScheduled at 0 forever with only the
+# startup-taint entry present, and vpc.amazonaws.com/efa never appeared
+# in that node's allocatable, even though the physical EFA devices were
+# present and healthy the whole time.
+#
+# A second, key-agnostic entry (operator: Exists, no key) added below
+# the #96 entry, not a third key-specific one for nvidia.com/gpu: naming
+# the key explicitly would also need a fourth entry for
+# tenancy.teamTaint (#22, same taint shape as accelerator.taint, not yet
+# used by any cell today -- checked: `grep -rn teamTaint gitops/cells/`
+# matches only comments) the moment a future pool sets one, since the
+# DaemonSet controller evaluates every matching-effect taint on a node
+# regardless of which key this chart happens to know about. A
+# key-agnostic entry closes that case (and, incidentally, already
+# covers the #96 startup taint on its own) without needing to enumerate
+# every taint key this platform might ever render. The #96 entry above
+# is kept rather than removed even though this new entry already
+# subsumes it: gitops/tests/check_startup_taint_keys.py asserts on the
+# literal distai.dev/startup-not-ready key by name (it checks
+# `t.get("key") == taint_key`, which a keyless entry does not match),
+# so dropping it would fail that check while still being correct at the
+# real Kubernetes scheduler level -- kept to satisfy that check
+# literally as well as to keep #96's own reasoning legible on its own,
+# not because the keyless entry below needs it to work. Scoped to
+# effect: NoSchedule because every real accelerator.taint/
+# tenancy.teamTaint usage in this repository today uses NoSchedule only
+# (same grep as above), even though capacity-pool's own taint rendering
+# also accepts PreferNoSchedule or NoExecute (gitops/charts/
+# capacity-pool/templates/_helpers.tpl) -- a future pool using effect:
+# NoExecute would need this toleration widened again (PreferNoSchedule
+# needs no such widening: it is a scheduling preference, not something
+# the DaemonSet controller gates placement on).
+#
+# The Neuron release (accel-efa-device-plugin-neuron/addon.yaml) gets
+# the identical fix on the stated grounds that it is the identical
+# chart/version/image with the identical template behavior, confirmed
+# statically with `helm template` for both releases -- not
+# independently re-run against a real trn2 node in this change.
 addon: accel-efa-device-plugin-nvidia
 tier: core
 chart: aws-efa-k8s-device-plugin
@@ -152,6 +198,8 @@ values:
   tolerations:
     - key: distai.dev/startup-not-ready
       operator: Exists
+      effect: NoSchedule
+    - operator: Exists
       effect: NoSchedule
   securityContext:
     privileged: false
