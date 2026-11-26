@@ -33,3 +33,10 @@ admin_principal_arns = [
 tags = {
   "distai-platform/cell" = "example-cell"
 }
+
+# Optional cost guardrail (issue #95): a light verification cell's own
+# AWS Budgets limit and the addresses that should be notified at 80% and
+# 100% of it. Both default to "off" (null / []); uncomment and pass your
+# own values, never commit a real email address here.
+# budget_limit_usd           = 10
+# budget_notification_emails = ["you@example.com"]

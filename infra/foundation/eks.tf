@@ -362,6 +362,32 @@ resource "aws_launch_template" "system_node" {
     }
   }
 
+  # Amazon EKS managed node group tags do not propagate to the node group's
+  # own Auto Scaling group or its EC2 instances (Amazon EKS User Guide,
+  # "Create a managed node group" -- console Tags field help text: "These
+  # tags don't propagate to other resources in the node group, such as
+  # Auto Scaling groups or instances"). Separately, the provider's own
+  # default_tags auto-merges only into a resource's own top-level tags/
+  # tags_all, never into a nested repeated block like tag_specifications,
+  # so writing var.tags here explicitly is required either way; it is not
+  # covered by default_tags doing this everywhere else in this layer. The
+  # Amazon EKS User Guide's own "Customize managed nodes with launch
+  # templates" page, "Tagging Amazon EC2 instances" section, names
+  # TagSpecification on the launch template as the supported way to tag a
+  # managed node group's own instances and volumes directly. merge() adds
+  # a Name tag unconditionally: a TagSpecification with zero tags (every
+  # cell that leaves var.tags at its own default {}) is rejected by the
+  # EC2 API, so this must never send var.tags alone.
+  tag_specifications {
+    resource_type = "instance"
+    tags          = merge(var.tags, { Name = "${var.name}-system-node" })
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+    tags          = merge(var.tags, { Name = "${var.name}-system-node" })
+  }
+
   update_default_version = true
 }
 
