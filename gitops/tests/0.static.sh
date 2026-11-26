@@ -198,11 +198,17 @@ else
   echo "FAIL no cells/*/smoke/*.yaml found"
   failures=$((failures + 1))
 fi
+# Not a FAIL like capacity-pool/smoke above: every cell has those two, but
+# sharedfs (#18) is optional per cell - only a cell whose
+# infra/foundation was applied with var.shared_fsx_lustre set has one.
+# This PR's own fixture (cells/dp-18-sharedfs-r1/sharedfs/) is why at
+# least one exists today, not a platform-wide requirement; a later PR
+# removing that fixture (or any cell's own sharedfs/*.yaml) with no
+# replacement must not fail every unrelated PR's static check.
 if [[ "${#cell_sharedfs_files[@]}" -ge 1 ]]; then
-  echo "PASS at least one cells/*/sharedfs/*.yaml exists"
+  echo "INFO ${#cell_sharedfs_files[@]} cells/*/sharedfs/*.yaml file(s) found"
 else
-  echo "FAIL no cells/*/sharedfs/*.yaml found"
-  failures=$((failures + 1))
+  echo "INFO no cells/*/sharedfs/*.yaml found (sharedfs is optional per cell - not a failure)"
 fi
 
 # ------------------------------------------------- 2. shellcheck, bash -n
