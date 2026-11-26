@@ -226,17 +226,24 @@ variable "shared_fsx_lustre" {
   # reference, StorageCapacity, fetched 2026-11-27 - an earlier version
   # of this validation got both branches wrong and was corrected before
   # being exercised against a storage_capacity_gib value that would have
-  # caught it): "For SCRATCH_2, PERSISTENT_2, and PERSISTENT_1 deployment
-  # types using SSD storage type, the valid values are 1200 GiB, 2400
-  # GiB, and increments of 2400 GiB" (this variable has no storage_type
-  # field at all - every file system it creates uses FSx's own SSD
-  # default - so the HDD-specific PERSISTENT_1 increments that same
-  # reference states do not apply here); "For SCRATCH_1 deployment type,
-  # valid values are 1200 GiB, 2400 GiB, and increments of 3600 GiB [from
-  # 2400]". This validation states that constraint so a bad value fails
-  # `terraform validate`/`plan`, not a 20-plus-minute `apply` against the
-  # real FSx API (this platform's own real-machine budget is counted in
-  # attempts, not retries of an avoidable input error).
+  # caught it, twice over - the first fix (2026-11-27) misread "increments
+  # of 3600" for SCRATCH_1 as continuing from the 2400 anchor already
+  # named in the same sentence (6000, 9600, ...), rather than as its own
+  # anchor (3600, 7200, ...); corrected against the FSx for Lustre User
+  # Guide's own per-storage-server unit for Scratch 1 (3.6 TiB,
+  # "Deployment and storage class options" page, IP addresses section),
+  # which only a whole-multiple-of-3600 reading matches): "For SCRATCH_2,
+  # PERSISTENT_2, and PERSISTENT_1 deployment types using SSD storage
+  # type, the valid values are 1200 GiB, 2400 GiB, and increments of 2400
+  # GiB" (this variable has no storage_type field at all - every file
+  # system it creates uses FSx's own SSD default - so the HDD-specific
+  # PERSISTENT_1 increments that same reference states do not apply
+  # here); "For SCRATCH_1 deployment type, valid values are 1200 GiB,
+  # 2400 GiB, and increments of 3600 GiB [i.e. 3600, 7200, ...]". This
+  # validation states that constraint so a bad value fails `terraform
+  # validate`/`plan`, not a 20-plus-minute `apply` against the real FSx
+  # API (this platform's own real-machine budget is counted in attempts,
+  # not retries of an avoidable input error).
   validation {
     condition = (
       var.shared_fsx_lustre == null ||
@@ -244,7 +251,7 @@ variable "shared_fsx_lustre" {
         var.shared_fsx_lustre.deployment_type == "SCRATCH_1"
         ? (
           contains([1200, 2400], var.shared_fsx_lustre.storage_capacity_gib) ||
-          (var.shared_fsx_lustre.storage_capacity_gib > 2400 && (var.shared_fsx_lustre.storage_capacity_gib - 2400) % 3600 == 0)
+          (var.shared_fsx_lustre.storage_capacity_gib >= 3600 && var.shared_fsx_lustre.storage_capacity_gib % 3600 == 0)
         )
         : (
           var.shared_fsx_lustre.storage_capacity_gib == 1200 ||
@@ -252,7 +259,7 @@ variable "shared_fsx_lustre" {
         )
       )
     )
-    error_message = "shared_fsx_lustre.storage_capacity_gib must be 1200, 2400, or 2400 plus a multiple of 3600 for deployment_type SCRATCH_1; or 1200, or a multiple of 2400, for SCRATCH_2/PERSISTENT_1/PERSISTENT_2 (SSD - this variable has no storage_type field for the HDD-specific PERSISTENT_1 increments)."
+    error_message = "shared_fsx_lustre.storage_capacity_gib must be 1200, 2400, or a multiple of 3600, for deployment_type SCRATCH_1; or 1200, or a multiple of 2400, for SCRATCH_2/PERSISTENT_1/PERSISTENT_2 (SSD - this variable has no storage_type field for the HDD-specific PERSISTENT_1 increments)."
   }
 
   # Per-deployment-type MB/s/TiB values (same AWS reference as above,
@@ -261,20 +268,24 @@ variable "shared_fsx_lustre" {
   # of this validation accepted either set for both types (silently
   # wrong for a value like 125 on PERSISTENT_1, which InvalidPerUnit
   # StorageThroughput would reject at apply), corrected here to check
-  # per type.
+  # per type. Also required, not merely checked-if-set: the same AWS
+  # reference states this argument is "Required with PERSISTENT_1 and
+  # PERSISTENT_2 deployment types using an SSD or HDD storage class" -
+  # an earlier version of this validation let a PERSISTENT cell plan
+  # cleanly with this left null, deferring the real rejection
+  # (MissingFileSystemConfiguration or similar) to `apply`.
   validation {
     condition = (
       var.shared_fsx_lustre == null ||
-      var.shared_fsx_lustre.per_unit_storage_throughput == null ||
       (
         var.shared_fsx_lustre.deployment_type == "PERSISTENT_1"
-        ? contains([50, 100, 200], var.shared_fsx_lustre.per_unit_storage_throughput)
+        ? (var.shared_fsx_lustre.per_unit_storage_throughput != null && contains([50, 100, 200], var.shared_fsx_lustre.per_unit_storage_throughput))
         : var.shared_fsx_lustre.deployment_type == "PERSISTENT_2"
-        ? contains([125, 250, 500, 1000], var.shared_fsx_lustre.per_unit_storage_throughput)
-        : false
+        ? (var.shared_fsx_lustre.per_unit_storage_throughput != null && contains([125, 250, 500, 1000], var.shared_fsx_lustre.per_unit_storage_throughput))
+        : var.shared_fsx_lustre.per_unit_storage_throughput == null
       )
     )
-    error_message = "shared_fsx_lustre.per_unit_storage_throughput, if set, must be one of 50, 100, 200 for deployment_type PERSISTENT_1 (SSD), or one of 125, 250, 500, 1000 for PERSISTENT_2 (SSD); leave it null for SCRATCH_1/SCRATCH_2, which do not take this argument."
+    error_message = "shared_fsx_lustre.per_unit_storage_throughput is required and must be one of 50, 100, 200 for deployment_type PERSISTENT_1 (SSD), or required and one of 125, 250, 500, 1000 for PERSISTENT_2 (SSD); it must be left null for SCRATCH_1/SCRATCH_2, which do not take this argument."
   }
 }
 
