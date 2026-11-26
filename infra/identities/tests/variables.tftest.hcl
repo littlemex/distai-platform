@@ -64,8 +64,13 @@ run "one_read_only_s3_entry_plans" {
   }
 
   assert {
-    condition     = length(aws_iam_role_policy_attachment.entry_managed) == 0
-    error_message = "an entry with no policy_arns must get no managed policy attachment."
+    condition     = length(aws_iam_role_policy_attachments_exclusive.entry["image-builder"].policy_arns) == 0
+    error_message = "an entry with no policy_arns must declare an empty exclusive managed-policy set (removing anything attached outside this layer), not skip the exclusive resource."
+  }
+
+  assert {
+    condition     = length(aws_iam_role_policies_exclusive.entry["image-builder"].policy_names) == 1 && contains(aws_iam_role_policies_exclusive.entry["image-builder"].policy_names, "scoped")
+    error_message = "an entry that declares s3 must list exactly its own \"scoped\" inline policy in the exclusive inline-policy set."
   }
 }
 
@@ -140,8 +145,13 @@ run "policy_arns_only_entry_gets_no_inline_policy" {
   }
 
   assert {
-    condition     = aws_iam_role_policy_attachment.entry_managed["mcp-server#arn:aws:iam::aws:policy/ReadOnlyAccess"].policy_arn == "arn:aws:iam::aws:policy/ReadOnlyAccess"
+    condition     = contains(aws_iam_role_policy_attachments_exclusive.entry["mcp-server"].policy_arns, "arn:aws:iam::aws:policy/ReadOnlyAccess")
     error_message = "the declared policy_arns entry must be attached."
+  }
+
+  assert {
+    condition     = length(aws_iam_role_policies_exclusive.entry["mcp-server"].policy_names) == 0
+    error_message = "an entry with no s3/kms_key_arns must declare an empty exclusive inline-policy set (removing any inline policy attached outside this layer)."
   }
 }
 

@@ -199,24 +199,45 @@ resource "aws_iam_role_policy" "identity_scoped" {
   policy = data.aws_iam_policy_document.identity_scoped[each.key].json
 }
 
-# --- Managed policy attachments: only this entry's own policy_arns -------
+# --- Exclusive ownership of the role's managed and inline policies -------
+#
+# aws_iam_role_policy_attachment (a single declared attachment) and a
+# plain aws_iam_role_policy (a single declared inline policy, by name)
+# each manage only the one resource they declare: neither detaches a
+# managed policy, nor removes an inline policy under a different name,
+# that was attached outside this layer - exactly the shape a hand-rolled
+# identity (issue #8's own Motivation) has. A real run of this layer's own
+# end-to-end test found this directly: importing a hand-rolled role that
+# had AmazonS3ReadOnlyAccess attached by hand, with no policy_arns
+# declared for that entry, left AmazonS3ReadOnlyAccess attached after
+# apply - the migration's own "permissions are tightened to this layer's
+# declared shape" claim does not hold with only aws_iam_role_policy_attachment.
+#
+# aws_iam_role_policy_attachments_exclusive/aws_iam_role_policies_exclusive
+# take over the role's *entire* set of managed attachments/inline policies:
+# anything not in the given list is removed on the next apply, which is
+# the fail-closed behavior this layer's own migration section promises.
+# Per the provider's own documentation, these must not be mixed with a
+# plain aws_iam_role_policy_attachment for the same role (this layer never
+# creates one) and must list every inline policy name this layer itself
+# still manages (depends_on makes the content exist before this exclusive
+# declaration is reconciled, even though the name list itself is computed
+# only from var.platform_identities, not from that resource's own attributes).
 
-locals {
-  policy_arn_pairs = merge([
-    for key, entry in var.platform_identities : {
-      for arn in entry.policy_arns : "${key}#${arn}" => {
-        entry_key  = key
-        policy_arn = arn
-      }
-    }
-  ]...)
+resource "aws_iam_role_policy_attachments_exclusive" "entry" {
+  for_each = var.platform_identities
+
+  role_name   = aws_iam_role.entry[each.key].name
+  policy_arns = each.value.policy_arns
 }
 
-resource "aws_iam_role_policy_attachment" "entry_managed" {
-  for_each = local.policy_arn_pairs
+resource "aws_iam_role_policies_exclusive" "entry" {
+  for_each = var.platform_identities
 
-  role       = aws_iam_role.entry[each.value.entry_key].name
-  policy_arn = each.value.policy_arn
+  role_name    = aws_iam_role.entry[each.key].name
+  policy_names = contains(keys(local.scoped_entries), each.key) ? ["scoped"] : []
+
+  depends_on = [aws_iam_role_policy.identity_scoped]
 }
 
 # --- Pod Identity association: only this entry's own namespace+SA -------
