@@ -5,28 +5,38 @@
 # accel-nvidia-device-plugin directly with helm (no GitOps/Argo CD layer
 # -- that delivery mechanism is proven separately by PR #21/#25; this
 # script only exercises the #96 mechanism itself: capacity-pool's
-# pool.startupTaints + vigil-controller + the device-plugin toleration),
-# then:
-#   scenario 1 (positive): a real g6e.2xlarge on-demand node launches
-#     with the startup taint; a GPU-requesting Pod with NO toleration for
-#     it must stay unschedulable until the real nvidia-device-plugin Pod
-#     is Ready and vigil-controller removes the taint.
-#   scenario 2 (negative): the device plugin is made unable to become
-#     Ready (bad image tag) on a second, freshly launched node; the same
-#     kind of Pod must stay Pending the whole observation window.
+# pool.startupTaints + vigil-controller + the device-plugin toleration).
+#
+# All three test Pods below request NO extended resource
+# (nvidia.com/gpu) on purpose: kube-scheduler's own resource-fit check
+# would otherwise hold a GPU-requesting Pod Pending on its own, with no
+# taint involved at all, confounding every result below. Each Pod only
+# carries a nodeSelector matching the pool's method label, so the ONLY
+# thing that can hold it Pending is the startup taint itself.
+#
+#   phase 0 (control): pool.startupTaints unset (today's behavior). The
+#     Pod must schedule as soon as the node is Ready, with no wait for
+#     the device plugin -- this is the unsafe race #96 describes.
+#   phase 1 (positive): the same pool, now with pool.startupTaints set.
+#     The Pod must stay unschedulable until the real nvidia-device-plugin
+#     Pod is Ready and vigil-controller removes the taint.
+#   phase 2 (negative): same pool/taint, but the device plugin is made
+#     unable to become Ready (bad image tag) on a freshly launched node;
+#     the Pod must stay Pending the whole observation window.
+#
 # Always destroys everything at the end via a trap, whether or not the
 # scenarios pass, and writes one evidence file per step under
 # /tmp/96-verify-evidence.
 set -uo pipefail
-# Deliberately not set -e: this script runs ~20 minutes of polling against a
-# live cluster where a single transient kubectl error must not abort the
-# whole run before the cleanup trap gets a chance to destroy everything. A
-# handful of genuinely fatal steps (terraform apply, the controller rollouts)
-# check their own exit code explicitly below instead.
+# Deliberately not set -e: this script runs many minutes of polling
+# against a live cluster where a single transient kubectl error must not
+# abort the whole run before the cleanup trap gets a chance to destroy
+# everything. The handful of genuinely fatal steps check their own exit
+# code explicitly below instead.
 
 export AWS_PROFILE=default
 export AWS_REGION=us-east-1
-NAME=dp-c96-gpu-r1
+NAME=dp-c96-gpu-r2
 STATE_BUCKET=distai-eks-tfstate-776010787911
 STATE_REGION=ap-northeast-1
 ADMIN_PRINCIPAL_ARN=arn:aws:iam::776010787911:role/distai-platform-runner
@@ -41,13 +51,12 @@ exec > >(tee -a "${LOG}") 2>&1
 
 log() { echo "[$(date -u +%H:%M:%S)] $*"; }
 
-APPLY_OK=0
 FOUNDATION_DIR="${REPO_ROOT}/infra/foundation"
 
 cleanup() {
   log "=== cleanup: terraform destroy ==="
   cd "${FOUNDATION_DIR}" || return 0
-  kubectl delete pod gpu-smoke-1 gpu-smoke-2 --ignore-not-found --wait=false 2>/dev/null || true
+  kubectl delete pod gpu-control gpu-positive gpu-negative --ignore-not-found --wait=false 2>/dev/null || true
   kubectl get nodeclaims -o name 2>/dev/null | xargs -r kubectl delete --wait=false 2>/dev/null || true
   terraform destroy -auto-approve -input=false 2>&1 | tee "${EV}/99-destroy.log"
   log "=== cleanup: leftover sweep (read-only) ==="
@@ -76,7 +85,6 @@ terraform init -input=false \
 terraform apply -auto-approve -input=false | tee "${EV}/01-apply.log"
 APPLY_RC="${PIPESTATUS[0]}"
 [ "${APPLY_RC}" -eq 0 ] || { log "FATAL: terraform apply failed (rc=${APPLY_RC})"; exit 1; }
-APPLY_OK=1
 
 NODE_ROLE="$(terraform output -raw karpenter_node_role_name)"
 INTERRUPTION_QUEUE="$(terraform output -raw karpenter_interruption_queue_name)"
@@ -84,6 +92,7 @@ log "NODE_ROLE=${NODE_ROLE} INTERRUPTION_QUEUE=${INTERRUPTION_QUEUE}"
 
 aws eks update-kubeconfig --name "${NAME}" --region "${AWS_REGION}"
 kubectl get nodes -o wide | tee "${EV}/02-system-nodes.txt"
+kubectl get daemonset -A -o wide | tee "${EV}/02-system-daemonsets.txt"
 
 log "=== 2. install karpenter-crd + karpenter ==="
 helm upgrade --install karpenter-crd oci://public.ecr.aws/karpenter/karpenter-crd --version 1.15.2 -n kube-system
@@ -158,8 +167,10 @@ VALUES
 helm upgrade --install accel-nvidia-device-plugin nvdp/nvidia-device-plugin --version 0.20.2 -n nvidia-device-plugin --create-namespace \
   -f "${EV}/nvdp-values.yaml"
 
-log "=== 5. render capacity-pool 'gpu' NodePool (pool.startupTaints set) ==="
-cat > "${EV}/gpu-pool-values.yaml" <<VALUES
+render_pool() {
+  # render_pool OUT_FILE STARTUP_TAINTS_YAML_OR_EMPTY
+  local out="$1" startup="$2"
+  cat > "${EV}/gpu-pool-values.yaml" <<VALUES
 clusterName: "${NAME}"
 nodeRole: "${NODE_ROLE}"
 pool:
@@ -172,30 +183,88 @@ pool:
     - key: node.kubernetes.io/instance-type
       operator: In
       values: ["${INSTANCE_TYPE}"]
-  startupTaints:
-    - key: distai.dev/startup-not-ready
-      effect: NoSchedule
+${startup}
 accelerator:
   resourceName: nvidia.com/gpu
   methodLabel:
     key: distai.dev/nvidia-gpu-method
     value: device-plugin
 VALUES
-helm template gpu "${REPO_ROOT}/gitops/charts/capacity-pool" -n kube-system -f "${EV}/gpu-pool-values.yaml" \
-  > "${EV}/03-gpu-pool-rendered.yaml"
-cat "${EV}/03-gpu-pool-rendered.yaml"
-kubectl apply -f "${EV}/03-gpu-pool-rendered.yaml"
+  helm template gpu "${REPO_ROOT}/gitops/charts/capacity-pool" -n kube-system -f "${EV}/gpu-pool-values.yaml" > "${out}"
+}
 
-#############################################################################
-log "=== SCENARIO 1 (positive): device plugin healthy, Pod must wait for it ==="
-#############################################################################
-cat > "${EV}/pod1.yaml" <<PODEOF
+STARTUP_TAINTS_BLOCK="  startupTaints:
+    - key: distai.dev/startup-not-ready
+      effect: NoSchedule"
+
+delete_gpu_node() {
+  local nc
+  for i in $(seq 1 30); do
+    nc="$(kubectl get nodeclaims -l karpenter.sh/nodepool=gpu -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+    [ -z "${nc}" ] && break
+    kubectl delete nodeclaim "${nc}" --wait=true --timeout=120s 2>/dev/null || true
+    sleep 5
+  done
+  for i in $(seq 1 12); do
+    kubectl get nodes -l distai.dev/nvidia-gpu-method=device-plugin --no-headers 2>/dev/null | grep -q . || break
+    sleep 10
+  done
+}
+
+# watch_pod POD_NAME EVIDENCE_PREFIX MAX_ITERS -> writes summary, returns via files
+watch_pod() {
+  local pod="$1" prefix="$2" max_iters="$3"
+  local node="" scheduled_at="" running_at="" taint_gone_at="" dp_ready_at=""
+  ( kubectl get events -A --watch -o wide > "${EV}/${prefix}-events.log" 2>&1 & echo $! > "${EV}/${prefix}-events.pid" )
+  for i in $(seq 1 "${max_iters}"); do
+    sleep 10
+    node="$(kubectl get pod "${pod}" -o jsonpath='{.spec.nodeName}' 2>/dev/null)"
+    local phase scheduled_cond taints dp_pod dp_ready
+    phase="$(kubectl get pod "${pod}" -o jsonpath='{.status.phase}' 2>/dev/null)"
+    scheduled_cond="$(kubectl get pod "${pod}" -o jsonpath='{.status.conditions[?(@.type=="PodScheduled")].status}' 2>/dev/null)"
+    if [ "${scheduled_cond}" = "True" ] && [ -z "${scheduled_at}" ]; then
+      scheduled_at="$(date -u +%H:%M:%S)"; log "${prefix}: Scheduled (onto ${node}) at ${scheduled_at}"
+    fi
+    taints="<no-node>"
+    if [ -n "${node}" ]; then
+      taints="$(kubectl get node "${node}" -o jsonpath='{.spec.taints}' 2>/dev/null)"
+      if [ -z "${taint_gone_at}" ] && ! echo "${taints}" | grep -q "startup-not-ready"; then
+        taint_gone_at="$(date -u +%H:%M:%S)"; log "${prefix}: startup taint gone from ${node} at ${taint_gone_at}"
+      fi
+      dp_pod="$(kubectl get pods -n nvidia-device-plugin --field-selector spec.nodeName="${node}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+      if [ -n "${dp_pod}" ] && [ -z "${dp_ready_at}" ]; then
+        dp_ready="$(kubectl get pod "${dp_pod}" -n nvidia-device-plugin -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)"
+        [ "${dp_ready}" = "True" ] && { dp_ready_at="$(date -u +%H:%M:%S)"; log "${prefix}: device-plugin pod ${dp_pod} Ready at ${dp_ready_at}"; }
+      fi
+    fi
+    log "${prefix} t+$((i*10))s node=${node:-<none>} scheduled=${scheduled_at:-no} taints=${taints} dp_ready=${dp_ready_at:-no} phase=${phase:-<none>}"
+    if [ "${phase}" = "Running" ] && [ -z "${running_at}" ]; then
+      running_at="$(date -u +%H:%M:%S)"; log "${prefix}: Running at ${running_at}"
+      break
+    fi
+  done
+  kill "$(cat "${EV}/${prefix}-events.pid" 2>/dev/null)" 2>/dev/null || true
+  [ -n "${node}" ] && kubectl get node "${node}" -o yaml > "${EV}/${prefix}-final-node.yaml" 2>/dev/null
+  kubectl describe pod "${pod}" > "${EV}/${prefix}-final-pod-describe.txt" 2>/dev/null || true
+  kubectl get events -A --sort-by=.lastTimestamp > "${EV}/${prefix}-events-final.txt" 2>/dev/null || true
+  {
+    echo "node=${node}"
+    echo "scheduled_at=${scheduled_at}"
+    echo "device_plugin_ready_at=${dp_ready_at}"
+    echo "taint_removed_at=${taint_gone_at}"
+    echo "running_at=${running_at}"
+  } > "${EV}/${prefix}-summary.txt"
+  cat "${EV}/${prefix}-summary.txt"
+}
+
+make_pod() {
+  local name="$1" out="$2"
+  cat > "${out}" <<PODEOF
 apiVersion: v1
 kind: Pod
 metadata:
-  name: gpu-smoke-1
+  name: ${name}
   namespace: default
-  labels: { scenario: positive-96 }
 spec:
   restartPolicy: Never
   nodeSelector:
@@ -203,122 +272,48 @@ spec:
   containers:
     - name: smoke
       image: ${TEST_IMAGE}
-      command: ["sh", "-c", "date -u; nvidia-smi -L; sleep 600"]
-      resources:
-        limits:
-          nvidia.com/gpu: 1
+      command: ["sh", "-c", "date -u; nvidia-smi -L || true; sleep 600"]
 PODEOF
-log "pod1.yaml (note: NO toleration for distai.dev/startup-not-ready -- this is the point)"
-cat "${EV}/pod1.yaml"
-( kubectl get events -A --watch -o wide > "${EV}/s1-events.log" 2>&1 & echo $! > "${EV}/s1-events.pid" )
-kubectl apply -f "${EV}/pod1.yaml"
-
-S1_NODE_READY=""
-S1_TAINT_GONE=""
-S1_DP_READY=""
-S1_POD_RUNNING=""
-for i in $(seq 1 90); do
-  sleep 10
-  NODE1="$(kubectl get nodes -l distai.dev/nvidia-gpu-method=device-plugin -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
-  if [ -n "${NODE1}" ]; then
-    if [ -z "${S1_NODE_READY}" ] && kubectl get node "${NODE1}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null | grep -q True; then
-      S1_NODE_READY="$(date -u +%H:%M:%S)"; log "node ${NODE1} Ready at ${S1_NODE_READY}"
-    fi
-    TAINTS="$(kubectl get node "${NODE1}" -o jsonpath='{.spec.taints}' 2>/dev/null)"
-    if [ -z "${S1_TAINT_GONE}" ] && ! echo "${TAINTS}" | grep -q "startup-not-ready"; then
-      S1_TAINT_GONE="$(date -u +%H:%M:%S)"; log "startup taint gone from ${NODE1} at ${S1_TAINT_GONE} (taints now: ${TAINTS})"
-    fi
-    DP_POD="$(kubectl get pods -n nvidia-device-plugin --field-selector spec.nodeName="${NODE1}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
-    if [ -n "${DP_POD}" ] && [ -z "${S1_DP_READY}" ]; then
-      READY="$(kubectl get pod "${DP_POD}" -n nvidia-device-plugin -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)"
-      if [ "${READY}" = "True" ]; then
-        S1_DP_READY="$(date -u +%H:%M:%S)"; log "device-plugin pod ${DP_POD} Ready at ${S1_DP_READY}"
-      fi
-    fi
-  fi
-  PHASE="$(kubectl get pod gpu-smoke-1 -o jsonpath='{.status.phase}' 2>/dev/null)"
-  TAINT_PRESENT=no
-  echo "${TAINTS:-}" | grep -q "startup-not-ready" && TAINT_PRESENT=yes
-  log "t+$((i*10))s node=${NODE1:-<none>} taint_present=${TAINT_PRESENT} dp_ready=${S1_DP_READY:-no} pod_phase=${PHASE:-<none>}"
-  if [ -z "${NODE1}" ] && [ "${i}" -eq 18 ]; then
-    log "no node after 3 minutes -- dumping karpenter logs and nodeclaim status for diagnosis"
-    kubectl get nodeclaims -o wide > "${EV}/s1-nodeclaims-t3m.txt" 2>&1 || true
-    kubectl describe nodeclaims > "${EV}/s1-nodeclaims-describe-t3m.txt" 2>&1 || true
-    kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter --since=5m --tail=200 > "${EV}/s1-karpenter-logs-t3m.txt" 2>&1 || true
-  fi
-  if [ "${PHASE}" = "Running" ] && [ -z "${S1_POD_RUNNING}" ]; then
-    S1_POD_RUNNING="$(date -u +%H:%M:%S)"; log "gpu-smoke-1 Running at ${S1_POD_RUNNING}"
-    break
-  fi
-done
-kill "$(cat "${EV}/s1-events.pid")" 2>/dev/null || true
-kubectl get node "${NODE1}" -o yaml > "${EV}/s1-final-node.yaml" 2>/dev/null || true
-kubectl describe pod gpu-smoke-1 > "${EV}/s1-final-pod-describe.txt" 2>/dev/null || true
-kubectl logs -n vigil-system -l app.kubernetes.io/name=vigil-controller --since=30m > "${EV}/s1-vigil-logs.txt" 2>/dev/null || true
-kubectl get events -A --sort-by=.lastTimestamp > "${EV}/s1-events-final.txt" 2>/dev/null || true
-{
-  echo "node_ready=${S1_NODE_READY}"
-  echo "device_plugin_ready=${S1_DP_READY}"
-  echo "taint_removed=${S1_TAINT_GONE}"
-  echo "pod_running=${S1_POD_RUNNING}"
-} > "${EV}/s1-summary.txt"
-cat "${EV}/s1-summary.txt"
+}
 
 #############################################################################
-log "=== SCENARIO 2 (negative): device plugin broken, Pod must stay Pending ==="
+log "=== PHASE 0 (control): pool.startupTaints unset -- today's unsafe behavior ==="
 #############################################################################
-log "deleting scenario 1's node to force a fresh one for scenario 2"
-kubectl delete pod gpu-smoke-1 --ignore-not-found
-NODECLAIM1="$(kubectl get nodeclaims -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
-if [ -n "${NODECLAIM1}" ]; then
-  kubectl delete nodeclaim "${NODECLAIM1}" --wait=true --timeout=120s || true
-fi
-for i in $(seq 1 12); do kubectl get nodes -l distai.dev/nvidia-gpu-method=device-plugin --no-headers 2>/dev/null | grep -q . || break; sleep 10; done
+render_pool "${EV}/03-gpu-pool-control.yaml" ""
+cat "${EV}/03-gpu-pool-control.yaml"
+kubectl apply -f "${EV}/03-gpu-pool-control.yaml"
+make_pod gpu-control "${EV}/pod-control.yaml"
+log "pod-control.yaml (no toleration, no resource request -- nothing but a taint could hold this Pending)"
+cat "${EV}/pod-control.yaml"
+kubectl apply -f "${EV}/pod-control.yaml"
+watch_pod gpu-control control 30
+kubectl delete pod gpu-control --ignore-not-found
+delete_gpu_node
 
+#############################################################################
+log "=== PHASE 1 (positive): same pool, pool.startupTaints set, device plugin healthy ==="
+#############################################################################
+render_pool "${EV}/03-gpu-pool-positive.yaml" "${STARTUP_TAINTS_BLOCK}"
+cat "${EV}/03-gpu-pool-positive.yaml"
+kubectl apply -f "${EV}/03-gpu-pool-positive.yaml"
+make_pod gpu-positive "${EV}/pod-positive.yaml"
+kubectl apply -f "${EV}/pod-positive.yaml"
+watch_pod gpu-positive positive 90
+kubectl logs -n vigil-system -l app.kubernetes.io/name=vigil-controller --since=30m > "${EV}/positive-vigil-logs.txt" 2>/dev/null || true
+kubectl delete pod gpu-positive --ignore-not-found
+delete_gpu_node
+
+#############################################################################
+log "=== PHASE 2 (negative): same taint, device plugin broken ==="
+#############################################################################
 log "breaking accel-nvidia-device-plugin's image (ImagePullBackOff on purpose)"
 helm upgrade accel-nvidia-device-plugin nvdp/nvidia-device-plugin --version 0.20.2 -n nvidia-device-plugin \
   -f "${EV}/nvdp-values.yaml" --set image.tag=does-not-exist-9.9.9
-
-cat > "${EV}/pod2.yaml" <<PODEOF
-apiVersion: v1
-kind: Pod
-metadata:
-  name: gpu-smoke-2
-  namespace: default
-  labels: { scenario: negative-96 }
-spec:
-  restartPolicy: Never
-  nodeSelector:
-    distai.dev/nvidia-gpu-method: device-plugin
-  containers:
-    - name: smoke
-      image: ${TEST_IMAGE}
-      command: ["sh", "-c", "sleep 600"]
-      resources:
-        limits:
-          nvidia.com/gpu: 1
-PODEOF
-kubectl apply -f "${EV}/pod2.yaml"
-
-S2_STAYED_PENDING=1
-for i in $(seq 1 18); do
-  sleep 10
-  NODE2="$(kubectl get nodes -l distai.dev/nvidia-gpu-method=device-plugin -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
-  PHASE2="$(kubectl get pod gpu-smoke-2 -o jsonpath='{.status.phase}' 2>/dev/null)"
-  TAINTS2="$(kubectl get node "${NODE2}" -o jsonpath='{.spec.taints}' 2>/dev/null)"
-  log "t+$((i*10))s node=${NODE2:-<none>} taints=${TAINTS2:-<none>} pod_phase=${PHASE2:-<none>}"
-  if [ "${PHASE2}" = "Running" ]; then
-    log "UNEXPECTED: gpu-smoke-2 reached Running at t+$((i*10))s -- see evidence"
-    S2_STAYED_PENDING=0
-    break
-  fi
-done
-kubectl describe pod gpu-smoke-2 > "${EV}/s2-final-pod-describe.txt" 2>/dev/null || true
-kubectl get events -A --sort-by=.lastTimestamp > "${EV}/s2-events-final.txt" 2>/dev/null || true
-kubectl get node "${NODE2}" -o yaml > "${EV}/s2-final-node.yaml" 2>/dev/null || true
-kubectl get pods -n nvidia-device-plugin -o wide > "${EV}/s2-device-plugin-pods.txt" 2>/dev/null || true
-echo "stayed_pending=${S2_STAYED_PENDING}" > "${EV}/s2-summary.txt"
-cat "${EV}/s2-summary.txt"
+kubectl apply -f "${EV}/03-gpu-pool-positive.yaml"
+make_pod gpu-negative "${EV}/pod-negative.yaml"
+kubectl apply -f "${EV}/pod-negative.yaml"
+watch_pod gpu-negative negative 18
+kubectl get pods -n nvidia-device-plugin -o wide > "${EV}/negative-device-plugin-pods.txt" 2>/dev/null || true
 
 log "reverting accel-nvidia-device-plugin's image"
 helm upgrade accel-nvidia-device-plugin nvdp/nvidia-device-plugin --version 0.20.2 -n nvidia-device-plugin \
