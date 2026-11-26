@@ -224,10 +224,17 @@ a Layer 1 pod on the existing cell's NVIDIA GPU pool, and a second
 foundation cell built in a Trainium-capable Region for a Layer 1 pod on a
 Neuron pool. Off by default, so an ordinary `1.e2e.sh` run (any `NAME`) is
 unaffected -- **the default is a cost control, not a statement that this
-extension is optional to run.** A plain `1.e2e.sh` run passes every check
-the script has without ever launching a GPU or a Trainium node; this is
-not hypothetical, it happened against `main`'s own tip on 2026-11-25
-(89 PASS / 0 FAIL, no accelerator step at all). **Set
+extension is optional to run.** A plain `1.e2e.sh` run against a generic
+cell (any `NAME` other than `dp-a19-gpu-r3`/`dp-a19-trn-r3`, whose own
+fixtures carry no accelerator pool at all) passes every check the script
+has without ever launching a GPU or a Trainium node; this is not
+hypothetical, it happened against `main`'s own tip on 2026-11-25
+(cell `dp-main-e2e-r1`, 89 PASS / 0 FAIL, no accelerator step at all).
+Nothing in this script stops the same thing from happening against
+`dp-a19-gpu-r3`/`dp-a19-trn-r3` themselves if `GITOPS_RUN_ACCEL_E2E` is
+left at its default -- this has not been run and confirmed separately,
+but the mechanism is the same either way: the flag, not the cell, is
+what gates every accelerator-specific check. **Set
 `GITOPS_RUN_ACCEL_E2E=1` for any pull request that changes
 `gitops/addons/accel-*`, `gitops/addon-catalog/accel-*`,
 `gitops/charts/accel-device-classes/`, the accelerator fields of
@@ -241,9 +248,9 @@ on-demand `g7`/`g6e`/`g5` for the GPU cell, spot `trn2.3xlarge` for the
 Trainium cell, #16), billed only while this script's own `terraform
 apply`/`destroy` window for each cell is open. A full run of the base
 suite plus this extension (both cells) took 1h59m37s end to end on a
-real run (2026-11-22, both cells reached a final `RESULT PASS`). A
-GPU-cell-only run of the base suite alone (no accelerator extension)
-took 1h22m on a real run against `main`'s own tip (2026-11-25). Four
+real run (2026-11-22, both cells reached a final `RESULT PASS`). A base-suite-only
+run (the generic cell above, no accelerator extension) took
+1h22m on a real run against `main`'s own tip (2026-11-25). Four
 real runs of this extension in a row (2026-11-26, tracked in #87) each
 failed before completing -- treat 1h59m37s as the known-good order of
 magnitude for planning, not as a number this extension currently

@@ -2058,10 +2058,13 @@ print(len(doc) if isinstance(doc, list) else -1)
   # karpenter.k8s.aws/instance-gpu-manufacturer=nvidia nodes before it
   # launches its own disposable one; relying on that 15m window to have
   # elapsed by then is a race, not a guarantee, so this check's own
-  # NodeClaim is deleted outright below instead: it is this check's own
-  # disposable fixture node, not a workload anything else depends on, so
-  # there is no image-pull window left to protect once the probe above
-  # has already run on it.
+  # NodeClaim is deleted outright below instead: this probe pod is the
+  # only workload this function itself put on the node, so there is no
+  # image-pull window of this function's own to protect once the probe
+  # above has already run on it. (Whether some other workload -- for
+  # example the admin smoke canary, step 11 -- later lands on or keeps
+  # alive this same node or another one from the same NodePool is a
+  # separate, open question, not ruled out here; see #87.)
   #
   # Fired with --wait=false, not waited on here: a real run (2026-11-26,
   # issue #87) showed this exact delete, issued with a blocking
@@ -3125,30 +3128,38 @@ pass "no Application ${APP_DCGM} exists at ${NO_DCGM_REVISION} (no ${DCGM_MARKER
 # genuine zero-node answer.
 #
 # Waited and retried, not a single-shot check: a real run (2026-11-26)
-# showed the accelerators step's own disposable GPU node can still exist
-# here, 15-20+ minutes after check_accel_layer1 requested its deletion --
-# kubectl's own --wait=true --timeout=300s on that delete only bounds how
-# long the *client* blocks, not how long Karpenter's real cordon/drain/
-# terminate sequence takes on an actual EC2 instance, so check_accel_layer1
-# no longer waits on it at all (fired with --wait=false instead, see its
-# own comment). 600s is a judgment call, not a proven-sufficient number --
-# that same real run never showed the node actually finish terminating,
-# and did not record which node its own leftover count was (this fail
-# message printed only a count, no name, at the time). Whether 600s is
-# enough, or whether a stuck finalizer/PDB/non-evictable pod is blocking a
-# real drain outright with no amount of waiting helping, or whether the
-# leftover node is unrelated to this check at all (the admin smoke
-# canary, step 11, also lands on this same NodePool and is never deleted
-# before this script's own final cleanup() -- a structural question this
-# precondition does not yet account for either way, tracked unresolved in
-# #87, not attempted here: fixing it would also need the dcgm_desired
-# check right below this one to tolerate the canary's own node, not only
-# this precondition, and neither has been verified against a real
-# cluster) is exactly what nvidia_node_leftover_diagnostics below is for
-# on the next real run.
+# failed this exact precondition with a leftover NVIDIA node present,
+# 15-20+ minutes after check_accel_layer1 requested deletion of its own
+# disposable node's NodeClaim -- kubectl's own --wait=true --timeout=300s
+# on that delete only bounds how long the *client* blocks, not how long
+# Karpenter's real cordon/drain/terminate sequence takes on an actual EC2
+# instance, so check_accel_layer1 no longer waits on it at all (fired
+# with --wait=false instead, see its own comment). 600s is a judgment
+# call, not a proven-sufficient number -- that run never showed any node
+# actually finish terminating, and did not record which node its own
+# leftover count was (that run's own fail message printed only a count,
+# no name). Whether 600s is enough, or whether a stuck finalizer/PDB/
+# non-evictable pod is blocking a real drain outright with no amount of
+# waiting helping, or whether the leftover node is unrelated to this
+# check at all (the admin smoke canary, step 11, also lands on this same
+# NodePool and is never deleted before this script's own final
+# cleanup() -- a structural question this precondition does not yet
+# account for either way, tracked unresolved in #87, not attempted here:
+# fixing it would also need the dcgm_desired check right below this one
+# to tolerate the canary's own node, not only this precondition, and
+# neither has been verified against a real cluster) is exactly what
+# nvidia_node_leftover_diagnostics below is for on the next real run.
 nvidia_node_names=""
+nvidia_node_lookup_error=""
 zero_nvidia_nodes() {
-  nvidia_node_names="$(k get nodes -l karpenter.k8s.aws/instance-gpu-manufacturer=nvidia -o name 2>&1)" || return 1
+  local out
+  if out="$(k get nodes -l karpenter.k8s.aws/instance-gpu-manufacturer=nvidia -o name 2>&1)"; then
+    nvidia_node_names="${out}"
+    nvidia_node_lookup_error=""
+  else
+    nvidia_node_lookup_error="${out}"
+    return 1
+  fi
   [[ "$(echo "${nvidia_node_names}" | grep -c .)" -eq 0 ]]
 }
 # nvidia_node_leftover_diagnostics: for each leftover node, its matching
@@ -3157,12 +3168,19 @@ zero_nvidia_nodes() {
 # trying and failing to finish the drain, not merely taking a while), the
 # pods still bound to it (a non-evictable pod or a restrictive
 # PodDisruptionBudget would show up here), and the node's own Events.
+# Only ever called after zero_nvidia_nodes's own lookup last succeeded
+# (see the fail() call below), so nvidia_node_names here is always a real
+# node list, never error text to word-split.
 nvidia_node_leftover_diagnostics() {
-  local node_name short_name nc_name
+  local node_name short_name nc_lookup nc_name
   for node_name in ${nvidia_node_names}; do
     short_name="${node_name#node/}"
-    nc_name="$(k get nodeclaims -o jsonpath='{range .items[*]}{.status.nodeName}{"="}{.metadata.name}{"\n"}{end}' 2>&1 \
-      | awk -F= -v n="${short_name}" '$1==n{print $2}')"
+    if nc_lookup="$(k get nodeclaims -o jsonpath='{range .items[*]}{.status.nodeName}{"="}{.metadata.name}{"\n"}{end}' 2>&1)"; then
+      nc_name="$(echo "${nc_lookup}" | awk -F= -v n="${short_name}" '$1==n{print $2}')"
+    else
+      nc_name=""
+      printf 'nodeclaim_lookup_failed=[%s] ' "${nc_lookup}"
+    fi
     printf 'node=%s nodeclaim=[%s] ' "${short_name}" "${nc_name}"
     if [[ -n "${nc_name}" ]]; then
       printf 'nodeclaim_status=[%s] ' "$(k get nodeclaim "${nc_name}" -o jsonpath='deletionTimestamp={.metadata.deletionTimestamp} finalizers={.metadata.finalizers} conditions={.status.conditions}' 2>&1)"
@@ -3172,8 +3190,13 @@ nvidia_node_leftover_diagnostics() {
       "$(k get events -A --field-selector "involvedObject.name=${short_name}" --sort-by='.lastTimestamp' -o jsonpath='{range .items[*]}{.reason}:{.message}|{end}' 2>&1)"
   done
 }
-wait_until 600 15 "zero NVIDIA nodes before step 14b-c launches one (accelerators step's own disposable node finishing termination)" zero_nvidia_nodes \
-  || fail "NVIDIA node precondition for step 14b-c not met within 600s: ${nvidia_node_names} -- $(nvidia_node_leftover_diagnostics)"
+if ! wait_until 600 15 "zero NVIDIA nodes before step 14b-c launches one" zero_nvidia_nodes; then
+  if [[ -n "${nvidia_node_lookup_error}" ]]; then
+    fail "kubectl get nodes -l karpenter.k8s.aws/instance-gpu-manufacturer=nvidia failed on the last poll before timeout: ${nvidia_node_lookup_error}"
+  else
+    fail "NVIDIA node precondition for step 14b-c not met within 600s: ${nvidia_node_names} -- $(nvidia_node_leftover_diagnostics)"
+  fi
+fi
 run_bootstrap --revision "${ADD_DCGM_REVISION}" || fail "bootstrap.sh --revision ${ADD_DCGM_REVISION}"
 wait_until 300 10 "dcgm-exporter Application generated from its marker file" app_exists "${APP_DCGM}" \
   || fail "no Application ${APP_DCGM} appeared at ${ADD_DCGM_REVISION} (addons-optional ApplicationSet did not generate it)"
