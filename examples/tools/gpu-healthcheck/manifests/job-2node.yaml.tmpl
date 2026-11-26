@@ -1,0 +1,72 @@
+# Two-pod inter-node EFA/NCCL check, design only (issue #30's own addition --
+# upstream's own kubernetes/ deployment has no multi-node NCCL job at all;
+# its check 5 is Slurm-salloc-only). The *intent* is to run upstream's own
+# all_reduce_perf binary unchanged, launched over SSH+mpirun between the two
+# Pods instead of over `srun` -- see README.md's "2-node status" section.
+# The container below does not actually do this yet (it only confirms both
+# Pods schedule and exits 1 with NOT IMPLEMENTED): no mpirun invocation, no
+# SSH, no EFA request, so it cannot read as a pass. Finishing it (the actual
+# mpirun/SSH bootstrap between two ephemeral Pods) is a follow-up, not part
+# of this PR.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gpu-healthcheck-2node-__RUN_ID__
+  namespace: __NAMESPACE__
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: gpu-healthcheck
+    app.kubernetes.io/component: twonode-__RUN_ID__
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gpu-healthcheck-2node-__RUN_ID__
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: gpu-healthcheck
+    app.kubernetes.io/component: preflight-2node
+    kueue.x-k8s.io/queue-name: __QUEUE_NAME__ # KUEUE-ONLY
+spec:
+  suspend: true # KUEUE-ONLY
+  completions: 2
+  parallelism: 2
+  completionMode: Indexed
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gpu-healthcheck
+        app.kubernetes.io/component: twonode-__RUN_ID__
+    spec:
+      restartPolicy: Never
+      subdomain: gpu-healthcheck-2node-__RUN_ID__
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/component: twonode-__RUN_ID__
+              topologyKey: kubernetes.io/hostname
+      nodeSelector:
+        node.kubernetes.io/instance-type: __INSTANCE_TYPE__
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: nccl-tests
+          image: public.ecr.aws/hpc-cloud/nccl-tests:latest
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              echo "RANK=${JOB_COMPLETION_INDEX} on $(hostname)"
+              echo "NOT IMPLEMENTED: job-2node.yaml.tmpl is a design-only template (issue #30)." >&2
+              echo "It does not yet launch mpirun/all_reduce_perf between the two Pods -- see README.md '2-node status'." >&2
+              exit 1
