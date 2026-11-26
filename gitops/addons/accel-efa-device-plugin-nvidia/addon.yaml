@@ -125,6 +125,63 @@
 # against both existing fixtures (neither renders the label, since
 # neither sets pool.networkInterfaces) and against this PR's own real
 # p4d.24xlarge test values (which do set it).
+# tolerations (#96, #102): this chart's own template appends
+# .Values.tolerations onto one hardcoded CriticalAddonsOnly entry
+# (aws-efa-k8s-device-plugin v0.5.35 templates/daemonset.yaml lines
+# 34-39, confirmed both by reading the pinned chart's own template
+# source and by `helm template` against it) rather than replacing the
+# whole list, so only the entries actually needed have to be added
+# here. #96 needed one (distai.dev/startup-not-ready:NoSchedule, so
+# this Pod can become Ready while a capacity-pool NodePool's own
+# pool.startupTaints is still held -- without it, vigil-controller,
+# gitops/addons/vigil-controller, would only ever release that taint at
+# its own timeout, never once this advertiser is actually ready).
+#
+# #102 found a second, unrelated taint this Pod also needs to tolerate:
+# accelerator.taint (gitops/charts/capacity-pool, nvidia.com/gpu by
+# convention, NoSchedule, permanent for the node's whole lifetime --
+# not released once ready the way pool.startupTaints is). Confirmed on
+# real hardware (p5en.48xlarge) that a pool setting both
+# accelerator.methodLabel and accelerator.taint (gitops/cells/
+# dp-a19-gpu-r3's own gpu.yaml does both already, #63/#56) left this
+# DaemonSet's desiredNumberScheduled at 0 forever with only the
+# startup-taint entry present, and vpc.amazonaws.com/efa never appeared
+# in that node's allocatable, even though the physical EFA devices were
+# present and healthy the whole time.
+#
+# A second, key-agnostic entry (operator: Exists, no key) added below
+# the #96 entry, not a third key-specific one for nvidia.com/gpu: naming
+# the key explicitly would also need a fourth entry for
+# tenancy.teamTaint (#22, same taint shape as accelerator.taint, not yet
+# used by any cell today -- checked: `grep -rn teamTaint gitops/cells/`
+# matches only comments) the moment a future pool sets one, since the
+# DaemonSet controller evaluates every matching-effect taint on a node
+# regardless of which key this chart happens to know about. A
+# key-agnostic entry closes that case (and, incidentally, already
+# covers the #96 startup taint on its own) without needing to enumerate
+# every taint key this platform might ever render. The #96 entry above
+# is kept rather than removed even though this new entry already
+# subsumes it: gitops/tests/check_startup_taint_keys.py asserts on the
+# literal distai.dev/startup-not-ready key by name (it checks
+# `t.get("key") == taint_key`, which a keyless entry does not match),
+# so dropping it would fail that check while still being correct at the
+# real Kubernetes scheduler level -- kept to satisfy that check
+# literally as well as to keep #96's own reasoning legible on its own,
+# not because the keyless entry below needs it to work. Scoped to
+# effect: NoSchedule because every real accelerator.taint/
+# tenancy.teamTaint usage in this repository today uses NoSchedule only
+# (same grep as above), even though capacity-pool's own taint rendering
+# also accepts PreferNoSchedule or NoExecute (gitops/charts/
+# capacity-pool/templates/_helpers.tpl) -- a future pool using effect:
+# NoExecute would need this toleration widened again (PreferNoSchedule
+# needs no such widening: it is a scheduling preference, not something
+# the DaemonSet controller gates placement on).
+#
+# The Neuron release (accel-efa-device-plugin-neuron/addon.yaml) gets
+# the identical fix on the stated grounds that it is the identical
+# chart/version/image with the identical template behavior, confirmed
+# statically with `helm template` for both releases -- not
+# independently re-run against a real trn2 node in this change.
 addon: accel-efa-device-plugin-nvidia
 tier: core
 chart: aws-efa-k8s-device-plugin
@@ -138,71 +195,10 @@ values:
   nodeSelector:
     distai.dev/nvidia-gpu-method: device-plugin
     distai.dev/efa-attached: "true"
-  # #102, confirmed on real hardware (p5en.48xlarge): this release's own
-  # live DaemonSet rendered tolerations: [{key: CriticalAddonsOnly,
-  # operator: Exists}] only (read directly with `kubectl get daemonset
-  # ... -o jsonpath='{.spec.template.spec.tolerations}'` against the
-  # pinned chart/image above, not merely read from the chart's own
-  # values.yaml default). That does not cover nvidia.com/gpu:NoSchedule,
-  # the taint accelerator.taint renders (gitops/cells/dp-a19-gpu-r3's own
-  # gpu.yaml sets both accelerator.methodLabel and accelerator.taint
-  # already, #63/#56), so a pool that sets both got a nodeSelector match
-  # whose DaemonSet never actually scheduled there: desiredNumberScheduled
-  # stayed 0, and vpc.amazonaws.com/efa never appeared in that node's
-  # allocatable, even though every physical EFA device was present and
-  # healthy at the same moment (confirmed independently via lspci/
-  # ibv_devices/fi_info).
-  #
-  # A key-agnostic toleration (operator: Exists, no key) rather than
-  # naming nvidia.com/gpu specifically, scoped to effect: NoSchedule:
-  # this addon's own header comment states the design intent ("EFA ...
-  # Follows the GPU's or Neuron's own method label, not a method label
-  # of its own") for the *method* label; extending the same idea to "also
-  # follow whatever taint key that accelerator pool carries, not just the
-  # one key capacity-pool pools happen to use today" is this PR's own
-  # inference from that stated intent, not a second thing the header
-  # itself already says. A pool that also sets tenancy.teamTaint (#22,
-  # gitops/charts/capacity-pool/values.yaml, same taint shape as
-  # accelerator.taint) would hit the exact same class of gap with a
-  # key-specific toleration, since the DaemonSet controller evaluates
-  # every matching-effect taint on a node regardless of which key this
-  # chart happens to know about. Checked: no cell in this repository sets
-  # tenancy.teamTaint today (`grep -rn teamTaint gitops/cells/` only
-  # matches comments, 2026-11-27) -- this closes a real but not-yet-hit
-  # case by documented Kubernetes toleration semantics (an empty key with
-  # operator: Exists matches every taint key), not one independently
-  # reproduced on real hardware.
-  #
-  # effect: NoSchedule, not left unset: capacity-pool's own taint
-  # rendering accepts NoSchedule, PreferNoSchedule or NoExecute for
-  # either accelerator.taint or tenancy.teamTaint
-  # (gitops/charts/capacity-pool/templates/_helpers.tpl), and every real
-  # cell today uses NoSchedule only (same grep as above) -- an unscoped
-  # Exists (no effect) would also tolerate an unrelated NoExecute taint
-  # (for example an administrator's own drain/maintenance taint)
-  # indefinitely, which this Pod has no reason to resist and real review
-  # flagged as unintentional scope creep. Known limitation, not fixed
-  # here: a future pool that sets accelerator.taint or tenancy.teamTaint
-  # with effect: PreferNoSchedule or NoExecute would need this toleration
-  # widened again.
-  #
-  # One entry, not two: this chart's own template
-  # (aws-efa-k8s-device-plugin v0.5.35, templates/daemonset.yaml lines
-  # 34-39) hardcodes its own `- key: CriticalAddonsOnly, operator:
-  # Exists` toleration and appends `.Values.tolerations` after it with
-  # `{{- with .Values.tolerations }}{{ toYaml . | nindent 8 }}{{- end
-  # }}` -- it does not replace the list. Confirmed two ways: `helm
-  # template` against the pinned chart with this exact one-entry value
-  # renders both entries, and the live DaemonSet on real hardware
-  # (p5en.48xlarge) read spec.template.spec.tolerations as
-  # [{key: CriticalAddonsOnly, operator: Exists}, {operator: Exists,
-  # effect: NoSchedule}] after this same values change was applied (an
-  # earlier revision of this comment assumed Helm replaces the list
-  # wholesale for this chart; that assumption was wrong and is corrected
-  # here, not merely dropped). Listing CriticalAddonsOnly again in
-  # values would just duplicate what the chart's own template already
-  # keeps unconditionally.
   tolerations:
+    - key: distai.dev/startup-not-ready
+      operator: Exists
+      effect: NoSchedule
     - operator: Exists
       effect: NoSchedule
   securityContext:

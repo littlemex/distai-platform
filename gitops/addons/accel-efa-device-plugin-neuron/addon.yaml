@@ -24,6 +24,21 @@
 # The EFA DRA driver (aws-dranet) is out of scope for both
 # accel-efa-device-plugin-* releases: see gitops/README.md's "Known
 # limits", and #19/#50 for where it is expected to be designed.
+#
+# tolerations (#96, #102) -- same reasoning as
+# accel-efa-device-plugin-nvidia/addon.yaml's own tolerations comment,
+# not repeated here: the #96 entry (distai.dev/startup-not-ready) is
+# kept because gitops/tests/check_startup_taint_keys.py asserts on that
+# literal key by name; the second, key-agnostic, effect: NoSchedule
+# entry added by #102 additionally covers accelerator.taint/
+# tenancy.teamTaint (and, incidentally, already subsumes the #96 entry
+# at the real Kubernetes scheduler level on its own). `helm template`
+# against the pinned chart with this exact two-entry value renders the
+# identical three-entry list ([{key: CriticalAddonsOnly, operator:
+# Exists}, {key: distai.dev/startup-not-ready, operator: Exists,
+# effect: NoSchedule}, {operator: Exists, effect: NoSchedule}]) as the
+# NVIDIA release -- confirmed statically; not independently re-run
+# against a real trn2 node in this change.
 addon: accel-efa-device-plugin-neuron
 tier: core
 chart: aws-efa-k8s-device-plugin
@@ -37,25 +52,10 @@ values:
   nodeSelector:
     distai.dev/neuron-method: device-plugin
     distai.dev/efa-attached: "true"
-  # #102: the identical gap and fix as
-  # accel-efa-device-plugin-nvidia/addon.yaml's own tolerations comment
-  # (read that file for the full rationale: why this is a key-agnostic
-  # toleration rather than a taint-key-specific one, why effect:
-  # NoSchedule and not left unset, and the exact chart template lines
-  # this behavior comes from) -- same chart/version/image. Because the
-  # toleration is key-agnostic, the fix itself no longer depends on
-  # knowing the exact Neuron taint key at all, and `helm template`
-  # against the pinned chart with this exact value renders the same two
-  # entries ([{key: CriticalAddonsOnly, operator: Exists}, {operator:
-  # Exists, effect: NoSchedule}]) for this release as for the NVIDIA one
-  # -- confirmed statically, no Trainium hardware needed for that part.
-  # What is still unverified in this PR: whether a real trn2 node
-  # actually carries both distai.dev/neuron-method=device-plugin and
-  # distai.dev/efa-attached="true" as expected, and whether
-  # vpc.amazonaws.com/efa actually appears in that node's allocatable
-  # once this DaemonSet schedules there -- only the NVIDIA release's
-  # real-hardware behavior (p5en.48xlarge) was directly observed.
   tolerations:
+    - key: distai.dev/startup-not-ready
+      operator: Exists
+      effect: NoSchedule
     - operator: Exists
       effect: NoSchedule
   securityContext:
