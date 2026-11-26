@@ -227,10 +227,18 @@ VALUESEOF
     "${HELM}" template ddp-static "${CHART}" --namespace static-check "${STATIC_SETS[@]}" -f "${WORK_DIR}/values-file-check.yaml"
   rendered_vf="${RENDERED_DIR}/pytorch-ddp-values-file.yaml"
   if [[ -s "${rendered_vf}" ]]; then
-    if grep -qE 'e[+-][0-9]' "${rendered_vf}"; then
-      fail "pytorch-ddp (values file render) contains scientific notation (e+NN/e-NN) in a rendered value -- a numeric env is missing its '| int' cast ($(grep -nE 'e[+-][0-9]' "${rendered_vf}" | tr '\n' ';'))"
+    # Scoped to rendered `value: "..."` env lines only, not the whole
+    # file: the ConfigMap embeds files/train.py's own source verbatim
+    # (which legitimately contains "lr=1e-3", a learning rate), and this
+    # chart's own template comments (describing the bug this check
+    # exists to catch) are plain YAML text that `helm template` emits
+    # unchanged -- both matched a whole-file grep in an earlier version
+    # of this check, which this comment and the narrower pattern below
+    # both fix.
+    if grep -E '^\s*value: ' "${rendered_vf}" | grep -qE 'e[+-][0-9]'; then
+      fail "pytorch-ddp (values file render) contains scientific notation (e+NN/e-NN) in a rendered env value -- a numeric env is missing its '| int' cast ($(grep -E '^\s*value: ' "${rendered_vf}" | grep -nE 'e[+-][0-9]' | tr '\n' ';'))"
     else
-      pass "pytorch-ddp (values file render) has no scientific-notation value"
+      pass "pytorch-ddp (values file render) has no scientific-notation env value"
     fi
     if grep -A1 'name: TOTAL_STEPS' "${rendered_vf}" | grep -q 'value: "1000000"'; then
       pass "pytorch-ddp (values file render) TOTAL_STEPS is \"1000000\", not truncated or in scientific notation"
