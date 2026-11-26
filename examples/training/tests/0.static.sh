@@ -138,7 +138,16 @@ if [[ "${#shell_scripts[@]}" -eq 0 ]]; then
 else
   for s in "${shell_scripts[@]}"; do
     run_check "bash -n ${s#"${TRAINING_ROOT}"/}" bash -n "${s}"
-    run_check "shellcheck ${s#"${TRAINING_ROOT}"/}" "${SHELLCHECK}" -x "${s}"
+    # -P SCRIPTDIR: this script and 1.e2e.sh both `source` chart-contract.sh
+    # via "${SCRIPT_DIR}/chart-contract.sh" (a dynamic path shellcheck
+    # cannot resolve against the caller's own cwd once invoked with an
+    # absolute path from outside this directory, as the EC2 runner does;
+    # confirmed: the same invocation with a relative path from inside this
+    # directory needs no extra flag at all) -- SCRIPTDIR is shellcheck's own
+    # token for "the directory containing the file being checked", not a
+    # literal path, and fixes the follow for every script here, not only
+    # one.
+    run_check "shellcheck ${s#"${TRAINING_ROOT}"/}" "${SHELLCHECK}" -x -P SCRIPTDIR "${s}"
   done
 fi
 
@@ -255,10 +264,10 @@ fi
 # would make that step time out on real hardware instead of failing here.
 # Looked for in every file of the chart (the script may live in files/,
 # in a ConfigMap template, or as a Python file next to it).
-if [[ -d "${CHART}" ]] && grep -rqE "${TRAINING_RESUME_LOG_REGEX%%\[*}" "${CHART}"; then
+if [[ -d "${CHART}" ]] && grep -rqF "${TRAINING_RESUME_LOG_PREFIX}" "${CHART}"; then
   pass "the chart's training code prints the resume line 1.e2e.sh greps for ('${TRAINING_RESUME_LOG_REGEX}')"
 else
-  fail "no file under examples/training/pytorch-ddp/ contains '${TRAINING_RESUME_LOG_REGEX%%\[*}' -- the training script must log the step it resumed from (tests/chart-contract.sh's TRAINING_RESUME_LOG_REGEX)"
+  fail "no file under examples/training/pytorch-ddp/ contains '${TRAINING_RESUME_LOG_PREFIX}' -- the training script must log the step it resumed from (tests/chart-contract.sh's TRAINING_RESUME_LOG_REGEX)"
 fi
 
 echo

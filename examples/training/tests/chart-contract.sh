@@ -50,3 +50,15 @@ TRAINING_KEY_TOTAL_STEPS="training.totalSteps"
 #     it prints nothing matching that pattern.
 # 1.e2e.sh greps the restarted Pods' logs for exactly this pattern.
 TRAINING_RESUME_LOG_REGEX='resuming from step ([0-9]+)'
+# The static part of the line above, with no regex metacharacters at all
+# (not derived from TRAINING_RESUME_LOG_REGEX by stripping a suffix: that
+# regex's own capture group opens with "(" before its "[0-9]" character
+# class closes, so a generic "strip from the first '[' or '(' onward"
+# trick cannot produce a valid prefix for every regex this file could
+# ever hold -- a fixed literal, kept in sync with the regex above by
+# hand, is the only robust way to source-grep for it). 0.static.sh uses
+# this (not the regex) to confirm the training script's own source
+# contains this literal text; the digits after it only exist at runtime
+# (an f-string interpolation), so a source-code check can only look for
+# the literal prefix, never the full pattern with its capture group.
+TRAINING_RESUME_LOG_PREFIX='resuming from step'
