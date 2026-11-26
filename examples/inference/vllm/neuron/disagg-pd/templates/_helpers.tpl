@@ -55,6 +55,9 @@ app.kubernetes.io/component: {{ .component }}
 {{- if not (has $t.kvLoadFailurePolicy (list "fail" "recompute")) -}}
 {{- fail (printf "transport.kvLoadFailurePolicy must be fail or recompute, got %q" $t.kvLoadFailurePolicy) -}}
 {{- end -}}
+{{- if not (has $t.kvRoleMode (list "kv_both" "producer_consumer")) -}}
+{{- fail (printf "transport.kvRoleMode must be kv_both or producer_consumer, got %q" $t.kvRoleMode) -}}
+{{- end -}}
 {{- if eq $t.backend "UCX" -}}
 {{- /* Same parsing as ../../disagg-pd/templates/_helpers.tpl: dig + toString so a
   missing transport.ucx or a bare number gets this chart's own message, not a

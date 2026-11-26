@@ -59,6 +59,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from check_placement_transport import (  # noqa: E402
     HOSTNAME,
     Renderer,
+    affinity_terms,
     anti_terms,
     container_text,
     env_of,
@@ -246,6 +247,7 @@ DISAGG_PRESENT = [
     ("placement", "nodeSelectorKey"), ("placement", "sameNodeMeasurement"),
     ("placement", "sharedPoolValue"), ("placement", "enforceAntiAffinity"),
     ("transport", "backend"), ("transport", "efaResourceName"), ("transport", "ucx", "tcpPortRange"),
+    ("transport", "kvRoleMode"),
     ("kvCacheTier", "mode"),
     ("engine", "cacheVolume"),
 ] + [(r, k) for r in ROLES for k in (
@@ -369,6 +371,45 @@ def check_disagg(R, chart):
                           "(0 or 1, from transport.forceEfaSameNode; default is forceEfaSameNode=false -> \"1\")",
                           envd.get("FI_EFA_ENABLE_SHM_TRANSFER") == "1", json.dumps(envd))
             check_decode_anti_affinity(f"{rel} default", roles)
+            # At the default (enforceAntiAffinity=true, both roles request
+            # EFA), decode must also carry a required podAffinity zone term
+            # matching prefill's labels -- EFA cannot cross a zone. #92
+            # tracks that this is dropped when enforceAntiAffinity=false;
+            # not re-checked here, only the default's own guarantee.
+            for w in roles["decode"]:
+                zreq, _ = affinity_terms(pod_spec(w))
+                zone_terms = [t for t in zreq if t.get("topologyKey") == "topology.kubernetes.io/zone"]
+                ok = bool(zone_terms) and all(
+                    any(term_hits(t, pod_labels(o)) for t in zone_terms) for o in roles["prefill"])
+                check(f"{rel} default: {name_of(w)} (decode) has a required podAffinity term, "
+                      "topologyKey topology.kubernetes.io/zone, selecting the prefill pods' labels",
+                      ok, f"podAffinity required terms={json.dumps(zreq)}")
+
+    # --------------------------------------- transport.kvRoleMode override
+    # Proves kvRoleMode=producer_consumer is a real, wired values-only
+    # switch (kv_producer on prefill, kv_consumer on decode), not merely
+    # documented: a template that always rendered kv_both regardless of
+    # this value would fail this scenario.
+    want_role = {"prefill": "kv_producer", "decode": "kv_consumer"}
+    rdocs, err = R.render(chart, sets=["transport.kvRoleMode=producer_consumer"])
+    if check(f"{rel} transport.kvRoleMode=producer_consumer: helm template", rdocs is not None, err):
+        scenarios["kvRoleMode=producer_consumer"] = rdocs
+        rroles = check_roles_present(f"{rel} transport.kvRoleMode=producer_consumer", rdocs, key, sel_values)
+        if rroles:
+            for r in ROLES:
+                for w in rroles[r]:
+                    envd = env_of(neuron_containers(pod_spec(w))[0]) if neuron_containers(pod_spec(w)) else {}
+                    kv_cfg = {}
+                    try:
+                        kv_cfg = json.loads(envd.get("KV_TRANSFER_CONFIG", "{}"))
+                    except json.JSONDecodeError:
+                        pass
+                    check(f"{rel} transport.kvRoleMode=producer_consumer: {name_of(w)} ({r}) "
+                          f"KV_TRANSFER_CONFIG sets kv_role to {want_role[r]!r}",
+                          kv_cfg.get("kv_role") == want_role[r], json.dumps(kv_cfg))
+    _, err = R.render(chart, sets=["transport.kvRoleMode=bogus"])
+    check(f"{rel} transport.kvRoleMode=bogus: helm template fails naming transport.kvRoleMode",
+          err is not None and "kvRoleMode" in (err or ""), err or "rendered")
 
     # ------------------------------------------- sameNodeMeasurement=true
     sdocs, err = R.render(chart, sets=["placement.sameNodeMeasurement=true"])
@@ -380,6 +421,23 @@ def check_disagg(R, chart):
             check(f"{rel} sameNodeMeasurement=true: both roles' nodeSelector {key} is placement.sharedPoolValue "
                   f"({shared})", all(v == shared for r in ROLES for v in got[r]), json.dumps(got))
             check_decode_anti_affinity(f"{rel} sameNodeMeasurement=true, enforceAntiAffinity=true (default)", sroles)
+
+    # ------------------------- forceEfaSameNode=true: FI_EFA_ENABLE_SHM_TRANSFER=0
+    # The default-scenario assertion above only proves the env var is "1" at
+    # transport.forceEfaSameNode's own default (false) -- a template that
+    # hardcoded "1" would pass that alone. This scenario flips the value and
+    # proves the env var actually follows it.
+    fdocs, err = R.render(chart, sets=["placement.sameNodeMeasurement=true", "transport.forceEfaSameNode=true"])
+    if check(f"{rel} forceEfaSameNode=true: helm template", fdocs is not None, err):
+        scenarios["forceEfaSameNode=true"] = fdocs
+        froles = check_roles_present(f"{rel} forceEfaSameNode=true", fdocs, key, sel_values)
+        if froles:
+            for r in ROLES:
+                for w in froles[r]:
+                    envd = env_of(neuron_containers(pod_spec(w))[0]) if neuron_containers(pod_spec(w)) else {}
+                    check(f"{rel} forceEfaSameNode=true: {name_of(w)} ({r}) sets "
+                          "FI_EFA_ENABLE_SHM_TRANSFER=0 (not hardcoded 1)",
+                          envd.get("FI_EFA_ENABLE_SHM_TRANSFER") == "0", json.dumps(envd))
 
     # ------------------------------------------- enforceAntiAffinity=false
     edocs, err = R.render(chart, sets=["placement.enforceAntiAffinity=false"])
@@ -441,6 +499,29 @@ def check_disagg(R, chart):
             check(f"{label}: prefill and decode override values differ "
                   "(each role's own value, not one shared computed value)",
                   want["prefill"] != want["decode"], json.dumps(want))
+
+    # ------------------------------------- accelerator.coresPerDevice override
+    # Proves per_device is actually read from the value, not hardcoded 4: at
+    # neuronCoresPerEngine=3, the default coresPerDevice (4) rounds to 1
+    # device, while coresPerDevice=2 rounds the SAME core count to 2 devices.
+    # A template that hardcoded per_device=4 would pass every other scenario
+    # in this file (all of them leave coresPerDevice at its default) but
+    # fail this one.
+    pdocs, err = R.render(chart, sets=[f"{r}.neuronCoresPerEngine=3" for r in ROLES])
+    cdocs, err2 = R.render(chart, sets=[f"{r}.neuronCoresPerEngine=3" for r in ROLES] +
+                           ["accelerator.coresPerDevice=2"])
+    if check(f"{rel} accelerator.coresPerDevice=2: helm template (both cores=3 renders)",
+             pdocs is not None and cdocs is not None, err or err2):
+        scenarios["coresPerDevice override (default)"] = pdocs
+        scenarios["coresPerDevice override (=2)"] = cdocs
+        proles = check_roles_present(f"{rel} coresPerDevice=4 (default), cores=3", pdocs, key, sel_values)
+        croles = check_roles_present(f"{rel} coresPerDevice=2, cores=3", cdocs, key, sel_values)
+        if proles and croles:
+            for r in ROLES:
+                for w in proles[r]:
+                    check_neuron_request(f"{rel} coresPerDevice=4 (default), cores=3 ({r})", w, 3, 4)
+                for w in croles[r]:
+                    check_neuron_request(f"{rel} coresPerDevice=2, cores=3 ({r})", w, 3, 2)
 
     # ------------------------------ compileCacheVolume override, per role
     # A PVC in place of the emptyDir default, with a DIFFERENT claim name
@@ -557,6 +638,18 @@ def check_agg(R, chart):
             cs = check_neuron_request(f"{rel} default", w, val("engine", "neuronCoresPerEngine"),
                                        val("accelerator", "coresPerDevice"))
             check_compile_cache(f"{rel} default", w, cs, val("engine", "compileCacheVolume"))
+            # Unlike disagg-pd, this chart renders no kv-transfer-config at
+            # all at the default kvCacheTier.mode=gpu-only (one aggregated
+            # process, no cross-process KV transfer, so no kv_buffer_device
+            # to assert here) -- confirmed against templates/engine.yaml's
+            # own comment. VLLM_NEURON_BACKEND still applies: the compile
+            # cache is a property of this engine regardless of KV transfer.
+            envd = env_of(cs[0]) if cs else {}
+            check(f"{rel} default: {name_of(w)} sets VLLM_NEURON_BACKEND=neuron_native",
+                  envd.get("VLLM_NEURON_BACKEND") == "neuron_native", json.dumps(envd))
+            check(f"{rel} default: {name_of(w)} renders no KV_TRANSFER_CONFIG "
+                  "at the default kvCacheTier.mode=gpu-only (one aggregated process)",
+                  not envd.get("KV_TRANSFER_CONFIG"), json.dumps(envd))
 
     per_device = val("accelerator", "coresPerDevice")
     default_cores = val("engine", "neuronCoresPerEngine")
@@ -577,6 +670,21 @@ def check_agg(R, chart):
                   f"default ({devices_for(default_cores, per_device)} device(s) at {default_cores} cores) "
                   f"to {devices_for(want, per_device)} device(s)",
                   devices_for(want, per_device) != devices_for(default_cores, per_device), json.dumps(got))
+
+    # ------------------------------------- accelerator.coresPerDevice override
+    # Same proof as disagg-pd: at neuronCoresPerEngine=3, coresPerDevice=4
+    # (default) rounds to 1 device, coresPerDevice=2 rounds the SAME core
+    # count to 2 -- proves per_device is read from the value, not hardcoded.
+    apdocs, err = R.render(chart, sets=["engine.neuronCoresPerEngine=3"])
+    acdocs, err2 = R.render(chart, sets=["engine.neuronCoresPerEngine=3", "accelerator.coresPerDevice=2"])
+    if check(f"{rel} accelerator.coresPerDevice=2: helm template (both cores=3 renders)",
+             apdocs is not None and acdocs is not None, err or err2):
+        scenarios["coresPerDevice override (default)"] = apdocs
+        scenarios["coresPerDevice override (=2)"] = acdocs
+        for w in workloads(apdocs):
+            check_neuron_request(f"{rel} coresPerDevice=4 (default), cores=3", w, 3, 4)
+        for w in workloads(acdocs):
+            check_neuron_request(f"{rel} coresPerDevice=2, cores=3", w, 3, 2)
 
     for name, sdocs in scenarios.items():
         check_no_forbidden_env(f"{rel} {name}", sdocs)

@@ -21,16 +21,26 @@
   kv_both is a role the plugin supports for a server that serves both
   phases; its cost is that a decode engine keeps its prefill weights and
   compiles its prefill graph (platform.py decode_only_weights is false for
-  kv_both), which a kv_consumer engine would skip.
+  kv_both), which a kv_consumer engine would skip. transport.kvRoleMode
+  switches between the two: "kv_both" (default, matches the NVIDIA chart)
+  or "producer_consumer" (the plugin's own tutorial shape, kv_producer on
+  prefill / kv_consumer on decode -- skips the cost above, real-hardware
+  verification has not yet confirmed whether this round-trips correctly on
+  Neuron's NIXL path either way).
 */}}
-{{- $nixlConn := dict "kv_connector" "NixlConnector" "kv_role" "kv_both" "kv_buffer_device" "cuda" "kv_load_failure_policy" $t.kvLoadFailurePolicy "kv_connector_extra_config" $extra -}}
+{{- $kvRoleByRole := dict "prefill" "kv_producer" "decode" "kv_consumer" -}}
+{{- range $role := list "prefill" "decode" }}
+{{- $kvRole := "kv_both" -}}
+{{- if eq $t.kvRoleMode "producer_consumer" -}}
+{{- $kvRole = index $kvRoleByRole $role -}}
+{{- end -}}
+{{- $nixlConn := dict "kv_connector" "NixlConnector" "kv_role" $kvRole "kv_buffer_device" "cuda" "kv_load_failure_policy" $t.kvLoadFailurePolicy "kv_connector_extra_config" $extra -}}
 {{- $kvConfig := $nixlConn -}}
-{{- if ne .Values.kvCacheTier.mode "gpu-only" }}
+{{- if ne $.Values.kvCacheTier.mode "gpu-only" }}
 {{- $nixlEntry := merge (dict "kv_connector" "NeuronNixlConnector" "kv_connector_module_path" "vllm_neuron.vllm.kv_connector.neuron_nixl_connector") (deepCopy $nixlConn) }}
 {{- $lmcacheConn := fromJson (include "disagg.lmcacheConnector" $) }}
-{{- $kvConfig = dict "kv_connector" "MultiConnector" "kv_role" "kv_both" "kv_buffer_device" "cuda" "kv_load_failure_policy" $t.kvLoadFailurePolicy "kv_connector_extra_config" (dict "connectors" (list $nixlEntry $lmcacheConn)) }}
+{{- $kvConfig = dict "kv_connector" "MultiConnector" "kv_role" $kvRole "kv_buffer_device" "cuda" "kv_load_failure_policy" $t.kvLoadFailurePolicy "kv_connector_extra_config" (dict "connectors" (list $nixlEntry $lmcacheConn)) }}
 {{- end }}
-{{- range $role := list "prefill" "decode" }}
 {{- $r := index $.Values $role }}
 {{- $limits := dict $.Values.accelerator.resourceName (int (include "disagg.neuronDevices" (dict "root" $ "role" $r))) }}
 {{- if gt (int $r.efaDevices) 0 }}
@@ -115,8 +125,12 @@ spec:
       {{- /*
         EFA traffic cannot cross an Availability Zone or a VPC (AWS EFA
         docs, "EFA limitations"), so whenever either role requests an EFA
-        device, decode is also required to be in prefill's zone. See
-        ../../disagg-pd/templates/engines.yaml for the full reasoning.
+        device AND placement.enforceAntiAffinity is true (the default),
+        decode is also required to be in prefill's zone. See
+        ../../disagg-pd/templates/engines.yaml for the full reasoning. Known
+        gap, not fixed here: with enforceAntiAffinity=false, this zone
+        guarantee is dropped along with the anti-affinity it backstops,
+        identically to the NVIDIA chart this mirrors -- #92.
       */}}
       {{- $wantsEfa := or (gt (int $.Values.prefill.efaDevices) 0) (gt (int $.Values.decode.efaDevices) 0) }}
       {{- if $.Values.placement.enforceAntiAffinity }}

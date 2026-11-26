@@ -112,6 +112,16 @@ transport:
   # "fail" returns an error, "recompute" silently runs the prefill again on
   # decode (and hides a broken transfer from every measurement).
   kvLoadFailurePolicy: fail
+  # NIXL's own kv_role for the engines: "kv_both" (default, matches the
+  # NVIDIA chart's own disagg-pd) runs each role as a server that can
+  # produce and consume KV, at the plugin's own documented cost -- a decode
+  # engine also keeps its prefill weights loaded and compiles prefill's
+  # graph (vllm_neuron.vllm.platform.py's decode_only_weights is false for
+  # kv_both). "producer_consumer" renders the plugin's own tutorial shape
+  # instead (kv_producer on prefill, kv_consumer on decode), skipping that
+  # cost; real-hardware verification has not yet confirmed either shape's
+  # own NIXL path on Neuron. Any other value fails the render.
+  kvRoleMode: kv_both
   # Merged into kv_connector_extra_config next to "backends".
   extraConnectorConfig: {}
   # Only read with backend=UCX. Same meaning and same 4096-port cap as the
