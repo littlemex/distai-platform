@@ -105,7 +105,7 @@ resource "aws_security_group_rule" "fsx_lustre_client_ingress" {
   from_port                = each.value.from_port
   to_port                  = each.value.to_port
   source_security_group_id = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
-  description              = "FSx for Lustre client traffic from this cell's node/cluster security group"
+  description              = "FSx for Lustre client traffic from this cell own node-cluster security group"
 }
 
 resource "aws_security_group_rule" "fsx_lustre_client_egress" {
@@ -117,7 +117,7 @@ resource "aws_security_group_rule" "fsx_lustre_client_egress" {
   from_port                = each.value.from_port
   to_port                  = each.value.to_port
   source_security_group_id = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
-  description              = "FSx for Lustre client traffic to this cell's node/cluster security group"
+  description              = "FSx for Lustre client traffic to this cell own node-cluster security group"
 }
 
 resource "aws_fsx_lustre_file_system" "shared" {
