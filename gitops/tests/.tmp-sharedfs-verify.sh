@@ -252,6 +252,25 @@ print(chr(10).join(bad))
     log "FAIL: Applications still not converged after 30 minutes:"
     echo "${NOT_SYNCED}" >&2
     kubectl get applications.argoproj.io -n "${ARGOCD_NS}" >&2 || true
+    # The one-line sync/health pair above (attempt 6, 2026-11-26) was not
+    # enough to root-cause which object a stuck Application could not
+    # apply: status.conditions and status.operationState carry Argo CD's
+    # own error message for that, and the cluster is gone by the time
+    # anyone reads this log (this trap's own cleanup tears it down right
+    # after). Dump both for every not-converged Application so the next
+    # real-machine attempt does not have to spend its own budget
+    # rediscovering the same gap.
+    while IFS= read -r app_line; do
+      [[ -z "${app_line}" ]] && continue
+      app_name="${app_line%%:*}"
+      log "diagnostics for ${app_name}:"
+      kubectl get application "${app_name}" -n "${ARGOCD_NS}" -o jsonpath='{.status.conditions}' >&2 || true
+      echo >&2
+      kubectl get application "${app_name}" -n "${ARGOCD_NS}" -o jsonpath='{.status.operationState}' >&2 || true
+      echo >&2
+      kubectl get application "${app_name}" -n "${ARGOCD_NS}" -o jsonpath='{.status.resources}' >&2 || true
+      echo >&2
+    done <<< "${NOT_SYNCED}"
     exit 1
   fi
   sleep 20
