@@ -3872,10 +3872,24 @@ JSON
   TRN_APP_CAPACITY_POOL="${APP_CAPACITY_POOL}"
   trn wait_until 1200 15 "Trainium capacity-pool Application Healthy and Synced" app_healthy_synced "${TRN_APP_CAPACITY_POOL}" \
     || fail "${TRN_APP_CAPACITY_POOL} did not reach Healthy+Synced: health=$(trn app_health "${TRN_APP_CAPACITY_POOL}") sync=$(trn app_sync "${TRN_APP_CAPACITY_POOL}")"
-  mapfile -t trn_nodepools < <(trn k get nodepools -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$')
-  [[ "${#trn_nodepools[@]}" -eq 1 ]] || fail "expected exactly 1 NodePool on the Trainium cell, found ${#trn_nodepools[@]}: ${trn_nodepools[*]:-none}"
+  # The platform's optional-pool ApplicationSet renders on every cell,
+  # the Trainium one included, the same way lines ~1781-1793 above
+  # already discover and exclude it for the GPU cell -- confirmed by a
+  # real run (2026-11-26): without this exclusion, the Trainium cell
+  # reports 2 NodePools (optional-pool and this cell's own), failing the
+  # "exactly 1" assertion below the first time this extension ever
+  # reached this step. Discovered the same way (the Application's own
+  # status.resources), not hardcoded as a literal "optional-pool" string.
+  trn_app_optional_pool="${TRN_CLUSTER}-optional-pool"
+  mapfile -t trn_optional_nodepools < <(trn app_owned_names "${trn_app_optional_pool}" NodePool)
+  [[ "${#trn_optional_nodepools[@]}" -eq 1 ]] \
+    || fail "expected Application ${trn_app_optional_pool} to own exactly 1 NodePool on the Trainium cell, found ${#trn_optional_nodepools[@]}: ${trn_optional_nodepools[*]:-none}"
+  TRN_OPTIONAL_NODEPOOL="${trn_optional_nodepools[0]}"
+  mapfile -t trn_nodepools < <(trn k get nodepools -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$' | grep -vxF "${TRN_OPTIONAL_NODEPOOL}")
+  [[ "${#trn_nodepools[@]}" -eq 1 ]] \
+    || fail "expected exactly 1 NodePool on the Trainium cell besides optional-pool's ${TRN_OPTIONAL_NODEPOOL}, found ${#trn_nodepools[@]}: ${trn_nodepools[*]:-none}"
   TRN_NODEPOOL="${trn_nodepools[0]}"
-  pass "${TRN_APP_CAPACITY_POOL} reached Healthy+Synced; exactly one NodePool (${TRN_NODEPOOL}) on the Trainium cell"
+  pass "${TRN_APP_CAPACITY_POOL} reached Healthy+Synced; exactly one capacity NodePool (${TRN_NODEPOOL}) on the Trainium cell besides optional-pool's own (${TRN_OPTIONAL_NODEPOOL})"
 
   # ------------------------------ 18. Trainium cell: accelerators (#28)
   #
