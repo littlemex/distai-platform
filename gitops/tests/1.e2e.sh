@@ -2061,10 +2061,11 @@ print(len(doc) if isinstance(doc, list) else -1)
   # NodeClaim is deleted outright below instead: this probe pod is the
   # only workload this function itself put on the node, so there is no
   # image-pull window of this function's own to protect once the probe
-  # above has already run on it. (Whether some other workload -- for
-  # example the admin smoke canary, step 11 -- later lands on or keeps
-  # alive this same node or another one from the same NodePool is a
-  # separate, open question, not ruled out here; see #87.)
+  # above has already run on it. (Some other workload -- the admin smoke
+  # canary, step 11 on the GPU cell -- does later land on and keep alive
+  # a node from the same NodePool; that is handled separately, right
+  # after step 14 is done needing it, not here -- see that release's own
+  # comment, above step 14b-a, and #87.)
   #
   # Fired with --wait=false, not waited on here: a real run (2026-11-26,
   # issue #87) showed this exact delete, issued with a blocking
@@ -2897,6 +2898,26 @@ run_bootstrap --revision "${GITOPS_REVISION}" || fail "bootstrap.sh (re-adopt af
 wait_until 600 15 "capacity-pool Application reappears and reaches Synced" app_synced "${APP_CAPACITY_POOL}" \
   || fail "${APP_CAPACITY_POOL} did not reappear and reach Synced after re-running bootstrap.sh"
 
+# Exactly the capacity pool and optional-pool's own pair (step 10), both
+# orphaned and re-adopted by name -- anything else is a duplicate.
+expected_nodepools="$(printf '%s\n' "${NODEPOOL}" "${OPTIONAL_NODEPOOL}" | sort | tr '\n' ' ')"
+expected_ec2nodeclasses="$(printf '%s\n' "${NODECLASS}" "${OPTIONAL_NODECLASS}" | sort | tr '\n' ' ')"
+nodepools_after="$(k get nodepools -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | { grep -v '^$' || true; } | sort | tr '\n' ' ')"
+ec2nodeclasses_after="$(k get ec2nodeclasses -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | { grep -v '^$' || true; } | sort | tr '\n' ' ')"
+[[ "${nodepools_after}" == "${expected_nodepools}" ]] \
+  || fail "expected exactly the NodePools [${expected_nodepools}] after re-adopting, found: [${nodepools_after}]"
+[[ "${ec2nodeclasses_after}" == "${expected_ec2nodeclasses}" ]] \
+  || fail "expected exactly the EC2NodeClasses [${expected_ec2nodeclasses}] after re-adopting, found: [${ec2nodeclasses_after}]"
+[[ "$(k get nodepool "${NODEPOOL}" -o jsonpath='{.metadata.creationTimestamp}')" == "${NODEPOOL_CREATED}" ]] \
+  || fail "NodePool ${NODEPOOL}'s creationTimestamp changed -- it was deleted and recreated, not re-adopted"
+[[ "$(k get ec2nodeclass "${NODECLASS}" -o jsonpath='{.metadata.creationTimestamp}')" == "${NODECLASS_CREATED}" ]] \
+  || fail "EC2NodeClass ${NODECLASS}'s creationTimestamp changed -- it was deleted and recreated, not re-adopted"
+pass "re-running bootstrap.sh re-adopted the same NodePool and EC2NodeClass (unchanged creationTimestamps), not a duplicate"
+# This is where step 14 (acceptance criterion 7, second half, the
+# deliberate full teardown/re-adopt test above and the re-adoption check
+# just above this line) is actually done with CANARY_NODE/CANARY_INSTANCE_ID:
+# nothing after this point in step 14 reads either variable.
+
 if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
   # #87's second, previously-open hypothesis, confirmed here by reading
   # the code and the cell's own fixture, not guessed: this cell's
@@ -2913,17 +2934,19 @@ if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
   # never actually starting from zero on this cell once step 11's canary
   # had landed on an NVIDIA-labeled node -- independent of, and in
   # addition to, the NodeClaim-deletion-timing cause already fixed above
-  # for check_accel_layer1's own probe node.
+  # for check_accel_layer1's own probe node. A real run (2026-11-26, this
+  # PR) with only this release added reached and passed step 14b-b's full
+  # sequence cleanly, the first time since #87 opened.
   #
-  # Released here, not tolerated in step 14b's checks: an earlier
-  # version of this fix excluded this specific node from step 14b-b's
-  # precondition alone, and review found it incomplete -- the very next
-  # check (step 14b-b's own dcgm_desired == 0 assertion) makes the same
-  # "zero NVIDIA nodes" assumption and would still fail for the same
-  # reason, moving the failure a few lines down rather than fixing it.
-  # Deleting the node outright, now that step 14 is done needing it,
-  # makes both of step 14b-b's assumptions actually true instead of
-  # teaching every downstream check to carve out one more exception.
+  # Released here, right after the line above that marks step 14 done
+  # needing it, not tolerated in step 14b's checks: an earlier version of
+  # this fix excluded this specific node from step 14b-b's precondition
+  # alone, and review found it incomplete -- the very next check (step
+  # 14b-b's own dcgm_desired == 0 assertion) makes the same "zero NVIDIA
+  # nodes" assumption and would still fail for the same reason, moving
+  # the failure a few lines down rather than fixing it. Deleting the node
+  # outright makes both of step 14b-b's assumptions actually true instead
+  # of teaching every downstream check to carve out one more exception.
   # Guarded into the same three outcomes check_accel_layer1 already
   # distinguishes (found and delete accepted, found but delete rejected,
   # lookup itself failed), fired with --wait=false: step 14b-b's own
@@ -2948,24 +2971,8 @@ if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
   else
     info "kubectl get nodeclaims failed while looking up step 14's own canary node ${CANARY_NODE} -- nothing deleted here, only consolidation or step 14b-b's own wait will catch it: ${canary_nc_lookup}"
   fi
-  pass "released step 14's own canary Job and (if found) its NodeClaim for node ${CANARY_NODE}, ahead of step 14b-b's zero-NVIDIA-node precondition"
+  pass "requested release of step 14's own canary Job and (if found) its NodeClaim for node ${CANARY_NODE}, ahead of step 14b-b's zero-NVIDIA-node precondition"
 fi
-
-# Exactly the capacity pool and optional-pool's own pair (step 10), both
-# orphaned and re-adopted by name -- anything else is a duplicate.
-expected_nodepools="$(printf '%s\n' "${NODEPOOL}" "${OPTIONAL_NODEPOOL}" | sort | tr '\n' ' ')"
-expected_ec2nodeclasses="$(printf '%s\n' "${NODECLASS}" "${OPTIONAL_NODECLASS}" | sort | tr '\n' ' ')"
-nodepools_after="$(k get nodepools -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | { grep -v '^$' || true; } | sort | tr '\n' ' ')"
-ec2nodeclasses_after="$(k get ec2nodeclasses -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | { grep -v '^$' || true; } | sort | tr '\n' ' ')"
-[[ "${nodepools_after}" == "${expected_nodepools}" ]] \
-  || fail "expected exactly the NodePools [${expected_nodepools}] after re-adopting, found: [${nodepools_after}]"
-[[ "${ec2nodeclasses_after}" == "${expected_ec2nodeclasses}" ]] \
-  || fail "expected exactly the EC2NodeClasses [${expected_ec2nodeclasses}] after re-adopting, found: [${ec2nodeclasses_after}]"
-[[ "$(k get nodepool "${NODEPOOL}" -o jsonpath='{.metadata.creationTimestamp}')" == "${NODEPOOL_CREATED}" ]] \
-  || fail "NodePool ${NODEPOOL}'s creationTimestamp changed -- it was deleted and recreated, not re-adopted"
-[[ "$(k get ec2nodeclass "${NODECLASS}" -o jsonpath='{.metadata.creationTimestamp}')" == "${NODECLASS_CREATED}" ]] \
-  || fail "EC2NodeClass ${NODECLASS}'s creationTimestamp changed -- it was deleted and recreated, not re-adopted"
-pass "re-running bootstrap.sh re-adopted the same NodePool and EC2NodeClass (unchanged creationTimestamps), not a duplicate"
 
 # ---------------- 14b. platform-optional add-on: dcgm-exporter (issue #41)
 #
@@ -3192,17 +3199,15 @@ pass "no Application ${APP_DCGM} exists at ${NO_DCGM_REVISION} (no ${DCGM_MARKER
 # call, not a proven-sufficient number -- that run never showed any node
 # actually finish terminating, and did not record which node its own
 # leftover count was (that run's own fail message printed only a count,
-# no name). Whether 600s is enough, or whether a stuck finalizer/PDB/
-# non-evictable pod is blocking a real drain outright with no amount of
-# waiting helping, or whether the leftover node is unrelated to this
-# check at all (the admin smoke canary, step 11, also lands on this same
-# NodePool and is never deleted before this script's own final
-# cleanup() -- a structural question this precondition does not yet
-# account for either way, tracked unresolved in #87, not attempted here:
-# fixing it would also need the dcgm_desired check right below this one
-# to tolerate the canary's own node, not only this precondition, and
-# neither has been verified against a real cluster) is exactly what
-# nvidia_node_leftover_diagnostics below is for on the next real run.
+# no name). A second, independent source of a leftover NVIDIA node on
+# this cell (the admin smoke canary, step 11, lands on this same
+# NodePool and was never deleted before this script's own final
+# cleanup()) is now released separately, right after step 14 is done
+# needing it (see that release's own comment, above step 14b-a) --
+# resolved there, not here, so this precondition's own job stays
+# "wait out whatever termination tail either source leaves behind", with
+# nvidia_node_leftover_diagnostics below showing, by name, which source
+# it was on any future failure.
 nvidia_node_names=""
 nvidia_node_lookup_error=""
 zero_nvidia_nodes() {
@@ -3881,6 +3886,10 @@ JSON
   # reached this step. Discovered the same way (the Application's own
   # status.resources), not hardcoded as a literal "optional-pool" string.
   trn_app_optional_pool="${TRN_CLUSTER}-optional-pool"
+  trn app_exists "${trn_app_optional_pool}" \
+    || fail "Application ${trn_app_optional_pool} does not exist on the Trainium cell -- the platform ApplicationSet never generated it from addons/optional-pool/addon.yaml"
+  trn wait_until 900 15 "optional-pool Application Healthy and Synced (Trainium cell)" app_healthy_synced "${trn_app_optional_pool}" \
+    || fail "${trn_app_optional_pool} did not reach Healthy+Synced: health=$(trn app_health "${trn_app_optional_pool}") sync=$(trn app_sync "${trn_app_optional_pool}")"
   mapfile -t trn_optional_nodepools < <(trn app_owned_names "${trn_app_optional_pool}" NodePool)
   [[ "${#trn_optional_nodepools[@]}" -eq 1 ]] \
     || fail "expected Application ${trn_app_optional_pool} to own exactly 1 NodePool on the Trainium cell, found ${#trn_optional_nodepools[@]}: ${trn_optional_nodepools[*]:-none}"
