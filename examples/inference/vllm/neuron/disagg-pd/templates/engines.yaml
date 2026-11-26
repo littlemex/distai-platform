@@ -1,0 +1,294 @@
+{{- include "disagg.validate" . -}}
+{{- $fullname := include "disagg.fullname" . -}}
+{{- $t := .Values.transport -}}
+{{- $extra := merge (dict "backends" (list $t.backend)) (deepCopy $t.extraConnectorConfig) -}}
+{{- /*
+  Same connector and role as ../../disagg-pd: NixlConnector, kv_both. Two
+  Neuron-specific facts from the plugin's own source (vllm-project/vllm-neuron
+  @eb6cb360, vllm_neuron/vllm/platform.py):
+  - kv_buffer_device must be "cuda". vLLM defaults it to the platform's
+    device_type, which is "neuron" here, and vLLM's NIXL worker raises
+    "neuron with neuron kv_buffer is not supported" for any value the
+    platform does not list; the Neuron platform lists only "cuda" ("cuda"
+    here means device: Neuron DI transfers device to device). The plugin's
+    own DI tutorial and design doc set it explicitly for the same reason.
+  - A top-level "NixlConnector" is rewritten by the plugin to its subclass
+    NeuronNixlConnector (which registers Neuron's K/V-slab cache layout) and
+    given that subclass's module path. That rewrite only looks at the
+    top-level kv_connector, so inside a MultiConnector list (kvCacheTier
+    local/remote) the entry names NeuronNixlConnector and its module path
+    itself.
+  kv_both is a role the plugin supports for a server that serves both
+  phases; its cost is that a decode engine keeps its prefill weights and
+  compiles its prefill graph (platform.py decode_only_weights is false for
+  kv_both), which a kv_consumer engine would skip.
+*/}}
+{{- $nixlConn := dict "kv_connector" "NixlConnector" "kv_role" "kv_both" "kv_buffer_device" "cuda" "kv_load_failure_policy" $t.kvLoadFailurePolicy "kv_connector_extra_config" $extra -}}
+{{- $kvConfig := $nixlConn -}}
+{{- if ne .Values.kvCacheTier.mode "gpu-only" }}
+{{- $nixlEntry := merge (dict "kv_connector" "NeuronNixlConnector" "kv_connector_module_path" "vllm_neuron.vllm.kv_connector.neuron_nixl_connector") (deepCopy $nixlConn) }}
+{{- $lmcacheConn := fromJson (include "disagg.lmcacheConnector" $) }}
+{{- $kvConfig = dict "kv_connector" "MultiConnector" "kv_role" "kv_both" "kv_buffer_device" "cuda" "kv_load_failure_policy" $t.kvLoadFailurePolicy "kv_connector_extra_config" (dict "connectors" (list $nixlEntry $lmcacheConn)) }}
+{{- end }}
+{{- range $role := list "prefill" "decode" }}
+{{- $r := index $.Values $role }}
+{{- $limits := dict $.Values.accelerator.resourceName (int (include "disagg.neuronDevices" (dict "root" $ "role" $r))) }}
+{{- if gt (int $r.efaDevices) 0 }}
+{{- $_ := set $limits $t.efaResourceName (int $r.efaDevices) }}
+{{- end }}
+{{- $resources := deepCopy (default (dict) $r.resources) }}
+{{- $_ := set $resources "limits" (merge $limits (default (dict) $resources.limits)) }}
+---
+# Headless: the proxy resolves it to the ready {{ $role }} pod addresses and
+# balances per request, not per TCP connection.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-{{ $role }}
+  labels:
+    {{- include "disagg.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $.Values.engine.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-{{ $role }}
+  labels:
+    {{- include "disagg.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  replicas: {{ $r.replicas }}
+  # Same reasoning as ../../disagg-pd/templates/engines.yaml: the startupProbe
+  # is budgeted for engine.startupTimeoutSeconds, above the 600s Kubernetes
+  # default progress deadline, and a cold Neuron start pulls a large image
+  # and compiles the model before it is ready. `max 600` never shortens the
+  # Kubernetes default.
+  progressDeadlineSeconds: {{ max 600 (add (int $.Values.engine.startupTimeoutSeconds) 300) }}
+  {{- /*
+    Recreate, as in ../../disagg-pd: a role whose pool fits exactly one node
+    (and every sameNodeMeasurement release) has no spare Neuron device or
+    EFA interface for a RollingUpdate surge pod, so a `helm upgrade` would
+    wait forever on the surge pod while the old pod holds the devices.
+  */}}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "disagg.selector" (dict "root" $ "component" $role) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "disagg.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: {{ $role }}
+        {{- if $.Values.metrics.enabled }}
+        vllm-metrics: "true"
+        {{- end }}
+      {{- if $.Values.metrics.enabled }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ $.Values.engine.port | quote }}
+        prometheus.io/path: /metrics
+      {{- end }}
+    spec:
+      nodeSelector:
+        {{- with $r.extraNodeSelector }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{ $.Values.placement.nodeSelectorKey }}: {{ ternary $.Values.placement.sharedPoolValue $r.nodeSelectorValue $.Values.placement.sameNodeMeasurement | quote }}
+      {{- /*
+        Required affinity/anti-affinity is rendered on decode only, never on
+        both roles: a required term on both can leave neither schedulable,
+        each waiting on a peer that is itself waiting. Prefill always
+        schedules unconstrained; decode either avoids prefill's node
+        (default) or is pulled onto it (sameNodeMeasurement, anti-affinity
+        off) - never both, never neither silently.
+      */}}
+      {{- if eq $role "decode" }}
+      {{- /*
+        EFA traffic cannot cross an Availability Zone or a VPC (AWS EFA
+        docs, "EFA limitations"), so whenever either role requests an EFA
+        device, decode is also required to be in prefill's zone. See
+        ../../disagg-pd/templates/engines.yaml for the full reasoning.
+      */}}
+      {{- $wantsEfa := or (gt (int $.Values.prefill.efaDevices) 0) (gt (int $.Values.decode.efaDevices) 0) }}
+      {{- if $.Values.placement.enforceAntiAffinity }}
+      affinity:
+        podAntiAffinity:
+          # Never on a node that runs a prefill pod of this release.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "disagg.selector" (dict "root" $ "component" "prefill") | nindent 18 }}
+        {{- if $wantsEfa }}
+        podAffinity:
+          # Same zone as a prefill pod of this release (whichever zone
+          # Karpenter actually placed prefill's node in).
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: topology.kubernetes.io/zone
+              labelSelector:
+                matchLabels:
+                  {{- include "disagg.selector" (dict "root" $ "component" "prefill") | nindent 18 }}
+        {{- end }}
+      {{- else if $.Values.placement.sameNodeMeasurement }}
+      affinity:
+        podAffinity:
+          # Actively pulled onto the same node as a prefill pod of this
+          # release, not merely left free to land there by chance.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "disagg.selector" (dict "root" $ "component" "prefill") | nindent 18 }}
+      {{- end }}
+      {{- end }}
+      {{- with $.Values.placement.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $.Values.engine.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: vllm
+          image: {{ include "disagg.image" $ }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          # Replaces the image's own ENTRYPOINT (a SageMaker-oriented
+          # launcher listening on 8080), the same way the NVIDIA chart runs
+          # `vllm serve` directly.
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              if [ -z "$MODEL_ID" ]; then
+                echo "model.name is not set: install with --set model.name=MODEL_ID, a Hugging Face model id" >&2
+                exit 1
+              fi
+              set -- --host 0.0.0.0 --port "$ENGINE_PORT" \
+                --tensor-parallel-size "$NEURON_CORES_PER_ENGINE" \
+                --kv-transfer-config "$KV_TRANSFER_CONFIG" "$@"
+              [ -z "$MODEL_REVISION" ] || set -- --revision "$MODEL_REVISION" "$@"
+              [ -z "$SERVED_MODEL_NAME" ] || set -- --served-model-name "$SERVED_MODEL_NAME" "$@"
+              exec vllm serve "$MODEL_ID" "$@"
+            - vllm-{{ $role }}
+          {{- with $r.extraArgs }}
+          args:
+            {{- range . }}
+            - {{ . | toString | quote }}
+            {{- end }}
+          {{- end }}
+          env:
+            - name: MODEL_ID
+              value: {{ $.Values.model.name | quote }}
+            - name: MODEL_REVISION
+              value: {{ $.Values.model.revision | quote }}
+            - name: SERVED_MODEL_NAME
+              value: {{ $.Values.model.servedModelName | quote }}
+            - name: ENGINE_PORT
+              value: {{ $.Values.engine.port | quote }}
+            - name: NEURON_CORES_PER_ENGINE
+              value: {{ $r.neuronCoresPerEngine | quote }}
+            - name: KV_TRANSFER_CONFIG
+              value: {{ toJson $kvConfig | quote }}
+            # The address the other role's engines use for the NIXL handshake.
+            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+              value: {{ $t.sideChannelPort | quote }}
+            {{- if eq $t.backend "UCX" }}
+            # Fixes the TCP port UCX's own TCP transport listens on for the
+            # actual KV connection, so the NetworkPolicy can name it.
+            - name: UCX_TCP_PORT_RANGE
+              value: {{ $t.ucx.tcpPortRange | quote }}
+            {{- end }}
+            {{- if eq $t.backend "LIBFABRIC" }}
+            # libfabric-level, not accelerator-specific: the same three
+            # variables as the NVIDIA chart. FI_EFA_ENABLE_SHM_TRANSFER is
+            # always rendered explicitly; 0 (forceEfaSameNode) forces a
+            # same-host transfer onto the EFA device, 1 is the library
+            # default, stated rather than omitted.
+            - name: FI_PROVIDER
+              value: efa
+            - name: FI_EFA_USE_DEVICE_RDMA
+              value: "1"
+            - name: FI_EFA_ENABLE_SHM_TRANSFER
+              value: {{ if $t.forceEfaSameNode }}"0"{{ else }}"1"{{ end }}
+            {{- end }}
+            # Turns on the plugin's caching-precompile cache; the server
+            # takes the same native route when this is unset, but with the
+            # cache off (values.yaml, engine.compileCacheVolume).
+            - name: VLLM_NEURON_BACKEND
+              value: neuron_native
+            - name: VLLM_CACHE_ROOT
+              value: /compile-cache
+            - name: HF_HOME
+              value: /cache/huggingface
+            # The image has no account for the non-root UID this chart runs
+            # as (values.yaml, engine.podSecurityContext).
+            - name: HOME
+              value: /cache/home
+            - name: USER
+              value: vllm
+            {{- if $.Values.model.hfTokenSecret.name }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.model.hfTokenSecret.name }}
+                  key: {{ $.Values.model.hfTokenSecret.key }}
+            {{- end }}
+            {{- with $r.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $.Values.engine.port }}
+            - name: nixl
+              containerPort: {{ $t.sideChannelPort }}
+          resources:
+            {{- toYaml $resources | nindent 12 }}
+          securityContext:
+            {{- toYaml $.Values.engine.containerSecurityContext | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: {{ div (int $.Values.engine.startupTimeoutSeconds) 10 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            failureThreshold: 5
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: cache
+              mountPath: /cache
+            - name: compile-cache
+              mountPath: /compile-cache
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ $.Values.engine.shmSizeLimit }}
+        - name: cache
+          {{- toYaml $.Values.engine.cacheVolume | nindent 10 }}
+        - name: compile-cache
+          {{- toYaml $.Values.engine.compileCacheVolume | nindent 10 }}
+{{- end }}

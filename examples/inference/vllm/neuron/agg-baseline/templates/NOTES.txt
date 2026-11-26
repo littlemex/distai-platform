@@ -1,0 +1,15 @@
+{{- $dev := int (include "agg.neuronDevices" .) -}}
+Endpoint (cluster-internal): http://{{ include "agg.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+
+Neuron devices ({{ .Values.accelerator.resourceName }}) this release requests (the --gpu-count for score.py, one unit per reserved device):
+  {{ mul (int .Values.engine.replicas) $dev }} = {{ .Values.engine.replicas }} engines x {{ $dev }}
+NeuronCores the engines use (tensor parallel degree):
+  {{ mul (int .Values.engine.replicas) (int .Values.engine.neuronCoresPerEngine) }} = {{ .Values.engine.replicas }} engines x {{ .Values.engine.neuronCoresPerEngine }}
+{{- if not .Values.model.name }}
+
+WARNING: model.name is empty; the engine exits until it is set.
+{{- end }}
+{{- if not .Values.engine.tolerations }}
+
+NOTE: engine.tolerations is empty. A Neuron pool tainted aws.amazon.com/neuron=true:NoSchedule (this platform's capacity-pool shape) admits no engine pod until it is set.
+{{- end }}

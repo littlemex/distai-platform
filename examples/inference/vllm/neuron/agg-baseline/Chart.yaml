@@ -1,0 +1,15 @@
+apiVersion: v2
+name: vllm-neuron-agg-baseline
+description: >-
+  vLLM aggregated serving baseline on AWS Trainium with the vLLM Neuron
+  plugin: one Deployment whose engines run prefill and decode in the same
+  process, with vLLM's shipped scheduler defaults and no KV connector. The
+  comparison point for the Neuron disagg-pd chart on the same hardware.
+type: application
+version: 0.1.0
+appVersion: "0.29.0.1.2.0"
+home: https://github.com/littlemex/distai-platform
+sources:
+  - https://github.com/littlemex/distai-platform
+  - https://github.com/vllm-project/vllm-neuron
+  - https://awsdocs-neuron.readthedocs-hosted.com/en/latest/release-notes/components/vllm-neuron.html

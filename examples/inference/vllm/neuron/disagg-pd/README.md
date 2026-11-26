@@ -1,0 +1,202 @@
+# vLLM prefill/decode disaggregation on AWS Trainium (vLLM Neuron plugin)
+
+This Helm chart serves one model with prefill and decode disaggregated on AWS Trainium: prefill engines compute the KV cache of each prompt, decode engines pull that KV cache over NIXL and generate the answer, and a small proxy in front sends each request through both. The two roles run as two Deployments with their own replica count and NeuronCores per engine, so the prefill:decode ratio is a value, not a fixed 1:1. By default prefill and decode never share a node, and the KV cache moves over libfabric on EFA.
+
+The engines run the [vLLM Neuron plugin](https://github.com/vllm-project/vllm-neuron) `0.29.0.1.2.0` (vLLM `0.29.0`, Neuron SDK `2.33`), whose release notes list disaggregated inference (1P1D and xPyD) as supported on Trn2 and Trn3. The plugin uses vLLM's own disaggregation mechanism: the `NixlConnector` KV connector with NIXL's `LIBFABRIC` backend over EFA and the same two-step request flow as vLLM on GPUs, described in the plugin's [disaggregated inference tutorial](https://github.com/vllm-project/vllm-neuron/blob/eb6cb360f7cff6082e22a9437d8ce0ba3891304a/docs/tutorials/tutorial-di-1p1d-xpyd.md) and [design document](https://github.com/vllm-project/vllm-neuron/blob/eb6cb360f7cff6082e22a9437d8ce0ba3891304a/docs/design/vllm/disaggregated-inference.md). The plugin is a Beta release, which is why the image is pinned.
+
+This chart is the Neuron counterpart of the NVIDIA chart [`../../disagg-pd/`](../../disagg-pd/): the same value names wherever the concept is the same, the same proxy, the same NetworkPolicy and the same placement rules. The aggregated baseline to compare against is [`../agg-baseline/`](../agg-baseline/); the load generator, the scorer and the dashboard are in [`../../../_shared/`](../../../_shared/).
+
+## How a request flows
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant X as Proxy
+  participant P as Prefill engine
+  participant D as Decode engine
+  C->>X: POST /v1/completions
+  X->>P: same request, max_tokens=1, stream=false, kv_transfer_params.do_remote_decode=true
+  P-->>X: kv_transfer_params (engine id, handshake host and port, KV block ids)
+  X->>D: original request + those kv_transfer_params
+  D->>P: NIXL handshake, then KV cache read (libfabric/EFA)
+  D-->>X: streamed tokens
+  X-->>C: streamed tokens, unchanged
+```
+
+The proxy is the NVIDIA chart's proxy, unchanged: it does not depend on the accelerator behind the engines, and the plugin's own tutorial proxy sends the same `kv_transfer_params`. It finds engines by resolving the headless `-prefill` and `-decode` Services and picks one of each round robin per request. If a prefill response carries no `kv_transfer_params`, the proxy returns HTTP 502 instead of letting decode quietly recompute the prompt, and the engines run with `kv_load_failure_policy: fail` for the same reason.
+
+## What differs from the NVIDIA chart, and why
+
+| Part | NVIDIA chart (`../../disagg-pd`) | This chart | Why |
+| --- | --- | --- | --- |
+| Image | `vllm/vllm-openai:v0.34.0-efa` | `public.ecr.aws/neuron/pytorch-inference-vllm-neuronx:0.29.0.1.2.0-neuronx-py314-sdk2.33.1-ubuntu26.04` | The Neuron plugin is a separate build with its own container, not a flag on the GPU image |
+| Accelerator request | `nvidia.com/gpu` = `gpusPerEngine` | `aws.amazon.com/neuron` = ceil(`neuronCoresPerEngine` / `accelerator.coresPerDevice`) | The Neuron device plugin hands out whole devices (one Trainium2 device = 4 NeuronCores), while the tensor parallel degree counts NeuronCores |
+| Tensor parallel value | `prefill.gpusPerEngine` | `prefill.neuronCoresPerEngine` (same for decode) | Named for the unit it counts |
+| `kv_buffer_device` | not set (vLLM's default on CUDA is `cuda`) | `"cuda"`, always | vLLM defaults it to the platform's device type ([kv_transfer.py](https://github.com/vllm-project/vllm/blob/98dff2a81d747d1dba01a47f939f48c3526d4206/vllm/config/kv_transfer.py#L16-L18)), `neuron` here, which vLLM's NIXL worker rejects; the Neuron platform registers only `cuda` for NIXL ([platform.py](https://github.com/vllm-project/vllm-neuron/blob/eb6cb360f7cff6082e22a9437d8ce0ba3891304a/vllm_neuron/vllm/platform.py#L1134-L1141), [base_worker.py](https://github.com/vllm-project/vllm/blob/98dff2a81d747d1dba01a47f939f48c3526d4206/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py#L455-L463)) |
+| Connector class | `NixlConnector` | `NixlConnector` | The plugin rewrites a top-level `NixlConnector` to its subclass `NeuronNixlConnector`, which registers Neuron's KV cache layout ([platform.py](https://github.com/vllm-project/vllm-neuron/blob/eb6cb360f7cff6082e22a9437d8ce0ba3891304a/vllm_neuron/vllm/platform.py#L1194-L1219)) |
+| Compile cache | none | `engine.compileCacheVolume` at `VLLM_CACHE_ROOT`, with `VLLM_NEURON_BACKEND=neuron_native` | A cold start traces and compiles the model; the [precompile cache guide](https://github.com/vllm-project/vllm-neuron/blob/eb6cb360f7cff6082e22a9437d8ce0ba3891304a/docs/guides/how-to-precompile-cache.md) says the cache is only on when that variable is set explicitly |
+| MPS and memory fraction | `*.mps`, `*.gpuMemoryUtilization` | absent | NVIDIA-only; Neuron has no counterpart |
+| Non-root user | the image's own `vllm` user (UID 2000) | UID 2000 with `HOME` and `USER` set by the chart | The Neuron image declares no user of its own |
+| Router alternatives | also `../../disagg-pd-llmd` (llm-d) | this proxy only | No primary source shows llm-d's Endpoint Picker running against the Neuron plugin ([#80](https://github.com/littlemex/distai-platform/issues/80)) |
+
+`NEURON_VISIBLE_DEVICES` is never set. The plugin's tutorial uses it for host-level NeuronCore numbering on a bare instance and says to leave it unset under Kubernetes and size the resource request instead; the device plugin already exposes only the allocated devices to the container.
+
+The KV connector role is `kv_both` on both roles, the same as the NVIDIA chart, instead of the tutorial's `kv_producer`/`kv_consumer` split. The plugin supports `kv_both`; its cost is that a decode engine keeps its prefill weights and compiles its prefill graph, which a `kv_consumer` engine would skip. Whether the plugin's NIXL path accepts `kv_both` end to end on Trainium is part of the real-hardware check ([Status](../../../README.md#status)). If it does not, changing the role is a one-line change to the per-role `kv_role` in `templates/engines.yaml`, not a redesign; the connector class itself already becomes `NeuronNixlConnector` through the plugin's own rewrite.
+
+## Placement and transport
+
+Placement works exactly as in the NVIDIA chart (see [its "Placement and transport" section](../../disagg-pd/README.md#placement-and-transport)): each role selects nodes where `placement.nodeSelectorKey` equals its own `nodeSelectorValue`, and the decode Deployment carries a required pod anti-affinity against prefill's node and, whenever EFA is requested, a required pod affinity to prefill's Availability Zone. On this platform's capacity pools, `placement.nodeSelectorKey=karpenter.sh/nodepool` selects one NodePool per role with no extra node label, because Karpenter sets that label on every node it launches.
+
+Transport is NIXL `LIBFABRIC` over EFA: both roles get `FI_PROVIDER=efa`, `FI_EFA_USE_DEVICE_RDMA=1` and an explicit `FI_EFA_ENABLE_SHM_TRANSFER`, and request `vpc.amazonaws.com/efa` devices. The plugin's tutorial requires `FI_EFA_ENABLE_SHM_TRANSFER=0` for prefill and decode on one node ("without it, both servers can start successfully but requests can produce inaccurate output"); `transport.forceEfaSameNode=true` sets it, together with `placement.sameNodeMeasurement=true`. A same-node run needs an instance with at least two Neuron devices and two EFA interfaces (for example `trn2.48xlarge`), because each engine pod holds its own; a `trn2.3xlarge` has one of each.
+
+## Prerequisites
+
+| Requirement | Why |
+| --- | --- |
+| A cell of this platform, which delivers the core add-ons [`accel-neuron-device-plugin`](../../../../../gitops/addons/accel-neuron-device-plugin/addon.yaml) (`aws.amazon.com/neuron`) and [`accel-efa-device-plugin-neuron`](../../../../../gitops/addons/accel-efa-device-plugin-neuron/addon.yaml) (`vpc.amazonaws.com/efa` on Neuron nodes) | Engines request Neuron devices and EFA devices as extended resources |
+| Two Trainium capacity pools, one per role, each shaped like [`gitops/cells/dp-a19-trn-r3/capacity-pool/trn.yaml`](../../../../../gitops/cells/dp-a19-trn-r3/capacity-pool/trn.yaml) and requesting one EFA interface (below) | The method label opts the nodes into the Neuron device plugin; the EFA interface sets `distai.dev/efa-attached=true`, which the Neuron EFA device plugin also selects on |
+| The toleration `aws.amazon.com/neuron=true:NoSchedule` on both roles (`placement.tolerations`) | That pool shape taints its nodes so that only pods requesting the device land there |
+| A Hugging Face token with access to the model, for gated models such as `meta-llama/Llama-3.2-1B-Instruct` | The weights are downloaded at start |
+| Nodes that can pull from `public.ecr.aws` and Hugging Face, with a root volume large enough for the image (about 6.5 GB compressed; the pool shape above sets `100Gi`) | The image and the weights are downloaded at start |
+| `kubectl` and Helm 3.8 or later on your workstation | Installing the chart |
+
+Each pool's parameter file adds `pool.networkInterfaces` to the `trn.yaml` shape, with the one-EFA-interface layout the capacity-pool chart documents for a single-network-card instance type such as `trn2.3xlarge` (see the `networkInterfaces` comment in [`gitops/charts/capacity-pool/values.yaml`](../../../../../gitops/charts/capacity-pool/values.yaml)). For the prefill pool (`pool.name: trn-prefill`; the decode pool is the same with `pool.name: trn-decode`):
+
+```yaml
+values:
+  pool:
+    name: trn-prefill
+    networkInterfaces:
+      - networkCardIndex: 0
+        deviceIndex: 0
+        interfaceType: interface
+      - networkCardIndex: 0
+        deviceIndex: 1
+        interfaceType: efa-only
+```
+
+## Deploy
+
+The example serves `meta-llama/Llama-3.2-1B-Instruct`, a model in the plugin's tested-model table, with one NeuronCore per engine: one prefill engine and one decode engine, each on its own `trn2.3xlarge`. `--max-model-len 4096 --max-num-seqs 4` are the values of the plugin's [online serving quickstart](https://github.com/vllm-project/vllm-neuron/blob/eb6cb360f7cff6082e22a9437d8ce0ba3891304a/docs/getting-started/quickstart-online-serving.md); they keep the compiled shapes small, and both roles must use the same values.
+
+```bash
+git clone https://github.com/littlemex/distai-platform.git
+cd distai-platform
+export NAMESPACE=pd-neuron
+export RELEASE=pdn
+export MODEL_ID=meta-llama/Llama-3.2-1B-Instruct
+export PREFILL_POOL=trn-prefill
+export DECODE_POOL=trn-decode
+export HF_TOKEN="${HF_TOKEN:?set HF_TOKEN to a Hugging Face token with access to the model}"
+kubectl create namespace "$NAMESPACE"
+kubectl create secret generic hf-token -n "$NAMESPACE" --from-literal=token="$HF_TOKEN"
+helm install "$RELEASE" examples/inference/vllm/neuron/disagg-pd \
+  --namespace "$NAMESPACE" \
+  --set model.name="$MODEL_ID" \
+  --set model.hfTokenSecret.name=hf-token \
+  --set prefill.neuronCoresPerEngine=1 \
+  --set decode.neuronCoresPerEngine=1 \
+  --set placement.nodeSelectorKey=karpenter.sh/nodepool \
+  --set prefill.nodeSelectorValue="$PREFILL_POOL" \
+  --set decode.nodeSelectorValue="$DECODE_POOL" \
+  --set-json 'placement.tolerations=[{"key":"aws.amazon.com/neuron","operator":"Equal","value":"true","effect":"NoSchedule"}]' \
+  --set-json 'prefill.extraArgs=["--max-model-len","4096","--max-num-seqs","4"]' \
+  --set-json 'decode.extraArgs=["--max-model-len","4096","--max-num-seqs","4"]'
+kubectl rollout status deployment -n "$NAMESPACE" -l app.kubernetes.io/instance="$RELEASE" --timeout=40m
+```
+
+The installation notes print the in-cluster endpoint, the number of Neuron devices the release requests (the `--gpu-count` the scorer needs, one unit per reserved device) and the NeuronCores the engines use.
+
+## Verify
+
+Check that prefill and decode landed on different nodes:
+
+```bash
+kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/instance="$RELEASE" -o wide
+```
+
+The engine log names the connector the plugin chose; expect the rewrite to `NeuronNixlConnector`:
+
+```bash
+kubectl logs -n "$NAMESPACE" deployment/"$RELEASE"-vllm-neuron-disagg-pd-decode | grep -i 'NeuronNixlConnector'
+```
+
+Send one request through the proxy from inside the cluster. The Service is `ClusterIP`, so it is not reachable from outside the cluster.
+
+```bash
+kubectl run curl-pdn --rm -i --restart=Never -n "$NAMESPACE" \
+  --image=curlimages/curl:8.23.0 -- \
+  curl -sS "http://$RELEASE-vllm-neuron-disagg-pd:8000/v1/completions" \
+  -H 'Content-Type: application/json' \
+  -d "{\"model\": \"$MODEL_ID\", \"prompt\": \"The capital of France is\", \"max_tokens\": 32}"
+```
+
+Which path the KV cache took is read from the EFA hardware counters on both nodes, the same way as for the NVIDIA chart (see [its "Check which path the KV cache took" section](../../disagg-pd/README.md#check-which-path-the-kv-cache-took)); in the plugin's read mode, decode pulls the blocks from prefill with an RDMA read.
+
+## Measure
+
+Run the load replay and scorer from [`../../../_shared/`](../../../_shared/) against `http://$RELEASE-vllm-neuron-disagg-pd:8000`, with `--gpu-count` set to the number of Neuron devices the installation notes print, and the same trace and SLO as the [aggregated baseline](../agg-baseline/) run on the same instance type.
+
+## Values
+
+| Value | Default | Meaning |
+| --- | --- | --- |
+| `model.name` | `""` | Hugging Face model repository id. Required; the engines exit with a message until it is set |
+| `model.revision` | `""` | Model repository commit or tag; empty is the default branch |
+| `model.servedModelName` | `""` | Name clients send as `model`; empty is `model.name` |
+| `model.hfTokenSecret.name` / `.key` | `""` / `token` | Secret with a Hugging Face token, for gated models |
+| `image.repository` / `.tag` / `.digest` | `public.ecr.aws/neuron/pytorch-inference-vllm-neuronx` / `0.29.0.1.2.0-neuronx-py314-sdk2.33.1-ubuntu26.04` / `""` | Engine and proxy image; the digest is pinned once confirmed on the verification runner |
+| `accelerator.resourceName` | `aws.amazon.com/neuron` | Extended resource the Neuron device plugin advertises, one unit per device |
+| `accelerator.coresPerDevice` | `4` | NeuronCores per device (Trainium2 at the default logical NeuronCore setting); devices per engine = ceil(`neuronCoresPerEngine` / this) |
+| `placement.nodeSelectorKey` | `distai.dev/pd-role` | Node label key that tells the roles apart; `karpenter.sh/nodepool` selects one capacity pool per role |
+| `placement.sameNodeMeasurement` | `false` | `true` targets both roles' `nodeSelector` at `placement.sharedPoolValue` instead of their own `nodeSelectorValue` |
+| `placement.sharedPoolValue` | `shared` | The pool value both roles target when `sameNodeMeasurement=true` |
+| `placement.enforceAntiAffinity` | `true` | `false` swaps decode's required anti-affinity (against prefill) for a required affinity (toward prefill), only meaningful with `sameNodeMeasurement=true` |
+| `placement.tolerations` | `[]` | Tolerations for both roles; `aws.amazon.com/neuron=true:NoSchedule` for this platform's Neuron pools |
+| `transport.backend` | `LIBFABRIC` | NIXL backend, `LIBFABRIC` or `UCX` (UCX is not documented by the plugin and not run on Neuron) |
+| `transport.forceEfaSameNode` | `false` | `true` sets `FI_EFA_ENABLE_SHM_TRANSFER=0` on both roles (else explicitly `1`); requires `LIBFABRIC` and `placement.sameNodeMeasurement=true` |
+| `transport.efaResourceName` | `vpc.amazonaws.com/efa` | Extended resource the EFA device plugin advertises |
+| `transport.sideChannelPort` | `5600` | NIXL handshake port (`VLLM_NIXL_SIDE_CHANNEL_PORT`); the host is the pod IP |
+| `transport.ucx.tcpPortRange` | `"20000-20063"` | `UCX_TCP_PORT_RANGE`, only read with `backend=UCX` |
+| `transport.kvLoadFailurePolicy` | `fail` | `fail` or `recompute` when decode cannot load a transferred KV cache |
+| `transport.extraConnectorConfig` | `{}` | Extra keys for `kv_connector_extra_config` |
+| `prefill.replicas`, `decode.replicas` | `1`, `1` | Engines per role |
+| `prefill.neuronCoresPerEngine`, `decode.neuronCoresPerEngine` | `1`, `1` | NeuronCores per engine (tensor parallel degree) |
+| `prefill.efaDevices`, `decode.efaDevices` | `1`, `1` | EFA devices per engine pod; at least 1 with `LIBFABRIC` |
+| `prefill.nodeSelectorValue`, `decode.nodeSelectorValue` | `prefill`, `decode` | Label value each role selects |
+| `prefill.extraNodeSelector`, `decode.extraNodeSelector` | `{}` | Additional node selector terms per role |
+| `prefill.extraArgs`, `decode.extraArgs` | `[]` | Extra `vllm serve` arguments per role |
+| `prefill.extraEnv`, `decode.extraEnv` | `[]` | Extra environment variables per role, for example `TORCH_CACHING_PRECOMPILE=0` |
+| `prefill.resources`, `decode.resources` | 4 CPU, 32Gi requested | CPU and memory; Neuron device and EFA limits are added from the values above |
+| `engine.port` | `8000` | Engine HTTP port, also serving `/metrics` |
+| `engine.shmSizeLimit` | `16Gi` | Size of the memory-backed `/dev/shm` |
+| `engine.cacheVolume` | `emptyDir: {}` | Volume for the model download cache (`HF_HOME`) |
+| `engine.compileCacheVolume` | `emptyDir: {}` | Volume for the compile cache (`VLLM_CACHE_ROOT`); one per pod, not shared |
+| `engine.podSecurityContext`, `engine.containerSecurityContext` | non-root UID 2000, all capabilities dropped | Security context of the engine pods |
+| `engine.startupTimeoutSeconds` | `1800` | Time allowed for download, compile and load before a restart |
+| `proxy.replicas` | `1` | Proxy pods |
+| `service.type` / `.port` | `ClusterIP` / `8000` | Client-facing Service in front of the proxy |
+| `metrics.enabled` | `true` | Pod label and annotations for the `vllm` scrape job |
+| `networkPolicy.enabled` | `true` | Default-deny ingress with the same exceptions as the NVIDIA chart |
+| `networkPolicy.metricsScrapeFrom` | `[]` | Ingress peers allowed to scrape `engine.port` |
+| `kvCacheTier.mode` | `gpu-only` | Same mode names as the NVIDIA chart; `gpu-only` means NIXL alone. `local`/`remote` render `MultiConnector` with `NeuronNixlConnector` and `LMCacheMPConnector`, unverified on Neuron |
+| `kvCacheTier.lmcache.mpServerEndpoint` | `""` | `host:port` of LMCache's own mp server; required whenever `mode` is `local` or `remote` |
+| `kvCacheTier.lmcache.extraConfig` | `{}` | Merged into `kv_connector_extra_config` as-is |
+
+## Known issues
+
+- Not yet run on real hardware; the status is kept in the [examples Status table](../../../README.md#status). The chart renders and lints; the facts it relies on are taken from the plugin's own source and documentation, linked above.
+- The image is pinned by tag only until its digest is confirmed on the verification runner.
+- The engines run as UID 2000, a user the image does not define. The chart sets `HOME` to a writable directory and `USER` so that Python and Torch do not fail on the missing account, but whether a non-root process can open the Neuron device files on this platform's nodes is a real-hardware check. If it cannot, the fix is in `engine.podSecurityContext`, and running as root needs a stated reason in the pull request that changes it.
+- With the default `emptyDir` volumes, every engine pod downloads the weights and compiles the model at start. Point `engine.cacheVolume` and `engine.compileCacheVolume` at per-pod persistent volumes to avoid that; the plugin's guide says multi-node precompile is not coordinated yet, so do not share one compile-cache volume between pods.
+- The proxy runs in the engine image so that it needs no image of its own; the node it lands on pulls the full image.
+- vLLM's OpenAI-compatible server has no authentication in this configuration. The Services are `ClusterIP` and the NetworkPolicy admits only the proxy and the shared load-replay driver.
+- One proxy pod is a single point of failure for the endpoint. Raise `proxy.replicas` for anything beyond measurement.
+- Whether the Neuron plugin exposes every vLLM metric that `_shared/dashboards/vllm-pd.json` reads is not confirmed.
+
+## Clean up
+
+```bash
+helm uninstall "$RELEASE" -n "$NAMESPACE"
+kubectl delete namespace "$NAMESPACE"
+```

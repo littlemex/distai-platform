@@ -1,0 +1,109 @@
+# One Deployment of vLLM engines on Neuron, each running prefill and decode
+# itself. vLLM's own scheduler defaults are kept on purpose: they are the
+# aggregated baseline, so no scheduler flag is set here. Same value names as
+# the NVIDIA chart ../../agg-baseline wherever the concept is the same.
+
+image:
+  # Same image as the Neuron disagg-pd chart, so a comparison changes the
+  # layout only. See ../disagg-pd/values.yaml for what the image carries.
+  repository: public.ecr.aws/neuron/pytorch-inference-vllm-neuronx
+  tag: 0.29.0.1.2.0-neuronx-py314-sdk2.33.1-ubuntu26.04
+  # Empty until the digest is confirmed by pulling this tag on the
+  # verification runner; pin it then, on both Neuron charts at once.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+model:
+  # Hugging Face model repository id. No default: the engine refuses to start
+  # (with a message saying so) until it is set.
+  name: ""
+  # Commit or tag of the model repository; pin it for any measurement.
+  revision: ""
+  servedModelName: ""
+  hfTokenSecret:
+    name: ""
+    key: token
+
+accelerator:
+  # One unit is one whole Neuron device, not one NeuronCore; see
+  # ../disagg-pd/values.yaml for why this platform requests devices.
+  resourceName: aws.amazon.com/neuron
+  # NeuronCores per device (4 on Trainium2 at the default logical NeuronCore
+  # setting). Each engine requests ceil(neuronCoresPerEngine /
+  # coresPerDevice) devices.
+  coresPerDevice: 4
+
+engine:
+  replicas: 1
+  # Tensor parallel degree in NeuronCores. Devices this release requests =
+  # replicas x ceil(neuronCoresPerEngine / accelerator.coresPerDevice).
+  # NEURON_VISIBLE_DEVICES is never set (../disagg-pd/values.yaml).
+  neuronCoresPerEngine: 1
+  port: 8000
+  # Nodes the engines may run on. Empty: any node with the accelerator. To
+  # compare with disagg-pd on the same hardware, select the same nodes, for
+  # example {"karpenter.sh/nodepool": "trn-prefill"}.
+  nodeSelector: {}
+  # This platform's Neuron capacity pools are tainted
+  # aws.amazon.com/neuron=true:NoSchedule; set the matching toleration
+  # (README, Prerequisites).
+  tolerations: []
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+  extraArgs: []
+  extraEnv: []
+  shmSizeLimit: 16Gi
+  # Model download cache (HF_HOME=/cache/huggingface).
+  cacheVolume:
+    emptyDir: {}
+  # Compile cache at /compile-cache (VLLM_CACHE_ROOT), Neuron-only. See
+  # ../disagg-pd/values.yaml, engine.compileCacheVolume: emptyDir re-traces
+  # and recompiles on every pod restart; use a PersistentVolumeClaim per pod
+  # if the engines restart often.
+  compileCacheVolume:
+    emptyDir: {}
+  startupTimeoutSeconds: 1800
+  # Non-root, the same UID/GID as the NVIDIA chart, although this image has
+  # no account for it; the template sets HOME and USER for that reason (see
+  # ../disagg-pd/values.yaml, engine.podSecurityContext).
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 2000
+    runAsGroup: 0
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+
+# ClusterIP: reachable only from inside the cluster. vLLM has no
+# authentication of its own here.
+service:
+  type: ClusterIP
+  port: 8000
+
+metrics:
+  # Adds the vllm-metrics=true pod label and the prometheus.io/* annotations
+  # that the "vllm" scrape job in examples/inference/_shared/dashboards/
+  # scrape-configs.yaml selects on.
+  enabled: true
+
+networkPolicy:
+  # Default deny, name the exception (#63): the same policy as
+  # ../../agg-baseline.
+  enabled: true
+  metricsScrapeFrom: []
+
+# Skeleton only, the same shape as ../../agg-baseline/values.yaml's own
+# kvCacheTier: "gpu-only" (no kv-transfer-config at all) is the default and
+# the only mode with any evidence behind it; local/remote render
+# LMCacheMPConnector alone and are unverified on Neuron in every respect
+# (../disagg-pd/values.yaml, kvCacheTier).
+kvCacheTier:
+  mode: gpu-only
+  lmcache:
+    mpServerEndpoint: ""
+    extraConfig: {}
