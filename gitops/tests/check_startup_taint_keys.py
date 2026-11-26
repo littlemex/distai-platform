@@ -39,12 +39,13 @@ Checked:
     tolerate this key, and no real dynamically-provisioned DRA pool
     exists to verify that combination against (#19 E2/E4c).
 
-What this check does NOT do (left to `check_pinned_crds.py`'s own
-network-requiring style of check, a separate concern): render any chart
-and read the *rendered* ConfigMap/DaemonSet back -- this check only reads
-each `addon.yaml`'s own declared `values:`, so a chart-level templating bug
-that renders something other than what `values:` says (for example a
-`config.*` key the chart silently ignores) is not caught here.
+What this check does NOT do (left to `check_startup_taint_renders.py`,
+a separate, network-requiring check in the same style as
+`check_pinned_crds.py`): render any chart and read the *rendered*
+ConfigMap/DaemonSet back -- this check only reads each `addon.yaml`'s own
+declared `values:`, so a chart-level templating bug that renders
+something other than what `values:` says (for example a `config.*` key
+the chart silently ignores) is not caught here.
 
 Usage: check_startup_taint_keys.py <repo_root> | check_startup_taint_keys.py --selftest
 Prints one PASS/FAIL line per check; exits 1 if any failed.

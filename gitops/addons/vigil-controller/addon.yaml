@@ -7,10 +7,17 @@
 # accel-* add-ons), waits for their Pods to go Ready, then removes the
 # taint -- fails open (removes the taint anyway) after timeoutSeconds
 # rather than wedging a node forever if one DaemonSet never comes up.
-# Lands in the "controllers" step, same as karpenter/kueue: it must be
-# running before any capacity-pool NodePool (the "capacity" step) ever
+# Lands in the "controllers" step, same as karpenter/kueue -- it needs to
+# be running before any capacity-pool NodePool (the "capacity" step) ever
 # launches a node carrying pool.startupTaints, or that node's taint is
-# never removed at all.
+# never removed at all. That ordering is this platform's own operational
+# intent, not something the delivery mechanism enforces for this add-on
+# the way it does for karpenter-crd's CRDs before karpenter: this add-on
+# creates no CRD and no object any later-wave chart reads, so there is no
+# comparable retry-until-converges dependency for a failing
+# vigil-controller Application to be caught by (gitops/README.md's own
+# "Node readiness (startupTaints)" section and this PR's own Changes item
+# state this precisely).
 #
 # config.taintKey/config.knownStartupTaintKeys: distai.dev/startup-not-ready
 # is the one startup-taint key this platform's own capacity-pool chart

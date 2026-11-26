@@ -371,6 +371,20 @@ or removes it anyway after `timeoutSeconds` if one never comes up, so a
 stuck DaemonSet degrades back to today's unprotected behavior rather than
 wedging the node forever.
 
+`vigil-controller`'s own placement in the `controllers` step (ahead of
+`accelerators`/`capacity`) is this platform's own operational intent, not
+an enforced dependency the way `karpenter-crd`'s CRDs are for `karpenter`:
+"Ordering" above quotes the real mechanism -- `platform.ApplicationSet.yaml`'s
+own `RollingSync` strategy is configured but not actually exposed by the
+managed capability, so every Application "syncs independently with
+`automated.selfHeal`, and a later step's Application fails once and
+retries until an earlier one it depends on converges." That retry only
+engages for a real object-level dependency (`capacity`'s `ResourceFlavor`
+needing `kueue`'s CRD, for example); `vigil-controller` creates no CRD and
+no object any later-wave chart reads, so a cell can finish bootstrapping
+with `vigil-controller` unhealthy and no startup taint ever removed, with
+no ordering failure surfaced anywhere else.
+
 Every DaemonSet a pool with `pool.startupTaints` set actually depends on
 must tolerate `distai.dev/startup-not-ready` itself, or it can never become
 `Ready` while the taint is present and `vigil-controller` only ever removes
