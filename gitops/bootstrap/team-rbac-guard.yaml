@@ -153,6 +153,24 @@
 #          is applied directly by the team's identity, not synced through
 #          a team AppProject; adding the kind there is a separate decision
 #          for the first team chart that GitOps-delivers a JobSet.
+#        - persistentvolumeclaims (core apiGroup, already on this list)
+#          was added for issue #18: a team claims sharedfs's
+#          checkpoints-rw/datasets-ro StorageClasses
+#          (gitops/charts/sharedfs-shares) with an ordinary PVC in its
+#          own namespace, the same way team-onboard.sh's own identity
+#          Role (step 3) already manages every other resource here --
+#          without this entry, that Role's own persistentvolumeclaims
+#          rule (added in the same PR) would itself be denied by this
+#          guard, and no team could use sharedfs through its own
+#          identity at all. Full CRUD, the same as jobsets/deployments,
+#          not the read-only carve-out: a PVC is an ordinary namespaced
+#          object its owner creates and deletes; sharedfs's own
+#          controller (not a team's Role) is what the PVC's
+#          storageClassName points at, and what provisions or revokes
+#          the PersistentVolume it binds to (cluster-scoped, never
+#          reachable from this namespaced Role at all -- see
+#          team-onboard.sh's own comment on why persistentvolumes is
+#          deliberately absent from that Role).
 #        - verbs: get, list, watch, create, update, patch, delete for
 #          every resource above except inferencepools,
 #          inferenceobjectives and inferencemodelrewrites, which are
@@ -223,12 +241,12 @@ spec:
         request.resource.resource != 'roles' || !has(object.rules) ||
         object.rules.all(r,
           r.apiGroups.all(g, g in ['', 'apps', 'batch', 'policy', 'networking.k8s.io', 'inference.networking.k8s.io', 'llm-d.ai', 'jobset.x-k8s.io']) &&
-          r.resources.all(x, x in ['serviceaccounts', 'configmaps', 'pods', 'services', 'deployments', 'statefulsets', 'daemonsets', 'jobs', 'cronjobs', 'poddisruptionbudgets', 'networkpolicies', 'jobsets', 'inferencepools', 'inferenceobjectives', 'inferencemodelrewrites']) &&
+          r.resources.all(x, x in ['serviceaccounts', 'configmaps', 'pods', 'services', 'persistentvolumeclaims', 'deployments', 'statefulsets', 'daemonsets', 'jobs', 'cronjobs', 'poddisruptionbudgets', 'networkpolicies', 'jobsets', 'inferencepools', 'inferenceobjectives', 'inferencemodelrewrites']) &&
           (r.resources.exists(x, x in ['inferencepools', 'inferenceobjectives', 'inferencemodelrewrites'])
             ? r.verbs.all(v, v in ['get', 'list', 'watch'])
             : r.verbs.all(v, v in ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete']))
         )
-      message: "a Role in a team namespace may grant only {get,list,watch,create,update,patch,delete} on {serviceaccounts,configmaps,pods,services,deployments,statefulsets,daemonsets,jobs,cronjobs,poddisruptionbudgets,networkpolicies,jobsets} (or {get,list,watch} only on {inferencepools,inferenceobjectives,inferencemodelrewrites}) in {core,apps,batch,policy,networking.k8s.io,inference.networking.k8s.io,llm-d.ai,jobset.x-k8s.io} -- this rule granted something outside that allow-list (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
+      message: "a Role in a team namespace may grant only {get,list,watch,create,update,patch,delete} on {serviceaccounts,configmaps,pods,services,persistentvolumeclaims,deployments,statefulsets,daemonsets,jobs,cronjobs,poddisruptionbudgets,networkpolicies,jobsets} (or {get,list,watch} only on {inferencepools,inferenceobjectives,inferencemodelrewrites}) in {core,apps,batch,policy,networking.k8s.io,inference.networking.k8s.io,llm-d.ai,jobset.x-k8s.io} -- this rule granted something outside that allow-list (RFC #22 Decision 10 H11, gitops/bootstrap/team-rbac-guard.yaml)"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
