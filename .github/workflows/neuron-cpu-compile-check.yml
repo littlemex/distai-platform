@@ -1,0 +1,119 @@
+name: Neuron compiler check (no Trainium/Inferentia hardware)
+
+# Compiles a tiny, fixed model to a Neuron NEFF on the GitHub-hosted runner
+# itself, with no Trainium/Inferentia hardware present. This is a cheap
+# toolchain smoke test that runs on every pull request; it does not
+# replace the real-hardware accelerator check in gitops/tests/1.e2e.sh
+# (GITOPS_RUN_ACCEL_E2E=1, documented in gitops/tests/README.md), which is
+# the only check that proves a real trn2.3xlarge node and the Neuron
+# device plugin work end to end. "CPU-mode" is deliberately not in this
+# workflow's name: vllm-neuron uses that exact phrase for its own,
+# unrelated CPU inference mode (VLLM_NEURON_CPU_MODE), distinct from its
+# CPU *compilation* mode (VLLM_NEURON_CPU_COMPILE) and from everything
+# this workflow does, which goes through torch_neuronx.trace() directly,
+# not vllm-neuron.
+#
+# Compiling without the device present is an officially documented Neuron
+# SDK workflow, not something this workflow invented; see the compile
+# script's own docstring (.github/scripts/neuron_cpu_compile_check.py)
+# for the primary-source citations and the four real runs of this exact
+# workflow (2026-11-26, three failed before the fourth passed) that found
+# what else it takes in practice beyond those citations.
+#
+# The AWS Neuron deep learning containers (for example
+# public.ecr.aws/neuron/pytorch-inference-neuronx) were considered instead
+# of the pip/apt install below, to match this repository's accelerator
+# add-ons more closely. Measured against the public.ecr.aws registry on
+# 2026-11-26, the tag used elsewhere in this repository's own e2e test
+# instructions for that exact repository
+# (2.9.0-neuronx-py312-sdk2.31.1-ubuntu24.04) is ~7.5 GiB compressed --
+# multiple GiB per pull on every pull request, regardless of the exact
+# free-disk ceiling a GitHub-hosted runner happens to have (GitHub's own
+# documentation points to the actions/runner-images repository for specs
+# rather than committing to a number here). du -sh below prints what the
+# packages this workflow actually installs come to on disk, for
+# comparison.
+#
+# The Neuron driver (aws-neuronx-dkms, a kernel module) is never installed
+# -- it has nothing to attach to on a GitHub-hosted runner with no Neuron
+# device, and the compile script's own cited "how to generate a NEFF"
+# prerequisites do not list it as required for compilation.
+#
+# The Neuron runtime library (aws-neuronx-runtime-lib, a plain userspace
+# .so, no kernel module) IS installed, found the hard way on a real run
+# of this workflow (2026-11-26, see the compile script's docstring).
+# Nothing here ever opens a real Neuron device; the library only needs to
+# be present on disk for torch_neuronx's own import-time init chain to
+# load successfully.
+#
+# Versions below are the exact ones this workflow resolved and installed
+# on 2026-11-26 (pinned, not a version range), chosen from the "PyTorch
+# 2.9.0" tab of the official manual install guide
+# (https://awsdocs-neuron.readthedocs-hosted.com/en/latest/setup/pytorch/manual.html):
+# AWS pairs neuronx-cc 2.28.x, aws-neuronx-runtime-lib 2.35.x and
+# aws-neuronx-tools 2.33.x together under the "Neuron 2.33" SDK release
+# (component version lines do not track the SDK release number itself);
+# torch-neuronx is deliberately the exception, pinned to its own last
+# build from the "Neuron 2.31" release, because XLA support for this
+# package line ended there -- the manual guide pairs that older
+# torch-neuronx build with the current compiler and runtime on purpose,
+# not a mismatch this workflow introduced.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    name: compile a tiny model (no Trainium/Inferentia hardware)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install the Neuron runtime library (no driver, no kernel module)
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          sudo install -m 0755 -d /etc/apt/keyrings
+          wget -qO - https://apt.repos.neuron.amazonaws.com/GPG-PUB-KEY-AMAZON-AWS-NEURON.PUB \
+            | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/neuron.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/neuron.gpg] https://apt.repos.neuron.amazonaws.com ${VERSION_CODENAME} main" \
+            | sudo tee /etc/apt/sources.list.d/neuron.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install -y "aws-neuronx-runtime-lib=2.35.33.0-d2725ccb8"
+          dpkg -l 'aws-neuronx-*'
+
+      - name: Install the Neuron compiler and CPU-only TorchNeuron packages
+        run: |
+          set -euo pipefail
+          python3 -m venv "${RUNNER_TEMP}/neuron-cpu-compile-venv"
+          source "${RUNNER_TEMP}/neuron-cpu-compile-venv/bin/activate"
+          python -m pip install "pip==26.3"
+          # The CPU wheel index keeps the "torch"/"torch-xla" dependencies
+          # torch-neuronx declares off the default CUDA build (not needed
+          # to compile for Trainium, and several hundred MiB larger).
+          python -m pip install \
+            "neuronx-cc==2.28.7631.0" \
+            "torch-neuronx==2.9.0.2.15.32035" \
+            --extra-index-url https://pip.repos.neuron.amazonaws.com \
+            --extra-index-url https://download.pytorch.org/whl/cpu
+          python -m pip freeze
+          du -sh "${RUNNER_TEMP}/neuron-cpu-compile-venv"
+
+      - name: Compile a tiny model to a NEFF
+        run: |
+          set -euo pipefail
+          source "${RUNNER_TEMP}/neuron-cpu-compile-venv/bin/activate"
+          # -u: unbuffered stdout, so a print() that runs before a later
+          # crash (or before the timeout above is hit) is not lost to
+          # block buffering.
+          python3 -u .github/scripts/neuron_cpu_compile_check.py --target trn2
