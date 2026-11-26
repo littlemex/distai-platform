@@ -19,6 +19,18 @@ Primary source for "compilation needs no Trainium/Inferentia hardware":
   True, tracing can be done completely on CPU. This keyword needs to be used
   with the compiler_args option to set the --target flag.")
 
+`import torch_neuronx` alone (before `cpu_backend` ever comes into play)
+pulls in `torch_xla`, which probes for the real Neuron runtime shared
+library (`/opt/aws/neuron/lib/libnrt.so.1`) at import time and raises
+`OSError` if it is absent -- confirmed on a real run of this check on a
+GitHub-hosted runner (2026-11-26) with no such library installed (by
+design: this check never installs the Neuron driver or runtime, see the
+workflow's own header comment). `libneuronxla`'s own `libnrt.py`
+(`check_compatible_libnrt()`, read from the installed package's source,
+`libneuronxla==2.2.17544.0+fb9962bf` at the time this was found) honors
+`NEURON_INTERNAL_SKIP_LIBNRT_CHECK=1` to skip exactly this probe, which is
+set below before the import for exactly that reason.
+
 Usage:
     neuron_cpu_compile_check.py [--target TARGET]
 
@@ -29,9 +41,16 @@ success; exits 1 with a GitHub Actions error annotation on any failure
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import tempfile
 from pathlib import Path
+
+# Must be set before `import torch_neuronx` (see the module docstring):
+# that import chain checks for the real Neuron runtime library and raises
+# OSError if it is not installed, which is always true on this CPU-only
+# runner.
+os.environ.setdefault("NEURON_INTERNAL_SKIP_LIBNRT_CHECK", "1")
 
 
 def error(message: str) -> None:
