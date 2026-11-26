@@ -458,6 +458,82 @@ run "rejects_empty_prefixes_list" {
   expect_failures = [var.platform_identities]
 }
 
+run "rejects_bare_slash_prefix" {
+  command = plan
+
+  variables {
+    platform_identities = {
+      bad = {
+        namespace       = "kube-system"
+        service_account = "x"
+        s3 = [{
+          bucket   = "some-bucket"
+          prefixes = ["/"]
+        }]
+      }
+    }
+  }
+
+  expect_failures = [var.platform_identities]
+}
+
+run "rejects_wildcard_in_prefix" {
+  command = plan
+
+  variables {
+    platform_identities = {
+      bad = {
+        namespace       = "kube-system"
+        service_account = "x"
+        s3 = [{
+          bucket   = "some-bucket"
+          prefixes = ["a*b/"]
+        }]
+      }
+    }
+  }
+
+  expect_failures = [var.platform_identities]
+}
+
+run "accepts_multi_region_kms_key" {
+  command = plan
+
+  variables {
+    platform_identities = {
+      ok = {
+        namespace       = "kube-system"
+        service_account = "x"
+        kms_key_arns    = ["arn:aws:kms:us-east-1:111122223333:key/mrk-1234abcd1234abcd1234abcd1234abcd"]
+      }
+    }
+  }
+
+  assert {
+    condition     = contains(data.aws_iam_policy_document.identity_scoped["ok"].statement[*].sid, "AllowScopedKms")
+    error_message = "a multi-Region (mrk-prefixed) KMS key ARN must be accepted, not rejected as if it were an alias ARN."
+  }
+}
+
+run "rejects_two_char_namespace_as_invalid" {
+  command = plan
+
+  variables {
+    platform_identities = {
+      ok = {
+        namespace       = "ml"
+        service_account = "x"
+        policy_arns     = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]
+      }
+    }
+  }
+
+  assert {
+    condition     = aws_eks_pod_identity_association.entry["ok"].namespace == "ml"
+    error_message = "a 2-character namespace (a valid Kubernetes label name) must be accepted, not rejected."
+  }
+}
+
 run "rejects_invalid_bucket_name" {
   command = plan
 

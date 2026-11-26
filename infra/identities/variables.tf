@@ -89,7 +89,7 @@ variable "platform_identities" {
 
   validation {
     condition     = alltrue([for k in keys(var.platform_identities) : can(regex("^[a-z][a-z0-9-]{0,38}$", k))])
-    error_message = "Every key of platform_identities must be 2 to 39 characters of lowercase letters, digits and hyphens, starting with a letter (it becomes part of an IAM role name)."
+    error_message = "Every key of platform_identities must be 1 to 39 characters of lowercase letters, digits and hyphens, starting with a letter (it becomes part of an IAM role name)."
   }
 
   validation {
@@ -135,22 +135,31 @@ variable "platform_identities" {
     error_message = "Every entry of platform_identities must declare at least one of s3, kms_key_arns or policy_arns; an entry with none of the three would create a Pod Identity association to a role that can do nothing, which is never useful and is rejected rather than silently created."
   }
 
+  # Both namespace and service_account are Kubernetes RFC 1123 *label*
+  # names (not subdomain names): lowercase alphanumeric or '-' only, 1 to
+  # 63 characters, starting and ending with an alphanumeric character.
+  # "." is not valid in either (a namespace is a label; only object names
+  # like a Pod's can be a longer subdomain) - a regex that accepted '.'
+  # here would accept a namespace this layer could never actually match
+  # against a real cluster. The optional middle group is written so a
+  # 2-character name (its own edge case: with a required 1+ character
+  # middle before the mandatory trailing character, the shortest matches
+  # were 1 or 3+ characters, silently rejecting valid 2-character names
+  # such as "ml") is accepted.
   validation {
-    condition = alltrue(flatten([
-      for v in values(var.platform_identities) : [
-        can(regex("^[a-z0-9]([a-z0-9.-]{1,61}[a-z0-9])?$", v.namespace)) ? true : false,
-      ]
-    ]))
-    error_message = "Every entry's namespace must be a valid Kubernetes name (lowercase alphanumeric, '-' or '.', 1 to 63 characters)."
+    condition = alltrue([
+      for v in values(var.platform_identities) :
+      can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", v.namespace)) && length(v.namespace) <= 63
+    ])
+    error_message = "Every entry's namespace must be a valid Kubernetes label name (lowercase alphanumeric or '-', starting and ending with alphanumeric, 1 to 63 characters; '.' is not valid in a namespace name)."
   }
 
   validation {
-    condition = alltrue(flatten([
-      for v in values(var.platform_identities) : [
-        can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", v.service_account)) ? true : false,
-      ]
-    ]))
-    error_message = "Every entry's service_account must be a valid Kubernetes name (lowercase alphanumeric or '-', 1 to 63 characters)."
+    condition = alltrue([
+      for v in values(var.platform_identities) :
+      can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", v.service_account)) && length(v.service_account) <= 63
+    ])
+    error_message = "Every entry's service_account must be a valid Kubernetes label name (lowercase alphanumeric or '-', starting and ending with alphanumeric, 1 to 63 characters)."
   }
 
   validation {
@@ -171,13 +180,38 @@ variable "platform_identities" {
     error_message = "Every s3[*].prefixes must list at least one prefix; list \"\" explicitly to grant the whole bucket - there is no default that would grant it implicitly."
   }
 
+  # "/" alone is rejected rather than silently treated the same as "": a
+  # bare "/" strips to an empty string the same way "" does (both grant
+  # the whole bucket under identities.tf's own trimprefix(p, "/")), which
+  # would contradict this layer's own "\"\" explicitly" rule above by
+  # accepting a second spelling of the same, widest grant without saying
+  # so. A real prefix ("a/" and similar) is unaffected: trimprefix only
+  # removes a single leading "/", a real one has more after it.
+  #
+  # "*"/"?" are rejected: both are S3 StringLike wildcard metacharacters,
+  # and identities.tf's own list-permission statement appends "*" to
+  # every declared prefix for exactly that matching - a declared prefix
+  # that already contains one would not mean what its own literal
+  # characters say (for example "a*b/" would also match "aXYZb/...", not
+  # only itself).
   validation {
     condition = alltrue(flatten([
       for v in values(var.platform_identities) : [
-        for arn in v.kms_key_arns : can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/[a-fA-F0-9-]+$", arn))
+        for b in v.s3 : [
+          for p in b.prefixes : p != "/" && !strcontains(p, "*") && !strcontains(p, "?")
+        ]
       ]
     ]))
-    error_message = "Every kms_key_arns entry must be a KMS key ARN of the form arn:aws:kms:<region>:<account>:key/<id> (a key alias ARN is not accepted: alias ARNs can be repointed at a different key without changing the ARN string, which would silently change what this scoped role can decrypt)."
+    error_message = "Every s3[*].prefixes entry must not be the literal string \"/\" (use \"\" to grant the whole bucket) and must not contain \"*\" or \"?\" (S3 StringLike wildcard characters, which would let the prefix match more than its own literal characters)."
+  }
+
+  validation {
+    condition = alltrue(flatten([
+      for v in values(var.platform_identities) : [
+        for arn in v.kms_key_arns : can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/(mrk-)?[a-fA-F0-9-]+$", arn))
+      ]
+    ]))
+    error_message = "Every kms_key_arns entry must be a KMS key ARN of the form arn:aws:kms:<region>:<account>:key/<id> (single-Region or multi-Region, \"mrk-\" prefixed) - a key alias ARN is not accepted: alias ARNs can be repointed at a different key without changing the ARN string, which would silently change what this scoped role can decrypt."
   }
 
   validation {
