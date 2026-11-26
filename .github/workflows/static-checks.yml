@@ -89,9 +89,12 @@ jobs:
   # (a job's `if:` compares strings, not booleans, so this avoids YAML's
   # own truthy/falsy surprises for OFF).
   #
-  # Four cases beyond a plain one-prefix-per-area match, each found wrong
-  # (or, for the fourth, found real) in a real throwaway verification
-  # round before this version:
+  # Four cases beyond a plain one-prefix-per-area match. Case 3 below was
+  # found wrong on a real run (cited in this pull request's own Test
+  # Results); cases 1, 2 and 4 were found by review and are each verified
+  # by a local, deterministic fixture (Test Results again), not by a
+  # live pull request reproducing the exact failure the fixture checks
+  # for.
   #   1. A rename moves a file's own old path out of an area without ever
   #      naming that old path under `.filename` (the API reports only the
   #      new path there; the old one is `.previous_filename`, present only
@@ -126,11 +129,16 @@ jobs:
   #      checked against `check_training_render.py`'s own rendered
   #      objects) and globs `gitops/charts/jobset-crd/crds/*.yaml` (the
   #      vendored JobSet CRD it validates a render against) -- confirmed
-  #      by reading that script. A pull request changing only one of
-  #      those two paths touches no file under `examples/training/` or
-  #      `gitops/` as this workflow's own `gitops` area defines it (the
-  #      whole of `gitops/`), so it would otherwise skip `training`
-  #      while silently changing an input that script's own checks read.
+  #      by reading that script. The trigger pattern below for this case,
+  #      `gitops/charts/jobset-crd/`, is deliberately broader than that
+  #      one `crds/*.yaml` glob (a safe superset: it also catches, for
+  #      example, a change to that chart's own `Chart.yaml`, which the
+  #      script does not read today but a future change to it plausibly
+  #      would). A pull request changing only one of the two paths above
+  #      does turn `gitops` on (the whole of `gitops/` is that area's own
+  #      prefix) but touches no file under `examples/training/`, so
+  #      without this case it would skip `training` while silently
+  #      changing an input that script's own checks read.
   #      Both paths are matched as further triggers for `training` below,
   #      found by reading every one of the five scripts for a path
   #      outside its own prefix; none of the other four read outside
@@ -290,16 +298,18 @@ jobs:
         # still handed to a step whose own script this pull request's
         # head can edit) by never letting `tflint --init` make that
         # network call at all: the plugin is placed, checksum-verified,
-        # exactly where `tflint --init` itself places it (confirmed on a
-        # real run with no plugin pre-installed: `~/.tflint.d/plugins/
-        # github.com/terraform-linters/tflint-ruleset-aws/<version>/
-        # tflint-ruleset-aws`, with no further `_<os>_<arch>` suffix on
-        # the binary name, and the release archive's own single file
-        # already has that same bare name once unzipped), so `tflint --init`
-        # finds "All plugins are already installed" and never calls out at
-        # all -- the same checksum-verified-download shape every other
-        # tool in this workflow uses, consistent with this file's own
-        # header comment.
+        # exactly where `tflint --init` itself places it (confirmed
+        # directly on this repository's own EC2 test runner, not a
+        # GitHub Actions run, with no plugin pre-installed: `~/.tflint.d/
+        # plugins/github.com/terraform-linters/tflint-ruleset-aws/
+        # <version>/tflint-ruleset-aws`, with no further `_<os>_<arch>`
+        # suffix on the binary name, and the release archive's own single
+        # file already has that same bare name once unzipped), so
+        # `tflint --init` finds "All plugins are already installed" and
+        # never calls out at all -- confirmed again on the GitHub Actions
+        # run cited in this pull request's own Test Results -- the same
+        # checksum-verified-download shape every other tool in this
+        # workflow uses, consistent with this file's own header comment.
         env:
           TFLINT_RULESET_AWS_VER: 0.50.0
           TFLINT_RULESET_AWS_SHA256: cdd433fdbc0929e7b9f9709dd9e72237fdfe1fc235674445c284b1e4b94a5c26
