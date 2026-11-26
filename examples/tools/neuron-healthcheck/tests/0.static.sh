@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Static checks for examples/tools/neuron-healthcheck (issue #97). No AWS
-# credentials, no cluster, no Neuron device, no torch/torch_neuronx. Run via
-# the EC2 runner, never the Mac:
+# credentials, no cluster, no Neuron device. Run via the EC2 runner, never
+# the Mac:
 #   runner/run.sh --ref <branch> -- bash examples/tools/neuron-healthcheck/tests/0.static.sh
 # Needs bash, awk, python3 with PyYAML (required, see the template check
-# below); shellcheck is used when installed.
+# below); shellcheck is used when installed. The check-1 section further
+# down additionally needs uv (used to fetch a real, CPU-only torch into an
+# ephemeral environment -- no Neuron package is ever installed); that one
+# section SKIPs, loudly, if uv is not on PATH.
 #
 # These checks are written against the issue's own design (the file layout,
 # the instance-profiles.conf format INSTANCE_TYPE|DEVICE_COUNT|NEURONCORE_COUNT|EFA_COUNT,
@@ -552,11 +555,14 @@ check "check 2 FAILs when the stub's EFA count (1) does not match EXPECTED_EFA_C
 grep -q "EFA PCI device count mismatch" "${WORK}/check2.out"
 check "check 2's own FAIL message names the EFA count mismatch, not a generic error" "$?"
 
-echo "=== check 1 (NEFF compile+load): this host has no Neuron Runtime or device, by construction ==="
-# Not a stub: this static-check host (the EC2 runner, never the Mac) has
-# neither torch_neuronx nor a Neuron device, so check 1 fails for real here
-# -- the same way it would on any host without Trainium hardware. This is
-# genuine coverage of check 1's own FAIL path, not a simulation.
+echo "=== check 1 (NEFF compile+load): the import-failure path, with neither torch nor torch_neuronx present ==="
+# Not a stub: with no PYTHONPATH override and no uv-fetched torch, this
+# process genuinely has neither package, so check 1's own
+# "import torch / import torch_neuronx" try/except is exercised for real,
+# not simulated -- the same way it would be on any host with the Neuron
+# packages not yet installed. This covers only that one FAIL path (the
+# import); the compile/load/shape branches below need torch actually
+# present, which is why they are a separate section.
 RESULTS1="${WORK}/check1-results"
 mkdir -p "${RESULTS1}"
 RESULTS_DIR="${RESULTS1}" python3 "${BASE_DIR}/lib/checks/1-neff-compile-load-check.py" --target trn2 >"${WORK}/check1.out" 2>&1
@@ -626,33 +632,45 @@ PYEOF
         echo "$?"
     }
 
+    RESULT1_FAKE="${WORK}/check1-fake-results/check-1-neff-compile-load.json"
+
     RC="$(run_check1_fake success)"
     [[ "${RC}" == "0" ]]
     check "check 1 PASSes end to end against a fake torch_neuronx that compiles, loads and returns the right shape" "$?"
+    grep -q '"status": "PASS"' "${RESULT1_FAKE}" 2>/dev/null
+    check "check 1's own result file reports PASS for the success case" "$?"
 
     RC="$(run_check1_fake compile_fail)"
     [[ "${RC}" == "1" ]]
     check "check 1 FAILs when torch_neuronx.trace() itself raises (the compile step)" "$?"
     grep -q "trace() (compile) failed" "${WORK}/check1-fake.out"
     check "check 1's own FAIL message names the compile failure, not a generic error" "$?"
+    grep -q '"status": "FAIL"' "${RESULT1_FAKE}" 2>/dev/null
+    check "check 1's own result file reports FAIL for the compile-failure case (not only the log line)" "$?"
 
     RC="$(run_check1_fake no_neff)"
     [[ "${RC}" == "1" ]]
     check "check 1 FAILs when trace() returns without raising but writes no .neff file" "$?"
     grep -q "no .neff file was written" "${WORK}/check1-fake.out"
     check "check 1's own FAIL message names the missing NEFF, not a generic error" "$?"
+    grep -q '"status": "FAIL"' "${RESULT1_FAKE}" 2>/dev/null
+    check "check 1's own result file reports FAIL for the no-NEFF-written case (not only the log line)" "$?"
 
     RC="$(run_check1_fake load_fail)"
     [[ "${RC}" == "1" ]]
     check "check 1 FAILs when running the traced model raises (the load/execute step, stands in for an nrt_init ABI mismatch)" "$?"
     grep -q "Neuron Runtime load/execute" "${WORK}/check1-fake.out"
     check "check 1's own FAIL message names the load/execute failure, not a generic error" "$?"
+    grep -q '"status": "FAIL"' "${RESULT1_FAKE}" 2>/dev/null
+    check "check 1's own result file reports FAIL for the load/execute-failure case (not only the log line)" "$?"
 
     RC="$(run_check1_fake wrong_shape)"
     [[ "${RC}" == "1" ]]
     check "check 1 FAILs when the traced model's own output has the wrong shape" "$?"
     grep -q "output shape" "${WORK}/check1-fake.out"
     check "check 1's own FAIL message names the shape mismatch, not a generic error" "$?"
+    grep -q '"status": "FAIL"' "${RESULT1_FAKE}" 2>/dev/null
+    check "check 1's own result file reports FAIL for the wrong-shape case (not only the log line)" "$?"
 else
     echo "SKIP: uv not installed -- cannot fetch a real, CPU-only torch to drive the fake-torch_neuronx coverage above"
 fi

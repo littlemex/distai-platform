@@ -264,7 +264,9 @@ examples/tools/neuron-healthcheck/run.sh
 
 With Kueue installed and a `LocalQueue` named `smoke` in the
 `neuron-healthcheck` namespace, bind the Job to it instead of running
-unsuspended:
+unsuspended (not exercised against a real Kueue in issue #97's own
+real-hardware run -- see "Deliberate deviations" item 3 above for what is
+expected and why, stated as expected behavior, not verified):
 
 ```bash
 export QUEUE_NAME=smoke

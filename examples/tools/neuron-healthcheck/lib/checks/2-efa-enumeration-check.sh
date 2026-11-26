@@ -50,11 +50,10 @@ else
 fi
 
 # stdout only, like upstream's own check (checks/2-efa-enumeration.sh:
-# `lspci | grep -ci "EFA"`, no stderr merge): EFA_PCI_COUNT is a count this
-# check compares with `-eq`, and merging lspci's own stderr into it (as an
-# earlier version of this check and of check 0 both did) could add a line
-# that happens to contain "efa" for the wrong reason, or simply noise this
-# count does not need.
+# `lspci | grep -ci "EFA"`, no stderr merge): merging lspci's own stderr
+# into the text EFA_PCI_COUNT is read from could add a line that happens to
+# contain "efa" for the wrong reason, or simply noise this count does not
+# need.
 LSPCI_ERR_FILE="$(mktemp)"
 LSPCI_OUT="$(lspci 2>"${LSPCI_ERR_FILE}")" || {
     write_result "${CHECK_NAME}" FAIL "lspci failed" "stdout: ${LSPCI_OUT}"$'\n'"stderr: $(cat "${LSPCI_ERR_FILE}")"
