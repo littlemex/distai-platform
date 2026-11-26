@@ -87,7 +87,17 @@ for bin in kubectl aws git curl sha256sum; do
 done
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "${WORK}"' EXIT
+# chmod before rm: `go mod download` (inside `go install` below) marks
+# every module it fetches into GOPATH/pkg/mod read-only (Go's own
+# documented module cache behavior, so a build cannot accidentally
+# mutate an immutable dependency) - plain `rm -rf` cannot remove a
+# read-only tree it does not own write access to, and failed outright on
+# the runner, 2026-11-26 (thousands of "Permission denied" lines, one per
+# cached file). `go clean -modcache` is the documented fix but needs the
+# Go toolchain still on PATH at trap time, which this trap cannot assume
+# (an early failure, before Go is even fetched, must still clean up);
+# chmod -R u+w first works unconditionally and needs nothing but coreutils.
+trap 'chmod -R u+w "${WORK}" 2>/dev/null; rm -rf "${WORK}"' EXIT
 
 echo "fetching Go ${GO_VERSION} (checksummed)" >&2
 curl -fsSL -o "${WORK}/go.tar.gz" "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
@@ -105,12 +115,25 @@ git clone --quiet "${SHAREDFS_REPO}" "${WORK}/sharedfs"
 git -C "${WORK}/sharedfs" checkout --quiet "${COMMIT}"
 
 REGISTRY_HOST="${ECR_REPOSITORY_URL%%/*}"
-echo "authenticating to ${REGISTRY_HOST} (no Docker daemon: writing a plain ~/.docker/config.json basic-auth entry, which go-containerregistry - ko's own push library - reads directly)" >&2
-export HOME="${WORK}/home"
-mkdir -p "${HOME}/.docker"
+echo "authenticating to ${REGISTRY_HOST} (no Docker daemon: writing a plain config.json basic-auth entry via DOCKER_CONFIG, which go-containerregistry - ko's own push library - reads directly)" >&2
+# DOCKER_CONFIG (not $HOME): go-containerregistry's default keychain reads
+# $DOCKER_CONFIG/config.json when set, the same as the Docker CLI itself.
+# An earlier version of this script instead pointed $HOME at a fresh,
+# empty directory for this - which also redirects the AWS CLI's own
+# config/credentials lookup there. With AWS_PROFILE=default set (this
+# platform's own runner convention - see runner/README.md) and no
+# ~/.aws/config at all in that fresh directory, `aws ecr
+# get-login-password` on the next line failed outright ("The config
+# profile (default) could not be found", confirmed on the runner,
+# 2026-11-26) before ko ever ran. DOCKER_CONFIG only changes where
+# go-containerregistry looks for registry credentials; it leaves
+# $HOME, and so the AWS CLI's own credential resolution (the runner's
+# IAM role via IMDS), untouched.
+export DOCKER_CONFIG="${WORK}/docker-config"
+mkdir -p "${DOCKER_CONFIG}"
 TOKEN="$(aws ecr get-login-password --region "${REGION}")"
 AUTH_B64="$(printf 'AWS:%s' "${TOKEN}" | base64 | tr -d '\n')"
-cat > "${HOME}/.docker/config.json" <<EOF
+cat > "${DOCKER_CONFIG}/config.json" <<EOF
 {"auths":{"${REGISTRY_HOST}":{"auth":"${AUTH_B64}"}}}
 EOF
 
