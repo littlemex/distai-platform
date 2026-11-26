@@ -217,13 +217,67 @@ for `2.upgrade.sh`). As with `infra/foundation/tests/1.e2e.sh`,
 `AWS_PROFILE=default` on the runner (it authenticates via its IAM role
 through IMDS) and `MY_CIDR` is the runner's own public IP, not the Mac's.
 
-### Accelerator extension (issue #28, opt-in: `GITOPS_RUN_ACCEL_E2E=1`)
+### Accelerator extension (issue #28, opt-in flag: `GITOPS_RUN_ACCEL_E2E=1`)
 
 Adds the `accelerators` step's own real-hardware check, light tier (#16):
 a Layer 1 pod on the existing cell's NVIDIA GPU pool, and a second
 foundation cell built in a Trainium-capable Region for a Layer 1 pod on a
 Neuron pool. Off by default, so an ordinary `1.e2e.sh` run (any `NAME`) is
-unaffected.
+unaffected -- **the default is a cost control, not a statement that this
+extension is optional to run.** A plain `1.e2e.sh` run against a generic
+cell (any `NAME` other than `dp-a19-gpu-r3`/`dp-a19-trn-r3`, whose own
+fixtures carry no accelerator pool at all) does not exercise this
+extension's own device plugin, DRA, `accel-device-classes` or either
+accelerator cell fixture; this is not hypothetical, it happened against
+`main`'s own tip on 2026-11-25, predating the dcgm-exporter/14b step
+below (#46, merged later that same day) (cell `dp-main-e2e-r1`, 89
+PASS / 0 FAIL, no accelerator step at all). The base suite's own
+step 14b (`dcgm-exporter`, #41, unconditional, not
+controlled by this flag) does launch a real GPU-family instance on
+every generic-cell run too, now that #46 has landed -- a known gap
+tracked in #87, not fixed here, and distinct from the device-plugin/DRA
+checks this flag actually gates. Nothing in this script stops a
+flag-off run against `dp-a19-gpu-r3`/
+`dp-a19-trn-r3` themselves from skipping every accelerator-specific
+check -- this has not been run and confirmed separately, but the flag,
+not the cell, is what gates every such check. That is narrower than
+"no GPU node is launched": step 11's own admin smoke canary is
+unconditional and lands on `dp-a19-gpu-r3`'s general capacity-pool
+NodePool regardless of the flag, which is itself NVIDIA-backed (see
+the accelerator extension's own canary-release fix, #88) -- a
+flag-off run on this cell still launches a real GPU node for the
+canary, it only skips the accelerator-specific checks themselves.
+**Set
+`GITOPS_RUN_ACCEL_E2E=1` for any pull request that changes
+`gitops/addons/accel-*`, `gitops/addon-catalog/accel-*`,
+`gitops/charts/accel-device-classes/`, the accelerator fields of
+`gitops/charts/capacity-pool/`, `gitops/cells/dp-a19-gpu-r3/`,
+`gitops/cells/dp-a19-trn-r3/`, or the `accelerators` step of `1.e2e.sh`/
+`0.static.sh` itself** -- with the flag off, none of this suite's
+device-plugin/DRA/`accel-device-classes` checks run, so a base-suite
+pass cannot stand in for it in a PR's `## Test Results`.
+
+Cost and time: both cells run on this suite's own light tier (spot/
+on-demand `g7`/`g6e`/`g5` for the GPU cell, spot `trn2.3xlarge` for the
+Trainium cell, #16), billed only while this script's own `terraform
+apply`/`destroy` window for each cell is open. A full run of the base
+suite plus this extension (both cells) took 1h59m37s end to end on a
+real run (2026-11-22, both cells reached a final `RESULT PASS`). A base-suite-only
+run (the generic cell above, no accelerator extension) took
+1h22m on a real run against `main`'s own tip (2026-11-25). Six real
+runs of this extension, against this branch's history, are on record
+so far (2026-11-26, tracked in #87 and #88): four in a row each failed
+before completing, at three different points; a fifth, with a fix for
+one of those points applied, passed that point cleanly but failed at
+a new, previously-unreached defect in the Trainium cell's own NodePool
+count; a sixth, with a fix for that defect added too, reached a final
+`RESULT PASS` (2h19m43s end to end) -- #87 has the full account of the
+four, #88 of the fifth and sixth. Only the sixth run has passed. Treat
+2h19m43s and the 1h59m37s figure above as the known-good order of
+magnitude for planning, not as a number every run reproduces exactly --
+this extension does not measure or isolate why the sixth run took
+longer than the 2026-11-22 run, so neither figure should be read as a
+tight bound.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |

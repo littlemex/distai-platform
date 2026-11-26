@@ -64,6 +64,21 @@ focused fix to make it look substantive.
       mocks are supporting checks, not a real run. Real means the change
       is applied and real traffic flows through it (a workload runs, a
       metric is scraped, a pod reads from Amazon S3).
+    - **A change touching the `accelerators` step, `gitops/addons/accel-*`,
+      `gitops/addon-catalog/accel-*`, `gitops/charts/accel-device-classes/`,
+      the accelerator fields of `gitops/charts/capacity-pool/`, or
+      `gitops/cells/dp-a19-gpu-r3/`/`gitops/cells/dp-a19-trn-r3/`**: a run
+      of `gitops/tests/1.e2e.sh` with `GITOPS_RUN_ACCEL_E2E=1`, not only the
+      base suite. The base suite runs no check of the device plugin, DRA,
+      `accel-device-classes` or either accelerator cell fixture (every such
+      check in `1.e2e.sh` sits behind the flag), so it does not satisfy
+      this bullet on its own for those paths -- see
+      `gitops/tests/README.md`'s accelerator extension section for cost and
+      time. (The base suite's own, unconditional step 14b (`dcgm-exporter`,
+      #41) does launch a real GPU-family instance on every
+      run regardless of this flag; that is a different code path from the
+      one this bullet is about, tracked as a known gap in #87, not fixed
+      here.)
     - **Small functional fix**: verification proportionate to the change.
     - **No functional impact**: write `docs-only` under `## Test Results`.
 
