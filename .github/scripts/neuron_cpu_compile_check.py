@@ -11,9 +11,11 @@ CPU-only host; it does not mean every operator this platform's own
 workloads use would compile, and it does not replace the real-hardware
 check in `gitops/tests/1.e2e.sh` (`GITOPS_RUN_ACCEL_E2E=1`), which is the
 only check that proves a real trn2.3xlarge node and the Neuron device
-plugin work end to end. It is still useful: a broken toolchain install or
-an API-usage regression in this exact call shows up here, cheaply, on
-every pull request, instead of only in that paid, light-tier run.
+plugin work end to end. It is still useful: a broken install of *this
+exact toolchain* (the versions pinned in the workflow, not necessarily
+the versions the real-hardware run's own container pins) or a regression
+in *this exact API call* shows up here, cheaply, on every pull request,
+instead of only in that paid, light-tier run.
 
 Primary sources:
 
@@ -32,33 +34,33 @@ Primary sources:
 
 `import torch_neuronx` alone (before `cpu_backend` ever comes into play)
 pulls in `torch_xla`, which goes on to `ctypes.CDLL` a PJRT plugin library
-that dynamically links `libnrt.so.1` -- confirmed by two real, failed runs
-of this check on a GitHub-hosted runner (2026-11-26):
+that dynamically links `libnrt.so.1` -- found across four real runs of
+this check on a GitHub-hosted runner, all on 2026-11-26:
 
 1. Without `aws-neuronx-runtime-lib` installed at all, `libneuronxla`'s own
    `libnrt.py` (`check_compatible_libnrt()`, read from the installed
    package's source, `libneuronxla==2.2.17544.0+fb9962bf`) raised `OSError`
    itself, before the native loader was even reached, unless
-   `NEURON_INTERNAL_SKIP_LIBNRT_CHECK=1` is set first (an internal,
-   undocumented switch found only by reading that source file; set below).
+   `NEURON_INTERNAL_SKIP_LIBNRT_CHECK=1` was set first (an internal,
+   undocumented switch found only by reading that source file).
 2. With that switch set but the runtime library still not installed, the
    native loader itself (`ctypes.CDLL`) raised `OSError: libnrt.so.1:
    cannot open shared object file`, from `torch_neuronx`'s own
    `xla.init()` -> `enable_neuron_custom_calls()`. Installing
    `aws-neuronx-runtime-lib` (see the workflow's own install step) fixed
-   this one; once it is installed, `libnrt.so.1` exists on disk and
-   `check_compatible_libnrt()`'s own path check passes on its own, making
-   `NEURON_INTERNAL_SKIP_LIBNRT_CHECK=1` a no-op in this specific
-   configuration -- kept anyway as a documented, inexpensive guard against
-   a future Neuron release moving that check earlier again, not because a
-   real run currently needs it.
-
-A third real run went past both of those and produced a real NEFF, then
-failed in `torch.jit.save()`/`torch.jit.load()` (not in `trace()` itself,
-and not in anything this file still does): `torch.jit.load()` went on to
-initialize the Neuron Runtime and failed with no device present. That
-round-trip was removed; this check now stops at confirming the `.neff`
-file `trace()` already wrote.
+   this one.
+3. A third run went past both of those and produced a real NEFF, then
+   failed in `torch.jit.save()`/`torch.jit.load()` (not in `trace()`
+   itself, and not in anything this file still does):
+   `torch.jit.load()` went on to initialize the Neuron Runtime and failed
+   with no device present. That round-trip was removed; this check now
+   stops at confirming the `.neff` file `trace()` already wrote.
+4. A fourth run, with `NEURON_INTERNAL_SKIP_LIBNRT_CHECK` removed again
+   and `aws-neuronx-runtime-lib` installed, passed: once the library is
+   on disk, `check_compatible_libnrt()`'s own path check passes on its
+   own, and that switch is not needed. It is not set anywhere in this
+   file; the only fix carried forward from finding 1 is installing the
+   library itself.
 
 Usage:
     neuron_cpu_compile_check.py [--target TARGET]
@@ -70,17 +72,9 @@ the file not being there).
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import tempfile
 from pathlib import Path
-
-# Must be set before `import torch_neuronx` (see the module docstring,
-# finding 1): a documented guard, confirmed by a fourth real run with this
-# line removed (2026-11-26) to be a no-op in this exact configuration
-# (finding 2) -- kept anyway against a future Neuron release moving the
-# check earlier again.
-os.environ.setdefault("NEURON_INTERNAL_SKIP_LIBNRT_CHECK", "1")
 
 
 def error(message: str) -> None:

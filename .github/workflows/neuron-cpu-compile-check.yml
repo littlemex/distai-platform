@@ -16,9 +16,9 @@ name: Neuron compiler check (no Trainium/Inferentia hardware)
 # Compiling without the device present is an officially documented Neuron
 # SDK workflow, not something this workflow invented; see the compile
 # script's own docstring (.github/scripts/neuron_cpu_compile_check.py)
-# for the primary-source citations and the two real, failed runs of this
-# exact workflow (2026-11-26) that found what else it takes in practice
-# beyond those citations.
+# for the primary-source citations and the four real runs of this exact
+# workflow (2026-11-26, three failed before the fourth passed) that found
+# what else it takes in practice beyond those citations.
 #
 # The AWS Neuron deep learning containers (for example
 # public.ecr.aws/neuron/pytorch-inference-neuronx) were considered instead
@@ -27,11 +27,12 @@ name: Neuron compiler check (no Trainium/Inferentia hardware)
 # 2026-11-26, the tag used elsewhere in this repository's own e2e test
 # instructions for that exact repository
 # (2.9.0-neuronx-py312-sdk2.31.1-ubuntu24.04) is ~7.5 GiB compressed --
-# too large to risk alongside the checkout and this runner's own
-# pre-installed tooling on a GitHub-hosted runner, which GitHub's own
-# documentation does not commit to an exact free-disk figure for. The
-# packages below (apt + pip combined) total well under 1 GiB and install
-# in well under a minute, measured on this exact workflow's own real run.
+# multiple GiB per pull on every pull request, regardless of the exact
+# free-disk ceiling a GitHub-hosted runner happens to have (GitHub's own
+# documentation points to the actions/runner-images repository for specs
+# rather than committing to a number here). du -sh below prints what the
+# packages this workflow actually installs come to on disk, for
+# comparison.
 #
 # The Neuron driver (aws-neuronx-dkms, a kernel module) is never installed
 # -- it has nothing to attach to on a GitHub-hosted runner with no Neuron
@@ -106,9 +107,13 @@ jobs:
             --extra-index-url https://pip.repos.neuron.amazonaws.com \
             --extra-index-url https://download.pytorch.org/whl/cpu
           python -m pip freeze
+          du -sh "${RUNNER_TEMP}/neuron-cpu-compile-venv"
 
       - name: Compile a tiny model to a NEFF
         run: |
           set -euo pipefail
           source "${RUNNER_TEMP}/neuron-cpu-compile-venv/bin/activate"
-          python3 .github/scripts/neuron_cpu_compile_check.py --target trn2
+          # -u: unbuffered stdout, so a print() that runs before a later
+          # crash (or before the timeout above is hit) is not lost to
+          # block buffering.
+          python3 -u .github/scripts/neuron_cpu_compile_check.py --target trn2
