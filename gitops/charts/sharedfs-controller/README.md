@@ -23,12 +23,13 @@ separate, per-cell chart - this one has nothing cell-specific in it beyond the i
 
 - **No Lustre project quotas.** Upstream's `config/quota` (the `sharedfs-quota` namespace, its
   own `Dockerfile.quota` image and the controller's `--quota-namespace`/`--quota-image` flags)
-  is not delivered by this chart: it needs a second custom image and an FSx for Lustre 2.15 file
-  system, neither of which this PR's own `gitops/bootstrap/sharedfs-image-publish.sh` or
-  `infra/foundation/fsx.tf` (deployment type `SCRATCH_2`) provide. Tracked as #18's own
-  "Deferred to a follow-up" note.
+  is not delivered by this chart: it needs a second custom image, which this PR's own
+  `gitops/bootstrap/sharedfs-image-publish.sh` does not build. `infra/foundation/fsx.tf` already
+  pins Lustre `2.15` for every deployment type, so that half of the original gap is closed - the
+  quota pod's own image is the only piece left. Tracked as #18's own "Deferred to a follow-up"
+  note.
 - **`--preparer-image` is always set to the controller's own image** (this chart's one addition
   to upstream's literal Deployment args - see `templates/crds.yaml`'s header, point 4):
-  `gitops/charts/sharedfs-shares`' own `checkpoints`/`datasets` `FilesystemShare` objects both
-  set `provision`, and upstream's controller refuses to start at all once any share does, unless
-  this flag is set.
+  `gitops/charts/sharedfs-shares`' own `checkpoints` `FilesystemShare` sets `provision` (`datasets`
+  does not - see that chart's own `templates/filesystemshares.yaml`), and upstream's controller
+  refuses to start at all once any share does, unless this flag is set.

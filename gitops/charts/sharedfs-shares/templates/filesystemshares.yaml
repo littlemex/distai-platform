@@ -16,12 +16,14 @@
 # exactly the single-segment case that rule exists to forbid, and
 # upstream's own README shows this exact path with no `provision` field
 # at all. `checkpoints/{namespace}` is two segments and keeps its own
-# `provision`, matching upstream's own other example. Caught on a real
-# cluster (2026-11-26): rendering `datasets` with `provision` set made
-# the object's own creation fail CRD admission on every sync attempt,
-# which is why gitops/charts/sharedfs-shares never converged in that run
-# - not the cross-ApplicationSet race this PR's own Test Results first
-# suspected.
+# `provision`, matching upstream's own other example. Found by code
+# review (2026-11-27, against sharedfs's own CRD and README - not on a
+# real cluster, which had already been torn down by the time this was
+# found): rendering `datasets` with `provision` set made the object's
+# own creation fail CRD admission on every sync attempt, which is almost
+# certainly why gitops/charts/sharedfs-shares never converged in attempt
+# 6 - not the cross-ApplicationSet race this PR's own Test Results first
+# suspected, though that race is not ruled out either.
 #
 # Both `checkpoints` and `datasets` are themselves top-level directories
 # whose own parent is the file system root - sharedfs's own README: "The

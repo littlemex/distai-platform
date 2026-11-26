@@ -31,8 +31,9 @@ this repository sets it.
 
 ## What this chart does
 
-`templates/seed.yaml` runs a one-time Argo CD `PreSync` hook Job (idempotent: `mkdir -p` plus a
-`chown`/`chmod` reassert on every sync) that creates the `checkpoints` and `datasets` top-level
+`templates/seed.yaml` runs an Argo CD `PostSync` hook Job on every sync (idempotent: `mkdir -p`
+plus a `chown`/`chmod` reassert each time, never skipped just because the directories already
+exist) that creates the `checkpoints` and `datasets` top-level
 directories sharedfs's own `FilesystemShare` `provision` mechanism assumes already exist
 ("the parent must already exist, be owned by root, and not be writable by group or others" -
 sharedfs's own README) - nothing else in this chart, or in sharedfs itself, creates that parent
