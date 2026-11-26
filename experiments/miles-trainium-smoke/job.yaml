@@ -1,0 +1,80 @@
+# Throwaway experiment manifest for the miles-on-Trainium investigation
+# (not part of the distai-platform product; not delivered through gitops/
+# Argo CD). Runs train_grpo_smoke.py (mounted from a ConfigMap generated
+# separately from the file of the same name in this directory) on one
+# trn2.3xlarge node, using this cell's own capacity-pool "trn" NodePool
+# and the platform's accel-neuron-device-plugin (gitops/README.md
+# "Accelerators"): nodeSelector + toleration match that pool's
+# accelerator.methodLabel / accelerator.taint
+# (gitops/cells/dp-miles-trn-r1/capacity-pool/trn.yaml), and the resource
+# request/limit is the extended resource aws.amazon.com/neuron the device
+# plugin advertises (never aws.amazon.com/neuroncore -- #19 E4a).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: miles-grpo-smoke
+  namespace: distai-smoke
+  labels:
+    app: miles-grpo-smoke
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3000
+  template:
+    metadata:
+      labels:
+        app: miles-grpo-smoke
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        distai.dev/neuron-method: device-plugin
+      tolerations:
+        - key: aws.amazon.com/neuron
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: grpo-smoke
+          image: public.ecr.aws/neuron/pytorch-training-neuronx:2.9.0-neuronx-py312-sdk2.30.0-ubuntu24.04
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              echo "[setup] pip install transformers"
+              pip install -q --no-cache-dir "transformers>=4.46,<5" "huggingface_hub>=0.24"
+              echo "[setup] starting train_grpo_smoke.py"
+              python /opt/rl/train_grpo_smoke.py
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: HF_HOME
+              value: /tmp/hf
+            - name: MODEL_ID
+              value: "Qwen/Qwen2.5-0.5B-Instruct"
+            - name: STEPS
+              value: "2"
+            - name: GROUP_SIZE
+              value: "4"
+            - name: PROMPT_LEN
+              value: "8"
+            - name: GEN_LEN
+              value: "6"
+          resources:
+            requests:
+              cpu: "2"
+              memory: "16Gi"
+              aws.amazon.com/neuron: "1"
+            limits:
+              cpu: "4"
+              memory: "32Gi"
+              aws.amazon.com/neuron: "1"
+          volumeMounts:
+            - name: script
+              mountPath: /opt/rl
+            - name: tmp-hf
+              mountPath: /tmp/hf
+      volumes:
+        - name: script
+          configMap:
+            name: miles-grpo-smoke-script
+        - name: tmp-hf
+          emptyDir:
+            sizeLimit: 10Gi
