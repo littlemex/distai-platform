@@ -120,17 +120,39 @@ def check_device_plugin_addon(repo_root: str, workdir: str, name: str, tol_path:
         set(before_ds) == set(after_ds),
         f"before={sorted(before_ds)} after={sorted(after_ds)}",
     )
-    target_entry = {"key": taint_key, "effect": taint_effect}
+    # The real entry this add-on's own values declares for the shared key
+    # (including its own operator, which varies: Exists here, but nothing
+    # stops a future add-on from writing Equal+value) -- not a hand-typed
+    # {key, effect} shape, since Kubernetes tolerates by the whole entry,
+    # not just those two fields, and more than one DaemonSet in a chart
+    # can read the *same* values.tolerations field (NVIDIA's own
+    # mps-control-daemon does) while another, unrelated one in the same
+    # chart (Neuron's own npd) reads a different values path this add-on
+    # never overrides at all -- that second DaemonSet is expected to show
+    # NO change, not the same addition.
+    declared = get_path(addon_doc, f"values.{tol_path}") or []
+    matches = [t for t in declared if isinstance(t, dict) and t.get("key") == taint_key and t.get("effect") == taint_effect]
+    check(f"{rel}: values.{tol_path} declares exactly one entry for {taint_key}:{taint_effect}", len(matches) == 1, f"got {matches!r}")
+    if len(matches) != 1:
+        return
+    target = normalize_toleration(matches[0])
+    gained_it_somewhere = False
     for ds_name in sorted(set(before_ds) & set(after_ds)):
         before_set = {normalize_toleration(t) for t in before_ds[ds_name] if isinstance(t, dict)}
         after_set = {normalize_toleration(t) for t in after_ds[ds_name] if isinstance(t, dict)}
         added = after_set - before_set
         removed = before_set - after_set
+        gained_it_somewhere = gained_it_somewhere or added == {target}
         check(
-            f"{rel}: DaemonSet {ds_name} gains exactly one toleration ({target_entry}), nothing else, nothing dropped",
-            not removed and len(added) == 1 and normalize_toleration(target_entry) in added,
-            f"removed={removed!r} added={added!r} (want added == {{{normalize_toleration(target_entry)!r}}}, removed == set())",
+            f"{rel}: DaemonSet {ds_name} either gains exactly {matches[0]} or is unaffected, and nothing is ever dropped",
+            not removed and added in (set(), {target}),
+            f"removed={removed!r} added={added!r} (want removed == set() and added in (set(), {{{target!r}}}))",
         )
+    check(
+        f"{rel}: at least one DaemonSet actually gained {matches[0]} (the override is not a no-op)",
+        gained_it_somewhere,
+        f"no DaemonSet among {sorted(set(before_ds) & set(after_ds))} gained it",
+    )
 
 
 def check_vigil_controller(repo_root: str, workdir: str) -> tuple[str | None, str | None]:
