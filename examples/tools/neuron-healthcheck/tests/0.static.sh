@@ -105,7 +105,7 @@ PROFILE_ROWS="$(data_rows 2>/dev/null < "${PROFILE}")"
 # Every data row has the four documented fields:
 #   INSTANCE_TYPE|DEVICE_COUNT|NEURONCORE_COUNT|EFA_COUNT
 # with the three counts as non-negative integers.
-BAD_ROWS="$(echo "${PROFILE_ROWS}" | awk -F'|' 'NF && !(NF==4 && $1!="" && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/)')"
+BAD_ROWS="$(echo "${PROFILE_ROWS}" | awk -F'|' 'NF && !(NF==4 && $1!="" && $2~/^(0|[1-9][0-9]*)$/ && $3~/^(0|[1-9][0-9]*)$/ && $4~/^(0|[1-9][0-9]*)$/)')"
 [[ -n "${PROFILE_ROWS}" && -z "${BAD_ROWS}" ]]
 check "every data row is INSTANCE_TYPE|DEVICE_COUNT|NEURONCORE_COUNT|EFA_COUNT with integer counts${BAD_ROWS:+ (bad: ${BAD_ROWS})}" "$?"
 DUP_TYPES="$(echo "${PROFILE_ROWS}" | awk -F'|' 'NF{print $1}' | sort | uniq -d)"
@@ -401,6 +401,65 @@ done < "${WORK}/manifests.out"
 grep -qx DONE "${WORK}/manifests.out" && [[ "${PY_RC}" == "0" ]]
 check "manifest checks ran to completion (python3 exit ${PY_RC}; PyYAML is required)" "$?"
 
+echo "=== lib/common.sh require_int: leading zero is actually rejected, not just a regex read by eye ==="
+REQUIRE_INT_RC="$(bash -c "source '${BASE_DIR}/lib/common.sh'; require_int X 08" 2>/dev/null; echo "$?")"
+[[ "${REQUIRE_INT_RC}" != "0" ]]
+check "require_int rejects '08' (would be read as invalid octal by the arithmetic -ne/-gt every caller uses)" "$?"
+REQUIRE_INT_RC="$(bash -c "source '${BASE_DIR}/lib/common.sh'; require_int X 010" 2>/dev/null; echo "$?")"
+[[ "${REQUIRE_INT_RC}" != "0" ]]
+check "require_int rejects '010' (would silently read as 8, not 10, in the arithmetic every caller uses)" "$?"
+REQUIRE_INT_RC="$(bash -c "source '${BASE_DIR}/lib/common.sh'; require_int X 0" 2>/dev/null; echo "$?")"
+[[ "${REQUIRE_INT_RC}" == "0" ]]
+check "require_int accepts bare '0' (the one leading-zero-looking value that is not actually a leading zero)" "$?"
+REQUIRE_INT_RC="$(bash -c "source '${BASE_DIR}/lib/common.sh'; require_int X 10" 2>/dev/null; echo "$?")"
+[[ "${REQUIRE_INT_RC}" == "0" ]]
+check "require_int accepts '10' (a normal multi-digit value with no leading zero)" "$?"
+
+echo "=== run.sh's own row validation: same leading-zero rule, run.sh's own copy ==="
+python3 -c "
+import re
+src = open('${BASE_DIR}/run.sh', encoding='utf-8').read()
+assert re.search(r'\^\(0\|\[1-9\]\[0-9\]\*\)\\\$', src), 'run.sh no longer carries the leading-zero-safe regex for the profile row fields'
+"
+check "run.sh's own row-validation regex is the leading-zero-safe one, read from the file (not re-derived)" "$?"
+
+echo "=== run.sh: refuses a reused RUN_ID and a non-DNS-1123 RUN_ID/NAMESPACE, before touching a cluster ==="
+run_guarded_run_id() {
+    rm -f "${WORK}/kubectl.calls"
+    env -u INSTANCE_TYPE -u QUEUE_NAME -u INJECT_BAD_DEVICE_COUNT -u KUBECTL \
+        PATH="${WORK}/bin:${PATH}" KUBECONFIG=/dev/null INSTANCE_TYPE=trn2.3xlarge "$@" "${BASE_DIR}/run.sh" >"${WORK}/run_id.out" 2>&1
+}
+run_guarded_run_id RUN_ID='Not_A_DNS_Label'
+RC=$?
+[[ -x "${BASE_DIR}/run.sh" && "${RC}" != "0" && ! -s "${WORK}/kubectl.calls" ]]
+check "run.sh with a RUN_ID that is not a DNS-1123 label exits non-zero (exit ${RC}) without calling kubectl" "$?"
+run_guarded_run_id NAMESPACE='Not_A_DNS_Label'
+RC=$?
+[[ -x "${BASE_DIR}/run.sh" && "${RC}" != "0" && ! -s "${WORK}/kubectl.calls" ]]
+check "run.sh with a NAMESPACE that is not a DNS-1123 label exits non-zero (exit ${RC}) without calling kubectl" "$?"
+
+mkdir -p "${WORK}/bin-existing-job"
+cat > "${WORK}/bin-existing-job/kubectl" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "${WORK}/kubectl-existing.calls"
+if [[ "\$1" == "get" && "\$2" == "job" ]]; then
+    exit 0
+fi
+exit 97
+EOF
+chmod +x "${WORK}/bin-existing-job/kubectl"
+rm -f "${WORK}/kubectl-existing.calls"
+env -u INSTANCE_TYPE -u QUEUE_NAME -u INJECT_BAD_DEVICE_COUNT -u KUBECTL \
+    PATH="${WORK}/bin-existing-job:${PATH}" KUBECONFIG=/dev/null INSTANCE_TYPE=trn2.3xlarge RUN_ID=already-exists \
+    "${BASE_DIR}/run.sh" >"${WORK}/run_id_reuse.out" 2>&1
+RC=$?
+[[ "${RC}" != "0" ]]
+check "run.sh refuses a RUN_ID whose Job already exists (exit ${RC})" "$?"
+grep -q "already exists" "${WORK}/run_id_reuse.out"
+check "run.sh's own message for a reused RUN_ID names the reason" "$?"
+! grep -qE '^(create namespace|apply)' "${WORK}/kubectl-existing.calls" 2>/dev/null
+check "run.sh checks for the existing Job before applying anything else (no 'create namespace' or 'apply' call recorded)" "$?"
+
 echo "=== check 0 (neuron-ls): fault injection with a stub binary, no real device needed ==="
 CHECK_BIN="${WORK}/checkbin"
 mkdir -p "${CHECK_BIN}"
@@ -457,9 +516,12 @@ check "check 0 FAILs when neuron-ls is missing from PATH entirely" "$?"
 grep -q "not found on PATH" "${WORK}/check0.out"
 check "check 0's own FAIL message names the missing binary" "$?"
 
-RC="$(EXPECTED_DEVICE_COUNT=0 EXPECTED_NEURONCORE_COUNT=4 RESULTS_DIR="${RESULTS0}" bash "${BASE_DIR}/lib/checks/0-neuron-ls-check.sh" >"${WORK}/check0.out" 2>&1; echo "$?")"
+write_neuron_ls_stub '[{"neuron_device": 0, "nc_count": 4}]'
+RC="$(EXPECTED_DEVICE_COUNT=0 EXPECTED_NEURONCORE_COUNT=4 RESULTS_DIR="${RESULTS0}" PATH="${CHECK_BIN}:${PATH}" bash "${BASE_DIR}/lib/checks/0-neuron-ls-check.sh" >"${WORK}/check0.out" 2>&1; echo "$?")"
 [[ "${RC}" == "1" ]]
-check "check 0 refuses EXPECTED_DEVICE_COUNT=0 as not a real expectation to check against" "$?"
+check "check 0 refuses EXPECTED_DEVICE_COUNT=0 even with a valid, matching neuron-ls stub present (exit ${RC}; would also exit 1 on 'not found on PATH' alone, so the stub is restored first to pin the actual guard being tested)" "$?"
+grep -q "not a real expectation to check against" "${WORK}/check0.out"
+check "check 0's own FAIL message for EXPECTED_DEVICE_COUNT=0 names that reason, not 'not found on PATH'" "$?"
 
 echo "=== check 2 (EFA enumeration): fault injection with a stub lspci, no real device needed ==="
 RESULTS2="${WORK}/check2-results"
@@ -475,7 +537,14 @@ printf '#!/usr/bin/env bash\necho "32:00.0 Ethernet controller [0200]: Amazon.co
 chmod +x "${CHECK_BIN}/lspci"
 RC="$(run_check2 1)"
 [[ "${RC}" == "0" ]]
-check "check 2 exits 0 against a stub lspci reporting the expected EFA count (PASS, or WARN if this static-check host's own /sys/module/efa is absent, which it checks for real)" "$?"
+check "check 2 exits 0 against a stub lspci reporting the expected EFA count" "$?"
+if [[ -d /sys/module/efa ]]; then
+    grep -q '"status": "PASS"' "${RESULTS2}/check-2-efa-enumeration.json" 2>/dev/null
+    check "check 2's own result file reports PASS (this host's own /sys/module/efa is present)" "$?"
+else
+    grep -q '"status": "WARN"' "${RESULTS2}/check-2-efa-enumeration.json" 2>/dev/null
+    check "check 2's own result file reports WARN, not PASS (this host's own /sys/module/efa is absent, checked for real, not assumed)" "$?"
+fi
 
 RC="$(run_check2 2)"
 [[ "${RC}" == "1" ]]
@@ -487,7 +556,7 @@ echo "=== check 1 (NEFF compile+load): this host has no Neuron Runtime or device
 # Not a stub: this static-check host (the EC2 runner, never the Mac) has
 # neither torch_neuronx nor a Neuron device, so check 1 fails for real here
 # -- the same way it would on any host without Trainium hardware. This is
-# genuine coverage of check 1's own FAIL path (DA-54), not a simulation.
+# genuine coverage of check 1's own FAIL path, not a simulation.
 RESULTS1="${WORK}/check1-results"
 mkdir -p "${RESULTS1}"
 RESULTS_DIR="${RESULTS1}" python3 "${BASE_DIR}/lib/checks/1-neff-compile-load-check.py" --target trn2 >"${WORK}/check1.out" 2>&1
@@ -500,6 +569,93 @@ check "check 1 prints its own FAIL line, not a silent or uncaught exit" "$?"
 check "check 1 writes its own result file even on failure" "$?"
 grep -q '"status": "FAIL"' "${RESULTS1}/check-1-neff-compile-load.json" 2>/dev/null
 check "check 1's own result file reports FAIL" "$?"
+
+echo "=== check 1: compile-success/compile-fail/load-fail/wrong-shape paths, with a real torch and a fake torch_neuronx ==="
+# The import-failure path above is real but shallow: it never reaches
+# trace() at all. torch_neuronx itself cannot be installed here (it needs
+# the Neuron SDK's own package index and, for anything past compile,
+# hardware this host does not have), so this uses a real, CPU-only torch
+# (fetched once via uv, ~200 MiB, cached after the first run) and a small
+# fake torch_neuronx module on PYTHONPATH that stands in for the real
+# package's own trace() entry point only -- it does not simulate the
+# Neuron compiler or runtime, only the three outcomes check 1's own code
+# branches on (compile raises, the traced callable raises, the traced
+# callable returns the wrong shape), so what this proves is that check 1's
+# own exception handling and result-writing are correct for each outcome,
+# not that the real Neuron Runtime behaves this way.
+if command -v uv >/dev/null 2>&1; then
+    FAKE_DIR="${WORK}/fake-torch-neuronx"
+    mkdir -p "${FAKE_DIR}"
+    cat > "${FAKE_DIR}/torch_neuronx.py" <<'PYEOF'
+import os
+import torch
+
+__version__ = "0.0.0-fake-for-tests-0-static-sh"
+
+
+class _FakeTraced:
+    def __init__(self, mode):
+        self.mode = mode
+
+    def __call__(self, *args, **kwargs):
+        if self.mode == "load_fail":
+            raise RuntimeError("fake Neuron Runtime load/execute failure (stands in for an nrt_init ABI mismatch)")
+        if self.mode == "wrong_shape":
+            return torch.zeros(1, 1)
+        return torch.zeros(8, 10)
+
+
+def trace(model, example_inputs, compiler_workdir=None, compiler_args=None):
+    mode = os.environ.get("FAKE_TORCH_NEURONX_MODE", "success")
+    if mode == "compile_fail":
+        raise RuntimeError("fake torch_neuronx.trace() compile failure")
+    if mode != "no_neff" and compiler_workdir:
+        with open(os.path.join(compiler_workdir, "graph.neff"), "wb") as f:
+            f.write(b"FAKE-NEFF-BYTES-FOR-TESTS-0-STATIC-SH")
+    return _FakeTraced(mode)
+PYEOF
+
+    run_check1_fake() {
+        local mode="$1" results_dir="${WORK}/check1-fake-results"
+        rm -rf "${results_dir}"
+        mkdir -p "${results_dir}"
+        FAKE_TORCH_NEURONX_MODE="${mode}" RESULTS_DIR="${results_dir}" PYTHONPATH="${FAKE_DIR}" \
+            uv run --with torch --index https://download.pytorch.org/whl/cpu --no-progress -- \
+            python3 "${BASE_DIR}/lib/checks/1-neff-compile-load-check.py" --target trn2 \
+            >"${WORK}/check1-fake.out" 2>&1
+        echo "$?"
+    }
+
+    RC="$(run_check1_fake success)"
+    [[ "${RC}" == "0" ]]
+    check "check 1 PASSes end to end against a fake torch_neuronx that compiles, loads and returns the right shape" "$?"
+
+    RC="$(run_check1_fake compile_fail)"
+    [[ "${RC}" == "1" ]]
+    check "check 1 FAILs when torch_neuronx.trace() itself raises (the compile step)" "$?"
+    grep -q "trace() (compile) failed" "${WORK}/check1-fake.out"
+    check "check 1's own FAIL message names the compile failure, not a generic error" "$?"
+
+    RC="$(run_check1_fake no_neff)"
+    [[ "${RC}" == "1" ]]
+    check "check 1 FAILs when trace() returns without raising but writes no .neff file" "$?"
+    grep -q "no .neff file was written" "${WORK}/check1-fake.out"
+    check "check 1's own FAIL message names the missing NEFF, not a generic error" "$?"
+
+    RC="$(run_check1_fake load_fail)"
+    [[ "${RC}" == "1" ]]
+    check "check 1 FAILs when running the traced model raises (the load/execute step, stands in for an nrt_init ABI mismatch)" "$?"
+    grep -q "Neuron Runtime load/execute" "${WORK}/check1-fake.out"
+    check "check 1's own FAIL message names the load/execute failure, not a generic error" "$?"
+
+    RC="$(run_check1_fake wrong_shape)"
+    [[ "${RC}" == "1" ]]
+    check "check 1 FAILs when the traced model's own output has the wrong shape" "$?"
+    grep -q "output shape" "${WORK}/check1-fake.out"
+    check "check 1's own FAIL message names the shape mismatch, not a generic error" "$?"
+else
+    echo "SKIP: uv not installed -- cannot fetch a real, CPU-only torch to drive the fake-torch_neuronx coverage above"
+fi
 
 echo "=== lib/aggregate-results.py: NOT_RUN, WARN and unrecognized-status handling ==="
 AGG_DIR="${WORK}/agg"

@@ -49,12 +49,24 @@ else
     echo "[INFO] pciutils installed: $(command -v lspci)"
 fi
 
-LSPCI_OUT="$(lspci 2>&1)" || {
-    write_result "${CHECK_NAME}" FAIL "lspci failed" "${LSPCI_OUT}"
+# stdout only, like upstream's own check (checks/2-efa-enumeration.sh:
+# `lspci | grep -ci "EFA"`, no stderr merge): EFA_PCI_COUNT is a count this
+# check compares with `-eq`, and merging lspci's own stderr into it (as an
+# earlier version of this check and of check 0 both did) could add a line
+# that happens to contain "efa" for the wrong reason, or simply noise this
+# count does not need.
+LSPCI_ERR_FILE="$(mktemp)"
+LSPCI_OUT="$(lspci 2>"${LSPCI_ERR_FILE}")" || {
+    write_result "${CHECK_NAME}" FAIL "lspci failed" "stdout: ${LSPCI_OUT}"$'\n'"stderr: $(cat "${LSPCI_ERR_FILE}")"
+    rm -f "${LSPCI_ERR_FILE}"
     exit 1
 }
+if [[ -s "${LSPCI_ERR_FILE}" ]]; then
+    echo "[INFO] lspci stderr (not counted, logged only): $(cat "${LSPCI_ERR_FILE}")"
+fi
+rm -f "${LSPCI_ERR_FILE}"
 EFA_PCI_COUNT="$(grep -ci EFA <<<"${LSPCI_OUT}" || true)"
-EVIDENCE="$(lspci -nn 2>&1 | grep -i EFA || true)"
+EVIDENCE="$(lspci -nn 2>/dev/null | grep -i EFA || true)"
 
 if [[ "${EFA_PCI_COUNT}" -ne "${EXPECTED_EFA_COUNT}" ]]; then
     write_result "${CHECK_NAME}" FAIL "EFA PCI device count mismatch: expected=${EXPECTED_EFA_COUNT}, detected=${EFA_PCI_COUNT}" "${EVIDENCE:-${LSPCI_OUT}}"

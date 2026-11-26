@@ -1,7 +1,8 @@
 # neuron-healthcheck (issue #97)
 
 A cheap, standard pre-flight that runs before a Trainium (Neuron) verification
-on this platform, so a bad node is caught in minutes, not mid-measurement. It
+on this platform, so a bad node is caught before the real run starts, not
+mid-measurement. It
 is the Neuron counterpart of [`../gpu-healthcheck`](../gpu-healthcheck): the
 same shape (a `run.sh` that renders one disposable Job onto one node, exits
 non-zero on failure, and uses `kubectl logs` as its only result transport),
@@ -22,9 +23,10 @@ whose `check_accel_layer1` Neuron probe runs `neuron-ls` in a pod and checks
 it reports exactly one device. That is a real check, but it is reachable
 only by running the whole accelerator e2e suite (30 minutes or more). This
 tool lifts the same assertion out into a standalone pre-flight that runs by
-itself, well inside its own 20-minute deadline (confirmed in this PR's own
-Test Results), and adds what that probe does not check: the NeuronCore
-count, and a model actually loading and running on the device.
+itself and reaches `Complete` or `Failed` before `run.sh`'s own 20-minute
+deadline (confirmed on real hardware, issue #97), and adds what that probe
+does not check: the NeuronCore count, and a model actually loading and
+running on the device.
 
 It is also not a duplicate of issue
 [#78](https://github.com/littlemex/distai-platform/issues/78)'s CPU-only
@@ -120,18 +122,21 @@ The Job runs the AWS Neuron PyTorch inference deep learning container
 `public.ecr.aws/neuron/pytorch-inference-neuronx:2.9.0-neuronx-py312-sdk2.31.1-ubuntu24.04`,
 pinned in `run.sh` by tag and digest
 (`sha256:de98dc02a68765df5688d301134debbd677ccdc4fbd6873af34fafafcc3462ec`,
-read from the `public.ecr.aws` registry on 2026-11-27). It is on the Neuron
-SDK 2.31 release line, the same release line as the Neuron driver 2.31.8.0
-measured on this platform's own Neuron node AMI
+read from the `public.ecr.aws` registry on 2026-11-27). It started as a
+candidate because it is on the Neuron SDK 2.31 release line, the same
+release-line number as the Neuron driver 2.31.8.0 measured on this
+platform's own Neuron node AMI
 (`amazon-eks-node-al2023-x86_64-neuron-1.37-v20261112`) in issue #19 -- a
-number match chosen as a starting point, not asserted as proof of ABI
-compatibility by itself (the Neuron SDK's own component versions do not
-always track the release-line number; `.github/workflows/neuron-cpu-compile-check.yml`'s
-own comment on this platform makes that same point about a different pair of
-components). What this PR's own Test Results actually show is the real
-proof: this exact image's `torch_neuronx` compiled a NEFF and then loaded and
+number match that this tool does not treat as proof of ABI compatibility by
+itself (the Neuron SDK's own component versions do not always track the
+release-line number; `.github/workflows/neuron-cpu-compile-check.yml`'s own
+comment on this platform makes that same point about a different pair of
+components). The real proof is empirical, from issue #97's own real-hardware
+run: this exact image's `torch_neuronx` compiled a NEFF and then loaded and
 ran it through the Neuron Runtime against this exact driver on a real
-`trn2.3xlarge` node, with no ABI error. It is also the image
+`trn2.3xlarge` node, with no ABI error (the versions the Job itself printed:
+`aws-neuronx-runtime-lib 2.33.10.0-3dcef56f0`, `torch-neuronx 2.9.0.2.15.32035+de43f57c`,
+against driver `2.31.8.0`). It is also the image
 `.github/workflows/neuron-cpu-compile-check.yml` names as the container it
 considered for #78/#79. It ships `torch`, `torch_neuronx`, the Neuron
 compiler, the Neuron Runtime and `neuron-ls`, so the Job installs nothing for
@@ -139,17 +144,24 @@ checks 0 and 1. The image is about 7.5 GiB compressed -- the same figure
 `.github/workflows/neuron-cpu-compile-check.yml`'s own comment already states
 for this exact tag, measured against the `public.ecr.aws` registry on
 2026-11-26, not re-measured here; the first run on a fresh node spends
-minutes pulling it. Both real runs in this PR's own Test Results reached
-`Complete`/`Failed` well inside `run.sh`'s own 20-minute deadline (the deadline
-itself was not approached); this PR did not separately measure the
-pre-flight's own wall-clock time apart from that bound.
+minutes pulling it. When the node AMI moves to a different Neuron driver,
+re-verify by running this tool against a real node rather than picking a new
+`BASE_IMAGE` by release-line number alone -- the number was only ever a
+starting point, confirmed in issue #97's own real-hardware run for this one
+pairing, not a rule that holds for every future pairing.
+
+Both real runs in issue #97's own Test Results reached `Complete`/`Failed`
+(`run.sh`'s own log carries no "neither Complete nor Failed after 20m"
+warning for either run) before `run.sh`'s own 20-minute deadline; the
+pre-flight's own wall-clock time was not separately measured.
 
 `BASE_IMAGE` overrides the default. When the node AMI moves to a new Neuron
-driver line, move `BASE_IMAGE` to the matching SDK line too, and re-read the
-digest from the registry (on the EC2 runner, not the Mac). The Job's log
-records the host driver version (`/sys/module/neuron/version`) and the
-container's Neuron package versions for a human to compare; the tool does
-not assert an exact driver version, because the AMI moves.
+driver line, pick a candidate image, re-read its digest from the registry
+(on the EC2 runner, not the Mac), and confirm it with a real run of this
+tool rather than by release-line number alone (see "Base image" above). The
+Job's log records the host driver version (`/sys/module/neuron/version`)
+and the container's Neuron package versions for a human to compare; the
+tool does not assert an exact driver version, because the AMI moves.
 
 ## The three checks
 
@@ -221,14 +233,18 @@ same reasons:
    same posture upstream's GPU DaemonSet documents ("does NOT request
    `nvidia.com/gpu`... accesses GPUs via device files in privileged mode"), so
    the pre-flight never consumes a device-plugin slot a real workload would
-   otherwise get. The consequence: Kueue's `ClusterQueue` quota (when
-   `QUEUE_NAME` is set) admits the Job on CPU and memory alone and does not
-   reserve the device, so nothing stops a Neuron workload from landing on the
-   same node while the pre-flight runs. Run the pre-flight before scheduling
-   the real verification workload on that node, not alongside it; check 1
-   is expected to fail if another process already holds the NeuronCores
-   (the Neuron Runtime's own exclusive-access behavior, not something this
-   PR verified directly -- no concurrent-process case was run).
+   otherwise get. The consequence follows from the manifest alone, not from a
+   run against a real Kueue (the `QUEUE_NAME` path was not exercised in
+   issue #97's own real-hardware run, only the unsuspended, no-Kueue path
+   was): a `ClusterQueue` quota can only count what a Job actually requests,
+   and this Job requests no accelerator resource, so it is expected to be
+   admitted on CPU and memory alone, reserving no device. Run the pre-flight
+   before scheduling the real verification workload on that node, not
+   alongside it; check 1 is expected to fail if another process already
+   holds the NeuronCores (the Neuron Runtime's own exclusive-access
+   behavior). Neither expectation in this paragraph was verified by a real
+   run in issue #97; both follow from the manifest and from Kueue's and the
+   Neuron Runtime's own documented behavior.
 
 The Job has no `hostNetwork`: none of the checks needs the host's network
 namespace. It tolerates the `aws.amazon.com/neuron` `NoSchedule` taint.
