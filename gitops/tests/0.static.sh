@@ -50,6 +50,11 @@
 #      serves
 #      (check_pinned_crds.py; needs network access to each add-on's own
 #      OCI registry, the same one Argo CD itself pulls from).
+#   4c. issue #34: the jobset-crd/jobset add-on pair's own shape
+#      (check_jobset_addon.py; --network for the upstream-CRD drift check,
+#      the wrapper render and the pinned Kueue integrations list), and
+#      team-rbac-guard.yaml's CEL rules plus team-onboard.sh step 3's Role,
+#      evaluated offline (check_team_rbac_guard.py);
 #   9. issue #50's pool.networkInterfaces generator, from committed
 #      fixtures only (check_nic_layout.py): re-run against every
 #      charts/capacity-pool/tools/fixtures/*.describe.json and byte-compared
@@ -62,6 +67,7 @@
 # Required: none (uses whatever NAME-independent fixtures are checked in).
 # Optional environment:
 #   HELM (helm), UV (uv), PYTHON_YAML_VERSION (6.0.2), YAMLLINT_VERSION (1.38.0),
+#   CEL_PYTHON_VERSION (0.5.0),
 #   KUBECONFORM_VERSION (0.8.0), K8S_SCHEMA_COMMIT, CRD_CATALOG_COMMIT
 #   (both default to the commits pinned below; override only to re-pin).
 set -euo pipefail
@@ -73,6 +79,7 @@ HELM="${HELM:-helm}"
 UV="${UV:-uv}"
 PYTHON_YAML_VERSION="${PYTHON_YAML_VERSION:-6.0.2}"
 YAMLLINT_VERSION="${YAMLLINT_VERSION:-1.38.0}"
+CEL_PYTHON_VERSION="${CEL_PYTHON_VERSION:-0.5.0}"
 KUBECONFORM_VERSION="${KUBECONFORM_VERSION:-0.8.0}"
 # yannh/kubernetes-json-schema@master, resolved 2026-11-19: the directory
 # layout for Kubernetes 1.37.0's standard schemas.
@@ -143,6 +150,12 @@ required_files=(
   "appsets/addons-optional.ApplicationSet.yaml"
   "addons/optional-pool/addon.yaml"
   "charts/optional-pool/Chart.yaml"
+  # Issue #34: the JobSet CRD (core, crds wave) and controller
+  # (platform-optional catalog entry), see check_jobset_addon.py below.
+  "addons/jobset-crd/addon.yaml"
+  "charts/jobset-crd/Chart.yaml"
+  "addon-catalog/jobset/addon.yaml"
+  "charts/jobset/Chart.yaml"
 )
 missing=()
 for f in "${required_files[@]}"; do
@@ -346,6 +359,34 @@ run_check "add-on catalog vs. cell markers self-test (check_addon_catalog_sync.p
 run_check "add-on catalog vs. cell markers (check_addon_catalog_sync.py)" \
   env HELM="${HELM}" "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
   python3 "${SCRIPT_DIR}/check_addon_catalog_sync.py" "${REPO_ROOT}"
+
+# Issue #34: the jobset-crd/jobset pair's own shape (CRD-only core
+# chart in the crds wave, one vendored CRD document checked against its
+# cited digest and against the pinned upstream chart's own copy, the
+# version pair, the catalog entry's skipCrds/dependsOn, the wrapper's
+# rendered controller/webhook/NetworkPolicy, and the pinned Kueue chart
+# still integrating JobSet). --selftest first, offline, as above.
+run_check "JobSet add-on self-test (check_jobset_addon.py --selftest)" \
+  env HELM="${HELM}" "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_jobset_addon.py" --selftest
+
+run_check "JobSet add-on (check_jobset_addon.py --network)" \
+  env HELM="${HELM}" "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_jobset_addon.py" "${REPO_ROOT}" --network
+
+# Issue #34 (on top of RFC #22 Decision 10 H11): team-rbac-guard.yaml's own
+# CEL rules evaluated offline against the jobsets widening and the
+# close-but-wrong shapes around it (jobsets/status, verb "*",
+# deletecollection, Kueue's own group), plus team-onboard.sh step 3's own
+# Role. cel-python needs Python >= 3.10, hence --python 3.12 (same reason
+# as yamllint above).
+run_check "team-rbac-guard CEL unit test self-test (check_team_rbac_guard.py --selftest)" \
+  "${UV}" run --no-project -q --python 3.12 --with "pyyaml==${PYTHON_YAML_VERSION}" --with "cel-python==${CEL_PYTHON_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_team_rbac_guard.py" --selftest
+
+run_check "team-rbac-guard CEL unit test (check_team_rbac_guard.py)" \
+  "${UV}" run --no-project -q --python 3.12 --with "pyyaml==${PYTHON_YAML_VERSION}" --with "cel-python==${CEL_PYTHON_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_team_rbac_guard.py" "${REPO_ROOT}"
 
 # ----------------------------------------------- 5. helm lint and template
 
