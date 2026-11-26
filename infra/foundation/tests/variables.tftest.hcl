@@ -183,8 +183,14 @@ run "budget_limit_usd_accepts_a_positive_amount" {
   # HCL template literal for this value rendered the four literal characters
   # "${var.name}" instead of interpolating the cell name, because a literal
   # "$" immediately followed by "{" is HCL's own escape for a literal "${".
+  # cost_filter is a set of objects (aws_budgets_budget's own schema), so its
+  # elements have no addressable index; a for expression with an if clause
+  # finds the one named "TagKeyValue" instead.
   assert {
-    condition     = aws_budgets_budget.cell[0].cost_filter[0].values[0] == "user:distai-platform/cell$example-cell"
+    condition = length([
+      for cf in aws_budgets_budget.cell[0].cost_filter :
+      true if cf.name == "TagKeyValue" && contains(cf.values, "user:distai-platform/cell$example-cell")
+    ]) == 1
     error_message = "cost_filter TagKeyValue must interpolate var.name after the literal \"user:distai-platform/cell$\" prefix, not render \"\\${var.name}\" literally."
   }
 }
