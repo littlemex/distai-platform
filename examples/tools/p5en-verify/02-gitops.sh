@@ -8,13 +8,23 @@ set -euo pipefail
 
 NAME="${NAME:-dp-p5en-efa}"
 AWS_REGION="${AWS_REGION:-us-east-2}"
+STATE_BUCKET="${STATE_BUCKET:-distai-eks-tfstate-776010787911}"
+STATE_REGION="${STATE_REGION:-ap-northeast-1}"
 REVISION="${REVISION:?export REVISION (this branch name)}"
 export AWS_PROFILE=default
 
 aws eks update-kubeconfig --name "${NAME}" --region "${AWS_REGION}"
 kubectl get nodes
 
+# Each runner invocation is a fresh clone with no local Terraform state:
+# re-init against the same S3 backend 01-foundation.sh used, so
+# `terraform output` reads the real state instead of an empty one.
 cd infra/foundation
+terraform init \
+  -backend-config="bucket=${STATE_BUCKET}" \
+  -backend-config="key=distai-platform/${AWS_REGION}/${NAME}/foundation" \
+  -backend-config="region=${STATE_REGION}" \
+  -backend-config="use_lockfile=true"
 ../../gitops/bootstrap/bootstrap.sh --tf-outputs <(terraform output -json) --revision "${REVISION}"
 cd ../..
 
