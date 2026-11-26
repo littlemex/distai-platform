@@ -25,14 +25,16 @@
 #      own `values:`; and of charts/dcgm-exporter (after `helm dependency
 #      build`) against the cells/*/addons/*.yaml marker that points at it;
 #   5b. issue #27's values shapes, from tests/fixtures/<chart>/*.yaml:
-#      `helm lint` and `helm template` of each fixture; seven fixtures
+#      `helm lint` and `helm template` of each fixture; the fixtures
 #      that must be refused (a reserved pool with no reservation tags, an
 #      unknown pool.capacityType, a capacity-type entry inside
 #      pool.requirements, an invalid instanceMatchCriteria, an invalid
-#      taint effect, a duplicate taint key+effect, an empty tag value)
-#      fail `helm template`; and the rendered objects' own fields checked
-#      by check_chart_renders.py, including the unchanged `on-demand`
-#      default pool and default smoke queue, whose fields must be
+#      taint effect, a duplicate taint key+effect, an empty tag value, a
+#      team taint with no value, and issue #96's invalid
+#      pool.startupTaints effect and duplicate pool.startupTaints
+#      key+effect) fail `helm template`; and the rendered objects' own
+#      fields checked by check_chart_renders.py, including the unchanged
+#      `on-demand` default pool and default smoke queue, whose fields must be
 #      identical to this chart's pre-#27 shape at the field level (not a
 #      byte-level comparison: a checked-in golden file breaks on an
 #      unrelated base-branch rebase or a different Helm version, neither
@@ -554,7 +556,8 @@ done
 #
 # tests/fixtures/<chart>/<name>.yaml are plain Helm values files, one per
 # values shape issue #27 adds (pool.capacityType on-demand/reserved/flex,
-# reservation.*, accelerator.*, tenancy.teamTaint, clusterQueue.memQuota).
+# reservation.*, accelerator.*, tenancy.teamTaint, clusterQueue.memQuota),
+# plus issue #96's pool.startupTaints.
 # Each is linted and rendered to RENDERED_DIR/fixture-<chart>-<name>.yaml,
 # so section 6's kubeconform and section 7's pinned-CRD check see every new
 # shape too, then check_chart_renders.py checks the rendered fields.
@@ -573,6 +576,8 @@ expect_render_failure=(
   "capacity-pool/duplicate-taint"
   "capacity-pool/empty-tag-value"
   "capacity-pool/team-taint-no-value"
+  "capacity-pool/invalid-startup-taint-effect"
+  "capacity-pool/duplicate-startup-taint"
 )
 must_fail() {
   local key="$1" f

@@ -1,0 +1,17 @@
+# Static-check input (0.static.sh), expected to FAIL `helm template`: a
+# pool.startupTaints entry's effect must be NoSchedule, PreferNoSchedule
+# or NoExecute (#96, validated like capacity-pool.taints) -- never a typo
+# rendered straight into the NodePool. The first entry is valid (identical
+# to startup-taints.yaml's first entry) and only the second one is bad, so
+# a template that validates only the first entry still renders this and
+# fails the check; a failure here can only come from that one value.
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: startup-taints
+  startupTaints:
+    - key: distai.dev/startup-not-ready
+      effect: NoSchedule
+    - key: distai.dev/startup-static-check
+      value: "pending"
+      effect: NoScheduleTypo

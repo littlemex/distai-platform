@@ -1,0 +1,18 @@
+# Static-check input (0.static.sh), expected to FAIL `helm template`: two
+# pool.startupTaints entries repeating the same key and effect (#96,
+# validated like capacity-pool.taints) would render the same startup
+# taint twice on the NodePool. The two values differ on purpose: the
+# rule is "same key and effect", not "identical entry", so a template
+# that only rejects byte-identical entries still renders this and fails
+# the check.
+clusterName: static-check-cluster
+nodeRole: static-check-node-role
+pool:
+  name: startup-taints
+  startupTaints:
+    - key: distai.dev/startup-not-ready
+      value: "a"
+      effect: NoSchedule
+    - key: distai.dev/startup-not-ready
+      value: "b"
+      effect: NoSchedule
