@@ -248,9 +248,9 @@ run "multi_bucket_entry_list_statements_do_not_cross_pair" {
       for s in data.aws_iam_policy_document.identity_scoped["multi-bucket"].statement :
       s if(
         s.actions == toset(["s3:ListBucket"]) &&
-        s.resources == toset(["arn:aws:s3:::distai-platform-bucket-a"]) &&
+        length(s.resources) == 1 && contains(s.resources, "arn:aws:s3:::distai-platform-bucket-a") &&
         length(s.condition) == 1 &&
-        one(s.condition).values == ["a-prefix/*"]
+        length(one(s.condition).values) == 1 && contains(one(s.condition).values, "a-prefix/*")
       )
     ]) == 1
     error_message = "bucket-a's own ListBucket statement must exist, naming only bucket-a's own ARN, with a condition scoped to exactly [\"a-prefix/*\"]."
@@ -261,9 +261,9 @@ run "multi_bucket_entry_list_statements_do_not_cross_pair" {
       for s in data.aws_iam_policy_document.identity_scoped["multi-bucket"].statement :
       s if(
         s.actions == toset(["s3:ListBucket"]) &&
-        s.resources == toset(["arn:aws:s3:::distai-platform-bucket-b"]) &&
+        length(s.resources) == 1 && contains(s.resources, "arn:aws:s3:::distai-platform-bucket-b") &&
         length(s.condition) == 1 &&
-        one(s.condition).values == ["b-prefix/*"]
+        length(one(s.condition).values) == 1 && contains(one(s.condition).values, "b-prefix/*")
       )
     ]) == 1
     error_message = "bucket-b's own ListBucket statement must exist, naming only bucket-b's own ARN, with a condition scoped to exactly [\"b-prefix/*\"]."
