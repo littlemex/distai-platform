@@ -34,7 +34,7 @@ The proxy is the NVIDIA chart's proxy, unchanged: it does not depend on the acce
 | Tensor parallel value | `prefill.gpusPerEngine` | `prefill.neuronCoresPerEngine` (same for decode) | Named for the unit it counts |
 | `kv_buffer_device` | not set (vLLM's default on CUDA is `cuda`) | `"cuda"`, always | vLLM defaults it to the platform's device type ([kv_transfer.py](https://github.com/vllm-project/vllm/blob/98dff2a81d747d1dba01a47f939f48c3526d4206/vllm/config/kv_transfer.py#L16-L18)), `neuron` here, which vLLM's NIXL worker rejects; the Neuron platform registers only `cuda` for NIXL ([platform.py](https://github.com/vllm-project/vllm-neuron/blob/eb6cb360f7cff6082e22a9437d8ce0ba3891304a/vllm_neuron/vllm/platform.py#L1134-L1141), [base_worker.py](https://github.com/vllm-project/vllm/blob/98dff2a81d747d1dba01a47f939f48c3526d4206/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py#L455-L463)) |
 | Connector class | `NixlConnector` | `NixlConnector` | The plugin rewrites a top-level `NixlConnector` to its subclass `NeuronNixlConnector`, which registers Neuron's KV cache layout ([platform.py](https://github.com/vllm-project/vllm-neuron/blob/eb6cb360f7cff6082e22a9437d8ce0ba3891304a/vllm_neuron/vllm/platform.py#L1194-L1219)) |
-| Compile cache | none | `engine.compileCacheVolume` at `VLLM_CACHE_ROOT`, with `VLLM_NEURON_BACKEND=neuron_native` | A cold start traces and compiles the model; the [precompile cache guide](https://github.com/vllm-project/vllm-neuron/blob/eb6cb360f7cff6082e22a9437d8ce0ba3891304a/docs/guides/how-to-precompile-cache.md) says the cache is only on when that variable is set explicitly |
+| Compile cache | none | `prefill.compileCacheVolume`/`decode.compileCacheVolume` at `VLLM_CACHE_ROOT`, with `VLLM_NEURON_BACKEND=neuron_native` | A cold start traces and compiles the model; the [precompile cache guide](https://github.com/vllm-project/vllm-neuron/blob/eb6cb360f7cff6082e22a9437d8ce0ba3891304a/docs/guides/how-to-precompile-cache.md) says the cache is only on when that variable is set explicitly. Set per role (not once for both): prefill and decode run on separate nodes, so one shared field pointing both at the same PersistentVolumeClaim name would hand two Pods on two different nodes the same claim |
 | MPS and memory fraction | `*.mps`, `*.gpuMemoryUtilization` | absent | NVIDIA-only; Neuron has no counterpart |
 | Non-root user | the image's own `vllm` user (UID 2000) | UID 2000 with `HOME` and `USER` set by the chart | The Neuron image declares no user of its own |
 | Router alternatives | also `../../disagg-pd-llmd` (llm-d) | this proxy only | No primary source shows llm-d's Endpoint Picker running against the Neuron plugin ([#80](https://github.com/littlemex/distai-platform/issues/80)) |
@@ -125,8 +125,9 @@ Send one request through the proxy from inside the cluster. The Service is `Clus
 
 ```bash
 kubectl run curl-pdn --rm -i --restart=Never -n "$NAMESPACE" \
+  --labels=app.kubernetes.io/name=load-replay \
   --image=curlimages/curl:8.23.0 -- \
-  curl -sS "http://$RELEASE-vllm-neuron-disagg-pd:8000/v1/completions" \
+  curl -sS -f "http://$RELEASE-vllm-neuron-disagg-pd:8000/v1/completions" \
   -H 'Content-Type: application/json' \
   -d "{\"model\": \"$MODEL_ID\", \"prompt\": \"The capital of France is\", \"max_tokens\": 32}"
 ```
@@ -145,7 +146,7 @@ Run the load replay and scorer from [`../../../_shared/`](../../../_shared/) aga
 | `model.revision` | `""` | Model repository commit or tag; empty is the default branch |
 | `model.servedModelName` | `""` | Name clients send as `model`; empty is `model.name` |
 | `model.hfTokenSecret.name` / `.key` | `""` / `token` | Secret with a Hugging Face token, for gated models |
-| `image.repository` / `.tag` / `.digest` | `public.ecr.aws/neuron/pytorch-inference-vllm-neuronx` / `0.29.0.1.2.0-neuronx-py314-sdk2.33.1-ubuntu26.04` / `""` | Engine and proxy image; the digest is pinned once confirmed on the verification runner |
+| `image.repository` / `.tag` / `.digest` | `public.ecr.aws/neuron/pytorch-inference-vllm-neuronx` / `0.29.0.1.2.0-neuronx-py314-sdk2.33.1-ubuntu26.04` / `sha256:7e44e4f6...` (pinned) | Engine and proxy image; confirmed against the registry's own v2 manifest API (a metadata-only query, not a layer pull), pinned in values.yaml |
 | `accelerator.resourceName` | `aws.amazon.com/neuron` | Extended resource the Neuron device plugin advertises, one unit per device |
 | `accelerator.coresPerDevice` | `4` | NeuronCores per device (Trainium2 at the default logical NeuronCore setting); devices per engine = ceil(`neuronCoresPerEngine` / this) |
 | `placement.nodeSelectorKey` | `distai.dev/pd-role` | Node label key that tells the roles apart; `karpenter.sh/nodepool` selects one capacity pool per role |
@@ -171,7 +172,7 @@ Run the load replay and scorer from [`../../../_shared/`](../../../_shared/) aga
 | `engine.port` | `8000` | Engine HTTP port, also serving `/metrics` |
 | `engine.shmSizeLimit` | `16Gi` | Size of the memory-backed `/dev/shm` |
 | `engine.cacheVolume` | `emptyDir: {}` | Volume for the model download cache (`HF_HOME`) |
-| `engine.compileCacheVolume` | `emptyDir: {}` | Volume for the compile cache (`VLLM_CACHE_ROOT`); one per pod, not shared |
+| `prefill.compileCacheVolume`, `decode.compileCacheVolume` | `emptyDir: {}` each | Volume for the compile cache (`VLLM_CACHE_ROOT`), one independent value per role. `emptyDir` is already one instance per Pod with no change needed; a `persistentVolumeClaim` override must use a different claim name per role (or an access mode that supports multiple attachers) since prefill and decode run on separate nodes |
 | `engine.podSecurityContext`, `engine.containerSecurityContext` | non-root UID 2000, all capabilities dropped | Security context of the engine pods |
 | `engine.startupTimeoutSeconds` | `1800` | Time allowed for download, compile and load before a restart |
 | `proxy.replicas` | `1` | Proxy pods |
@@ -185,10 +186,10 @@ Run the load replay and scorer from [`../../../_shared/`](../../../_shared/) aga
 
 ## Known issues
 
-- Not run on real hardware yet, not for lack of trying. The chart renders and lints; the facts it relies on are taken from the plugin's own source and documentation, linked above. Real-hardware verification (`ap-southeast-4`, `trn2.3xlarge` spot, [#80](https://github.com/littlemex/distai-platform/issues/80)) built a fresh cell end to end -- foundation, Karpenter, Kueue, both Neuron/EFA device-plugin add-ons, both `capacity-pool` releases -- with no defect found anywhere in that chain; a pending pod correctly selected its pool and requested `aws.amazon.com/neuron`, and Karpenter correctly nominated a `NodeClaim` for it. Every attempt (4 of 4, the real-machine budget for this issue) stopped there: EC2's own `CreateFleet` returned `UnfulfillableCapacity` for `trn2.3xlarge` every time, 11 times over 33 minutes on the last attempt. No completion, no cross-node KV transfer and no EFA counter were observed. See the [examples Status table](../../../README.md#status) and [#80](https://github.com/littlemex/distai-platform/issues/80) for the exact events.
+- Not run on real hardware yet, not for lack of trying, and this release specifically was never installed on a real cluster in any of the 4 real-hardware attempts (the full real-machine budget for [#80](https://github.com/littlemex/distai-platform/issues/80)): 3 attempts stopped earlier, in the verification harness's own setup (fixed, not chart defects); the 4th built the full platform stack with no defect found -- foundation, Karpenter, Kueue, both Neuron/EFA device-plugin add-ons, both `capacity-pool` releases, both `NodePool`s `Ready` -- then installed the aggregated chart (`../agg-baseline/`) first, against the `trn-prefill` pool. That pod's own `NodeClaim`s hit EC2's `CreateFleet` `UnfulfillableCapacity` for `trn2.3xlarge` 11 times over 33 minutes, and the attempt's own timeout tore the cell down before this chart was ever installed; the `trn-decode` pool reached `NodePool` `Ready` and was never asked to schedule anything. This chart's own EFA requests, required anti-affinity and zone affinity are verified by `helm template` only (the static checks in this directory), never against a live API server. See the [examples Status table](../../../README.md#status) and [#80](https://github.com/littlemex/distai-platform/issues/80) for the exact events.
 - The image is pinned by tag and digest (confirmed against the registry's own v2 manifest API).
 - The engines run as UID 2000, a user the image does not define. The chart sets `HOME` to a writable directory and `USER` so that Python and Torch do not fail on the missing account, but whether a non-root process can open the Neuron device files on this platform's nodes is still a real-hardware check, not yet reached. If it cannot, the fix is in `engine.podSecurityContext`, and running as root needs a stated reason in the pull request that changes it.
-- With the default `emptyDir` volumes, every engine pod downloads the weights and compiles the model at start. Point `engine.cacheVolume` and `engine.compileCacheVolume` at per-pod persistent volumes to avoid that; the plugin's guide says multi-node precompile is not coordinated yet, so do not share one compile-cache volume between pods.
+- With the default `emptyDir` volumes, every engine pod downloads the weights and compiles the model at start. Point `engine.cacheVolume` and `prefill.compileCacheVolume`/`decode.compileCacheVolume` at persistent volumes to avoid that; the plugin's guide says multi-node precompile is not coordinated yet, so use a different claim per role (and per replica, if `replicas > 1`), not one shared volume.
 - The proxy runs in the engine image so that it needs no image of its own; the node it lands on pulls the full image.
 - vLLM's OpenAI-compatible server has no authentication in this configuration. The Services are `ClusterIP` and the NetworkPolicy admits only the proxy and the shared load-replay driver.
 - One proxy pod is a single point of failure for the endpoint. Raise `proxy.replicas` for anything beyond measurement.

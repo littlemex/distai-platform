@@ -4,8 +4,9 @@
 # contract (decode-only required podAntiAffinity against prefill, the two
 # nodeSelectorValues, placement.sameNodeMeasurement retargeting both roles to
 # placement.sharedPoolValue, the transport.ucx.tcpPortRange guard) plus the
-# Neuron-specific parts (aws.amazon.com/neuron requested per
-# neuronCoresPerEngine, engine.compileCacheVolume mounted at VLLM_CACHE_ROOT,
+# Neuron-specific parts (aws.amazon.com/neuron requested as whole devices,
+# ceil(neuronCoresPerEngine / accelerator.coresPerDevice), never a raw core
+# count; prefill/decode.compileCacheVolume mounted at VLLM_CACHE_ROOT;
 # NEURON_VISIBLE_DEVICES never set), checked from `helm template` output
 # alone. No AWS credentials, no cluster.
 #

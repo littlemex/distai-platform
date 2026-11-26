@@ -48,8 +48,9 @@ Pin `model.revision` on both releases for any measurement.
 
 ```bash
 kubectl run curl-aggn --rm -i --restart=Never -n "$NAMESPACE" \
+  --labels=app.kubernetes.io/name=load-replay \
   --image=curlimages/curl:8.23.0 -- \
-  curl -sS "http://$RELEASE-vllm-neuron-agg-baseline:8000/v1/completions" \
+  curl -sS -f "http://$RELEASE-vllm-neuron-agg-baseline:8000/v1/completions" \
   -H 'Content-Type: application/json' \
   -d "{\"model\": \"$MODEL_ID\", \"prompt\": \"The capital of France is\", \"max_tokens\": 32}"
 ```
@@ -66,7 +67,7 @@ Run the same load replay and scorer from [`../../../_shared/`](../../../_shared/
 | `model.revision` | `""` | Model repository commit or tag; empty is the default branch |
 | `model.servedModelName` | `""` | Name clients send as `model`; empty is `model.name` |
 | `model.hfTokenSecret.name` / `.key` | `""` / `token` | Secret with a Hugging Face token, for gated models |
-| `image.repository` / `.tag` / `.digest` | `public.ecr.aws/neuron/pytorch-inference-vllm-neuronx` / `0.29.0.1.2.0-neuronx-py314-sdk2.33.1-ubuntu26.04` / `""` | Same image as the disaggregated chart |
+| `image.repository` / `.tag` / `.digest` | `public.ecr.aws/neuron/pytorch-inference-vllm-neuronx` / `0.29.0.1.2.0-neuronx-py314-sdk2.33.1-ubuntu26.04` / `sha256:7e44e4f6...` (pinned) | Same image as the disaggregated chart |
 | `accelerator.resourceName` | `aws.amazon.com/neuron` | Extended resource the Neuron device plugin advertises, one unit per device |
 | `accelerator.coresPerDevice` | `4` | NeuronCores per device; devices per engine = ceil(`neuronCoresPerEngine` / this) |
 | `engine.replicas` | `1` | Engines |
@@ -91,7 +92,7 @@ Run the same load replay and scorer from [`../../../_shared/`](../../../_shared/
 
 ## Known issues
 
-- Not run on real hardware yet, not for lack of trying: the status, the exact capacity blocker (`trn2.3xlarge` spot `UnfulfillableCapacity` in `ap-southeast-4`, every layer up to the pending pod's own `NodeClaim` otherwise correct) and the real-hardware attempts that found it are kept in the [examples Status table](../../../README.md#status) and [#80](https://github.com/littlemex/distai-platform/issues/80).
+- Not run on real hardware yet, not for lack of trying. This is the one chart of the two Neuron charts that the real-hardware attempts actually reached: 3 of 4 attempts stopped earlier, in the verification harness's own setup (fixed, not chart defects); the 4th built the full platform stack with no defect found and installed this chart against the `trn-prefill` pool. Its pod correctly requested `aws.amazon.com/neuron: 1` and Karpenter correctly nominated a `NodeClaim` for it, but EC2's own `CreateFleet` returned `UnfulfillableCapacity` for `trn2.3xlarge` every time, 11 times over 33 minutes, before the attempt's own timeout tore the cell down. The status, the exact events and the real-hardware attempts that found this are kept in the [examples Status table](../../../README.md#status) and [#80](https://github.com/littlemex/distai-platform/issues/80).
 - The image is pinned by tag and digest (confirmed against the registry's own v2 manifest API).
 - The engines run as UID 2000, a user the image does not define; whether a non-root process can open the Neuron device files is still a real-hardware check, not yet reached (see the [disaggregated chart's Known issues](../disagg-pd/README.md#known-issues)).
 - vLLM's OpenAI-compatible server has no authentication in this configuration. The Service is `ClusterIP` and the NetworkPolicy admits only the shared load-replay driver.

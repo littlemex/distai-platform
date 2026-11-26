@@ -226,7 +226,7 @@ spec:
             {{- end }}
             # Turns on the plugin's caching-precompile cache; the server
             # takes the same native route when this is unset, but with the
-            # cache off (values.yaml, engine.compileCacheVolume).
+            # cache off (values.yaml, prefill/decode.compileCacheVolume).
             - name: VLLM_NEURON_BACKEND
               value: neuron_native
             - name: VLLM_CACHE_ROOT
@@ -290,5 +290,5 @@ spec:
         - name: cache
           {{- toYaml $.Values.engine.cacheVolume | nindent 10 }}
         - name: compile-cache
-          {{- toYaml $.Values.engine.compileCacheVolume | nindent 10 }}
+          {{- toYaml $r.compileCacheVolume | nindent 10 }}
 {{- end }}

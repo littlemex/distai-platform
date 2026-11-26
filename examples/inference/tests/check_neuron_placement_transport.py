@@ -14,8 +14,12 @@ checked here from `helm template` output alone:
     accel-neuron-device-plugin/addon.yaml). neuronCoresPerEngine itself still
     reaches vLLM's --tensor-parallel-size unchanged, raw;
   - transport.efaResourceName still defaults to vpc.amazonaws.com/efa;
-  - engine.compileCacheVolume (default emptyDir: {}) is mounted at exactly the
-    path VLLM_CACHE_ROOT names;
+  - prefill.compileCacheVolume/decode.compileCacheVolume (agg-baseline:
+    engine.compileCacheVolume), each default emptyDir: {}, is mounted at
+    exactly the path VLLM_CACHE_ROOT names. disagg-pd sets this per role,
+    not once under engine.*: prefill and decode run on separate nodes, and
+    a single shared value pointing both at the same PersistentVolumeClaim
+    name would be a multi-attach failure waiting to happen;
   - NEURON_VISIBLE_DEVICES is never set (the vLLM Neuron plugin documents it
     for bare-metal host-level numbering only; under the Kubernetes device
     plugin it must stay unset).
@@ -56,7 +60,6 @@ from check_placement_transport import (  # noqa: E402
     HOSTNAME,
     Renderer,
     anti_terms,
-    configmap_text,
     container_text,
     env_of,
     get_path,
@@ -213,7 +216,9 @@ def check_tp_wired(label, w, cs, names, cores):
 
 def check_compile_cache(label, w, cs, want_volume):
     """VLLM_CACHE_ROOT equals, as a string, the mountPath of a volumeMount
-    whose volume is engine.compileCacheVolume as configured."""
+    whose volume is `want_volume` as configured (the caller passes the
+    role's own compileCacheVolume: engine.* for agg-baseline, or that
+    role's own prefill.*/decode.* for disagg-pd)."""
     spec = pod_spec(w)
     vols = {v.get("name"): {k: x for k, x in v.items() if k != "name"} for v in spec.get("volumes") or []}
     for c in cs:
@@ -227,8 +232,8 @@ def check_compile_cache(label, w, cs, want_volume):
                      f"mountPaths={[m.get('mountPath') for m in c.get('volumeMounts') or []]}"):
             continue
         vname = mounts[0].get("name")
-        check(f"{label}: {name_of(w)} the volume at {root} ({vname}) is engine.compileCacheVolume "
-              f"({json.dumps(want_volume)})", vols.get(vname) == want_volume,
+        check(f"{label}: {name_of(w)} the volume at {root} ({vname}) is the configured "
+              f"compileCacheVolume ({json.dumps(want_volume)})", vols.get(vname) == want_volume,
               f"volume {vname!r} = {json.dumps(vols.get(vname, '<not in pod volumes>'))}")
         check(f"{label}: {name_of(w)} mount at {root} is writable (the compile cache is written on a cold start)",
               not mounts[0].get("readOnly"), json.dumps(mounts[0]))
@@ -237,33 +242,34 @@ def check_compile_cache(label, w, cs, want_volume):
 # ---------------------------------------------------------------- checks
 
 DISAGG_PRESENT = [
-    ("accelerator", "resourceName"),
+    ("accelerator", "resourceName"), ("accelerator", "coresPerDevice"),
     ("placement", "nodeSelectorKey"), ("placement", "sameNodeMeasurement"),
     ("placement", "sharedPoolValue"), ("placement", "enforceAntiAffinity"),
     ("transport", "backend"), ("transport", "efaResourceName"), ("transport", "ucx", "tcpPortRange"),
     ("kvCacheTier", "mode"),
-    ("engine", "cacheVolume"), ("engine", "compileCacheVolume"),
+    ("engine", "cacheVolume"),
 ] + [(r, k) for r in ROLES for k in (
     "replicas", "neuronCoresPerEngine", "efaDevices", "nodeSelectorValue",
-    "extraNodeSelector", "resources", "extraArgs", "extraEnv")]
-DISAGG_ABSENT = [(r, k) for r in ROLES for k in ("gpusPerEngine", "mps", "gpuMemoryUtilization")]
+    "extraNodeSelector", "resources", "extraArgs", "extraEnv", "compileCacheVolume")]
+DISAGG_ABSENT = [(r, k) for r in ROLES for k in ("gpusPerEngine", "mps", "gpuMemoryUtilization")] \
+    + [("engine", "compileCacheVolume")]
 
 AGG_PRESENT = [
-    ("accelerator", "resourceName"), ("kvCacheTier", "mode"),
+    ("accelerator", "resourceName"), ("accelerator", "coresPerDevice"), ("kvCacheTier", "mode"),
     ("engine", "neuronCoresPerEngine"), ("engine", "cacheVolume"), ("engine", "compileCacheVolume"),
 ]
 AGG_ABSENT = [("engine", k) for k in ("gpusPerEngine", "mps", "gpuMemoryUtilization")]
 
-# Fixed core counts for the override render, chosen to fit a trn2.3xlarge
-# (4 NeuronCores); replaced by another if a default already equals one.
-# Spread across device boundaries (coresPerDevice defaults to 4) so the
-# override scenario actually exercises ceil(cores / coresPerDevice) instead
-# of landing on 1 device for every candidate.
-CORE_CANDIDATES = (2, 5, 9)
-
-
-def pick_override(default, avoid=()):
-    return next(n for n in CORE_CANDIDATES if str(n) != str(default) and n not in avoid)
+def device_crossing_override(default_cores, per_device):
+    """A neuronCoresPerEngine value whose own device count (ceil(x /
+    per_device)) differs from the default's. A value that is merely a
+    different core count is not enough: at the default of 1 core (device
+    count 1), the next plausible core count can still land on the same
+    device count (e.g. 2 cores is still 1 device at per_device=4) -- a
+    chart that hardcoded "1 device" regardless of cores would pass that
+    check too. Adding a full per_device crosses the boundary unconditionally.
+    """
+    return int(default_cores) + int(per_device)
 
 
 def check_disagg(R, chart):
@@ -297,8 +303,9 @@ def check_disagg(R, chart):
           val("placement", "enforceAntiAffinity") is True, repr(val("placement", "enforceAntiAffinity")))
     check(f"{rel} values: prefill and decode nodeSelectorValues differ",
           sel_values["prefill"] != sel_values["decode"], json.dumps(sel_values))
-    check(f"{rel} values: engine.compileCacheVolume defaults to emptyDir: {{}}",
-          val("engine", "compileCacheVolume") == {"emptyDir": {}}, json.dumps(val("engine", "compileCacheVolume")))
+    for r in ROLES:
+        check(f"{rel} values: {r}.compileCacheVolume defaults to emptyDir: {{}}",
+              val(r, "compileCacheVolume") == {"emptyDir": {}}, json.dumps(val(r, "compileCacheVolume")))
 
     scenarios = {}
 
@@ -315,15 +322,52 @@ def check_disagg(R, chart):
                           f"({r}.nodeSelectorValue)", got == sel_values[r], repr(got))
                     cs = check_neuron_request(f"{rel} default ({r})", w, val(r, "neuronCoresPerEngine"),
                                                val("accelerator", "coresPerDevice"))
-                    check_compile_cache(f"{rel} default ({r})", w, cs, val("engine", "compileCacheVolume"))
+                    check_compile_cache(f"{rel} default ({r})", w, cs, val(r, "compileCacheVolume"))
                     efa = val(r, "efaDevices")
                     got_efa = [str(((c.get("resources") or {}).get("limits") or {}).get(EFA)) for c in cs]
                     check(f"{rel} default: {name_of(w)} ({r}) requests resources.limits[{EFA}] = {efa} "
                           f"({r}.efaDevices)", bool(got_efa) and all(g == str(efa) for g in got_efa), f"got {got_efa}")
-                    text = " ".join(container_text(c) for c in cs) + " " + configmap_text(docs)
+                    # Engine containers only -- not configmap_text(docs): this
+                    # chart's own proxy ConfigMap embeds proxy.py verbatim,
+                    # whose docstring literally contains "NixlConnector",
+                    # which would make this check pass even if no engine
+                    # container actually configured the connector.
+                    text = " ".join(container_text(c) for c in cs)
                     check(f"{rel} default: {name_of(w)} ({r}) configures a NixlConnector "
                           "(NixlConnector or NeuronNixlConnector) with the LIBFABRIC backend",
                           "NixlConnector" in text and "LIBFABRIC" in text)
+                    # The exact Neuron-specific facts the PR cites from the
+                    # plugin's own source: kv_buffer_device must be "cuda"
+                    # (vllm_neuron.vllm.platform.get_nixl_supported_devices
+                    # lists only that value for Neuron) and the compile
+                    # cache is off unless VLLM_NEURON_BACKEND is set
+                    # explicitly, even on the plugin's own default route.
+                    # Parse KV_TRANSFER_CONFIG's own value as JSON rather
+                    # than substring-matching the doubly-escaped text, so
+                    # this does not depend on how many times the value got
+                    # re-serialized on the way into container_text.
+                    envd = env_of(cs[0]) if cs else {}
+                    kv_cfg = {}
+                    try:
+                        kv_cfg = json.loads(envd.get("KV_TRANSFER_CONFIG", "{}"))
+                    except json.JSONDecodeError:
+                        pass
+                    check(f"{rel} default: {name_of(w)} ({r}) KV_TRANSFER_CONFIG sets "
+                          'kv_buffer_device to "cuda" (the only value the plugin accepts for Neuron)',
+                          kv_cfg.get("kv_buffer_device") == "cuda", json.dumps(kv_cfg))
+                    check(f"{rel} default: {name_of(w)} ({r}) sets VLLM_NEURON_BACKEND=neuron_native "
+                          "(the precompile cache is off otherwise)",
+                          envd.get("VLLM_NEURON_BACKEND") == "neuron_native", json.dumps(envd))
+                    # Libfabric/EFA env vars, same names and meaning as the
+                    # NVIDIA chart (these are libfabric-level, not
+                    # accelerator-specific).
+                    check(f"{rel} default: {name_of(w)} ({r}) sets FI_PROVIDER=efa",
+                          envd.get("FI_PROVIDER") == "efa", json.dumps(envd))
+                    check(f"{rel} default: {name_of(w)} ({r}) sets FI_EFA_USE_DEVICE_RDMA=1",
+                          envd.get("FI_EFA_USE_DEVICE_RDMA") == "1", json.dumps(envd))
+                    check(f"{rel} default: {name_of(w)} ({r}) sets FI_EFA_ENABLE_SHM_TRANSFER "
+                          "(0 or 1, from transport.forceEfaSameNode; default is forceEfaSameNode=false -> \"1\")",
+                          envd.get("FI_EFA_ENABLE_SHM_TRANSFER") == "1", json.dumps(envd))
             check_decode_anti_affinity(f"{rel} default", roles)
 
     # ------------------------------------------- sameNodeMeasurement=true
@@ -355,9 +399,18 @@ def check_disagg(R, chart):
                           got == sel_values[r], repr(got))
 
     # ----------------------------------- neuronCoresPerEngine override
-    want = {}
-    for r in ROLES:
-        want[r] = pick_override(val(r, "neuronCoresPerEngine"), avoid=want.values())
+    per_device = val("accelerator", "coresPerDevice")
+    default_cores_by_role = {r: val(r, "neuronCoresPerEngine") for r in ROLES}
+    # device_crossing_override per role, offset by one extra per_device for
+    # decode so the two roles' override values differ from each other too
+    # (prefill and decode must stay independently wired, not accidentally
+    # sharing one computed value) -- see device_crossing_override's own
+    # docstring for why a merely-different core count alone does not
+    # prove the device math scales.
+    want = {
+        "prefill": device_crossing_override(default_cores_by_role["prefill"], per_device),
+        "decode": device_crossing_override(default_cores_by_role["decode"], per_device) + int(per_device),
+    }
     kdocs, err = R.render(chart, sets=[f"{r}.neuronCoresPerEngine={want[r]}" for r in ROLES])
     label = f"{rel} neuronCoresPerEngine prefill={want['prefill']},decode={want['decode']}"
     if check(f"{label}: helm template", kdocs is not None, err):
@@ -366,11 +419,16 @@ def check_disagg(R, chart):
         droles = roles_by(docs, key, sel_values) if docs is not None else {r: [] for r in ROLES}
         if kroles:
             for r in ROLES:
-                default_cores = val(r, "neuronCoresPerEngine")
+                default_cores = default_cores_by_role[r]
                 default_names = tp_env_names([c for w in droles[r] for c in neuron_containers(pod_spec(w))],
                                              default_cores)
                 for w in kroles[r]:
-                    cs = check_neuron_request(f"{label} ({r})", w, want[r], val("accelerator", "coresPerDevice"))
+                    cs = check_neuron_request(f"{label} ({r})", w, want[r], per_device)
+                    got = [str(((c.get("resources") or {}).get("limits") or {}).get(NEURON)) for c in cs]
+                    check(f"{label} ({r}): device count actually changed from the default "
+                          f"({devices_for(default_cores, per_device)} device(s) at {default_cores} cores) "
+                          f"to {devices_for(want[r], per_device)} device(s)",
+                          devices_for(want[r], per_device) != devices_for(default_cores, per_device), json.dumps(got))
                     # An env var carries the core count when it equals the
                     # configured value both at the default and under the
                     # override -- the same name, following the value.
@@ -380,23 +438,64 @@ def check_disagg(R, chart):
                           f"env equal to {want[r]} here: {sorted(tp_env_names(cs, want[r]))}; "
                           f"env equal to {default_cores} at the default: {sorted(default_names)}")
                     check_tp_wired(f"{label} ({r})", w, cs, names, want[r])
+            check(f"{label}: prefill and decode override values differ "
+                  "(each role's own value, not one shared computed value)",
+                  want["prefill"] != want["decode"], json.dumps(want))
 
-    # -------------------------------------- engine.compileCacheVolume override
-    # A PVC in place of the emptyDir default: proves the mount at
-    # VLLM_CACHE_ROOT is wired from the value, not a coincidental emptyDir.
-    # Helm deep-merges a values-file map into the chart's default map, so
-    # the override nulls emptyDir explicitly (Helm's documented way to drop a
-    # default key); without that the volume would carry both sources.
-    pvc = {"persistentVolumeClaim": {"claimName": "neuron-compile-cache"}}
-    cdocs, err = R.render(chart, values={"engine": {"compileCacheVolume": {"emptyDir": None, **pvc}}})
-    if check(f"{rel} engine.compileCacheVolume=PVC: helm template", cdocs is not None, err):
+    # ------------------------------ compileCacheVolume override, per role
+    # A PVC in place of the emptyDir default, with a DIFFERENT claim name
+    # per role: proves (a) the mount at VLLM_CACHE_ROOT is wired from each
+    # role's own value, not a coincidental emptyDir, and (b) the two roles'
+    # values are independent, not the same shared field -- a prefill and a
+    # decode Pod on two different nodes must never be pointed at the same
+    # PersistentVolumeClaim name by this chart's own defaults (Decision 3
+    # puts them on separate nodes; a shared RWO claim name would be a
+    # multi-attach failure waiting to happen). Helm deep-merges a
+    # values-file map into the chart's default map, so each override nulls
+    # emptyDir explicitly (Helm's documented way to drop a default key);
+    # without that the volume would carry both sources.
+    pvc_by_role = {r: {"persistentVolumeClaim": {"claimName": f"neuron-compile-cache-{r}"}} for r in ROLES}
+    cdocs, err = R.render(chart, values={
+        r: {"compileCacheVolume": {"emptyDir": None, **pvc_by_role[r]}} for r in ROLES
+    })
+    if check(f"{rel} compileCacheVolume=PVC (per role, different claim names): helm template",
+             cdocs is not None, err):
         scenarios["compileCacheVolume=PVC"] = cdocs
-        croles = check_roles_present(f"{rel} engine.compileCacheVolume=PVC", cdocs, key, sel_values)
+        croles = check_roles_present(f"{rel} compileCacheVolume=PVC", cdocs, key, sel_values)
         if croles:
             for r in ROLES:
                 for w in croles[r]:
-                    check_compile_cache(f"{rel} engine.compileCacheVolume=PVC ({r})", w,
-                                        neuron_containers(pod_spec(w)), pvc)
+                    check_compile_cache(f"{rel} compileCacheVolume=PVC ({r})", w,
+                                        neuron_containers(pod_spec(w)), pvc_by_role[r])
+            check(f"{rel} compileCacheVolume=PVC: prefill and decode do not share a claim name",
+                  pvc_by_role["prefill"] != pvc_by_role["decode"], json.dumps(pvc_by_role))
+
+    # ------------------------------------- kvCacheTier.mode=local render
+    # Only a render-only smoke check: proves the MultiConnector branch
+    # (templates/engines.yaml) does not crash and that the NIXL entry
+    # inside it is renamed to NeuronNixlConnector with its module path
+    # (the plugin's top-level-NixlConnector rewrite only looks at the
+    # top-level kv_connector, so inside MultiConnector this chart's own
+    # template has to do that renaming itself). Does not confirm anything
+    # about LMCacheMPConnector itself on Neuron -- unverified either way,
+    # stated in values.yaml and the README, not resolved here.
+    ldocs, err = R.render(chart, sets=[
+        "kvCacheTier.mode=local",
+        "kvCacheTier.lmcache.mpServerEndpoint=10.0.1.23:5555",
+    ])
+    if check(f"{rel} kvCacheTier.mode=local: helm template", ldocs is not None, err):
+        scenarios["kvCacheTier.mode=local"] = ldocs
+        lroles = check_roles_present(f"{rel} kvCacheTier.mode=local", ldocs, key, sel_values)
+        if lroles:
+            for r in ROLES:
+                for w in lroles[r]:
+                    cs = neuron_containers(pod_spec(w))
+                    text = " ".join(container_text(c) for c in cs)
+                    check(f"{rel} kvCacheTier.mode=local: {name_of(w)} ({r}) renders "
+                          "MultiConnector with a NeuronNixlConnector entry (not a bare NixlConnector, "
+                          "since the plugin's own top-level rewrite does not reach inside MultiConnector)",
+                          "MultiConnector" in text and "NeuronNixlConnector" in text
+                          and "vllm_neuron.vllm.kv_connector.neuron_nixl_connector" in text, text[:800])
 
     # --------------------------------------------------- UCX port range
     # Same guard as the GPU chart: a range wider than 4096 ports fails to
@@ -459,14 +558,25 @@ def check_agg(R, chart):
                                        val("accelerator", "coresPerDevice"))
             check_compile_cache(f"{rel} default", w, cs, val("engine", "compileCacheVolume"))
 
-    want = pick_override(val("engine", "neuronCoresPerEngine"))
+    per_device = val("accelerator", "coresPerDevice")
+    default_cores = val("engine", "neuronCoresPerEngine")
+    # device_crossing_override: at the default of 1 core (1 device at
+    # coresPerDevice=4), a merely-different core count can still round to
+    # the same device count, which would let a chart that hardcoded
+    # "1 device" pass. This value crosses a device boundary
+    # unconditionally, so the override actually proves ceil() scales.
+    want = device_crossing_override(default_cores, per_device)
     kdocs, err = R.render(chart, sets=[f"engine.neuronCoresPerEngine={want}"])
     if check(f"{rel} engine.neuronCoresPerEngine={want}: helm template", kdocs is not None, err):
         scenarios["neuronCoresPerEngine override"] = kdocs
         for w in workloads(kdocs):
-            cs = check_neuron_request(f"{rel} engine.neuronCoresPerEngine={want}", w, want,
-                                       val("accelerator", "coresPerDevice"))
+            cs = check_neuron_request(f"{rel} engine.neuronCoresPerEngine={want}", w, want, per_device)
             check_tp_wired(f"{rel} engine.neuronCoresPerEngine={want}", w, cs, tp_env_names(cs, want), want)
+            got = [str(((c.get("resources") or {}).get("limits") or {}).get(NEURON)) for c in cs]
+            check(f"{rel} engine.neuronCoresPerEngine={want}: device count actually changed from the "
+                  f"default ({devices_for(default_cores, per_device)} device(s) at {default_cores} cores) "
+                  f"to {devices_for(want, per_device)} device(s)",
+                  devices_for(want, per_device) != devices_for(default_cores, per_device), json.dumps(got))
 
     for name, sdocs in scenarios.items():
         check_no_forbidden_env(f"{rel} {name}", sdocs)
