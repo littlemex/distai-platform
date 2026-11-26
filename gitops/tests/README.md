@@ -236,7 +236,7 @@ step 14b (`dcgm-exporter`, #41, unconditional, not
 controlled by this flag) does launch a real GPU-family instance on
 every generic-cell run too, now that #46 has landed -- a known gap
 tracked in #87, not fixed here, and distinct from the device-plugin/DRA
-code this flag actually controls. Nothing in this script stops a
+checks this flag actually gates. Nothing in this script stops a
 flag-off run against `dp-a19-gpu-r3`/
 `dp-a19-trn-r3` themselves from skipping every accelerator-specific
 check -- this has not been run and confirmed separately, but the flag,
@@ -253,8 +253,9 @@ canary, it only skips the accelerator-specific checks themselves.
 `gitops/charts/accel-device-classes/`, the accelerator fields of
 `gitops/charts/capacity-pool/`, `gitops/cells/dp-a19-gpu-r3/`,
 `gitops/cells/dp-a19-trn-r3/`, or the `accelerators` step of `1.e2e.sh`/
-`0.static.sh` itself** -- the base suite does not exercise any of that
-code and cannot stand in for it in a PR's `## Test Results`.
+`0.static.sh` itself** -- with the flag off, none of this suite's
+device-plugin/DRA/`accel-device-classes` checks run, so a base-suite
+pass cannot stand in for it in a PR's `## Test Results`.
 
 Cost and time: both cells run on this suite's own light tier (spot/
 on-demand `g7`/`g6e`/`g5` for the GPU cell, spot `trn2.3xlarge` for the
