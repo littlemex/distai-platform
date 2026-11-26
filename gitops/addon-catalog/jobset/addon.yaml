@@ -42,14 +42,15 @@ dependsOn:
 #   jobset.controller.resources -- the one thing a cell has a real reason
 #     to size differently: the upstream defaults (500m / 128Mi requested,
 #     a 2 CPU / 4Gi limit) are pinned in the wrapper's values.yaml, and a
-#     cell with a small system node group, or many JobSets, needs to move
+#     cell with a small optional-pool limit, or many JobSets, needs to move
 #     them without a platform-wide change.
 #
 # Deliberately absent, so a cell cannot change them:
 #   - jobset.image -- the digest pin is the point of the wrapper.
-#   - jobset.controller.tolerations/affinity/nodeSelector -- where an
-#     admission webhook runs is a platform decision (see values.yaml),
-#     not a per-cell one.
+#   - jobset.controller.tolerations/affinity/nodeSelector -- placement
+#     follows gitops/README.md's Tiers rule for platform-optional
+#     components (optional-pool, never the system node group; see the
+#     wrapper's values.yaml); a cell does not change it.
 #   - jobset.controller.securityContext/podSecurityContext/hostNetwork --
 #     the reduced-privilege defaults are pinned on purpose.
 #   - jobset.controller.replicas -- left out for now: the upstream chart's

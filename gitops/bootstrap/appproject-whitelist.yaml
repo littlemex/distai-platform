@@ -22,8 +22,10 @@
 #
 # CRD-backed kinds (karpenter.k8s.aws, karpenter.sh, kueue.x-k8s.io,
 # resource.k8s.io): the one generic "CustomResourceDefinition" entry above
-# already covers every CRD *definition* karpenter-crd and kueue install
-# (16 total, confirmed by rendering both charts) - a specific kind is
+# already covers every CRD *definition* karpenter-crd, kueue and
+# jobset-crd install (17 total: 16 from karpenter-crd and kueue, confirmed
+# by rendering both charts, plus the one JobSet CRD jobset-crd vendors,
+# issue #34) - a specific kind is
 # listed below only when this repository's own addon.yaml/cells/
 # parameter files actually create an *instance* of it through an Argo
 # CD-synced Application (EC2NodeClass/NodePool via capacity-pool and
@@ -33,7 +35,10 @@
 # NodeOverlay, CapacityBuffer, Cohort, AdmissionCheck, MultiKueueCluster,
 # MultiKueueConfig, ProvisioningRequestConfig, Topology,
 # WorkloadPriorityClass, Workload) are deliberately left out - see the
-# comments inline below each group. Each kind's own scope (Namespaced vs
+# comments inline below each group. JobSet (jobset.x-k8s.io, Namespaced)
+# is left out for the same reason: a JobSet is created by a team applying
+# it directly (examples/training/pytorch-ddp), never by an Application in
+# the platform AppProject. Each kind's own scope (Namespaced vs
 # Cluster) was read from the CRD's own spec.scope field at the pinned
 # chart version, not assumed.
 clusterResourceWhitelist:

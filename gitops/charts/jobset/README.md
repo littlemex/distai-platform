@@ -40,8 +40,6 @@ add-on changes for this.
 | --- | --- | --- |
 | `jobset.fullnameOverride` | `jobset` | Stable object names (`jobset-controller`, `jobset-webhook-service`) on every cell; otherwise every name is prefixed with the per-cell `Application` name |
 | `jobset.image` | `registry.k8s.io/jobset/jobset`, tag `v0.13.1` pinned by the digest of its multi-architecture image index | The upstream default is the mutable tag alone |
-| `jobset.controller.tolerations` | `CriticalAddonsOnly`, `Exists` | The upstream default is none; without it the Pod has no node on a new cell (see "Placement") |
-| `jobset.controller.affinity` | `karpenter.sh/nodepool` `DoesNotExist` | Keeps the Pod off every Karpenter-launched node, team pools and `optional-pool` alike; the same rule `kueue` and Karpenter's own chart use |
 | `jobset.controller.resources` | the upstream `0.13.1` defaults, copied in explicitly | A reviewed diff in this repository, not a silent upstream change, moves the footprint |
 | `jobset.controller.podSecurityContext`, `.securityContext`, `.hostNetwork` | the upstream `0.13.1` defaults, copied in explicitly | Non-root, `RuntimeDefault` seccomp, read-only root filesystem, all capabilities dropped, no host network: Pod Security `restricted`. Pinned so a version bump cannot loosen them without a diff |
 | `jobset.certManager.enable` | `false` | No cert-manager in a cell; the controller manages its own webhook certificate, as Kueue does |
@@ -50,20 +48,9 @@ add-on changes for this.
 
 ## Placement
 
-The controller tolerates `CriticalAddonsOnly` and is kept off every
-Karpenter-launched node, so it runs on the foundation's system node group,
-next to Kueue. The reason is that it is an admission webhook: every
-`JobSet` create and update, and every Pod a `JobSet` creates, goes through
-it, the same position Kueue's own webhook has.
+No placement value is set: `jobset.controller.tolerations`, `.affinity` and `.nodeSelector` stay at the upstream chart's empty defaults. This follows `gitops/README.md`'s Tiers rule as written: "A component with no node-placement need of its own lands on the core `optional-pool` `NodePool`, never the system node group". The JobSet controller has no such need. Karpenter and Kueue tolerate `CriticalAddonsOnly` because they are core and must run before any Karpenter-launched capacity exists; JobSet is opt-in and nothing depends on it running first.
 
-This is a deliberate exception to `gitops/README.md`'s Tiers rule, which
-sends a platform-optional component's Pods to the core `optional-pool`
-`NodePool` instead of the system node group (option (b) of RFC #41
-Decision 4 Finding 1, `gitops/charts/optional-pool/README.md`). Which one
-the platform keeps for an admission webhook is not decided by this chart.
-Moving the controller to `optional-pool` is a change to `values.yaml`
-only: replace the toleration and affinity with a `nodeSelector` on
-`karpenter.sh/nodepool: optional-pool`.
+Without a toleration, the Pod cannot land on the system node group (tainted `CriticalAddonsOnly=true:NoSchedule`), and `optional-pool` is untainted on purpose. The Pod is not pinned to `optional-pool`: any other untainted node in the cell is equally eligible, as for every platform-optional component that relies on this rule. In a cell where `optional-pool` is disabled (`enabled: false`) and no other untainted node exists, the Pod stays `Pending`; that is `optional-pool`'s own documented condition (`gitops/charts/optional-pool/README.md`).
 
 ## Catalog contract (RFC #41 Decision 4)
 
@@ -72,7 +59,7 @@ only: replace the toleration and affinity with a `nodeSelector` on
 | Default namespace | `jobset-system`, the upstream chart's own documented namespace. Pod Security labels are not set on it; the controller meets `restricted` |
 | Who may deploy objects into it | Only the admin-owned `Application` that `addons-optional.ApplicationSet.yaml` generates, in the `platform` `AppProject`, today |
 | `dependsOn` | `jobset-crd` (core, always present) |
-| Infra prerequisites | None beyond the system node group. A `JobSet` that should be admitted by Kueue needs a `LocalQueue` in its namespace |
+| Infra prerequisites | An untainted node for the controller Pod, normally `optional-pool`'s (its `requests` of `500m` CPU must fit `optional-pool`'s `pool.limits`). A `JobSet` that should be admitted by Kueue needs a `LocalQueue` in its namespace |
 | Overridable by a cell | `jobset.controller.resources` only (`overridableKeys` in the catalog entry) |
 | Owner | `@littlemex` |
 

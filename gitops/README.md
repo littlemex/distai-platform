@@ -241,13 +241,13 @@ separate `ApplicationSet` objects.
 
 | `ApplicationSet` | Step (`wave`) | Delivered in this PR |
 | --- | --- | --- |
-| `platform` | `crds` (`karpenter-crd`) | yes |
+| `platform` | `crds` (`karpenter-crd`, `jobset-crd`) | yes |
 | `platform` | `controllers` (`karpenter`, `kueue`, `optional-pool`) | yes |
 | `platform` | `accelerators` (`accel-nvidia-device-plugin`, `accel-nvidia-dra`, `accel-neuron-device-plugin`, `accel-neuron-dra`, `accel-device-classes`, `accel-efa-device-plugin-nvidia`, `accel-efa-device-plugin-neuron`) | yes |
 | `platform` | `extras` | no - [#18](https://github.com/littlemex/distai-platform/issues/18)/[#23](https://github.com/littlemex/distai-platform/issues/23) |
 | `cells` | `capacity` (`capacity-pool/*`, `smoke/*`) | yes |
 | `cells` | `teams` | no - [#22](https://github.com/littlemex/distai-platform/issues/22) |
-| `addons-optional` | `optional-1`..`optional-4` (`cells/*/addons/*`) | yes ([#41](https://github.com/littlemex/distai-platform/issues/41)) |
+| `addons-optional` | `optional-1`..`optional-4` (`cells/*/addons/*`; catalog entries `dcgm-exporter`, `jobset` - a `jobset` marker uses `optional-1`, since its one `dependsOn`, `jobset-crd`, is core and needs no earlier optional wave) | yes ([#41](https://github.com/littlemex/distai-platform/issues/41), [#34](https://github.com/littlemex/distai-platform/issues/34)) |
 
 ## Versioning
 
