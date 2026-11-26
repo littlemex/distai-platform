@@ -1,0 +1,50 @@
+{{- /*
+Default deny, name the exception (gitops/README.md "NetworkPolicy
+defaults"). The upstream JobSet chart ships no NetworkPolicy, so without
+this object any Pod in any namespace could reach every port the
+controller listens on, including the admission webhook that decides
+whether a JobSet, and every Pod a JobSet creates, is admitted.
+
+Port-only rules with no `from:` selector, for the two ports kube-apiserver
+and the node's own kubelet reach directly -- the same shape, for the same
+reason, as gitops/charts/kueue-netpol (which copies upstream Kueue's own
+Kustomize NetworkPolicy component): the apiserver's and the kubelet's
+source addresses cannot be expressed as a pod or namespace selector.
+
+  9443  webhook server (kube-apiserver -> the JobSet and Pod webhooks;
+        the webhook Service's port 443 targets this container port, and a
+        NetworkPolicy matches the Pod's own port, never the Service's)
+  8081  health probe (the node's kubelet -> /healthz, /readyz)
+
+Deliberately NOT opened: 8443, the controller's metrics endpoint. Nothing
+in a cell scrapes it yet (prometheus.enable is false in values.yaml), the
+same "deny until a real consumer exists" precedent kueue-netpol and
+dcgm-exporter already follow.
+
+Port numbers and pod labels were read from the pinned upstream chart's own
+rendered Deployment (jobset 0.13.1); a version bump that changes either
+needs a reviewed diff here too.
+*/ -}}
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: jobset-controller
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: jobset
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: controller
+  policyTypes: ["Ingress"]
+  ingress:
+    # kube-apiserver -> the admission webhook server.
+    - ports:
+        - protocol: TCP
+          port: 9443
+    # kubelet (this Pod's own node) -> the liveness/readiness probe.
+    - ports:
+        - protocol: TCP
+          port: 8081
+{{- end }}

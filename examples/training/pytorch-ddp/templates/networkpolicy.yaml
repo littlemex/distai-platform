@@ -1,0 +1,29 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /*
+  Default deny for ingress, with one named exception: other Pods of this
+  same JobSet. In the two-node layout, torch.distributed's rendezvous
+  (workers.masterPort on the rank-0 Pod) and NCCL's own socket connections
+  (ports NCCL picks at run time) go between the worker Pods, so the rule
+  allows every port, but only from Pods carrying this JobSet's own
+  jobset.sigs.k8s.io/jobset-name label, which the JobSet controller sets on
+  every Pod it creates. The training Pods serve nothing else. Egress is
+  left open: every Pod reads and writes Amazon S3 and installs boto3 from
+  PyPI at start.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ddp.name" . }}
+  labels:
+    {{- include "ddp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      jobset.sigs.k8s.io/jobset-name: {{ include "ddp.name" . }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              jobset.sigs.k8s.io/jobset-name: {{ include "ddp.name" . }}
+{{- end }}

@@ -1,0 +1,58 @@
+# JobSet's one CustomResourceDefinition (jobsets.jobset.x-k8s.io, group
+# jobset.x-k8s.io, served version v1alpha2), issue #34. Delivered in the
+# "crds" step, one step ahead of everything else, the same split
+# karpenter-crd/karpenter already use: the controller and webhook that
+# serve this CRD are the platform-optional catalog entry
+# gitops/addon-catalog/jobset/addon.yaml, which a cell opts into, while the
+# CRD itself is core. Delivering the CRD to every cell costs nothing on a
+# cell that never opts in (a CRD with no controller is an inert API type),
+# and it means a cell opting in or out never creates or deletes a CRD --
+# deleting a CRD deletes every JobSet object of that kind cluster-wide,
+# which a per-cell marker-file removal must never be able to trigger
+# (addons-optional.ApplicationSet.yaml's own preserveResourcesOnDeletion
+# protects against that today; keeping the CRD out of that Application
+# altogether does not depend on it).
+#
+# Why a vendored local chart (dir:) rather than the upstream chart: unlike
+# Karpenter, which publishes a separate karpenter-crd chart, upstream
+# JobSet publishes one chart only (oci://registry.k8s.io/jobset/charts/
+# jobset), carrying this CRD in its crds/ folder together with the
+# controller Deployment, the webhook configurations and their RBAC, with
+# no values switch that renders the CRD alone. Pointing this addon.yaml at
+# that chart (or at a local chart depending on it) would put the
+# controller and webhook into this core Application too, a second copy of
+# exactly what the catalog entry delivers -- two Applications owning the
+# same Deployment and webhook configurations. gitops/charts/jobset-crd
+# instead carries the CRD file only, copied verbatim from the same tag
+# (see that file's own header for the source URL, date and sha256), and
+# the catalog entry's own skipCrds: true keeps the CRD out of the
+# controller's Application, so each object has exactly one owner.
+#
+# A pull request bumping the JobSet version must update both halves
+# together: the vendored CRD file here and gitops/charts/jobset/Chart.yaml's
+# dependency version (the same rule gitops/README.md's Versioning section
+# states for karpenter-crd/karpenter).
+addon: jobset-crd
+# RFC #41 Decision 1: delivered unconditionally to every cell, no opt-out.
+tier: core
+dir: gitops/charts/jobset-crd
+wave: crds
+# A CustomResourceDefinition is cluster-scoped and has no namespace, but
+# every addon.yaml names one (it becomes the generated Application's
+# destination.namespace, and bootstrap.sh adds it to the platform
+# AppProject's destinations). kube-system is the closest precedent: it is
+# what karpenter-crd, the other CRD-only core add-on, uses, and it is
+# already in every cell's AppProject destinations unconditionally
+# (bootstrap.sh), so this choice adds no namespace to that list and
+# CreateNamespace=true creates nothing.
+namespace: kube-system
+# syncOptions is a sibling of values (sets spec.syncPolicy.syncOptions on
+# the generated Application, never a chart value). ServerSideApply=true is
+# required here, not only a match for upstream docs: the vendored CRD file
+# is about 890 KB, and a client-side apply stores the whole object again
+# in the kubectl.kubernetes.io/last-applied-configuration annotation,
+# whose limit is 256 KiB (262144 bytes) -- a client-side apply of this
+# object fails outright. Upstream JobSet's own install instructions use
+# `kubectl apply --server-side` for the same reason.
+syncOptions:
+  - ServerSideApply=true
