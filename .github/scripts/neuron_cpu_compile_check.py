@@ -76,10 +76,11 @@ import tempfile
 from pathlib import Path
 
 # Must be set before `import torch_neuronx` (see the module docstring,
-# finding 1): a documented guard, not currently load-bearing in this exact
-# package configuration (finding 2).
-# TEMP TEST: verifying whether this is still needed now that the runtime lib is installed
-# os.environ.setdefault("NEURON_INTERNAL_SKIP_LIBNRT_CHECK", "1")
+# finding 1): a documented guard, confirmed by a fourth real run with this
+# line removed (2026-11-26) to be a no-op in this exact configuration
+# (finding 2) -- kept anyway against a future Neuron release moving the
+# check earlier again.
+os.environ.setdefault("NEURON_INTERNAL_SKIP_LIBNRT_CHECK", "1")
 
 
 def error(message: str) -> None:
