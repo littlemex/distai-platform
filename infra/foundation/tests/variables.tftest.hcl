@@ -36,6 +36,36 @@ variables {
   endpoint_public_access_cidrs = ["203.0.113.0/24"]
 }
 
+run "system_node_launch_template_tags_instances_and_volumes" {
+  command = plan
+
+  # Amazon EKS managed node group tags do not propagate to the node
+  # group's own instances or volumes (Amazon EKS User Guide); this layer's
+  # launch template tags both directly instead (eks.tf), so the budget
+  # guardrail's (issue #95) cost_filter can see the system node group's
+  # own spend, not only the fixed-cost resources default_tags reaches on
+  # its own.
+  variables {
+    tags = { "distai-platform/cell" = "example-cell" }
+  }
+
+  assert {
+    condition = length([
+      for ts in aws_launch_template.system_node.tag_specifications :
+      true if ts.resource_type == "instance" && lookup(ts.tags, "distai-platform/cell", null) == "example-cell"
+    ]) == 1
+    error_message = "the system node launch template must tag instances with distai-platform/cell = var.name."
+  }
+
+  assert {
+    condition = length([
+      for ts in aws_launch_template.system_node.tag_specifications :
+      true if ts.resource_type == "volume" && lookup(ts.tags, "distai-platform/cell", null) == "example-cell"
+    ]) == 1
+    error_message = "the system node launch template must tag volumes with distai-platform/cell = var.name."
+  }
+}
+
 run "argocd_accepts_all_three_roles" {
   command = plan
 
@@ -276,15 +306,28 @@ run "budget_limit_usd_with_no_subscribers_still_creates_topic_and_budget" {
   }
 }
 
+run "budget_limit_usd_rejects_a_missing_cell_tag" {
+  command = plan
+
+  # var.tags here does not carry distai-platform/cell at all (the default
+  # tags = {}): the precondition on aws_budgets_budget.cell must catch this
+  # at plan time, since cost_filter would otherwise silently match nothing.
+  variables {
+    budget_limit_usd = 10
+  }
+
+  expect_failures = [aws_budgets_budget.cell[0]]
+}
+
 run "budget_limit_usd_rejects_a_cell_tag_mismatch" {
   command = plan
 
-  # var.tags here does not carry distai-platform/cell = var.name (the default
-  # tags = {} has no such key at all): the precondition on
-  # aws_budgets_budget.cell must catch this at plan time, since cost_filter
-  # would otherwise silently match nothing.
+  # var.tags here does carry the key, but with a different cell's own name
+  # as the value: the precondition must still catch this, not only the
+  # key's absence.
   variables {
     budget_limit_usd = 10
+    tags              = { "distai-platform/cell" = "some-other-cell" }
   }
 
   expect_failures = [aws_budgets_budget.cell[0]]

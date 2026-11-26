@@ -362,6 +362,28 @@ resource "aws_launch_template" "system_node" {
     }
   }
 
+  # Amazon EKS managed node group tags do not propagate to the node group's
+  # own Auto Scaling group or its EC2 instances (Amazon EKS User Guide,
+  # "Customize managed nodes with launch templates" -- console help text:
+  # "These tags don't propagate to other resources in the node group, such
+  # as Auto Scaling groups or instances"), so the provider's own default_tags
+  # on this launch template resource itself never reaches the instances or
+  # volumes it launches either. The same guide's own "Tagging Amazon EC2
+  # instances" section names TagSpecification on the launch template as the
+  # supported way to tag them directly; var.tags here is the same map
+  # default_tags already applies everywhere else, so instances and volumes
+  # carry distai-platform/cell = var.name whenever the budget guardrail
+  # (issue #95) needs it, without a separate tag to keep in sync.
+  tag_specifications {
+    resource_type = "instance"
+    tags          = var.tags
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+    tags          = var.tags
+  }
+
   update_default_version = true
 }
 

@@ -10,15 +10,20 @@
 # account-wide, cell-independent resource.
 #
 # Scope limit (issue #95 comment, tracked as issue #98): this cost_filter
-# matches only resources this layer's own Terraform creates (every one
-# already carries the distai-platform/cell tag through var.tags and the
-# provider's default_tags - the precondition below enforces that). It does
-# not yet match EC2 instances Karpenter launches into a capacity-pool
-# (gitops/charts/capacity-pool's EC2NodeClass sets no spec.tags), which is
-# the Issue's own two accident scenarios and the larger, more variable share
-# of a cell's spend. Closing that needs a chart-level change with its own
-# real-machine verification on a cluster with Karpenter actually running,
-# outside this layer's own Terraform and this PR's real-machine budget.
+# matches resources tagged distai-platform/cell = var.name through the
+# provider's own default_tags (every resource this layer creates directly)
+# or an explicit tag_specifications block this layer sets itself (the
+# system node group's EC2 instances and EBS volumes, eks.tf -- a managed
+# node group's own tags do not propagate to either, per the Amazon EKS User
+# Guide). The precondition below only checks that var.tags itself carries
+# the key; it cannot verify every individual AWS-side resource actually
+# received it. It does not yet match EC2 instances Karpenter launches into
+# a capacity-pool (gitops/charts/capacity-pool's EC2NodeClass sets no
+# spec.tags), which is the Issue's own two accident scenarios and the
+# larger, more variable share of a cell's spend. Closing that needs a
+# chart-level change with its own real-machine verification on a cluster
+# with Karpenter actually running, outside this layer's own Terraform and
+# this PR's real-machine budget.
 
 locals {
   budget_enabled = var.budget_limit_usd != null
@@ -39,9 +44,12 @@ resource "aws_sns_topic" "budget_alerts" {
 # AWS Budgets does not get implicit permission to publish to a topic it did
 # not create, even one in the same account: without this policy, apply still
 # succeeds and the budget still reaches HEALTHY, but no notification is ever
-# delivered (AWS's own Budgets-to-SNS setup documentation; confirmed this
-# platform's own real apply never exercises delivery, since neither
-# describe-budget nor get-topic-attributes calls it).
+# delivered. This statement's own shape (Principal, Action and both
+# Condition keys) comes from AWS's own Budgets-to-SNS setup documentation;
+# actual delivery is not exercised by either describe-budget or
+# get-topic-attributes, so this platform's own real applies (issue #95 PR
+# Test Results) confirm the resources exist, not that a notification is
+# ever actually delivered.
 resource "aws_sns_topic_policy" "budget_alerts" {
   count = local.budget_enabled ? 1 : 0
 
@@ -87,6 +95,15 @@ resource "aws_sns_topic_subscription" "budget_alert_email" {
 resource "aws_budgets_budget" "cell" {
   count = local.budget_enabled ? 1 : 0
 
+  # The budget's own arguments reference the topic, never the policy, so
+  # nothing here would otherwise order this resource after it; the same
+  # kind of missing edge let an unrelated AssociateAccessPolicy call race
+  # ahead of the access entry it targets elsewhere in this layer (Argo CD,
+  # this README's own Design notes) once the two resources shared no
+  # attribute. Budgets accepting a topic with no publish permission yet is
+  # not known to fail the same way, but there is no reason to find out.
+  depends_on = [aws_sns_topic_policy.budget_alerts]
+
   name         = "${var.name}-cell-cost"
   budget_type  = "COST"
   limit_amount = tostring(var.budget_limit_usd)
@@ -120,8 +137,14 @@ resource "aws_budgets_budget" "cell" {
   # The cost_filter above assumes var.tags actually carries this cell's own
   # distai-platform/cell tag; without it the budget still creates and still
   # reaches HEALTHY, but cost_filter matches nothing and the budget tracks
-  # $0 forever regardless of real spend. Caught at plan time, not after a
-  # month of silent non-coverage.
+  # $0 forever regardless of real spend. This precondition catches that one
+  # specific case (the key missing from var.tags) at plan time. It cannot
+  # catch the other way a cost_filter on a tag tracks $0 forever: AWS Cost
+  # Explorer only reports spend under a user-defined tag key once that key
+  # is activated as a cost allocation tag in Billing (account-wide, up to
+  # 24 hours after first use, not retroactive) -- a one-time, admin-done
+  # prerequisite this layer's own Terraform cannot activate on a per-cell
+  # basis (infra/foundation/README.md's own Known limits).
   lifecycle {
     precondition {
       condition     = lookup(var.tags, "distai-platform/cell", null) == var.name
