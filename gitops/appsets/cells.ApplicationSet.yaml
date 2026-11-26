@@ -12,10 +12,14 @@
 # future teams/*.yaml glob, added here first because #18 needed it first.
 # A separate step from "capacity", not folded into it: neither the static
 # PersistentVolume/FilesystemShare objects here nor capacity-pool/smoke's
-# own NodePool/ResourceFlavor depend on the other to exist, and a failure
-# in one should not block the other's own RollingSync progress. It is
-# ordered after "capacity" (not before, and not unordered relative to it)
-# only as a stable, read top-to-bottom convention - gitops/addon-catalog/
+# own NodePool/ResourceFlavor depend on the other to exist at the object
+# level. RollingSync is still sequential, though: a "capacity" step that
+# never reaches its own success criteria DOES hold "sharedfs" back from
+# syncing at all, the same as it already holds back any step ordered
+# after it today - this PR accepts that coupling rather than removing it
+# (a parallel, unordered step shape is a bigger change to this file's own
+# RollingSync strategy than #18 needs). It is ordered after "capacity"
+# (not before) only as a stable, read top-to-bottom convention - gitops/addon-catalog/
 # sharedfs's own controller (a different ApplicationSet,
 # addons-optional.ApplicationSet.yaml) is this step's real GitOps
 # prerequisite (the FilesystemShare CustomResourceDefinition this step's
