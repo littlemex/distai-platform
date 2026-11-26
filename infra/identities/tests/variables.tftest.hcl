@@ -150,7 +150,29 @@ run "two_entries_get_two_independent_roles_and_associations" {
   # attributes of a mocked resource, unknown until "applied" even against
   # mock_provider (no real AWS call either way - mock_provider replaces
   # the provider's RPCs entirely, so this creates nothing real).
+  #
+  # Two override_resource blocks give each entry's mocked role a distinct,
+  # well-formed ARN: mock_provider's own default mocked value for a
+  # computed string attribute is an opaque placeholder, not ARN-shaped,
+  # and aws_eks_pod_identity_association.role_arn has an ARN-format
+  # validator in the provider's own schema that runs even against a
+  # mocked apply, so the un-overridden default fails validation (not a
+  # real AWS call - purely the provider's own, schema-level check).
   command = apply
+
+  override_resource {
+    target = aws_iam_role.entry["image-builder"]
+    values = {
+      arn = "arn:aws:iam::111122223333:role/example-cell-identity-image-builder"
+    }
+  }
+
+  override_resource {
+    target = aws_iam_role.entry["openzfs"]
+    values = {
+      arn = "arn:aws:iam::111122223333:role/example-cell-identity-openzfs"
+    }
+  }
 
   variables {
     platform_identities = {
