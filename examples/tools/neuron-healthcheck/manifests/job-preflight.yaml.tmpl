@@ -1,0 +1,136 @@
+# Template for run.sh. Tokens (__LIKE_THIS__) are substituted by sed; lines
+# tagged "# KUEUE-ONLY" are dropped entirely when run.sh has no QUEUE_NAME
+# (so the Job runs immediately, unsuspended, on a cluster with no Kueue).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: neuron-healthcheck-preflight-__RUN_ID__
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: neuron-healthcheck
+    app.kubernetes.io/component: preflight
+    kueue.x-k8s.io/queue-name: __QUEUE_NAME__ # KUEUE-ONLY
+spec:
+  suspend: true # KUEUE-ONLY
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: neuron-healthcheck
+        app.kubernetes.io/component: preflight
+    spec:
+      restartPolicy: Never
+      # hostPID for the same reason ../gpu-healthcheck's Job sets it: the
+      # checks look at the node's real device state, including which host
+      # processes hold the Neuron device. No hostNetwork: none of the three
+      # checks needs the host's network namespace (lspci reads PCI config
+      # from sysfs, not from a network interface).
+      hostPID: true
+      nodeSelector:
+        node.kubernetes.io/instance-type: __INSTANCE_TYPE__
+      tolerations:
+        - key: aws.amazon.com/neuron
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: preflight
+          image: __BASE_IMAGE__
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: INSTANCE_TYPE
+              value: "__INSTANCE_TYPE__"
+            - name: EXPECTED_DEVICE_COUNT
+              value: "__EXPECTED_DEVICE_COUNT__"
+            - name: EXPECTED_NEURONCORE_COUNT
+              value: "__EXPECTED_NEURONCORE_COUNT__"
+            - name: EXPECTED_EFA_COUNT
+              value: "__EXPECTED_EFA_COUNT__"
+            - name: RESULTS_DIR
+              value: /tmp/neuron-healthcheck-results
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              # neuron-ls ships in aws-neuronx-tools under /opt/aws/neuron/bin;
+              # a non-login `bash -c` never reads the profile scripts that
+              # would add it, so add it here.
+              [ -d /opt/aws/neuron/bin ] && export PATH="/opt/aws/neuron/bin:${PATH}"
+              mkdir -p "${RESULTS_DIR}"
+              cd /opt/neuron-healthcheck
+              echo "=== node ${NODE_NAME} (${INSTANCE_TYPE}): expected devices=${EXPECTED_DEVICE_COUNT} nc_count=${EXPECTED_NEURONCORE_COUNT} efa=${EXPECTED_EFA_COUNT} ==="
+              # Recorded for a human to compare, not asserted: the node AMI's
+              # Neuron driver moves with the AMI, and the container's Neuron
+              # packages move with BASE_IMAGE.
+              echo "=== versions (recorded, not asserted) ==="
+              echo "neuron driver (host /sys/module/neuron/version): $(cat /sys/module/neuron/version 2>/dev/null || echo unknown)"
+              (dpkg-query -W -f='${Package} ${Version}\n' 'aws-neuronx-*' 2>/dev/null || true)
+              (python3 -m pip list 2>/dev/null | grep -iE '^(torch|torch-neuronx|neuronx-cc|libneuronxla) ' || true)
+              # Checks run in order and the first failure stops the rest: a
+              # node whose device count is wrong (check 0) would only fail
+              # check 1 for the same reason. lib/aggregate-results.py
+              # reports a check that never ran as NOT_RUN, which fails the
+              # summary -- never as a pass.
+              echo "=== check 0: neuron-ls device and NeuronCore count ==="
+              if bash lib/checks/0-neuron-ls-check.sh; then
+                echo "=== check 1: NEFF compile, load and run on the device ==="
+                if python3 lib/checks/1-neff-compile-load-check.py --target trn2; then
+                  echo "=== check 2: EFA PCI enumeration ==="
+                  bash lib/checks/2-efa-enumeration-check.sh || echo "[INFO] check 2 failed"
+                else
+                  echo "[INFO] check 1 failed -- check 2 not run"
+                fi
+              else
+                echo "[INFO] check 0 failed -- checks 1 and 2 not run"
+              fi
+              echo "=== aggregate ==="
+              RESULT=0
+              python3 lib/aggregate-results.py --results-dir "${RESULTS_DIR}" || RESULT=$?
+              echo "=== summary.json ==="
+              cat "${RESULTS_DIR}/summary.json" || true
+              echo "=== per-check results ==="
+              for f in "${RESULTS_DIR}"/check-*.json; do
+                [ -e "$f" ] || continue
+                echo "--- $f ---"; cat "$f" || true
+              done
+              exit "$RESULT"
+          # Privileged with the host's /dev mounted, the same posture as
+          # ../gpu-healthcheck's Job: the checks reach /dev/neuron* directly,
+          # not through the Neuron device plugin. The Job deliberately
+          # requests no aws.amazon.com/neuron or aws.amazon.com/neuroncore,
+          # mirroring upstream awsome-distributed-ai's own GPU health-check
+          # DaemonSet, which "does NOT request nvidia.com/gpu" and "accesses
+          # GPUs via device files in privileged mode": a pre-flight must not
+          # consume a device-plugin slot a real workload would otherwise get.
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: dev
+              mountPath: /dev
+            - name: lib-root
+              mountPath: /opt/neuron-healthcheck/lib
+            - name: lib-checks
+              mountPath: /opt/neuron-healthcheck/lib/checks
+      volumes:
+        - name: dev
+          hostPath:
+            path: /dev
+        - name: lib-root
+          configMap:
+            name: neuron-healthcheck-lib-root-__RUN_ID__
+            defaultMode: 0755
+        - name: lib-checks
+          configMap:
+            name: neuron-healthcheck-lib-checks-__RUN_ID__
+            defaultMode: 0755
