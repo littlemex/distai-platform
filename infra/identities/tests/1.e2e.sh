@@ -29,8 +29,9 @@
 #      re-plans infra/foundation (this script never calls terraform against
 #      infra/foundation again after its first apply);
 #   6. terraform destroy of infra/identities, then of infra/foundation;
-#      nothing of either layer is left (IAM roles by name and by an
-#      account-wide tag sweep, the disposable S3 bucket, the cell's VPC).
+#      nothing of either layer is left (IAM roles by name and by a tag
+#      sweep scoped to this layer's own derived-name prefix, the
+#      disposable S3 bucket, the cell's VPC).
 #
 # Every check prints PASS or FAIL. The script exits non-zero on the first
 # failed step and always attempts to destroy what it created (EXIT trap).
@@ -328,6 +329,13 @@ still_has_broad_policy="$(aws iam list-attached-role-policies --role-name "${LEG
 [[ -z "${still_has_broad_policy}" ]] || fail "AmazonS3ReadOnlyAccess is still attached after apply; the migration must remove it (it is not declared in platform_identities)"
 pass "the broad, hand-attached AmazonS3ReadOnlyAccess policy is gone; only the entry's own scoped inline policy remains"
 
+migrated_trust_policy="$(aws iam get-role --role-name "${LEGACY_ROLE_NAME}" --query Role.AssumeRolePolicyDocument --output json)"
+printf '%s' "${migrated_trust_policy}" | grep -q "aws:RequestTag/kubernetes-namespace" \
+  || fail "legacy-imagebuilder's trust policy after apply has no namespace RequestTag condition; it was not actually tightened to this layer's own shape: ${migrated_trust_policy}"
+printf '%s' "${migrated_trust_policy}" | grep -q "aws:RequestTag/kubernetes-service-account" \
+  || fail "legacy-imagebuilder's trust policy after apply has no service-account RequestTag condition; it was not actually tightened to this layer's own shape: ${migrated_trust_policy}"
+pass "legacy-imagebuilder's trust policy is replaced by this layer's own scoped shape (RequestTag conditions present), not left at its hand-rolled, unscoped original"
+
 # --------------------------------------------- 5. pods and credential checks
 
 apply_test_pod() {
@@ -371,33 +379,41 @@ pod_has_creds_env() {
 # apply_test_pod reader/writer/undeclared, then, for reader and writer
 # only (the two with a declared association), wait for the credentials
 # env var - recreating the Pod, not retrying a call against the same one,
-# on every attempt that still lacks it.
+# on every attempt that still lacks it. The env var is set by the
+# mutating webhook at admission time, independent of the Pod's own
+# runtime phase, so this checks it without waiting for Running first;
+# once it is present, the Pod is still waited for Running once before
+# returning, since every caller needs that for its own next step
+# (`kubectl exec`).
 #
 # EKS Pod Identity associations are eventually consistent (AWS's own
 # documentation: "potential delays of several seconds after API calls");
-# this layer's own apply, just above, created the associations these Pods
-# use. A real run of this exact step found the very first Pod created
-# right after that apply never had the env var injected at all (not a
-# credential-fetch failure - the SDK reported "Unable to locate
-# credentials", meaning it found no AWS_CONTAINER_CREDENTIALS_FULL_URI to
-# try in the first place) - a single Pod's own env, once set at creation,
-# does not change, so retrying a call against that same Pod could never
-# have helped; only recreating it after the association has propagated
-# does.
+# this layer's own apply, just above, created the associations these
+# Pods use. On a real run of an earlier form of this exact step, the
+# very first Pod created right after that apply failed its first
+# credentialed call with "Unable to locate credentials" - the SDK's own
+# wording for having found no credential source to try at all, which is
+# consistent with (not directly confirmed by an inspection of that Pod's
+# own spec, which that run did not capture) the env var never having
+# been injected in the first place. A single Pod's own env, once set at
+# creation, does not change afterward, so retrying a call against that
+# same Pod could not have helped; recreating it after the association
+# has propagated is this version's own fix for that symptom.
 wait_for_creds_env() {
   local name="$1" sa="$2" start now
   start="$(date +%s)"
   while true; do
     if pod_has_creds_env "${name}"; then
+      wait_until 60 5 "pod ${name} Running (credentials env var already present)" pod_running "${name}" \
+        || fail "pod ${name} has the Pod Identity credentials env var but never reached Running"
       return 0
     fi
     now="$(date +%s)"
     if ((now - start >= 90)); then
       return 1
     fi
-    kubectl delete pod "${name}" -n "${TEST_NAMESPACE}" --wait --timeout=30s >/dev/null 2>&1
+    kubectl delete pod "${name}" -n "${TEST_NAMESPACE}" --wait --timeout=60s --grace-period=0 --force >/dev/null 2>&1
     apply_test_pod "${name}" "${sa}"
-    wait_until 60 5 "pod ${name} Running" pod_running || true
   done
 }
 
@@ -405,7 +421,7 @@ apply_test_pod reader reader
 apply_test_pod writer writer
 apply_test_pod undeclared undeclared
 for p in reader writer undeclared; do
-  if ! wait_until 360 5 "pod ${p} Running" pod_running; then
+  if ! wait_until 360 5 "pod ${p} Running" pod_running "${p}"; then
     kubectl describe pod "${p}" -n "${TEST_NAMESPACE}" || true
     fail "pod ${p} did not reach Running within 360s"
   fi
@@ -495,13 +511,25 @@ pass "test namespace deleted"
 identities_destroy_start="$(date +%s)"
 tfi destroy -input=false -var-file="${IDENTITIES_TFVARS}" -auto-approve || fail "terraform destroy infra/identities"
 IDENTITIES_DESTROYED=1
+# The legacy role is now this destroy's own responsibility (it has been
+# Terraform-managed since the import, under its own real name via
+# role_name); the EXIT trap's own cleanup must not then also try to
+# delete it by hand and report a spurious failure (NoSuchEntity) on an
+# otherwise fully successful run.
+LEGACY_ROLE_CREATED=0
 pass "terraform destroy infra/identities ($(($(date +%s) - identities_destroy_start))s)"
 
 no_role_left "${LEGACY_ROLE_NAME}" || fail "legacy-imagebuilder's role (now Terraform-managed, under its own pre-existing name via role_name) still exists after destroy"
 pass "no identity role tagged for this run remains, by name (legacy-imagebuilder)"
-wait_until "${E2E_LEFTOVER_GRACE_SECONDS}" 10 "no IAM role tagged ${TEST_TAG_KEY}=${RUN_ID}" no_role_tagged_for_run \
-  || fail "an IAM role tagged ${TEST_TAG_KEY}=${RUN_ID} still exists after destroy"
-pass "no IAM role anywhere in the account still carries this run's own tag"
+# Scoped to "<NAME>-identity-" (this layer's own derived-name convention),
+# not plain NAME: infra/foundation's own roles (for example
+# "<NAME>-karpenter-node") carry the identical tag and still exist at
+# this point in the script (infra/foundation is destroyed afterward,
+# below) - a plain-NAME prefix would also match those and read as "a
+# tagged role still exists" on an otherwise successful run.
+wait_until "${E2E_LEFTOVER_GRACE_SECONDS}" 10 "no IAM role tagged ${TEST_TAG_KEY}=${RUN_ID} under ${NAME}-identity-" no_role_tagged_for_run "${NAME}-identity-" \
+  || fail "an IAM role under ${NAME}-identity- tagged ${TEST_TAG_KEY}=${RUN_ID} still exists after destroy"
+pass "no identities-layer IAM role still carries this run's own tag"
 assoc_left="$(aws eks list-pod-identity-associations --cluster-name "${CLUSTER_NAME}" --namespace "${TEST_NAMESPACE}" --query 'associations' --output text 2>&1)"
 [[ -z "${assoc_left}" || "${assoc_left}" == "None" ]] || fail "Pod Identity associations remain for namespace ${TEST_NAMESPACE}: ${assoc_left}"
 pass "no Pod Identity association remains for the test namespace"

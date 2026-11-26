@@ -9,8 +9,6 @@
 # Reads these globals of the calling script at call time:
 #   TEST_TAG_KEY, RUN_ID   the run tag this test applies to every resource
 #                          it creates directly (IAM roles, the S3 bucket)
-#   NAME                   cell name; every role name-prefix sweep below is
-#                           scoped to it
 #   FAILED_STEP            set by fail()
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
@@ -97,8 +95,8 @@ no_bucket_left() {
   fail "checking for leftover S3 bucket $1: ${err}"
 }
 
-# no_role_tagged_for_run: true if no IAM role whose name starts with this
-# cell's own NAME still carries this run's own tag (TEST_TAG_KEY=RUN_ID).
+# no_role_tagged_for_run PREFIX: true if no IAM role whose name starts
+# with PREFIX still carries this run's own tag (TEST_TAG_KEY=RUN_ID).
 # Not account-wide by tag alone: IAM's own ListRoles response never
 # includes Tags at all (confirmed against the API's own documentation,
 # "ListRoles... does not return... Tags"), and the Resource Groups Tagging
@@ -106,15 +104,23 @@ no_bucket_left() {
 # direct GetRole call, to carry a real tag (confirmed on a real account,
 # 2026-11-26) - IAM roles are not actually discoverable through either of
 # those two tag-search mechanisms. This instead lists every role name
-# under this cell's own prefix (every role this script, or a bug in it,
-# could plausibly have created shares that prefix: the derived
-# "<cluster_name>-identity-<key>" names and the simulated legacy role,
-# "<NAME>-legacy-imagebuilder") and calls GetRole (which does return Tags)
-# on each candidate.
+# under the given prefix and calls GetRole (which does return Tags) on
+# each candidate.
+#
+# PREFIX is a parameter, not this cell's own NAME, on purpose: the same
+# tag is also set on infra/foundation's own resources (both layers' own
+# tfvars pass the identical TEST_TAG_KEY=RUN_ID), including its Karpenter
+# roles ("<NAME>-karpenter-node"/"-controller"), which still exist, by
+# design, at the point in this script where this layer's own roles are
+# swept (infra/foundation is destroyed afterward) - a prefix of plain
+# NAME would match those too and read as "a tagged role still exists"
+# on an otherwise fully successful run. The caller passes the narrower
+# prefix that only this layer's own roles share
+# ("<NAME>-identity-", the derived-name convention).
 no_role_tagged_for_run() {
-  local role_names role_name tags
-  if ! role_names="$(aws_text aws iam list-roles --query "Roles[?starts_with(RoleName, '${NAME}')].RoleName" --output text)"; then
-    fail "listing IAM roles under prefix ${NAME}: ${role_names}"
+  local prefix="$1" role_names role_name tags
+  if ! role_names="$(aws_text aws iam list-roles --query "Roles[?starts_with(RoleName, '${prefix}')].RoleName" --output text)"; then
+    fail "listing IAM roles under prefix ${prefix}: ${role_names}"
   fi
   for role_name in ${role_names}; do
     [[ "${role_name}" == "None" || -z "${role_name}" ]] && continue

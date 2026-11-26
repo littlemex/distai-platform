@@ -44,7 +44,7 @@ run "one_read_only_s3_entry_plans" {
     platform_identities = {
       image-builder = {
         namespace       = "image-builder"
-        service_account = "image-builder"
+        service_account = "image-builder-sa"
         s3 = [{
           bucket   = "distai-platform-images"
           prefixes = ["manifests/"]
@@ -99,19 +99,28 @@ run "one_read_only_s3_entry_plans" {
   }
 
   assert {
-    condition = alltrue([
+    condition     = sort(flatten(data.aws_iam_policy_document.identity_scoped["image-builder"].statement[*].resources)) == sort(["arn:aws:s3:::distai-platform-images/manifests/*", "arn:aws:s3:::distai-platform-images"])
+    error_message = "the scoped policy's own resources must be exactly the declared bucket/prefix's own object and bucket ARNs - no more, no fewer (catches, for example, s3_object_arns silently ignoring the declared prefix)."
+  }
+
+  # alltrue([... c.variable != X || Y]) alone would also pass if the
+  # condition for X were removed from the trust policy entirely (an empty
+  # list is vacuously alltrue) - each assertion below also requires at
+  # least one condition to exist for that exact variable.
+  assert {
+    condition = length([
       for c in data.aws_iam_policy_document.identity_assume["image-builder"].statement[0].condition :
-      c.variable != "aws:RequestTag/kubernetes-namespace" || (length(c.values) == 1 && contains(c.values, "image-builder"))
-    ])
-    error_message = "the trust policy's own namespace condition must scope to exactly this entry's declared namespace."
+      c if c.variable == "aws:RequestTag/kubernetes-namespace" && length(c.values) == 1 && contains(c.values, "image-builder")
+    ]) == 1
+    error_message = "the trust policy must carry exactly one namespace condition, scoped to exactly this entry's declared namespace."
   }
 
   assert {
-    condition = alltrue([
+    condition = length([
       for c in data.aws_iam_policy_document.identity_assume["image-builder"].statement[0].condition :
-      c.variable != "aws:RequestTag/kubernetes-service-account" || (length(c.values) == 1 && contains(c.values, "image-builder"))
-    ])
-    error_message = "the trust policy's own service-account condition must scope to exactly this entry's declared service_account."
+      c if c.variable == "aws:RequestTag/kubernetes-service-account" && length(c.values) == 1 && contains(c.values, "image-builder-sa")
+    ]) == 1
+    error_message = "the trust policy must carry exactly one service-account condition, scoped to exactly this entry's declared service_account."
   }
 }
 
@@ -227,28 +236,37 @@ run "multi_bucket_entry_list_statements_do_not_cross_pair" {
     error_message = "a two-bucket entry must get two separate ListBucket statements, one per declared bucket."
   }
 
+  # Positive, exact assertions (not only "does not also allow the other
+  # bucket's prefix", which would also pass if the condition were
+  # emptied or removed entirely): the statement naming bucket-a's own
+  # ARN must have a condition whose values are exactly ["a-prefix/*"],
+  # and likewise for bucket-b - this fails both if the two buckets'
+  # prefixes are merged into one statement and if either statement's own
+  # condition is dropped.
   assert {
-    condition = alltrue([
-      for s in data.aws_iam_policy_document.identity_scoped["multi-bucket"].statement : (
-        s.actions != toset(["s3:ListBucket"]) || !(
-          contains(s.resources, "arn:aws:s3:::distai-platform-bucket-a") &&
-          contains(flatten([for c in s.condition : c.values]), "b-prefix/*")
-        )
+    condition = length([
+      for s in data.aws_iam_policy_document.identity_scoped["multi-bucket"].statement :
+      s if(
+        s.actions == toset(["s3:ListBucket"]) &&
+        s.resources == toset(["arn:aws:s3:::distai-platform-bucket-a"]) &&
+        length(s.condition) == 1 &&
+        s.condition[0].values == ["a-prefix/*"]
       )
-    ])
-    error_message = "bucket-a's own ListBucket statement must not also allow bucket-b's own declared prefix."
+    ]) == 1
+    error_message = "bucket-a's own ListBucket statement must exist, naming only bucket-a's own ARN, with a condition scoped to exactly [\"a-prefix/*\"]."
   }
 
   assert {
-    condition = alltrue([
-      for s in data.aws_iam_policy_document.identity_scoped["multi-bucket"].statement : (
-        s.actions != toset(["s3:ListBucket"]) || !(
-          contains(s.resources, "arn:aws:s3:::distai-platform-bucket-b") &&
-          contains(flatten([for c in s.condition : c.values]), "a-prefix/*")
-        )
+    condition = length([
+      for s in data.aws_iam_policy_document.identity_scoped["multi-bucket"].statement :
+      s if(
+        s.actions == toset(["s3:ListBucket"]) &&
+        s.resources == toset(["arn:aws:s3:::distai-platform-bucket-b"]) &&
+        length(s.condition) == 1 &&
+        s.condition[0].values == ["b-prefix/*"]
       )
-    ])
-    error_message = "bucket-b's own ListBucket statement must not also allow bucket-a's own declared prefix."
+    ]) == 1
+    error_message = "bucket-b's own ListBucket statement must exist, naming only bucket-b's own ARN, with a condition scoped to exactly [\"b-prefix/*\"]."
   }
 }
 
@@ -536,7 +554,7 @@ run "accepts_multi_region_kms_key" {
   }
 }
 
-run "rejects_two_char_namespace_as_invalid" {
+run "accepts_two_char_namespace" {
   command = plan
 
   variables {
