@@ -38,6 +38,8 @@ An add-on identity created by hand before this layer existed (exactly the shape 
 
 EKS Pod Identity injects credentials into a Pod at Pod creation time (through a mutating webhook that adds the credential-fetching environment variables and volume). A Pod that was already `Running` before its own `aws_eks_pod_identity_association` was created does not retroactively gain those credentials: it must be restarted (deleted and recreated, or rolled) after the association exists. This is a property of EKS Pod Identity itself (confirmed against the AWS documentation for the feature: "Amazon EKS Pod Identity associations" / "existing pods"), not something this layer's own resources control either way.
 
+A related, separate point: AWS's own documentation states that EKS Pod Identity associations are "eventually consistent, with potential delays of several seconds after API calls." A Pod created immediately after `terraform apply` creates its own association - automation applying this layer and then immediately rolling out a Deployment in the same pipeline, for example - can still briefly fail to obtain credentials even though it was never `Running` beforehand; a real end-to-end run of this layer's own test confirmed this directly (the very first credentialed call after an apply failed with "Unable to locate credentials" until a short retry was added). Automation that applies this layer and then immediately creates or restarts Pods using a new entry should allow a short retry window (tens of seconds), not assume credentials are available the instant `terraform apply` returns.
+
 ## Usage
 
 Apply `infra/foundation` first (the cluster and the `eks-pod-identity-agent` add-on must already exist). Then, from the repository root:

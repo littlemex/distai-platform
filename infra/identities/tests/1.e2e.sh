@@ -380,8 +380,20 @@ pass "reader, writer and undeclared pods are Running"
 
 kexec() { kubectl exec -i -n "${TEST_NAMESPACE}" "$1" -- "${@:2}"; }
 
-kexec reader aws s3 cp "s3://${BUCKET}/allowed/ok.txt" - >/dev/null \
-  || fail "reader could not read s3://${BUCKET}/allowed/ok.txt (its own declared prefix)"
+# EKS Pod Identity associations are eventually consistent (AWS's own
+# documentation: "potential delays of several seconds after API calls");
+# the association was created by the apply just above, and these Pods
+# right after it, so the very first credentialed call gets a retry budget
+# for that documented propagation window. A real run of this exact check,
+# with no retry, failed immediately with "Unable to locate credentials"
+# (the SDK found no AWS_CONTAINER_CREDENTIALS_FULL_URI at all, consistent
+# with the association not yet having propagated to this node's agent)
+# before this retry was added.
+reader_reads_allowed() {
+  kexec reader aws s3 cp "s3://${BUCKET}/allowed/ok.txt" - >/dev/null 2>"${WORK_DIR}/reader-ok.err"
+}
+wait_until 60 5 "reader reads its own declared prefix (allowing for EKS Pod Identity's documented propagation delay)" reader_reads_allowed \
+  || fail "reader could not read s3://${BUCKET}/allowed/ok.txt within 60s (its own declared prefix): $(cat "${WORK_DIR}/reader-ok.err")"
 pass "reader reads inside its own declared prefix (allowed/)"
 
 if kexec reader aws s3 cp "s3://${BUCKET}/other/secret.txt" - >/dev/null 2>"${WORK_DIR}/reader-other.err"; then
@@ -396,8 +408,11 @@ fi
 grep -qi "AccessDenied\|Forbidden" "${WORK_DIR}/reader-write.err" || fail "reader's denied write did not fail with AccessDenied/Forbidden: $(cat "${WORK_DIR}/reader-write.err")"
 pass "reader is denied writing, because its own entry does not declare write = true"
 
-echo "written" | kexec writer aws s3 cp - "s3://${BUCKET}/writer-area/new.txt" \
-  || fail "writer could not write s3://${BUCKET}/writer-area/new.txt (its own declared prefix, write = true)"
+writer_writes_own_prefix() {
+  echo "written" | kexec writer aws s3 cp - "s3://${BUCKET}/writer-area/new.txt" >/dev/null 2>"${WORK_DIR}/writer-ok.err"
+}
+wait_until 60 5 "writer writes its own declared prefix (allowing for EKS Pod Identity's documented propagation delay)" writer_writes_own_prefix \
+  || fail "writer could not write s3://${BUCKET}/writer-area/new.txt within 60s (its own declared prefix, write = true): $(cat "${WORK_DIR}/writer-ok.err")"
 pass "writer writes inside its own declared prefix (writer-area/), because its own entry declares write = true"
 
 if kexec writer aws s3 cp "s3://${BUCKET}/allowed/ok.txt" - >/dev/null 2>"${WORK_DIR}/writer-other.err"; then
