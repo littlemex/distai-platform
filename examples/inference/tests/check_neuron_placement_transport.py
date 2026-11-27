@@ -377,6 +377,9 @@ def check_disagg(R, chart):
                     check(f"{rel} default: {name_of(w)} ({r}) sets FI_EFA_ENABLE_SHM_TRANSFER "
                           "(0 or 1, from transport.forceEfaSameNode; default is forceEfaSameNode=false -> \"1\")",
                           envd.get("FI_EFA_ENABLE_SHM_TRANSFER") == "1", json.dumps(envd))
+                    check(f"{rel} default: {name_of(w)} ({r}) sets NEURON_SKIP_EFA_AFFINITY=1 "
+                          "(engine.skipEfaAffinity defaults to true, #80)",
+                          envd.get("NEURON_SKIP_EFA_AFFINITY") == "1", json.dumps(envd))
             check_decode_anti_affinity(f"{rel} default", roles)
             # At the default (enforceAntiAffinity=true, both roles request
             # EFA), decode must also carry a required podAffinity zone term
@@ -446,6 +449,22 @@ def check_disagg(R, chart):
                     check(f"{rel} forceEfaSameNode=true: {name_of(w)} ({r}) sets "
                           "FI_EFA_ENABLE_SHM_TRANSFER=0 (not hardcoded 1)",
                           envd.get("FI_EFA_ENABLE_SHM_TRANSFER") == "0", json.dumps(envd))
+
+    # ------------------------------------- engine.skipEfaAffinity=false
+    # Must omit the variable entirely (the plugin's own unset default), not
+    # render an explicit "0" whose parsing was never checked.
+    nodocs, err = R.render(chart, sets=["engine.skipEfaAffinity=false"])
+    if check(f"{rel} engine.skipEfaAffinity=false: helm template", nodocs is not None, err):
+        scenarios["skipEfaAffinity=false"] = nodocs
+        noroles = check_roles_present(f"{rel} skipEfaAffinity=false", nodocs, key, sel_values)
+        if noroles:
+            for r in ROLES:
+                for w in noroles[r]:
+                    cs = neuron_containers(pod_spec(w))
+                    envd = env_of(cs[0]) if cs else {}
+                    check(f"{rel} skipEfaAffinity=false: {name_of(w)} ({r}) renders no "
+                          "NEURON_SKIP_EFA_AFFINITY at all (not an explicit \"0\")",
+                          "NEURON_SKIP_EFA_AFFINITY" not in envd, json.dumps(envd))
 
     # ------------------------------------------- enforceAntiAffinity=false
     edocs, err = R.render(chart, sets=["placement.enforceAntiAffinity=false"])
@@ -661,6 +680,22 @@ def check_agg(R, chart):
                   "itself is always rendered, the entrypoint's own [ -z \"$KV_TRANSFER_CONFIG\" ] "
                   "check is what skips --kv-transfer-config, not an absent env entry)",
                   not envd.get("KV_TRANSFER_CONFIG"), json.dumps(envd))
+            check(f"{rel} default: {name_of(w)} sets NEURON_SKIP_EFA_AFFINITY=1 "
+                  "(engine.skipEfaAffinity defaults to true, #80)",
+                  envd.get("NEURON_SKIP_EFA_AFFINITY") == "1", json.dumps(envd))
+
+    # engine.skipEfaAffinity=false must omit the variable entirely (the
+    # plugin's own unset default), not render an explicit "0" whose parsing
+    # was never checked against the plugin's own source.
+    nodocs, err = R.render(chart, sets=["engine.skipEfaAffinity=false"])
+    if check(f"{rel} engine.skipEfaAffinity=false: helm template", nodocs is not None, err):
+        scenarios["skipEfaAffinity=false"] = nodocs
+        for w in workloads(nodocs):
+            cs = neuron_containers(pod_spec(w))
+            envd = env_of(cs[0]) if cs else {}
+            check(f"{rel} engine.skipEfaAffinity=false: {name_of(w)} renders no "
+                  "NEURON_SKIP_EFA_AFFINITY at all (not an explicit \"0\")",
+                  "NEURON_SKIP_EFA_AFFINITY" not in envd, json.dumps(envd))
 
     per_device = val("accelerator", "coresPerDevice")
     default_cores = val("engine", "neuronCoresPerEngine")

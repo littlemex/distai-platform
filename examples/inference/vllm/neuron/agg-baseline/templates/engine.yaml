@@ -109,15 +109,21 @@ spec:
             # vllm_neuron.utils.hardware_config.get_efa_interface_from_bdf
             # looks up an EFA network interface co-located with the Neuron
             # device's own PCI address purely for a CPU-affinity
-            # optimization, unconditionally -- it raises RuntimeError (not a
-            # soft warning) when none exists, which crashed every engine on
-            # trn2.3xlarge, including this chart, which never requests an
-            # EFA device at all. The plugin's own error message states the
-            # fix: "EFA affinity is a CPU performance optimization, not a
-            # correctness requirement; set NEURON_SKIP_EFA_AFFINITY=1 to
-            # skip it on instances without EFA" (values.yaml, engine.skipEfaAffinity).
+            # optimization at engine startup -- observed, in this one
+            # traceback, to run even though this chart never requests an
+            # EFA device at all -- and raises RuntimeError (not a soft
+            # warning) when none exists, crashing the engine during its own
+            # startup on trn2.3xlarge every time this was reached. The
+            # plugin's own error message states the fix: "EFA affinity is a
+            # CPU performance optimization, not a correctness requirement;
+            # set NEURON_SKIP_EFA_AFFINITY=1 to skip it on instances without
+            # EFA" (values.yaml, engine.skipEfaAffinity). false renders no
+            # variable at all (the plugin's own unset default), not an
+            # explicit "0" whose parsing by the plugin was not checked.
+            {{- if $e.skipEfaAffinity }}
             - name: NEURON_SKIP_EFA_AFFINITY
-              value: {{ ternary "1" "0" $e.skipEfaAffinity | quote }}
+              value: "1"
+            {{- end }}
             {{- if .Values.model.hfTokenSecret.name }}
             - name: HF_TOKEN
               valueFrom:

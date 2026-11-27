@@ -76,16 +76,23 @@ engine:
   startupTimeoutSeconds: 1800
   # Non-root, the same UID/GID as the NVIDIA chart, although this image has
   # no account for it; the template sets HOME and USER for that reason (see
-  # ../disagg-pd/values.yaml, engine.podSecurityContext). fsGroup is the fix
-  # for a confirmed real failure (README, Known issues, and #80): unlike the
-  # NVIDIA image, this image ships no pre-made group-writable directories for
-  # UID 2000, and a kubelet emptyDir with no fsGroup is root:root mode 0755 --
-  # group 0 (root) gets no write bit, so UID 2000 (group 0 via runAsGroup)
-  # cannot create files under /cache or /compile-cache. fsGroup makes the
-  # kubelet chown each mounted volume to this group and add the group-write
-  # bit (and the setgid bit, so files created under it keep the group), which
-  # is what the NVIDIA image's own pre-made directories already give UID 2000
-  # for free.
+  # ../disagg-pd/values.yaml, engine.podSecurityContext). fsGroup is
+  # defense-in-depth for a PersistentVolumeClaim override of cacheVolume/
+  # compileCacheVolume (README, Known issues): some provisioners/access
+  # modes hand back a volume owned by a group other than 0, which UID 2000
+  # (group 0 via runAsGroup) could not then write to without it. It is not
+  # what fixes the default `emptyDir` configuration: a real kubelet
+  # (confirmed with a local kind cluster, no Trainium needed -- `kubectl
+  # exec ... stat -c "%U:%G %a" /cache` on a pod with this exact
+  # securityContext and no fsGroup) creates an unmounted-PVC `emptyDir` as
+  # `root:root` mode `0777`, already writable by any UID regardless of
+  # group -- an earlier round's own container-only reproduction (a bind
+  # mount on a plain Docker host, not a real kubelet) wrongly suggested
+  # `0755`, because a bind-mounted host directory inherits the host's own
+  # umask instead of the kubelet's own emptyDir creation mode. This chart's
+  # real crash loop on real hardware (#80) was never a cache-permission
+  # problem; see engine.skipEfaAffinity below for the actual, confirmed
+  # cause.
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 2000
@@ -100,18 +107,23 @@ engine:
   # Confirmed on real hardware (#80, trn2.3xlarge, ap-southeast-4): the
   # plugin's own vllm_neuron.utils.hardware_config.get_efa_interface_from_bdf
   # looks up an EFA network interface co-located with the Neuron device's
-  # own PCI address for a CPU-affinity optimization, unconditionally --
-  # regardless of whether this chart's pod requests an EFA device at all --
-  # and raises RuntimeError, not a soft warning, when none exists
-  # ("No EFA device found at /sys/bus/pci/devices/.../infiniband ... This is
-  # expected on instances without EFA"). trn2.3xlarge's default network
-  # interface (no pool.networkInterfaces override, this chart's own
-  # Prerequisites) has no EFA device at that PCI address, so every engine
-  # crashed on first request until this was set. true (default) sets
+  # own PCI address for a CPU-affinity optimization at engine startup --
+  # observed, in this one traceback, to run regardless of whether this
+  # chart's pod requests an EFA device at all -- and raises RuntimeError,
+  # not a soft warning, when none exists ("No EFA device found at
+  # /sys/bus/pci/devices/.../infiniband ... This is expected on instances
+  # without EFA"). trn2.3xlarge's default network interface (no
+  # pool.networkInterfaces override, this chart's own Prerequisites) has
+  # no EFA device at that PCI address, so the engine crashed during its
+  # own startup, before ever reaching a listening state, every time this
+  # was reached on real hardware. true (default) sets
   # NEURON_SKIP_EFA_AFFINITY=1, which the plugin's own error message names
   # as the fix ("not a correctness requirement"). Set false only once a
   # node with a real, co-located EFA device for this Neuron device is
-  # confirmed on real hardware, to get the affinity optimization back.
+  # confirmed on real hardware, to get the affinity optimization back;
+  # false renders no such variable at all (unset, the plugin's own
+  # default), rather than an explicit "0" whose parsing was not checked
+  # against the plugin's own source.
   skipEfaAffinity: true
 
 # ClusterIP: reachable only from inside the cluster. vLLM has no
