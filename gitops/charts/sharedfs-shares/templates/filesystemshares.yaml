@@ -17,13 +17,16 @@
 # upstream's own README shows this exact path with no `provision` field
 # at all. `checkpoints/{namespace}` is two segments and keeps its own
 # `provision`, matching upstream's own other example. Found by code
-# review (2026-11-27, against sharedfs's own CRD and README - not on a
-# real cluster, which had already been torn down by the time this was
-# found): rendering `datasets` with `provision` set made the object's
-# own creation fail CRD admission on every sync attempt, which is almost
-# certainly why gitops/charts/sharedfs-shares never converged in attempt
-# 6 - not the cross-ApplicationSet race this PR's own Test Results first
-# suspected, though that race is not ruled out either.
+# review (2026-11-27, against sharedfs's own CRD and README - at the
+# time, the cluster that reproduced the symptom had already been torn
+# down): rendering `datasets` with `provision` set made the object's own
+# creation fail CRD admission on every sync attempt. Confirmed as the
+# actual cause, not merely the likely one, by attempt 7 (this task
+# round's own Test Results): with this fix in place, every Application
+# including gitops/charts/sharedfs-shares converged Synced and Healthy
+# for the first time across every attempt to date, with the
+# cross-ApplicationSet race this PR's Test Results first suspected never
+# recurring in three further attempts (7, 8, 9) against this fix.
 #
 # Both `checkpoints` and `datasets` are themselves top-level directories
 # whose own parent is the file system root - sharedfs's own README: "The

@@ -224,9 +224,10 @@ variable "shared_fsx_lustre" {
     # 2.15 client the aws-fsx-csi-driver's own image ships, and nothing
     # here has confirmed a 2.15 client can mount a 2.10 server (FSx for
     # Lustre's own client/server version-skew guarantees are narrower
-    # than "any client can mount any server") - not yet re-verified on
-    # a real cluster after this fix, since no real-machine budget
-    # remained once it was found (see this PR's own Test Results).
+    # than "any client can mount any server") - real-machine confirmed in
+    # attempt 9 (this PR's own Test Results): a 2.15 file system mounted
+    # and served reads/writes through this platform's own CSI driver
+    # client with no mount error.
     file_system_type_version = optional(string, "2.15")
     # false (AWS's own CreateFileSystem default) unless set true: a
     # PERSISTENT_1/PERSISTENT_2 file system takes a final backup on

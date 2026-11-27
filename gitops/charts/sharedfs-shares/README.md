@@ -43,6 +43,26 @@ root, so it needs `fs-admin`'s own Pod Security level to allow the same `UID 0` 
 sharedfs's own preparer pods already run with (`baseline`, not `restricted` - see
 `templates/namespace.yaml`'s own comment).
 
+## Tenant usage
+
+A team claims these shares with an ordinary `PersistentVolumeClaim` through its own onboarding
+identity (`gitops/bootstrap/team-onboard.sh`), naming one of the `StorageClass`es sharedfs's own
+controller creates from this chart's two `FilesystemShare` objects and their grants:
+
+| `storageClassName` | Access | What it claims |
+| --- | --- | --- |
+| `checkpoints-rw` | `ReadWriteMany` | The claiming namespace's own `checkpoints/<namespace>` directory. |
+| `datasets-ro` | `ReadOnlyMany` | The shared, admin-seeded `datasets` directory. |
+| `datasets-rw` | (never binds for a team) | Only `fs-admin`'s own `ReadWrite` grant on `datasets` matches this; a team's own claim against it stays `Pending` with a `NotGranted` event. |
+
+A pod mounting `checkpoints-rw` must run as (or supplementally include) `runAsGroup: 1000` -
+`checkpoints`' own `FilesystemShare.spec.provision.gid` - since the directory is created
+`2770` (setgid) and `fsGroup` has no effect on this CSI driver's own volumes (sharedfs's own
+README). A pod mounting `datasets-ro` needs no particular `uid`/`gid` to read it (world-readable
+`0755`); only `fs-admin`'s own seeding pods, which must run as `uid 0` since `datasets` carries
+no `provision` and so no group-write bit at all (see "What this chart does" above), can write to
+it.
+
 ## What this chart does not do
 
 - It does not deliver the sharedfs controller itself (`gitops/charts/sharedfs-controller`,

@@ -2,7 +2,9 @@
 # (gitops/addon-catalog/sharedfs/addon.yaml, #18) -- dir/namespace below
 # are byte-identical to that entry's own
 # (gitops/tests/check_addon_catalog_sync.py's check (1)). image is the
-# one overridableKey that entry declares (check (4)): read from the
+# one of the two overridableKeys that entry declares (check (4); the
+# other, networkPolicy.allowedPeers, is left unset here - this cell
+# grants no scraper access): read from the
 # cell-registration Secret's own annotation, set by
 # gitops/bootstrap/sharedfs-image-publish.sh after infra/foundation's
 # var.shared_fsx_lustre is applied and gitops/bootstrap/bootstrap.sh has

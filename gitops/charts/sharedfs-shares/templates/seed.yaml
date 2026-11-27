@@ -7,8 +7,11 @@
 # the one piece of this chart's own objects that is not a direct render
 # of something sharedfs documents, because nothing else does it.
 #
-# Found missing by code review against sharedfs's own README (not on a
-# real cluster - no real-machine attempt has reached this code yet): the
+# Found missing by code review against sharedfs's own README (at the time,
+# no real-machine attempt had reached this code yet - attempt 9, this PR's
+# own Test Results, since confirmed this Job runs, both top-level
+# directories get created, and both teams' own per-namespace directories
+# provision successfully against them): the
 # `datasets` FilesystemShare's own `provision` field made that object
 # fail CRD admission outright (fixed - see templates/filesystemshares.yaml's
 # own header comment); `checkpoints/{namespace}` passes admission but its

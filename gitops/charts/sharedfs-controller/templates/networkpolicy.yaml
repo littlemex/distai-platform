@@ -1,6 +1,6 @@
 # Ported from littlemex/sharedfs's own `kubectl kustomize config/default`
 # output at the pinned commit (see templates/crds.yaml's own header for the
-# full citation, the four edits made from the literal render, and why each
+# full citation, the seven edits made from the literal render, and why each
 # one is safe).
 #
 # A second NetworkPolicy below, sharedfs-controller-metrics-deny-by-default,

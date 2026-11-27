@@ -8,9 +8,17 @@
 # into a GITOPS_RUN_SHAREDFS_E2E section of gitops/tests/1.e2e.sh (the same
 # shape GITOPS_RUN_ACCEL_E2E already uses) is tracked as follow-up scope.
 #
-# Run via the EC2 runner only:
+# Needs a Linux/amd64 host: gitops/bootstrap/sharedfs-image-publish.sh,
+# which this script calls, downloads a `go${GO_VERSION}.linux-amd64.tar.gz`
+# toolchain unconditionally (no `uname`-based platform detection), the same
+# x86_64-only scoping this platform's own system node group already has -
+# not macOS, and not arm64. Tools: aws, terraform, kubectl, jq, git,
+# python3, curl, tar, sha256sum. This task round ran it on this
+# repository's own EC2 runner:
 #   runner/run.sh --ref feat/18-sharedfs-storage --detach \
 #     -- bash gitops/tests/.tmp-sharedfs-verify.sh
+# but nothing about the script itself requires that specific host, only
+# the platform/tool list above.
 #
 # shellcheck disable=SC2015
 # Every "A && B || C" below has only log/exit calls (which always
@@ -31,6 +39,30 @@ set -euo pipefail
 export AWS_PROFILE="${AWS_PROFILE:-default}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# NAME must match a committed gitops/cells/<NAME>/ fixture directory: the
+# cells/addons-optional ApplicationSets both generate Applications from a
+# Git file generator keyed on this exact cluster name
+# (gitops/appsets/cells.ApplicationSet.yaml, gitops/appsets/
+# addons-optional.ApplicationSet.yaml), and this PR's only committed
+# fixture is gitops/cells/dp-18-sharedfs-r1/. A different NAME is not an
+# error this script's earlier steps would ever surface - terraform apply,
+# bootstrap.sh and sharedfs-image-publish.sh all succeed regardless, and
+# the convergence loop below reports every (zero) cell-specific
+# Application "Synced" vacuously, so the first visible symptom used to be
+# `kubectl wait` failing on a CustomResourceDefinition that was simply
+# never generated in the first place, after a full EKS + FSx build had
+# already run (found the hard way, 2026-11-27: this task round's own
+# second real-machine attempt). Checked here, before `terraform init`,
+# so a wrong NAME fails in under a second instead of after ~15 minutes
+# of real AWS resource creation.
+for required_dir in capacity-pool sharedfs smoke; do
+  [[ -d "${ROOT}/gitops/cells/${NAME}/${required_dir}" ]] || {
+    echo "[sharedfs-verify] FAIL: gitops/cells/${NAME}/${required_dir}/ does not exist in this checkout - NAME must match a committed cell fixture directory (this PR's own fixture is dp-18-sharedfs-r1), not an arbitrary unused cell name" >&2
+    exit 1
+  }
+done
+
 STATE_KEY="distai-platform/${AWS_REGION}/${NAME}/foundation"
 IDC_GROUP_NAME="dp18-sfs-$(date +%s)"
 IDC_GROUP_ID=""
@@ -52,6 +84,21 @@ IMAGE="public.ecr.aws/docker/library/busybox:1.37"
 log() { echo "[sharedfs-verify] $*" >&2; }
 
 cleanup() {
+  # Captured before anything else in this trap touches $? - this is the
+  # main script body's own exit status (0 if every check passed, non-zero
+  # if one failed), not this trap's. PROBLEM tracks whether cleanup itself
+  # finds anything wrong (a failed destroy, a leftover resource, a sweep
+  # call that failed for a reason other than "not found"); set below by
+  # every branch that logs WARNING/LEFTOVER/UNKNOWN. Found by a review
+  # round (2026-11-27/28): this function used to only log those lines and
+  # never touch the exit code at all, so a run could print "ALL CHECKS
+  # PASS" and still exit 0 even if the destroy that followed left a real,
+  # billable EKS cluster or FSx file system running - the exact failure
+  # mode this trap exists to catch. An EXIT trap's own `exit N` does
+  # override the script's final exit status; without one here, bash just
+  # keeps the original.
+  local original_rc=$?
+  local problem=0
   log "cleanup: start"
   if [[ "${INITIALIZED}" == "1" ]]; then
     ( cd "${ROOT}/infra/foundation" && terraform destroy -auto-approve \
@@ -60,9 +107,15 @@ cleanup() {
       -var "admin_principal_arns=[\"${ADMIN_PRINCIPAL_ARN}\"]" \
       -var "argocd={idc_instance_arn=\"${ARGOCD_IDC_INSTANCE_ARN}\",idc_region=\"${ARGOCD_IDC_REGION}\",role_mappings=[{role=\"ADMIN\",group_ids=[\"${IDC_GROUP_ID}\"]}]}" \
       -var "shared_fsx_lustre={deployment_type=\"SCRATCH_2\",storage_capacity_gib=1200,skip_final_backup=true}" \
-    ) || log "WARNING: terraform destroy did not exit 0; a leftover sweep follows regardless"
+    ) || { log "WARNING: terraform destroy did not exit 0; a leftover sweep follows regardless"; problem=1; }
   fi
   if [[ -n "${IDC_GROUP_ID}" ]]; then
+    # Not a `problem=1` branch: unlike the six checks below, this group is
+    # not a billable AWS resource, and "already gone" (this call's own
+    # failure branch, indistinguishable here from a real delete failure)
+    # is an expected, harmless outcome on more than one path - logged as a
+    # WARNING for a human to notice, not treated as the kind of leftover
+    # this trap's own exit code exists to catch.
     aws identitystore delete-group --identity-store-id "${ARGOCD_IDC_IDENTITY_STORE_ID}" \
       --region "${ARGOCD_IDC_REGION}" --group-id "${IDC_GROUP_ID}" >/dev/null 2>&1 \
       && log "deleted IdC group ${IDC_GROUP_ID}" || log "WARNING: IdC group ${IDC_GROUP_ID} delete failed or already gone"
@@ -90,11 +143,11 @@ cleanup() {
   aws eks describe-cluster --name "${NAME}" --region "${AWS_REGION}" >/dev/null 2>"${sweep_err}"
   eks_rc=$?
   if [[ "${eks_rc}" -eq 0 ]]; then
-    log "LEFTOVER: eks cluster ${NAME} still exists"
+    { log "LEFTOVER: eks cluster ${NAME} still exists"; problem=1; }
   elif grep -q "ResourceNotFoundException" "${sweep_err}"; then
     log "ok: eks cluster ${NAME} absent"
   else
-    log "UNKNOWN: aws eks describe-cluster for ${NAME} failed for a reason other than \"not found\" - investigate manually: $(cat "${sweep_err}")"
+    { log "UNKNOWN: aws eks describe-cluster for ${NAME} failed for a reason other than \"not found\" - investigate manually: $(cat "${sweep_err}")"; problem=1; }
   fi
 
   instances_out="$(aws ec2 describe-instances --region "${AWS_REGION}" \
@@ -102,41 +155,41 @@ cleanup() {
     --query 'Reservations[].Instances[].InstanceId' --output text 2>"${sweep_err}")"
   instances_rc=$?
   if [[ "${instances_rc}" -ne 0 ]]; then
-    log "UNKNOWN: aws ec2 describe-instances for ${NAME} failed - investigate manually: $(cat "${sweep_err}")"
+    { log "UNKNOWN: aws ec2 describe-instances for ${NAME} failed - investigate manually: $(cat "${sweep_err}")"; problem=1; }
   elif [[ -z "${instances_out}" ]]; then
     log "ok: no EC2 instances tagged eks:eks-cluster-name=${NAME}"
   else
-    log "LEFTOVER: instances ${instances_out}"
+    { log "LEFTOVER: instances ${instances_out}"; problem=1; }
   fi
 
   vpcs_out="$(aws ec2 describe-vpcs --region "${AWS_REGION}" --filters "Name=tag:Name,Values=${NAME}" --query 'Vpcs[].VpcId' --output text 2>"${sweep_err}")"
   vpcs_rc=$?
   if [[ "${vpcs_rc}" -ne 0 ]]; then
-    log "UNKNOWN: aws ec2 describe-vpcs for ${NAME} failed - investigate manually: $(cat "${sweep_err}")"
+    { log "UNKNOWN: aws ec2 describe-vpcs for ${NAME} failed - investigate manually: $(cat "${sweep_err}")"; problem=1; }
   elif [[ -z "${vpcs_out}" ]]; then
     log "ok: no VPC tagged Name=${NAME}"
   else
-    log "LEFTOVER: VPCs ${vpcs_out}"
+    { log "LEFTOVER: VPCs ${vpcs_out}"; problem=1; }
   fi
 
   repos_out="$(aws ecr describe-repositories --region "${AWS_REGION}" --query "repositories[?starts_with(repositoryName, '${NAME}-')].repositoryName" --output text 2>"${sweep_err}")"
   repos_rc=$?
   if [[ "${repos_rc}" -ne 0 ]]; then
-    log "UNKNOWN: aws ecr describe-repositories for ${NAME}-* failed - investigate manually: $(cat "${sweep_err}")"
+    { log "UNKNOWN: aws ecr describe-repositories for ${NAME}-* failed - investigate manually: $(cat "${sweep_err}")"; problem=1; }
   elif [[ -z "${repos_out}" ]]; then
     log "ok: no ECR repository ${NAME}-*"
   else
-    log "LEFTOVER: ECR repositories ${repos_out}"
+    { log "LEFTOVER: ECR repositories ${repos_out}"; problem=1; }
   fi
 
   fs_out="$(aws fsx describe-file-systems --region "${AWS_REGION}" --query "FileSystems[?Tags[?Key=='Name' && Value=='${NAME}-shared']].FileSystemId" --output text 2>"${sweep_err}")"
   fs_rc=$?
   if [[ "${fs_rc}" -ne 0 ]]; then
-    log "UNKNOWN: aws fsx describe-file-systems for ${NAME}-shared failed - investigate manually: $(cat "${sweep_err}")"
+    { log "UNKNOWN: aws fsx describe-file-systems for ${NAME}-shared failed - investigate manually: $(cat "${sweep_err}")"; problem=1; }
   elif [[ -z "${fs_out}" ]]; then
     log "ok: no FSx file system tagged Name=${NAME}-shared"
   else
-    log "LEFTOVER: FSx file system ${fs_out} (deletion may still be in progress; re-check)"
+    { log "LEFTOVER: FSx file system ${fs_out} (deletion may still be in progress; re-check)"; problem=1; }
   fi
 
   # IAM role: fsx.tf's own aws_iam_role.fsx_csi_driver (#18) - not swept by
@@ -145,16 +198,21 @@ cleanup() {
   aws iam get-role --role-name "${NAME}-fsx-csi-driver" >/dev/null 2>"${sweep_err}"
   role_rc=$?
   if [[ "${role_rc}" -eq 0 ]]; then
-    log "LEFTOVER: IAM role ${NAME}-fsx-csi-driver still exists"
+    { log "LEFTOVER: IAM role ${NAME}-fsx-csi-driver still exists"; problem=1; }
   elif grep -q "NoSuchEntity" "${sweep_err}"; then
     log "ok: IAM role ${NAME}-fsx-csi-driver absent"
   else
-    log "UNKNOWN: aws iam get-role for ${NAME}-fsx-csi-driver failed for a reason other than \"not found\" - investigate manually: $(cat "${sweep_err}")"
+    { log "UNKNOWN: aws iam get-role for ${NAME}-fsx-csi-driver failed for a reason other than \"not found\" - investigate manually: $(cat "${sweep_err}")"; problem=1; }
   fi
 
   rm -f "${sweep_err}"
   set -e
-  log "cleanup: done"
+  if [[ "${problem}" -eq 1 ]]; then
+    log "cleanup: done, but found at least one problem above (WARNING/LEFTOVER/UNKNOWN) - exiting non-zero regardless of the main script's own exit status (${original_rc}) so this run is never read as a clean pass"
+    exit 1
+  fi
+  log "cleanup: done, no leftovers"
+  exit "${original_rc}"
 }
 trap cleanup EXIT
 
@@ -236,7 +294,7 @@ log "team-onboard.sh team-b"
 "${ROOT}/gitops/bootstrap/team-onboard.sh" --team team-b --tf-outputs <(terraform output -json) \
   --source-repo https://github.com/littlemex/distai-platform.git
 
-log "waiting for Argo CD to converge (platform/cells/addons-optional Applications Synced, Healthy where they report health)"
+log "waiting for Argo CD to converge (platform/cells/addons-optional Applications Synced, Healthy where they report health, and each Application's own last sync operation Succeeded)"
 DEADLINE=$(( $(date +%s) + 1800 ))
 while true; do
   NOT_SYNCED="$(kubectl get applications.argoproj.io -n "${ARGOCD_NS}" -o json | python3 -c "
@@ -247,8 +305,19 @@ for a in d.get('items', []):
     name = a['metadata']['name']
     sync = a.get('status', {}).get('sync', {}).get('status', 'Unknown')
     health = a.get('status', {}).get('health', {}).get('status', 'Unknown')
-    if sync != 'Synced' or health not in ('Healthy', 'Unknown'):
-        bad.append(f'{name}: sync={sync} health={health}')
+    # operationState.phase: Argo CD does not report a sync operation as
+    # Succeeded until every phase of it, including PostSync hooks such as
+    # templates/seed.yaml's own Job, has itself finished - unlike
+    # status.sync.status, which reflects only whether the live, non-hook
+    # resources currently match the desired manifests, and can in
+    # principle read Synced while a hook from the same operation is still
+    # running. Absent entirely (an Application with no sync attempted
+    # yet) is tolerated the same as health's own 'Unknown' above, since
+    # such an Application also never reports sync=='Synced' and is
+    # already caught by that condition.
+    phase = a.get('status', {}).get('operationState', {}).get('phase', 'Unknown')
+    if sync != 'Synced' or health not in ('Healthy', 'Unknown') or phase not in ('Succeeded', 'Unknown'):
+        bad.append(f'{name}: sync={sync} health={health} operationPhase={phase}')
 print(chr(10).join(bad))
 ")"
   if [[ -z "${NOT_SYNCED}" ]]; then
@@ -283,16 +352,25 @@ print(chr(10).join(bad))
   sleep 20
 done
 
-# Not also checked inside the Argo CD convergence loop above: an
-# Application's own Synced/Healthy status reflects whether Argo CD
-# applied its objects, not whether templates/seed.yaml's own PostSync
-# hook Job actually finished creating the directories those objects
-# need - a review round raised this as a real gap in that loop. This
-# wait is the actual gate, not that loop: sharedfs's own controller sets
-# a FilesystemShare's Ready condition only once it can confirm the share
-# is actually usable (which needs the seed Job's own work done first),
-# so nothing after this line runs before that is true, regardless of
-# what the Argo CD loop above already reported.
+# A review round raised a real gap in the convergence loop above:
+# Synced/Healthy alone reflects whether Argo CD applied an Application's
+# regular objects, not whether templates/seed.yaml's own PostSync hook Job
+# (which creates the `checkpoints`/`datasets` top-level directories the
+# FilesystemShare objects below need to already exist) has itself
+# finished. The loop above now also requires operationState.phase ==
+# Succeeded, which Argo CD does not set until every phase of a sync
+# operation, including its own PostSync hooks, completes - this is the
+# actual gate against that gap, not the FilesystemShare Ready wait below.
+# An earlier version of this comment claimed sharedfs's own controller
+# sets Ready only once it can confirm the seed Job's work is done; that
+# claim is not supported by the FilesystemShare CRD (its own conditions
+# are only `Ready`, with `Resolved` as attempt 9's own observed reason -
+# nothing in the CRD ties it to a specific namespace's directory, which
+# is FilesystemShareDirectory's own `Prepared` condition instead) and is
+# retracted. The Ready wait below still has independent value (it also
+# waits for sharedfs's own controller to have reconciled the `checkpoints`/
+# `datasets` definitions themselves, not only the hook), just not the
+# ordering guarantee this comment used to claim for it.
 #
 # Found by this real-machine attempt (round 4, 2026-11-27): even after the
 # Argo CD loop above reports every Application (including `sharedfs`, which
@@ -317,7 +395,7 @@ log "waiting for the FilesystemShare/FilesystemShareDirectory CRDs to report Est
 kubectl wait --for=condition=Established \
   crd/filesystemshares.sharedfs.io crd/filesystemsharedirectories.sharedfs.io --timeout=120s
 DEADLINE=$(( $(date +%s) + 60 ))
-while ! kubectl get fss >/dev/null 2>&1; do
+while ! kubectl get filesystemshares.sharedfs.io >/dev/null 2>&1; do
   if [[ "$(date +%s)" -ge "${DEADLINE}" ]]; then
     log "FAIL: kubectl still cannot resolve the fss (FilesystemShare) resource type 60s after the CRD reported Established"
     kubectl get crd filesystemshares.sharedfs.io -o yaml >&2 || true
@@ -326,7 +404,7 @@ while ! kubectl get fss >/dev/null 2>&1; do
   sleep 5
 done
 log "waiting for FilesystemShare objects to report Ready"
-kubectl wait --for=condition=Ready fss/checkpoints fss/datasets --timeout=300s
+kubectl wait --for=condition=Ready filesystemshares.sharedfs.io/checkpoints filesystemshares.sharedfs.io/datasets --timeout=300s
 
 RESULTS_DIR="${HOME}/sharedfs-verify-results"
 mkdir -p "${RESULTS_DIR}"
@@ -398,7 +476,16 @@ sleep 60
 kubectl get pvc ckpt-ungranted -n ungranted -o json | tee "${RESULTS_DIR}/check2b-ungranted-pvc.json"
 kubectl describe pvc ckpt-ungranted -n ungranted | tee "${RESULTS_DIR}/check2b-ungranted-pvc-events.log"
 PHASE="$(kubectl get pvc ckpt-ungranted -n ungranted -o jsonpath='{.status.phase}')"
-[[ "${PHASE}" != "Bound" ]] && log "CHECK 2b PASS: ungranted namespace's claim stayed ${PHASE:-Pending}, not Bound" || { log "CHECK 2b FAIL: ungranted namespace's claim bound"; exit 1; }
+[[ "${PHASE}" != "Bound" ]] && log "CHECK 2b PASS (part 1): ungranted namespace's claim stayed ${PHASE:-Pending}, not Bound" || { log "CHECK 2b FAIL: ungranted namespace's claim bound"; exit 1; }
+# A review round asked for more than "never bound" here: a claim can also
+# stay Pending for reasons unrelated to the grant at all (sharedfs's own
+# controller not running, a transient AWS throttle). sharedfs's own
+# controller reports the actual reason as a PersistentVolumeClaim event
+# with Reason NotGranted (confirmed by attempt 9's own log: "FilesystemShare
+# checkpoints grants namespace ungranted no ReadWrite access") - asserting
+# the Reason, not the full message text, so an upstream wording change
+# does not break this on its own.
+grep -q "NotGranted" "${RESULTS_DIR}/check2b-ungranted-pvc-events.log" && log "CHECK 2b PASS (part 2): sharedfs's own controller reported NotGranted for this claim" || { log "CHECK 2b FAIL: claim stayed unbound, but no NotGranted event was reported - the reason is not confirmed"; exit 1; }
 
 log "check 3: both teams read the shared, admin-seeded dataset; a team's write against it is refused"
 kubectl apply -n fs-admin -f - <<'EOF'
@@ -493,8 +580,12 @@ kubectl get pvc ds-rw-attempt -n team-a -o json | tee "${RESULTS_DIR}/check5-dat
 kubectl describe pvc ds-rw-attempt -n team-a | tee "${RESULTS_DIR}/check5-datasets-rw-pvc-events.log"
 PHASE="$(kubectl get pvc ds-rw-attempt -n team-a -o jsonpath='{.status.phase}')"
 [[ "${PHASE}" != "Bound" ]] || { log "CHECK 5 FAIL: team-a's datasets-rw claim bound (a team should never get write access to the shared dataset)"; exit 1; }
-log "CHECK 5 PASS: team-a's datasets-rw claim stayed ${PHASE:-Pending}, not Bound"
+log "CHECK 5 PASS (part 1): team-a's datasets-rw claim stayed ${PHASE:-Pending}, not Bound"
+# Same reasoning as check 2b's own second assertion: confirmed by attempt
+# 9's own log ("FilesystemShare datasets grants namespace team-a no
+# ReadWrite access"); asserting the Reason, not the full message.
+grep -q "NotGranted" "${RESULTS_DIR}/check5-datasets-rw-pvc-events.log" && log "CHECK 5 PASS (part 2): sharedfs's own controller reported NotGranted for this claim" || { log "CHECK 5 FAIL: claim stayed unbound, but no NotGranted event was reported - the reason is not confirmed"; exit 1; }
 
 log "ALL CHECKS PASS"
-kubectl get fss -A | tee "${RESULTS_DIR}/final-fss-status.log"
+kubectl get filesystemshares.sharedfs.io -A | tee "${RESULTS_DIR}/final-fss-status.log"
 kubectl get fsd -A | tee "${RESULTS_DIR}/final-fsd-status.log"
