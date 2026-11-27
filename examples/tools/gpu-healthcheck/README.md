@@ -134,6 +134,19 @@ isolate. A future PR that wires the intensive suite into a manual quarantine
 workflow (upstream's own `kubectl cordon` + Job-template pattern, unchanged)
 is where that number would actually get produced.
 
+One real number for `p5en.48xlarge`, measured directly (not through this
+tool's own `run.sh`, which has no code path to produce it): a plain,
+unconstrained `all_reduce_perf -b 8M -e 8G -f 2 -g 8` on a real 8x H200 node,
+`NCCL_ALGO` left unset. Peak bus bandwidth 481.29 GB/s (8GB message),
+average 387.7 GB/s across the full sweep, zero out-of-bounds values. This is
+under both of upstream's own `p5en.48xlarge` thresholds in
+`checks/5-nccl-allreduce.sh` (the non-isolated floor, 800 GB/s, and the
+separate NVLink-only isolation sub-test's own threshold, 500 GB/s), but it
+is not the same measurement as either: this run did not force
+`NCCL_P2P_LEVEL=NVL`/`NCCL_NET=Socket` the way the isolation sub-test does,
+so NCCL's own algorithm selection, not a pinned one, picked the path for
+this run. Full evidence in [issue #30](https://github.com/littlemex/distai-platform/issues/30)'s own comment thread.
+
 ### Neuron is out of scope for this PR, on purpose (AGENTS.md section 5)
 
 Upstream's suite is NVIDIA-specific end to end: `nvidia-smi`, DCGM and the
