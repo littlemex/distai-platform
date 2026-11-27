@@ -311,12 +311,16 @@ for a in d.get('items', []):
     # status.sync.status, which reflects only whether the live, non-hook
     # resources currently match the desired manifests, and can in
     # principle read Synced while a hook from the same operation is still
-    # running. Absent entirely (an Application with no sync attempted
-    # yet) is tolerated the same as health's own 'Unknown' above, since
-    # such an Application also never reports sync=='Synced' and is
-    # already caught by that condition.
+    # running, or even while no sync operation has ever actually run at
+    # all (status.sync.status is computed by a continuous diff, not
+    # gated on an operation having been triggered). A review round found
+    # that tolerating a missing operationState the same as health's own
+    # 'Unknown' reopened exactly that gap for an Application whose live
+    # state happens to already match desired with no operation ever
+    # recorded; required strictly, with no 'Unknown' exception, for
+    # exactly that reason.
     phase = a.get('status', {}).get('operationState', {}).get('phase', 'Unknown')
-    if sync != 'Synced' or health not in ('Healthy', 'Unknown') or phase not in ('Succeeded', 'Unknown'):
+    if sync != 'Synced' or health not in ('Healthy', 'Unknown') or phase != 'Succeeded':
         bad.append(f'{name}: sync={sync} health={health} operationPhase={phase}')
 print(chr(10).join(bad))
 ")"
