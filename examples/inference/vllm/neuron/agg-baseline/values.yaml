@@ -78,7 +78,7 @@ engine:
   # no account for it; the template sets HOME and USER for that reason (see
   # ../disagg-pd/values.yaml, engine.podSecurityContext). fsGroup is
   # defense-in-depth for a PersistentVolumeClaim override of cacheVolume/
-  # compileCacheVolume (README, Known issues): some provisioners/access
+  # compileCacheVolume: some provisioners/access
   # modes hand back a volume owned by a group other than 0, which UID 2000
   # (group 0 via runAsGroup) could not then write to without it. It is not
   # what fixes the default `emptyDir` configuration: a real kubelet
