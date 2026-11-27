@@ -218,10 +218,19 @@ engine:
   # name its compile cache directory, fails without a USER variable.
   # Whether UID 2000 can open the Neuron device files is a real-hardware
   # check (README, Known issues).
+  # fsGroup is a confirmed real fix (README, Known issues, and #80): unlike
+  # the NVIDIA image, this image ships no pre-made group-writable
+  # directories for UID 2000, and a kubelet emptyDir with no fsGroup is
+  # root:root mode 0755 -- group 0 (root) has no write bit, so UID 2000
+  # (group 0 via runAsGroup) cannot create files under /cache or
+  # /compile-cache. fsGroup makes the kubelet chown each mounted volume to
+  # this group and add the group-write and setgid bits, matching what the
+  # NVIDIA image's own pre-made directories already give UID 2000 for free.
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 2000
     runAsGroup: 0
+    fsGroup: 0
     seccompProfile:
       type: RuntimeDefault
   containerSecurityContext:
@@ -242,10 +251,15 @@ proxy:
       memory: 2Gi
   nodeSelector: {}
   tolerations: []
+  # fsGroup for the same reason as engine.podSecurityContext above: the
+  # proxy mounts its own /tmp emptyDir (templates/proxy.yaml) under
+  # readOnlyRootFilesystem, and that mount hits the identical root:root
+  # 0755 problem without it.
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 2000
     runAsGroup: 0
+    fsGroup: 0
     seccompProfile:
       type: RuntimeDefault
   containerSecurityContext:

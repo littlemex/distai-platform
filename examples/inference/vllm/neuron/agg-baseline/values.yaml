@@ -76,11 +76,21 @@ engine:
   startupTimeoutSeconds: 1800
   # Non-root, the same UID/GID as the NVIDIA chart, although this image has
   # no account for it; the template sets HOME and USER for that reason (see
-  # ../disagg-pd/values.yaml, engine.podSecurityContext).
+  # ../disagg-pd/values.yaml, engine.podSecurityContext). fsGroup is the fix
+  # for a confirmed real failure (README, Known issues, and #80): unlike the
+  # NVIDIA image, this image ships no pre-made group-writable directories for
+  # UID 2000, and a kubelet emptyDir with no fsGroup is root:root mode 0755 --
+  # group 0 (root) gets no write bit, so UID 2000 (group 0 via runAsGroup)
+  # cannot create files under /cache or /compile-cache. fsGroup makes the
+  # kubelet chown each mounted volume to this group and add the group-write
+  # bit (and the setgid bit, so files created under it keep the group), which
+  # is what the NVIDIA image's own pre-made directories already give UID 2000
+  # for free.
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 2000
     runAsGroup: 0
+    fsGroup: 0
     seccompProfile:
       type: RuntimeDefault
   containerSecurityContext:
