@@ -341,23 +341,68 @@ print(chr(10).join(bad))
   sleep 20
 done
 
-# A review round raised a real, still-open gap in the convergence loop
-# above: Synced/Healthy alone reflects whether Argo CD applied an
-# Application's regular objects, not whether templates/seed.yaml's own
-# PostSync hook Job (which creates the `checkpoints`/`datasets` top-level
-# directories the FilesystemShare objects below need to already exist)
-# has itself finished - status.sync.status is a continuous diff against
-# desired state, not gated on a hook phase. A stricter gate
-# (operationState.phase == Succeeded, which Argo CD does not set until
-# every phase of a sync operation, including PostSync hooks, completes)
-# was tried and reverted: it is a new, additional condition on this
-# script's own main pass path that no real-machine attempt has exercised,
-# and review found it could in principle hold a genuinely converged
-# Application here for no real reason (or the reverse) in cases this task
-# round's own real-machine budget had no attempt left to characterize.
-# Left as a known, open gap rather than an unverified fix: the next
-# real-machine attempt is this gate's own first test, not a confirmation
-# of one already shipped untested.
+# A review round raised a real gap in the convergence loop above:
+# Synced/Healthy alone reflects whether Argo CD applied an Application's
+# regular objects, not whether templates/seed.yaml's own PostSync hook Job
+# (which creates the `checkpoints`/`datasets` top-level directories the
+# FilesystemShare objects below need to already exist) has itself
+# finished - status.sync.status is a continuous diff against desired
+# state, not gated on a hook phase. A first candidate gate
+# (operationState.phase == Succeeded on the whole Application) was tried
+# and reverted: it is a condition on every Application this script waits
+# on, including ones with no hook at all, and no real-machine attempt had
+# confirmed it does not also hold a genuinely converged Application for
+# no reason. This gate instead targets the one resource that actually
+# matters: sharedfs-shares' own PostSync hook Job by name, read from the
+# owning Application's own `status.operationState.syncResult.resources`
+# entry for it - the one place Argo CD's own documented resource-result
+# shape (ResourceResult: group/version/kind/namespace/name/status/
+# message/hookPhase/hookType) should keep a hook's own outcome even
+# after the hook-delete-policy's own `HookSucceeded` deletes the Job
+# object itself. Not yet confirmed on real hardware when this was
+# written: the diagnostic dump below logs the actual field once, before
+# this gate's own assertion runs at all, specifically so a wrong
+# assumption about this field's shape shows up as a clear "not found" in
+# the log rather than a silent false pass.
+SHAREDFS_SHARES_APP="${NAME}-sharedfs-shares"
+SEED_JOB_DEADLINE=$(( $(date +%s) + 300 ))
+SEED_JOB_DIAGNOSTIC_LOGGED=0
+log "waiting for ${SHAREDFS_SHARES_APP}'s own PostSync seed Job (sharedfs-seed-top-level-dirs) to report hookPhase Succeeded"
+while true; do
+  APP_JSON="$(kubectl get application "${SHAREDFS_SHARES_APP}" -n "${ARGOCD_NS}" -o json)"
+  if [[ "${SEED_JOB_DIAGNOSTIC_LOGGED}" == "0" ]]; then
+    log "diagnostic (once, before this gate's own assertion): ${SHAREDFS_SHARES_APP}'s own status.operationState.syncResult.resources"
+    echo "${APP_JSON}" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+resources = d.get('status', {}).get('operationState', {}).get('syncResult', {}).get('resources', [])
+print(json.dumps(resources, indent=2))
+" >&2
+    SEED_JOB_DIAGNOSTIC_LOGGED=1
+  fi
+  SEED_HOOK_PHASE="$(echo "${APP_JSON}" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+resources = d.get('status', {}).get('operationState', {}).get('syncResult', {}).get('resources', [])
+for r in resources:
+    if r.get('kind') == 'Job' and r.get('name') == 'sharedfs-seed-top-level-dirs':
+        print(r.get('hookPhase', ''))
+        break
+")"
+  if [[ "${SEED_HOOK_PHASE}" == "Succeeded" ]]; then
+    log "sharedfs-seed-top-level-dirs reported hookPhase Succeeded"
+    break
+  fi
+  if [[ "$(date +%s)" -ge "${SEED_JOB_DEADLINE}" ]]; then
+    log "FAIL: sharedfs-seed-top-level-dirs did not reach hookPhase Succeeded within 5 minutes (last seen: '${SEED_HOOK_PHASE}')"
+    kubectl get job sharedfs-seed-top-level-dirs -n fs-admin -o yaml >&2 || log "(Job object itself already gone - expected if it succeeded and HookSucceeded deleted it, or if it never ran at all)"
+    kubectl describe job sharedfs-seed-top-level-dirs -n fs-admin >&2 || true
+    kubectl get events -n fs-admin --field-selector involvedObject.name=sharedfs-seed-top-level-dirs >&2 || true
+    exit 1
+  fi
+  sleep 10
+done
+#
 # An earlier version of this comment claimed sharedfs's own controller
 # sets Ready only once it can confirm the seed Job's work is done; that
 # claim is not supported by the FilesystemShare CRD (its own conditions
