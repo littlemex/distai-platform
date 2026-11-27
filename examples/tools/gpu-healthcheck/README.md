@@ -137,15 +137,27 @@ is where that number would actually get produced.
 One real number for `p5en.48xlarge`, measured directly (not through this
 tool's own `run.sh`, which has no code path to produce it): a plain,
 unconstrained `all_reduce_perf -b 8M -e 8G -f 2 -g 8` on a real 8x H200 node,
-`NCCL_ALGO` left unset. Peak bus bandwidth 481.29 GB/s (8GB message),
-average 387.7 GB/s across the full sweep, zero out-of-bounds values. This is
-under both of upstream's own `p5en.48xlarge` thresholds in
-`checks/5-nccl-allreduce.sh` (the non-isolated floor, 800 GB/s, and the
-separate NVLink-only isolation sub-test's own threshold, 500 GB/s), but it
-is not the same measurement as either: this run did not force
-`NCCL_P2P_LEVEL=NVL`/`NCCL_NET=Socket` the way the isolation sub-test does,
-so NCCL's own algorithm selection, not a pinned one, picked the path for
-this run. Full evidence in [issue #30](https://github.com/littlemex/distai-platform/issues/30)'s own comment thread.
+`NCCL_ALGO` (NCCL's own collective-algorithm selection) left unset so NCCL
+picked it automatically, at the largest message size tested (8GB, the `-e`
+bound):
+
+```text
+    size (B)   out-of-place busbw (GB/s)   in-place busbw (GB/s)
+  8589934592                     481.29                   481.25
+# Out of bounds values : 0 OK
+# Avg bus bandwidth    : 387.727  (full 8MB-8GB sweep, out-of-place)
+```
+
+This run did not set `NCCL_P2P_LEVEL`/`NCCL_NET` -- a separate pair of
+variables, unrelated to `NCCL_ALGO`, that upstream's own NVLink-only
+isolation sub-test uses to force NVLink-only and exclude the network path
+entirely. That sub-test's own threshold for `p5en.48xlarge` is 500 GB/s;
+`checks/5-nccl-allreduce.sh`'s separate, non-isolated floor for the same
+instance type is 800 GB/s. This run's own peak (481.29 GB/s) is below both,
+but neither upstream number is a claim this run can confirm or contradict:
+both are for a differently-configured run (the isolation sub-test's own
+`NCCL_P2P_LEVEL=NVL`/`NCCL_NET=Socket`, which this run did not set), not
+this one. Full evidence, including the complete sweep, in [issue #30](https://github.com/littlemex/distai-platform/issues/30#issuecomment-7210501445)'s own comment.
 
 ### Neuron is out of scope for this PR, on purpose (AGENTS.md section 5)
 
