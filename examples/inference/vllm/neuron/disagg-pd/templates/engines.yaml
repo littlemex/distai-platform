@@ -253,6 +253,19 @@ spec:
               value: /cache/home
             - name: USER
               value: vllm
+            # Confirmed on real hardware (#80): the plugin's own
+            # vllm_neuron.utils.hardware_config.get_efa_interface_from_bdf
+            # looks up an EFA network interface co-located with the Neuron
+            # device's own PCI address purely for a CPU-affinity
+            # optimization, unconditionally, and raises RuntimeError (not a
+            # soft warning) when none exists -- it crashed every engine on
+            # trn2.3xlarge's trn-prefill pool (no EFA interface requested
+            # there at all). The plugin's own error message states the fix:
+            # "EFA affinity is a CPU performance optimization, not a
+            # correctness requirement; set NEURON_SKIP_EFA_AFFINITY=1 to
+            # skip it on instances without EFA" (values.yaml, engine.skipEfaAffinity).
+            - name: NEURON_SKIP_EFA_AFFINITY
+              value: {{ ternary "1" "0" $.Values.engine.skipEfaAffinity | quote }}
             {{- if $.Values.model.hfTokenSecret.name }}
             - name: HF_TOKEN
               valueFrom:

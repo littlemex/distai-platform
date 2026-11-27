@@ -97,6 +97,22 @@ engine:
     allowPrivilegeEscalation: false
     capabilities:
       drop: ["ALL"]
+  # Confirmed on real hardware (#80, trn2.3xlarge, ap-southeast-4): the
+  # plugin's own vllm_neuron.utils.hardware_config.get_efa_interface_from_bdf
+  # looks up an EFA network interface co-located with the Neuron device's
+  # own PCI address for a CPU-affinity optimization, unconditionally --
+  # regardless of whether this chart's pod requests an EFA device at all --
+  # and raises RuntimeError, not a soft warning, when none exists
+  # ("No EFA device found at /sys/bus/pci/devices/.../infiniband ... This is
+  # expected on instances without EFA"). trn2.3xlarge's default network
+  # interface (no pool.networkInterfaces override, this chart's own
+  # Prerequisites) has no EFA device at that PCI address, so every engine
+  # crashed on first request until this was set. true (default) sets
+  # NEURON_SKIP_EFA_AFFINITY=1, which the plugin's own error message names
+  # as the fix ("not a correctness requirement"). Set false only once a
+  # node with a real, co-located EFA device for this Neuron device is
+  # confirmed on real hardware, to get the affinity optimization back.
+  skipEfaAffinity: true
 
 # ClusterIP: reachable only from inside the cluster. vLLM has no
 # authentication of its own here.
