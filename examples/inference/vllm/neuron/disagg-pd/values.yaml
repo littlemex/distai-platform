@@ -216,26 +216,28 @@ engine:
   # (template): a UID with no /etc/passwd entry otherwise gets HOME=/, which
   # it cannot write, and Python's getpass.getuser(), which Torch uses to
   # name its compile cache directory, fails without a USER variable.
-  # Whether UID 2000 can open the Neuron device files is confirmed as a
-  # non-issue in practice: a later real-hardware round (#80) reached a
-  # `Ready` pod with this UID and both fixes below applied, which requires
-  # successful device access (the readiness probe's own HTTP health check
-  # passed against the running server), though no dedicated log line
-  # confirming the device open itself was captured.
+  # Whether UID 2000 can open the Neuron device files is consistent with,
+  # not independently confirmed by, a later real-hardware round (#80): the
+  # aggregated chart's own pod reached `Ready` with this UID and
+  # engine.skipEfaAffinity (below) applied, meaning the readiness probe's
+  # own HTTP health check passed against the running server -- this
+  # disaggregated chart itself was never installed on real hardware (see
+  # README, Known issues), and no dedicated log line confirming the device
+  # open itself was captured in either chart's case.
   # fsGroup is defense-in-depth for a PersistentVolumeClaim override of
   # cacheVolume/compileCacheVolume (README, Known issues): some
   # provisioners/access modes hand back a volume owned by a group other
   # than 0, which UID 2000 (group 0 via runAsGroup) could not then write to
-  # without it. It is not what fixes the default `emptyDir` configuration:
-  # a real kubelet (confirmed with a local kind cluster, no Trainium
-  # needed) creates an unmounted-PVC `emptyDir` as `root:root` mode `0777`,
-  # already writable by any UID regardless of group -- an earlier round's
-  # own container-only reproduction (a bind mount on a plain Docker host,
-  # not a real kubelet) wrongly suggested `0755`, because a bind-mounted
-  # host directory inherits the host's own umask instead of the kubelet's
-  # own emptyDir creation mode. This chart's real crash loop on real
-  # hardware was never a cache-permission problem; see
-  # engine.skipEfaAffinity below for the actual, confirmed cause.
+  # without it. It is not what fixes the default `emptyDir` configuration,
+  # and it was never what caused the aggregated chart's own real crash
+  # loop on real hardware (engine.skipEfaAffinity below is): a real kubelet
+  # (confirmed with a local kind cluster, no Trainium needed) creates a
+  # plain emptyDir (no PVC override) as `root:root` mode `0777`, already
+  # writable by any UID regardless of group. An earlier round's own
+  # container-only reproduction (a bind mount on a plain Docker host, not
+  # a real kubelet) wrongly suggested `0755`, because a bind-mounted host
+  # directory inherits the host's own umask instead of the kubelet's own
+  # emptyDir creation mode.
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 2000
@@ -251,26 +253,25 @@ engine:
   # plugin's own vllm_neuron.utils.hardware_config.get_efa_interface_from_bdf
   # looks up an EFA network interface co-located with the Neuron device's
   # own PCI address for a CPU-affinity optimization at engine startup --
-  # observed, in this one traceback, to run independent of whether this
-  # chart's own EFA device request (prefill/decode.efaDevices) is
-  # satisfied -- and raises RuntimeError, not a soft warning, when none
-  # exists at that PCI address ("No EFA device found at
-  # /sys/bus/pci/devices/.../infiniband ... This is expected on instances
-  # without EFA"). Confirmed crashing the aggregated chart's own
-  # trn-prefill pool this way (no pool.networkInterfaces set there); this
-  # disaggregated chart was never itself installed on real hardware (the
-  # harness that fixed this never got past the aggregated chart's own
-  # verification step, #80), so whether an EC2NodeClass that does set
-  # pool.networkInterfaces to an EFA interface on trn2.3xlarge resolves
-  # this lookup differently remains an open, real-hardware question (not
-  # a capacity or quota question -- the pool itself reached `Ready` in
-  # that same round, see README Known issues). true (default) sets
-  # NEURON_SKIP_EFA_AFFINITY=1, which the plugin's own error message names
-  # as the fix ("not a correctness requirement"); false renders no such
-  # variable at all (unset, the plugin's own default), not an explicit "0"
-  # whose parsing was not checked against the plugin's own source. Set
-  # false only once a node with a real, co-located EFA device for this
-  # Neuron device is confirmed, to get the affinity optimization back.
+  # observed, in this one traceback (the aggregated chart's own
+  # trn-prefill pool, no pool.networkInterfaces set there, #80), to run
+  # even though that chart never requests an EFA device at all -- and
+  # raises RuntimeError, not a soft warning, when none exists at that PCI
+  # address ("No EFA device found at /sys/bus/pci/devices/.../infiniband
+  # ... This is expected on instances without EFA" -- and, in the same
+  # single error message, "EFA affinity is a CPU performance optimization,
+  # not a correctness requirement; set NEURON_SKIP_EFA_AFFINITY=1 to skip
+  # it on instances without EFA", the plugin's own named fix). This
+  # disaggregated chart was never itself installed on real hardware in
+  # any attempt (README, Known issues), so whether an EC2NodeClass that
+  # does set pool.networkInterfaces to a real EFA interface on
+  # trn2.3xlarge changes this lookup's own outcome for the role that
+  # requests one remains an open, real-hardware question. true (default)
+  # sets NEURON_SKIP_EFA_AFFINITY=1; false renders no such variable at all
+  # (unset, the plugin's own default), not an explicit "0" whose parsing
+  # was not checked against the plugin's own source. Set false only once a
+  # node with a real, co-located EFA device for this Neuron device is
+  # confirmed, to get the affinity optimization back.
   skipEfaAffinity: true
 
 proxy:
@@ -286,15 +287,18 @@ proxy:
       memory: 2Gi
   nodeSelector: {}
   tolerations: []
-  # fsGroup for the same reason as engine.podSecurityContext above: the
-  # proxy mounts its own /tmp emptyDir (templates/proxy.yaml) under
-  # readOnlyRootFilesystem, and that mount hits the identical root:root
-  # 0755 problem without it.
+  # No fsGroup here: the proxy mounts its own /tmp as a plain emptyDir
+  # (templates/proxy.yaml, under readOnlyRootFilesystem) with no
+  # PersistentVolumeClaim override exposed for it in this values.yaml, so
+  # engine.podSecurityContext's own fsGroup rationale (defense-in-depth for
+  # a PVC override) does not apply here; a real kubelet's default emptyDir
+  # is already writable by any UID (confirmed with a local kind cluster,
+  # see engine.podSecurityContext's own comment), so there is nothing for
+  # fsGroup to fix on this mount either.
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 2000
     runAsGroup: 0
-    fsGroup: 0
     seccompProfile:
       type: RuntimeDefault
   containerSecurityContext:

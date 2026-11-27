@@ -84,8 +84,8 @@ engine:
   # what fixes the default `emptyDir` configuration: a real kubelet
   # (confirmed with a local kind cluster, no Trainium needed -- `kubectl
   # exec ... stat -c "%U:%G %a" /cache` on a pod with this exact
-  # securityContext and no fsGroup) creates an unmounted-PVC `emptyDir` as
-  # `root:root` mode `0777`, already writable by any UID regardless of
+  # securityContext and no fsGroup) creates a plain `emptyDir` (no PVC
+  # override) as `root:root` mode `0777`, already writable by any UID regardless of
   # group -- an earlier round's own container-only reproduction (a bind
   # mount on a plain Docker host, not a real kubelet) wrongly suggested
   # `0755`, because a bind-mounted host directory inherits the host's own
@@ -108,8 +108,8 @@ engine:
   # plugin's own vllm_neuron.utils.hardware_config.get_efa_interface_from_bdf
   # looks up an EFA network interface co-located with the Neuron device's
   # own PCI address for a CPU-affinity optimization at engine startup --
-  # observed, in this one traceback, to run regardless of whether this
-  # chart's pod requests an EFA device at all -- and raises RuntimeError,
+  # observed, in this one traceback, to run even though this chart's pod
+  # never requests an EFA device at all -- and raises RuntimeError,
   # not a soft warning, when none exists ("No EFA device found at
   # /sys/bus/pci/devices/.../infiniband ... This is expected on instances
   # without EFA"). trn2.3xlarge's default network interface (no

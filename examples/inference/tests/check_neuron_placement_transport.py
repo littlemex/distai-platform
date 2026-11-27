@@ -461,6 +461,8 @@ def check_disagg(R, chart):
             for r in ROLES:
                 for w in noroles[r]:
                     cs = neuron_containers(pod_spec(w))
+                    check(f"{rel} skipEfaAffinity=false: {name_of(w)} ({r}) has a Neuron container "
+                          "to check (not vacuously empty)", bool(cs), "no Neuron container found")
                     envd = env_of(cs[0]) if cs else {}
                     check(f"{rel} skipEfaAffinity=false: {name_of(w)} ({r}) renders no "
                           "NEURON_SKIP_EFA_AFFINITY at all (not an explicit \"0\")",
@@ -690,8 +692,13 @@ def check_agg(R, chart):
     nodocs, err = R.render(chart, sets=["engine.skipEfaAffinity=false"])
     if check(f"{rel} engine.skipEfaAffinity=false: helm template", nodocs is not None, err):
         scenarios["skipEfaAffinity=false"] = nodocs
-        for w in workloads(nodocs):
+        nws = workloads(nodocs)
+        check(f"{rel} skipEfaAffinity=false: exactly one vLLM workload (not vacuously empty)",
+              len(nws) == 1, str([name_of(w) for w in nws]))
+        for w in nws:
             cs = neuron_containers(pod_spec(w))
+            check(f"{rel} skipEfaAffinity=false: {name_of(w)} has a Neuron container to check "
+                  "(not vacuously empty)", bool(cs), "no Neuron container found")
             envd = env_of(cs[0]) if cs else {}
             check(f"{rel} engine.skipEfaAffinity=false: {name_of(w)} renders no "
                   "NEURON_SKIP_EFA_AFFINITY at all (not an explicit \"0\")",
