@@ -50,7 +50,7 @@ a `JobSet`, gang admission and checkpoint resume) is
 
 | Script | What it checks | Needs AWS | Duration |
 | --- | --- | --- | --- |
-| `0.static.sh` | Required files, `bash -n`/`shellcheck` on every `*.sh` under `gitops/` (including this suite's own three scripts, not only `bootstrap.sh`), `yamllint` on every literal (non-templated) tracked YAML file, the structural contract of every `addon.yaml`/cells parameter file and the three ApplicationSets (`check_gitops_contract.py`, including issue #27's `pool.capacityType`/`reservation.tags` rules, exercised against disposable copies since the tracked tree ships no reserved pool), the tier and naming rules of issue #41 Decision 2 (`check_addon_tiers.py`), issue #41 Decision 3's checks (0)-(4) of every `cells/*/addons/*.yaml` marker against its catalog entry, including each `overridableKeys` path against the wrapper chart's coalesced defaults (`check_addon_catalog_sync.py`), `helm lint`/`helm template` of `charts/capacity-pool`, `charts/smoke`, `charts/optional-pool` and `charts/dcgm-exporter` (after `helm dependency build`), the same for every values fixture under `fixtures/` (issue #27's shapes: `on-demand`/`reserved`/`flex`, `accelerator`+`tenancy`, a no-value taint, `memQuota`, and seven fixtures that must be refused) with the rendered fields of every fixture -- including the unchanged `on-demand` default -- checked field-by-field by `check_chart_renders.py` against the exact fixture set shipped, `kubeconform` of all rendered output plus the three ApplicationSets and the root Application against pinned upstream + CRD-catalog schemas, `check_pinned_crds.py` validating the rendered CRD-backed objects against each pinned chart's own exact CRD versions, and issue #50's network-interface generator (`check_nic_layout.py`: its output against every committed fixture byte for byte, each committed layout against the issue's own algorithm and table, its refusals, and the `p6-b300` exception entry), and issue #34's `check_jobset_addon.py`/`check_team_rbac_guard.py` (each after its own `--selftest`) | No | About 2 to 3 minutes |
+| `0.static.sh` | Required files, `bash -n`/`shellcheck` on every `*.sh` under `gitops/` (including this suite's own three scripts, not only `bootstrap.sh`), `yamllint` on every literal (non-templated) tracked YAML file, the structural contract of every `addon.yaml`/cells parameter file and the three ApplicationSets (`check_gitops_contract.py`, including issue #27's `pool.capacityType`/`reservation.tags` rules, exercised against disposable copies since the tracked tree ships no reserved pool), the tier and naming rules of issue #41 Decision 2 (`check_addon_tiers.py`), issue #41 Decision 3's checks (0)-(4) of every `cells/*/addons/*.yaml` marker against its catalog entry, including each `overridableKeys` path against the wrapper chart's coalesced defaults (`check_addon_catalog_sync.py`), `helm lint`/`helm template` of `charts/capacity-pool`, `charts/smoke`, `charts/optional-pool` and `charts/dcgm-exporter` (after `helm dependency build`), the same for every values fixture under `fixtures/` (issue #27's shapes: `on-demand`/`reserved`/`flex`, `accelerator`+`tenancy`, a no-value taint, `memQuota`; issue #96's `pool.startupTaints`; and the fixtures among them that must be refused, kept in `0.static.sh`'s own `expect_render_failure` list rather than counted here, since that list is what actually drives the check) with the rendered fields of every fixture -- including the unchanged `on-demand` default -- checked field-by-field by `check_chart_renders.py` against the exact fixture set shipped, `kubeconform` of all rendered output plus the three ApplicationSets and the root Application against pinned upstream + CRD-catalog schemas, `check_pinned_crds.py` validating the rendered CRD-backed objects against each pinned chart's own exact CRD versions, and issue #50's network-interface generator (`check_nic_layout.py`: its output against every committed fixture byte for byte, each committed layout against the issue's own algorithm and table, its refusals, and the `p6-b300` exception entry), and issue #34's `check_jobset_addon.py`/`check_team_rbac_guard.py` (each after its own `--selftest`) | No | About 2 to 3 minutes |
 | `1.e2e.sh` | Builds one foundation cell (with a temporary Identity Center group), the before/after RBAC change on the capability's own access entry, bootstrap idempotency / `--revision`-only re-run / wrong-cluster abort, the `crds`→`controllers`→`capacity` ordering (including two deliberately broken steps), the OCI chart and Git-file-generator-revision checks, no shared CRD between `karpenter-crd` and `karpenter`, the admin smoke canary through Kueue and Karpenter, issue #27's three pools (`-rsv` backed by a real targeted Capacity Reservation, `-od`, `-flex`) with one canary each and a second `-rsv` canary held by quota, then the reservation cancelled, one accidental generator-entry loss, one full bootstrap-object teardown and re-adopt, the `dcgm-exporter` platform-optional add-then-remove cycle with a GPU placement check (issue #41), then destroy and leftovers | Yes | About 60 to 85 minutes (measured 60m07s on the issue #27 implementation's own real-cluster run) |
 | `2.upgrade.sh` | The mechanical version-pair check (decision 6) on a mismatched `karpenter`/`karpenter-crd` bump, then a matched bump against a live cell: no `Application` goes `Degraded`, the `NodePool`-launched instance is not replaced, and the canary pod stays `Running` throughout | Yes | About 35 to 50 minutes |
 
@@ -217,13 +217,67 @@ for `2.upgrade.sh`). As with `infra/foundation/tests/1.e2e.sh`,
 `AWS_PROFILE=default` on the runner (it authenticates via its IAM role
 through IMDS) and `MY_CIDR` is the runner's own public IP, not the Mac's.
 
-### Accelerator extension (issue #28, opt-in: `GITOPS_RUN_ACCEL_E2E=1`)
+### Accelerator extension (issue #28, opt-in flag: `GITOPS_RUN_ACCEL_E2E=1`)
 
 Adds the `accelerators` step's own real-hardware check, light tier (#16):
 a Layer 1 pod on the existing cell's NVIDIA GPU pool, and a second
 foundation cell built in a Trainium-capable Region for a Layer 1 pod on a
 Neuron pool. Off by default, so an ordinary `1.e2e.sh` run (any `NAME`) is
-unaffected.
+unaffected -- **the default is a cost control, not a statement that this
+extension is optional to run.** A plain `1.e2e.sh` run against a generic
+cell (any `NAME` other than `dp-a19-gpu-r3`/`dp-a19-trn-r3`, whose own
+fixtures carry no accelerator pool at all) does not exercise this
+extension's own device plugin, DRA, `accel-device-classes` or either
+accelerator cell fixture; this is not hypothetical, it happened against
+`main`'s own tip on 2026-11-25, predating the dcgm-exporter/14b step
+below (#46, merged later that same day) (cell `dp-main-e2e-r1`, 89
+PASS / 0 FAIL, no accelerator step at all). The base suite's own
+step 14b (`dcgm-exporter`, #41, unconditional, not
+controlled by this flag) does launch a real GPU-family instance on
+every generic-cell run too, now that #46 has landed -- a known gap
+tracked in #87, not fixed here, and distinct from the device-plugin/DRA
+checks this flag actually gates. Nothing in this script stops a
+flag-off run against `dp-a19-gpu-r3`/
+`dp-a19-trn-r3` themselves from skipping every accelerator-specific
+check -- this has not been run and confirmed separately, but the flag,
+not the cell, is what gates every such check. That is narrower than
+"no GPU node is launched": step 11's own admin smoke canary is
+unconditional and lands on `dp-a19-gpu-r3`'s general capacity-pool
+NodePool regardless of the flag, which is itself NVIDIA-backed (see
+the accelerator extension's own canary-release fix, #88) -- a
+flag-off run on this cell still launches a real GPU node for the
+canary, it only skips the accelerator-specific checks themselves.
+**Set
+`GITOPS_RUN_ACCEL_E2E=1` for any pull request that changes
+`gitops/addons/accel-*`, `gitops/addon-catalog/accel-*`,
+`gitops/charts/accel-device-classes/`, the accelerator fields of
+`gitops/charts/capacity-pool/`, `gitops/cells/dp-a19-gpu-r3/`,
+`gitops/cells/dp-a19-trn-r3/`, or the `accelerators` step of `1.e2e.sh`/
+`0.static.sh` itself** -- with the flag off, none of this suite's
+device-plugin/DRA/`accel-device-classes` checks run, so a base-suite
+pass cannot stand in for it in a PR's `## Test Results`.
+
+Cost and time: both cells run on this suite's own light tier (spot/
+on-demand `g7`/`g6e`/`g5` for the GPU cell, spot `trn2.3xlarge` for the
+Trainium cell, #16), billed only while this script's own `terraform
+apply`/`destroy` window for each cell is open. A full run of the base
+suite plus this extension (both cells) took 1h59m37s end to end on a
+real run (2026-11-22, both cells reached a final `RESULT PASS`). A base-suite-only
+run (the generic cell above, no accelerator extension) took
+1h22m on a real run against `main`'s own tip (2026-11-25). Six real
+runs of this extension, against this branch's history, are on record
+so far (2026-11-26, tracked in #87 and #88): four in a row each failed
+before completing, at three different points; a fifth, with a fix for
+one of those points applied, passed that point cleanly but failed at
+a new, previously-unreached defect in the Trainium cell's own NodePool
+count; a sixth, with a fix for that defect added too, reached a final
+`RESULT PASS` (2h19m43s end to end) -- #87 has the full account of the
+four, #88 of the fifth and sixth. Only the sixth run has passed. Treat
+2h19m43s and the 1h59m37s figure above as the known-good order of
+magnitude for planning, not as a number every run reproduces exactly --
+this extension does not measure or isolate why the sixth run took
+longer than the 2026-11-22 run, so neither figure should be read as a
+tight bound.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
@@ -266,6 +320,9 @@ runner/run.sh --ref "${GITOPS_REVISION}" \
 | #27: `accelerator.*` and `tenancy.teamTaint` render taints, mirrored tolerations, the method label and the resource-name annotation | `0.static.sh` section 5b (`check_chart_renders.py` on `fixtures/capacity-pool/accelerator-tenancy.yaml`) |
 | #27: the reservation is cancelled at the end, pass or fail, shown by `DescribeCapacityReservations` | `1.e2e.sh` step 11b-6, and `cleanup()` (`cancel_run_capacity_reservations`) if 11b-6 was not reached |
 | #27: `helm lint` and `kubeconform` pass for every new values shape, including `memQuota` | `0.static.sh` sections 5b and 6 (every `fixture-*.yaml` render is a `kubeconform` target) |
+| #96: `pool.startupTaints` renders exactly on the `NodePool`, validated like `capacity-pool.taints` (effect, no duplicate key+effect), never mirrored as a `ResourceFlavor` toleration | `0.static.sh` section 5b (`fixtures/capacity-pool/startup-taints.yaml`, `startup-taints-with-accelerator-taint.yaml`, `invalid-startup-taint-effect.yaml`, `duplicate-startup-taint.yaml`; `check_chart_renders.py`'s own no-mirroring assertion) |
+| #96: every `cells/*/capacity-pool/*.yaml`'s `pool.startupTaints` key/effect, and every device-plugin add-on's own tolerations, match `vigil-controller`'s own configured `taintKey`/`taintEffect`; a DRA-method pool combined with `pool.startupTaints` is refused | `0.static.sh` section 4a (`check_startup_taint_keys.py`, with its own `--selftest`) |
+| #96: the pinned chart each device-plugin add-on and `vigil-controller` actually names, rendered with and without that add-on's own values, gains exactly the one shared toleration on its own primary advertiser `DaemonSet` with nothing dropped; `vigil-controller`'s own rendered `ConfigMap`/`Deployment` carry its declared config/tolerations/affinity | `0.static.sh` section 8a (`check_startup_taint_renders.py`; needs network access to each add-on's own chart registry) |
 | Upgrade e2e's version-pair check catches a mismatch; a matched bump passes no-replacement and canary-stays-Running | `2.upgrade.sh` experiments A and B |
 | Issue #41: every `gitops/addons/` entry is `tier: core`, every catalog entry `platform-optional` or `workload`, directory name equals `addon`, no name in both directories | `0.static.sh` (`check_addon_tiers.py`) |
 | Issue #41: markers match their catalog entry (stem/`addon`/`fromCatalog`, cell-wide uniqueness, `dir`/`namespace`/`skipCrds`, tier, wave, `dependsOn`, `overridableKeys`) | `0.static.sh` (`check_addon_catalog_sync.py`) |

@@ -1,0 +1,128 @@
+# Node readiness controller for #96: watches for Karpenter's own
+# startupTaints (karpenter.sh/docs/concepts/nodepools/ -- "Karpenter
+# assumes that the taint is temporary and some other system will remove
+# the taint"), auto-discovers which DaemonSets a node is expected to run
+# via the same scheduling predicates kube-scheduler itself uses (no
+# per-DaemonSet configuration needed here or in this platform's own
+# accel-* add-ons), waits for their Pods to go Ready, then removes the
+# taint -- fails open (removes the taint anyway) after timeoutSeconds
+# rather than wedging a node forever if one DaemonSet never comes up.
+# Lands in the "controllers" step, same as karpenter/kueue -- it needs to
+# be running before any capacity-pool NodePool (the "capacity" step) ever
+# launches a node carrying pool.startupTaints, or that node's taint is
+# never removed at all. That ordering is this platform's own operational
+# intent, not something the delivery mechanism enforces for this add-on
+# the way it does for karpenter-crd's CRDs before karpenter: this add-on
+# creates no CRD and no object any later-wave chart reads, so there is no
+# comparable retry-until-converges dependency for a failing
+# vigil-controller Application to be caught by (gitops/README.md's own
+# "Node readiness (startupTaints)" section and this PR's own Changes item
+# state this precisely).
+#
+# config.taintKey/config.knownStartupTaintKeys: distai.dev/startup-not-ready
+# is the one startup-taint key this platform's own capacity-pool chart
+# documents for pool.startupTaints (gitops/charts/capacity-pool's own
+# values.yaml) -- a single shared convention, not a per-pool choice, so
+# capacity-pool itself stays generic and does not know about this add-on.
+# config.taintEffect: NoSchedule, matching every pool.startupTaints entry
+# this platform's own cells are expected to set.
+#
+# config.timeoutSeconds: 300, not the chart's own default 120. This
+# platform's own real-hardware history (gitops/charts/capacity-pool's own
+# README.md, "Known limits") already found a trn2.3xlarge node pulling a
+# 7.5 GiB verification image, and a p4d.24xlarge pulling the EFA
+# device-plugin image, both taking several minutes on a cold node -- a
+# shorter timeout would make this controller fail open before a slow
+# cold pull finishes, losing the protection on exactly the nodes that
+# need it most. Not independently re-measured against the chart's own
+# default 120 in this PR's own real-hardware run -- see the Test Plan's
+# own negative phase and the Test Results for what that run actually
+# showed.
+#
+# config.knownStartupTaintKeys also carries node.kubernetes.io/not-ready
+# and node.kubernetes.io/unreachable, not only this platform's own
+# startup-taint key -- a real defect found on real hardware (two separate
+# runs), not a hypothetical. The chart's own discovery logic
+# (internal/discovery/discovery.go's ExpectedDaemonSets) builds a
+# synthetic Pod straight from each DaemonSet's own pod template and
+# checks it against node.Spec.Taints with only knownStartupTaintKeys
+# stripped -- it never goes through the API server's own admission-time
+# default-toleration injection, the step that normally gives every real
+# DaemonSet Pod an implicit toleration for the built-in
+# node.kubernetes.io/not-ready/unreachable taints kubelet itself clears.
+# A DaemonSet whose own template has no *explicit* toleration for them --
+# accel-nvidia-device-plugin's own rendered tolerations are exactly
+# CriticalAddonsOnly/nvidia.com/gpu/distai.dev/startup-not-ready, none of
+# which matches -- is therefore wrongly excluded from the expected set
+# while the node is still freshly registered (node.kubernetes.io/not-ready
+# present), with no later re-inclusion once it clears: two real runs both
+# showed the taint removed in lockstep with the three EKS-managed
+# DaemonSets alone (aws-node/kube-proxy/eks-pod-identity-agent, each with
+# a bare `operator: Exists` toleration that matches anything, so this gap
+# never affects them), never actually waiting on
+# accel-nvidia-device-plugin at all -- confirmed directly on a third run,
+# with the device plugin deliberately broken, where the taint was removed
+# anyway. This is exactly the documented purpose of knownStartupTaintKeys
+# ("new nodes often have additional temporary taints set by other
+# controllers... this list is used... to strip [them] before evaluating
+# which DaemonSets should run on a node in steady state" -- the chart's
+# own config.example.yaml, whose own example entries name CSI-driver
+# taints, not this one): node.kubernetes.io/not-ready is exactly such a
+# temporary, self-clearing taint, just one Kubernetes sets itself rather
+# than a CSI driver.
+#
+# config.excludeDaemonSets is left empty: no DaemonSet in this platform
+# has been measured to need excluding from the readiness wait (Neuron's
+# own npd sub-component, not an advertiser, already tolerates this taint
+# via its own chart default -- accel-neuron-device-plugin/addon.yaml --
+# so it is included in, not excluded from, the expected set). Revisit
+# only if a real run finds one that needs it.
+#
+# tolerations/affinity: same reasoning as kueue/addon.yaml's own comment
+# ("Both [karpenter and kueue] tolerate CriticalAddonsOnly and target the
+# system node group, since no Karpenter-launched NodePool exists yet") --
+# this controller must stay Healthy before any capacity-pool node exists,
+# and keeping it off Karpenter-launched nodes afterwards avoids the
+# circular case of this controller's own Pod landing on the very node
+# whose taint it is waiting to remove. The chart's own values.yaml
+# default for all three (tolerations, nodeSelector, affinity) is empty
+# (confirmed by reading the pinned chart version), so this is a real
+# override, not a restatement of a chart default.
+#
+# Chart source: https://github.com/Nextdoor/vigil (Apache-2.0), classic
+# Helm repository (index.yaml, not OCI) https://oss.nextdoor.com/vigil,
+# same shape accel-nvidia-device-plugin/addon.yaml already uses for a
+# non-OCI registry -- a new chart registry for this platform, so the
+# platform AppProject's sourceRepos needs one bootstrap.sh re-run per
+# cell after this merges (gitops/README.md, "Versioning"). Version and
+# RBAC confirmed against the chart's own index.yaml/clusterrole.yaml/
+# role.yaml at the pinned version, 2026-11-27.
+addon: vigil-controller
+# RFC #41 Decision 1: gitops/addons/ is delivered unconditionally to
+# every cell, no opt-out, and check_addon_tiers.py requires every
+# addon.yaml here to say so explicitly.
+tier: core
+chart: vigil-controller
+repoURL: https://oss.nextdoor.com/vigil
+version: "0.7.0"
+wave: controllers
+namespace: vigil-system
+values:
+  tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: karpenter.sh/nodepool
+                operator: DoesNotExist
+  config:
+    taintKey: "distai.dev/startup-not-ready"
+    taintEffect: "NoSchedule"
+    knownStartupTaintKeys:
+      - "distai.dev/startup-not-ready"
+      - "node.kubernetes.io/not-ready"
+      - "node.kubernetes.io/unreachable"
+    timeoutSeconds: 300

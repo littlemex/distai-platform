@@ -23,9 +23,20 @@
 # equivalent chart key"). nodeSelector carries the same label as well, the
 # key #28's Interface table names.
 #
-# Tolerations stay at the chart default (CriticalAddonsOnly,
-# nvidia.com/gpu:NoSchedule), so a GPU NodePool that adds the usual
-# nvidia.com/gpu taint later still gets its advertiser.
+# tolerations repeats the chart's own default (CriticalAddonsOnly,
+# nvidia.com/gpu:NoSchedule) rather than leaving it unset, and adds
+# distai.dev/startup-not-ready:NoSchedule (#96): the chart's own template
+# replaces the whole tolerations list rather than merging it (the same
+# "Helm replaces lists" rule this file's own affinity comment already
+# applies to nodeSelectorTerms), so setting this value at all without
+# repeating the chart defaults would silently drop the
+# CriticalAddonsOnly/nvidia.com/gpu tolerations this Pod still needs. The
+# new entry lets this DaemonSet's own Pod schedule onto a node a
+# capacity-pool NodePool opted into pool.startupTaints for -- without it,
+# this Pod could never become Ready while the taint is present, and
+# vigil-controller (gitops/addons/vigil-controller) would only ever
+# remove that taint at its own timeout, not once this advertiser is
+# actually ready.
 #
 # Chart source: https://github.com/NVIDIA/k8s-device-plugin (tag v0.20.2),
 # classic Helm repository (index.yaml, not OCI), install section of the
@@ -45,6 +56,15 @@ namespace: nvidia-device-plugin
 values:
   nodeSelector:
     distai.dev/nvidia-gpu-method: device-plugin
+  tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+    - key: distai.dev/startup-not-ready
+      operator: Exists
+      effect: NoSchedule
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:

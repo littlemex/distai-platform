@@ -34,6 +34,23 @@
 # found Karpenter estimates neuroncore: 8 for trn2.3xlarge where the node
 # reports 4 (#28, Alternatives Considered).
 #
+# devicePlugin.tolerations repeats the chart's own default (CriticalAddonsOnly,
+# aws.amazon.com/neuron:NoSchedule, the SageMaker node-health-status
+# toleration) rather than leaving it unset, and adds
+# distai.dev/startup-not-ready:NoSchedule (#96): confirmed by reading the
+# pinned chart version's own values.yaml, Helm replaces the whole
+# devicePlugin.tolerations list rather than merging it, so setting this
+# value at all without repeating the chart defaults would silently drop
+# tolerations this Pod still needs. The new entry lets this DaemonSet's
+# own Pod schedule onto a node a capacity-pool NodePool opted into
+# pool.startupTaints for -- without it, this Pod could never become
+# Ready while the taint is present, and vigil-controller
+# (gitops/addons/vigil-controller) would only ever remove that taint at
+# its own timeout, not once this advertiser is actually ready. npd needs
+# no change: the chart's own npd.tolerations default
+# (effect: NoSchedule/NoExecute, operator: Exists) already tolerates any
+# NoSchedule or NoExecute taint regardless of key.
+#
 # Chart source: https://github.com/aws-neuron/neuron-helm-charts (chart
 # version 1.11.2), OCI:
 #   oci://public.ecr.aws/neuron/neuron-helm-chart:1.11.2
@@ -52,6 +69,19 @@ values:
   devicePlugin:
     nodeSelector:
       distai.dev/neuron-method: device-plugin
+    tolerations:
+      - key: CriticalAddonsOnly
+        operator: Exists
+      - key: aws.amazon.com/neuron
+        operator: Exists
+        effect: NoSchedule
+      - key: sagemaker.amazonaws.com/node-health-status
+        operator: Equal
+        value: Unschedulable
+        effect: NoSchedule
+      - key: distai.dev/startup-not-ready
+        operator: Exists
+        effect: NoSchedule
   draDriver:
     enabled: false
   npd:

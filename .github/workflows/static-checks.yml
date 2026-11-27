@@ -1,0 +1,808 @@
+name: Static checks
+
+# Runs this repository's own existing static-check scripts
+# (infra/foundation/tests/0.static.sh, infra/identities/tests/0.static.sh,
+# gitops/tests/0.static.sh, examples/inference/tests/0.static.sh,
+# examples/training/tests/0.static.sh,
+# examples/tools/run-board/tests/run_tests.sh) on every pull request. None
+# of the six needs AWS credentials or a real cluster (each one's own
+# header comment says so; confirmed by reading every one on 2026-11-26,
+# infra/identities/tests/0.static.sh added 2026-11-27) -- that is exactly
+# why these six, and not the *.e2e.sh / 1.e2e.sh scripts next to them, are
+# wired up here. A workflow-level `on.pull_request.paths` filter is
+# deliberately not used: if a pull request touches none of the listed
+# paths, GitHub never starts the workflow at all, so a required status
+# check named after it would sit pending forever and block the pull
+# request. Instead, every pull request starts this workflow, one job
+# (`changed-paths`) computes which of the six areas actually changed, each
+# check job is skipped (not failed) when its own area did not change, and
+# the final `static` job always runs and fails if anything it depends on
+# neither succeeded nor was legitimately skipped. `static` is the one job
+# name meant to be set as a required status check (see issue #53).
+#
+# Every job here needs no AWS credentials: no job assumes a role, reads an
+# AWS secret, or calls an AWS API, and no job's own `permissions:` block
+# grants anything beyond `contents: read` (the six tool-install/script
+# jobs) or `pull-requests: read` (`changed-paths`, which never checks the
+# repository out at all); `static` itself needs neither and declares
+# `permissions: {}`. By GitHub's own documented default for a plain
+# `pull_request` trigger, a pull request from a fork gets exactly this same
+# token shape as one from this repository -- this is not separately
+# exercised with an actual fork pull request here (this automation has no
+# second account to open one from), so this claim rests on that documented
+# default, not on a run of this workflow against a fork.
+#
+# Every tool a job installs by name below (Terraform, TFLint, TFLint's own
+# "aws" ruleset plugin, Helm, shellcheck, uv) is pinned to one version and
+# installed from its own checksum-verified download, never from apt or the
+# runner image's own pre-installed copy (Helm happens to already be on
+# `ubuntu-24.04` at the same version this workflow pins, checked
+# 2026-11-26, but GitHub documents a hosted image's own pre-installed
+# versions as changing on their own schedule --
+# https://github.com/actions/runner-images -- so relying on that copy
+# would make "pinned" track whatever the image carries this week instead
+# of a version this workflow chose). The exact versions were chosen to
+# match this repository's own EC2 test runner at the time this workflow
+# was written (`runner/runner.yaml`, a file in the distai-platform skill
+# directory, not part of this repository and not something a reviewer of
+# this repository can open); nothing here depends on that file staying in
+# sync going forward, and each version/checksum pair appears inline, once
+# per job that needs it (no composite action or shared file extracts it
+# into one place -- a real duplication this file accepts rather than adds
+# a new kind of file to review, see the Caveat on the matching `## Changes`
+# item in the pull request this workflow shipped with).
+#
+# awsome-distributed-ai's own workflows use a version tag for each action
+# and `ubuntu-latest` for `runs-on` (checked against
+# awslabs/awsome-distributed-ai's .github/workflows/ on 2026-11-26). This
+# workflow instead pins every action to a commit SHA and runs on the fixed
+# `ubuntu-24.04` label, matching this repository's own existing workflows
+# (.github/workflows/tool-attribution-check.yml,
+# .github/workflows/neuron-cpu-compile-check.yml) and AGENTS.md section 7
+# ("Actions are pinned by commit SHA; the runner is fixed, like
+# ubuntu-24.04") rather than awsome's convention -- a floating tag can be
+# moved to point at different code after review, and `ubuntu-latest` is
+# itself a moving target GitHub repoints at a new image on its own
+# schedule.
+#
+# `pull_request_target` is never used here, for the same reason
+# .github/workflows/tool-attribution-check.yml's own header gives: it would
+# run this workflow's own code against head-controlled inputs with a token
+# that can be granted write access, which is the shape of risk this
+# repository's rule against it exists to avoid. A plain `pull_request`
+# trigger checks out the pull request's own merge ref, which is fine here
+# because every job's permissions stay read-only and nothing here reads a
+# secret.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # ----------------------------------------------------------------------
+  # Decide which of the six areas changed, from the pull request's own
+  # file list (the `pulls/.../files` API), the same source
+  # tool-attribution-check.yml already uses for the commit list -- not a
+  # `git diff` against a locally fetched base, which would need a deeper
+  # checkout (`fetch-depth: 0`) just to compute something the API already
+  # gives directly. Each output is the literal string "true" or "false"
+  # (a job's `if:` compares strings, not booleans, so this avoids YAML's
+  # own truthy/falsy surprises for OFF).
+  #
+  # Four cases beyond a plain one-prefix-per-area match. Case 3 below was
+  # found wrong on a real run (cited in this pull request's own Test
+  # Results); cases 1, 2 and 4 were found by review and are each verified
+  # by a local, deterministic fixture (Test Results again), not by a
+  # live pull request reproducing the exact failure the fixture checks
+  # for.
+  #   1. A rename moves a file's own old path out of an area without ever
+  #      naming that old path under `.filename` (the API reports only the
+  #      new path there; the old one is `.previous_filename`, present only
+  #      on a renamed entry) -- both are matched below, so a rename out of
+  #      `infra/foundation/`, for example, still turns `foundation` on,
+  #      the same as any other change under that path would. This does
+  #      not force every area to `true` by itself -- only whichever
+  #      area(s) the old and new paths belong to.
+  #   2. The `pulls/.../files` endpoint pages up to 3,000 entries and never
+  #      reports more, with no error -- a pull request at or past that cap
+  #      would otherwise read as "nothing changed" for whatever files
+  #      pagination cut off. `github.event.pull_request.changed_files` is
+  #      the pull request's own true count; a mismatch forces every area
+  #      to `true` rather than trust a partial list (the same "a count
+  #      mismatch is a hard stop, not a lower bound" rule
+  #      tool-attribution-check.yml already applies to its own commit
+  #      list, with the difference that endpoint's own 250-commit cap is
+  #      treated as an acceptable, warned partial check, not a forced
+  #      "run everything": a partial list of commit messages to scan for
+  #      an AI tool's name is still real evidence for every commit it did
+  #      cover, where a partial list of changed files is not real evidence
+  #      that any area it omitted did not change).
+  #   3. This workflow file is in no area's own prefix, so a pull request
+  #      that only edits `.github/workflows/static-checks.yml` (including
+  #      every one that shipped it) would otherwise never run any of the
+  #      six jobs it just changed, and `static` would pass on a change to
+  #      itself that installed a broken tool or a wrong checksum. A change
+  #      to this file forces every area to `true`.
+  #   4. `examples/training/tests/0.static.sh` itself reads two paths
+  #      under `gitops/`, not under `examples/training/`: it names
+  #      `gitops/bootstrap/team-onboard.sh` directly (`--team-onboard`,
+  #      checked against `check_training_render.py`'s own rendered
+  #      objects) and globs `gitops/charts/jobset-crd/crds/*.yaml` (the
+  #      vendored JobSet CRD it validates a render against) -- confirmed
+  #      by reading that script. The trigger pattern below for this case,
+  #      `gitops/charts/jobset-crd/`, is deliberately broader than that
+  #      one `crds/*.yaml` glob (a safe superset: it also catches, for
+  #      example, a change to that chart's own `Chart.yaml`, which the
+  #      script does not read today but a future change to it plausibly
+  #      would). A pull request changing only one of the two paths above
+  #      does turn `gitops` on (the whole of `gitops/` is that area's own
+  #      prefix) but touches no file under `examples/training/`, so
+  #      without this case it would skip `training` while silently
+  #      changing an input that script's own checks read.
+  #      Both paths are matched as further triggers for `training` below,
+  #      found by reading every one of the six scripts for a path
+  #      outside its own prefix; none of the other five read outside
+  #      their own.
+  changed-paths:
+    name: changed paths
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      foundation: ${{ steps.paths.outputs.foundation }}
+      identities: ${{ steps.paths.outputs.identities }}
+      gitops: ${{ steps.paths.outputs.gitops }}
+      inference: ${{ steps.paths.outputs.inference }}
+      training: ${{ steps.paths.outputs.training }}
+      run_board: ${{ steps.paths.outputs.run_board }}
+    steps:
+      - name: List the files changed in this pull request
+        id: paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          set -euo pipefail
+          # Two calls to the same read-only, same-token endpoint (cheap;
+          # this is not the GitHub API's own anonymous rate limit
+          # infra/foundation's own step below used to hit): the first,
+          # raw_entries.txt, is one filename per line, one per changed
+          # file regardless of rename -- api_count below counts these
+          # lines, compared against the pull request's own true count.
+          # The second appends a renamed entry's own previous_filename as
+          # a further line of changed_files.txt, for the prefix match
+          # below.
+          gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" --jq '.[] | .filename' \
+            > "${RUNNER_TEMP}/raw_entries.txt"
+          cp "${RUNNER_TEMP}/raw_entries.txt" "${RUNNER_TEMP}/changed_files.txt"
+          gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+            --jq '.[] | select(.previous_filename != null) | .previous_filename' \
+            >> "${RUNNER_TEMP}/changed_files.txt"
+          echo "::group::changed (and, for a rename, previous) file paths"
+          cat "${RUNNER_TEMP}/changed_files.txt"
+          echo "::endgroup::"
+
+          declare -A result=(
+            [foundation]=false
+            [identities]=false
+            [gitops]=false
+            [inference]=false
+            [training]=false
+            [run_board]=false
+          )
+
+          api_count=$(wc -l < "${RUNNER_TEMP}/raw_entries.txt" | tr -d ' ')
+          if [[ "${api_count}" != "${PR_CHANGED_FILES}" ]]; then
+            echo "::warning::pulls/.../files listed ${api_count} file(s), the pull request itself reports ${PR_CHANGED_FILES}; treating every area as changed rather than trusting a partial list (likely the endpoint's own 3,000-file cap)"
+            for name in "${!result[@]}"; do result[${name}]=true; done
+          elif grep -qxF '.github/workflows/static-checks.yml' "${RUNNER_TEMP}/changed_files.txt"; then
+            echo "::notice::this workflow file is itself changed; treating every area as changed so the change to it is exercised for real"
+            for name in "${!result[@]}"; do result[${name}]=true; done
+          else
+            # One area can have more than one trigger pattern (training
+            # has three: its own prefix, plus the two gitops/ paths its
+            # own 0.static.sh reads directly -- see this job's own header
+            # comment, point 4). A plain associative array could not hold
+            # that, hence a list of "area:pattern" pairs instead.
+            trigger_patterns=(
+              "foundation:infra/foundation/"
+              "identities:infra/identities/"
+              "gitops:gitops/"
+              "inference:examples/inference/"
+              "training:examples/training/"
+              "training:gitops/bootstrap/team-onboard\.sh"
+              "training:gitops/charts/jobset-crd/"
+              "run_board:examples/tools/run-board/"
+            )
+            for rule in "${trigger_patterns[@]}"; do
+              name="${rule%%:*}"
+              pattern="${rule#*:}"
+              if grep -qE "^${pattern}" "${RUNNER_TEMP}/changed_files.txt"; then
+                result[${name}]=true
+              fi
+            done
+          fi
+          for name in "${!result[@]}"; do
+            echo "${name}=${result[${name}]}" >> "${GITHUB_OUTPUT}"
+          done
+
+  # ----------------------------------------------------------------------
+  foundation-static:
+    name: infra/foundation static checks
+    needs: changed-paths
+    if: needs.changed-paths.outputs.foundation == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Terraform (pinned, checksum-verified; same pin as the EC2 test runner)
+        env:
+          TF_VER: 1.17.2
+          TF_SHA256: e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/terraform.zip" \
+            "https://releases.hashicorp.com/terraform/${TF_VER}/terraform_${TF_VER}_linux_amd64.zip"
+          got="$(sha256sum "${RUNNER_TEMP}/terraform.zip" | awk '{print $1}')"
+          [[ "${got}" == "${TF_SHA256}" ]] || { echo "FAIL terraform ${TF_VER} checksum mismatch: got ${got}, want ${TF_SHA256}"; exit 1; }
+          sudo unzip -o "${RUNNER_TEMP}/terraform.zip" -d /usr/local/bin terraform
+          sudo chmod 0755 /usr/local/bin/terraform
+          terraform version
+
+      - name: Install TFLint (pinned, checksum-verified; same pin as the EC2 test runner)
+        env:
+          TFLINT_VER: 0.66.0
+          TFLINT_SHA256: 22be11cadc25cd02401e94c0ccc91aa63467debb8485c2a755d98f4c0a9d1e2e
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/tflint.zip" \
+            "https://github.com/terraform-linters/tflint/releases/download/v${TFLINT_VER}/tflint_linux_amd64.zip"
+          got="$(sha256sum "${RUNNER_TEMP}/tflint.zip" | awk '{print $1}')"
+          [[ "${got}" == "${TFLINT_SHA256}" ]] || { echo "FAIL tflint ${TFLINT_VER} checksum mismatch: got ${got}, want ${TFLINT_SHA256}"; exit 1; }
+          sudo unzip -o "${RUNNER_TEMP}/tflint.zip" -d /usr/local/bin tflint
+          sudo chmod 0755 /usr/local/bin/tflint
+          tflint --version
+
+      - name: Install shellcheck (pinned, checksum-verified; same pin as the EC2 test runner)
+        env:
+          SC_VER: v0.11.0
+          SC_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SC_VER}/shellcheck-${SC_VER}.linux.x86_64.tar.xz"
+          got="$(sha256sum "${RUNNER_TEMP}/shellcheck.tar.xz" | awk '{print $1}')"
+          [[ "${got}" == "${SC_SHA256}" ]] || { echo "FAIL shellcheck ${SC_VER} checksum mismatch: got ${got}, want ${SC_SHA256}"; exit 1; }
+          tar -xJf "${RUNNER_TEMP}/shellcheck.tar.xz" -C "${RUNNER_TEMP}" "shellcheck-${SC_VER}/shellcheck"
+          sudo install -m 0755 "${RUNNER_TEMP}/shellcheck-${SC_VER}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Pre-install TFLint's own "aws" ruleset plugin (pinned, checksum-verified)
+        # infra/foundation/tests/0.static.sh runs `tflint --chdir=... --init`,
+        # which -- with no plugin already in place -- fetches
+        # terraform-linters/tflint-ruleset-aws's own pinned release
+        # (infra/foundation's own .tflint.hcl: version = "0.50.0") from the
+        # GitHub API. A real run of this exact step on 2026-11-26 failed
+        # that fetch with "403 API rate limit exceeded" against
+        # GitHub-hosted runners' own shared, unauthenticated IP pool. An
+        # earlier version of this step instead passed GITHUB_TOKEN through
+        # so `tflint` could authenticate that one request itself; this
+        # version avoids the question that raised (a read-only token,
+        # still handed to a step whose own script this pull request's
+        # head can edit) by never letting `tflint --init` make that
+        # network call at all: the plugin is placed, checksum-verified,
+        # exactly where `tflint --init` itself places it (confirmed
+        # directly on this repository's own EC2 test runner, not a
+        # GitHub Actions run, with no plugin pre-installed: `~/.tflint.d/
+        # plugins/github.com/terraform-linters/tflint-ruleset-aws/
+        # <version>/tflint-ruleset-aws`, with no further `_<os>_<arch>`
+        # suffix on the binary name, and the release archive's own single
+        # file already has that same bare name once unzipped), so
+        # `tflint --init` finds "All plugins are already installed" and
+        # never calls out at all -- confirmed again on the GitHub Actions
+        # run cited in this pull request's own Test Results -- the same
+        # checksum-verified-download shape every other tool in this
+        # workflow uses, consistent with this file's own header comment.
+        env:
+          TFLINT_RULESET_AWS_VER: 0.50.0
+          TFLINT_RULESET_AWS_SHA256: cdd433fdbc0929e7b9f9709dd9e72237fdfe1fc235674445c284b1e4b94a5c26
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/tflint-ruleset-aws.zip" \
+            "https://github.com/terraform-linters/tflint-ruleset-aws/releases/download/v${TFLINT_RULESET_AWS_VER}/tflint-ruleset-aws_linux_amd64.zip"
+          got="$(sha256sum "${RUNNER_TEMP}/tflint-ruleset-aws.zip" | awk '{print $1}')"
+          [[ "${got}" == "${TFLINT_RULESET_AWS_SHA256}" ]] || { echo "FAIL tflint-ruleset-aws ${TFLINT_RULESET_AWS_VER} checksum mismatch: got ${got}, want ${TFLINT_RULESET_AWS_SHA256}"; exit 1; }
+          unzip -o "${RUNNER_TEMP}/tflint-ruleset-aws.zip" -d "${RUNNER_TEMP}/tflint-ruleset-aws-extracted"
+          plugin_dir="${HOME}/.tflint.d/plugins/github.com/terraform-linters/tflint-ruleset-aws/${TFLINT_RULESET_AWS_VER}"
+          mkdir -p "${plugin_dir}"
+          install -m 0755 "${RUNNER_TEMP}/tflint-ruleset-aws-extracted/tflint-ruleset-aws" "${plugin_dir}/tflint-ruleset-aws"
+
+      - name: Run infra/foundation/tests/0.static.sh
+        run: bash infra/foundation/tests/0.static.sh
+
+  # ----------------------------------------------------------------------
+  identities-static:
+    name: infra/identities static checks
+    needs: changed-paths
+    if: needs.changed-paths.outputs.identities == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Terraform (pinned, checksum-verified; same pin as foundation-static above and the EC2 test runner)
+        env:
+          TF_VER: 1.17.2
+          TF_SHA256: e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/terraform.zip" \
+            "https://releases.hashicorp.com/terraform/${TF_VER}/terraform_${TF_VER}_linux_amd64.zip"
+          got="$(sha256sum "${RUNNER_TEMP}/terraform.zip" | awk '{print $1}')"
+          [[ "${got}" == "${TF_SHA256}" ]] || { echo "FAIL terraform ${TF_VER} checksum mismatch: got ${got}, want ${TF_SHA256}"; exit 1; }
+          sudo unzip -o "${RUNNER_TEMP}/terraform.zip" -d /usr/local/bin terraform
+          sudo chmod 0755 /usr/local/bin/terraform
+          terraform version
+
+      - name: Install TFLint (pinned, checksum-verified; same pin as foundation-static above and the EC2 test runner)
+        env:
+          TFLINT_VER: 0.66.0
+          TFLINT_SHA256: 22be11cadc25cd02401e94c0ccc91aa63467debb8485c2a755d98f4c0a9d1e2e
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/tflint.zip" \
+            "https://github.com/terraform-linters/tflint/releases/download/v${TFLINT_VER}/tflint_linux_amd64.zip"
+          got="$(sha256sum "${RUNNER_TEMP}/tflint.zip" | awk '{print $1}')"
+          [[ "${got}" == "${TFLINT_SHA256}" ]] || { echo "FAIL tflint ${TFLINT_VER} checksum mismatch: got ${got}, want ${TFLINT_SHA256}"; exit 1; }
+          sudo unzip -o "${RUNNER_TEMP}/tflint.zip" -d /usr/local/bin tflint
+          sudo chmod 0755 /usr/local/bin/tflint
+          tflint --version
+
+      - name: Install shellcheck (pinned, checksum-verified; same pin as foundation-static above and the EC2 test runner)
+        env:
+          SC_VER: v0.11.0
+          SC_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SC_VER}/shellcheck-${SC_VER}.linux.x86_64.tar.xz"
+          got="$(sha256sum "${RUNNER_TEMP}/shellcheck.tar.xz" | awk '{print $1}')"
+          [[ "${got}" == "${SC_SHA256}" ]] || { echo "FAIL shellcheck ${SC_VER} checksum mismatch: got ${got}, want ${SC_SHA256}"; exit 1; }
+          tar -xJf "${RUNNER_TEMP}/shellcheck.tar.xz" -C "${RUNNER_TEMP}" "shellcheck-${SC_VER}/shellcheck"
+          sudo install -m 0755 "${RUNNER_TEMP}/shellcheck-${SC_VER}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Pre-install TFLint's own "aws" ruleset plugin (pinned, checksum-verified; same reasoning as foundation-static above)
+        env:
+          TFLINT_RULESET_AWS_VER: 0.50.0
+          TFLINT_RULESET_AWS_SHA256: cdd433fdbc0929e7b9f9709dd9e72237fdfe1fc235674445c284b1e4b94a5c26
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/tflint-ruleset-aws.zip" \
+            "https://github.com/terraform-linters/tflint-ruleset-aws/releases/download/v${TFLINT_RULESET_AWS_VER}/tflint-ruleset-aws_linux_amd64.zip"
+          got="$(sha256sum "${RUNNER_TEMP}/tflint-ruleset-aws.zip" | awk '{print $1}')"
+          [[ "${got}" == "${TFLINT_RULESET_AWS_SHA256}" ]] || { echo "FAIL tflint-ruleset-aws ${TFLINT_RULESET_AWS_VER} checksum mismatch: got ${got}, want ${TFLINT_RULESET_AWS_SHA256}"; exit 1; }
+          unzip -o "${RUNNER_TEMP}/tflint-ruleset-aws.zip" -d "${RUNNER_TEMP}/tflint-ruleset-aws-extracted"
+          plugin_dir="${HOME}/.tflint.d/plugins/github.com/terraform-linters/tflint-ruleset-aws/${TFLINT_RULESET_AWS_VER}"
+          mkdir -p "${plugin_dir}"
+          install -m 0755 "${RUNNER_TEMP}/tflint-ruleset-aws-extracted/tflint-ruleset-aws" "${plugin_dir}/tflint-ruleset-aws"
+
+      - name: Run infra/identities/tests/0.static.sh
+        run: bash infra/identities/tests/0.static.sh
+
+  # ----------------------------------------------------------------------
+  gitops-static:
+    name: gitops static checks
+    needs: changed-paths
+    if: needs.changed-paths.outputs.gitops == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Helm (pinned, checksum-verified; same pin as the EC2 test runner, not the runner image's own copy)
+        env:
+          HELM_VER: v3.22.1
+          HELM_SHA256: 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/helm.tgz" "https://get.helm.sh/helm-${HELM_VER}-linux-amd64.tar.gz"
+          got="$(sha256sum "${RUNNER_TEMP}/helm.tgz" | awk '{print $1}')"
+          [[ "${got}" == "${HELM_SHA256}" ]] || { echo "FAIL helm ${HELM_VER} checksum mismatch: got ${got}, want ${HELM_SHA256}"; exit 1; }
+          tar -xzf "${RUNNER_TEMP}/helm.tgz" -C "${RUNNER_TEMP}" "linux-amd64/helm"
+          sudo install -m 0755 "${RUNNER_TEMP}/linux-amd64/helm" /usr/local/bin/helm
+          helm version --short
+
+      - name: Install uv (pinned, checksum-verified; same pin as the EC2 test runner)
+        env:
+          UV_VER: 0.13.9
+          UV_SHA256: a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/uv.tar.gz" \
+            "https://github.com/astral-sh/uv/releases/download/${UV_VER}/uv-x86_64-unknown-linux-gnu.tar.gz"
+          got="$(sha256sum "${RUNNER_TEMP}/uv.tar.gz" | awk '{print $1}')"
+          [[ "${got}" == "${UV_SHA256}" ]] || { echo "FAIL uv ${UV_VER} checksum mismatch: got ${got}, want ${UV_SHA256}"; exit 1; }
+          tar -xzf "${RUNNER_TEMP}/uv.tar.gz" -C "${RUNNER_TEMP}" "uv-x86_64-unknown-linux-gnu/uv"
+          sudo install -m 0755 "${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu/uv" /usr/local/bin/uv
+          uv --version
+
+      - name: Install shellcheck (pinned, checksum-verified; same pin as the EC2 test runner)
+        env:
+          SC_VER: v0.11.0
+          SC_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SC_VER}/shellcheck-${SC_VER}.linux.x86_64.tar.xz"
+          got="$(sha256sum "${RUNNER_TEMP}/shellcheck.tar.xz" | awk '{print $1}')"
+          [[ "${got}" == "${SC_SHA256}" ]] || { echo "FAIL shellcheck ${SC_VER} checksum mismatch: got ${got}, want ${SC_SHA256}"; exit 1; }
+          tar -xJf "${RUNNER_TEMP}/shellcheck.tar.xz" -C "${RUNNER_TEMP}" "shellcheck-${SC_VER}/shellcheck"
+          sudo install -m 0755 "${RUNNER_TEMP}/shellcheck-${SC_VER}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Register the Helm chart repositories gitops/ charts' own Chart.yaml dependencies name
+        # gitops/tests/0.static.sh's own `helm dependency build` calls
+        # (for charts/dcgm-exporter and any gitops/addon-catalog/*/
+        # wrapper chart with a `dependencies:` entry) resolve against
+        # Helm's local repository list, not a repository URL given
+        # directly in Chart.yaml -- confirmed by a real run of this exact
+        # step on 2026-11-26, which failed with "no repository definition
+        # for https://nvidia.github.io/dcgm-exporter/helm-charts" until
+        # this step was added. This repository's own EC2 test runner
+        # (runner/runner.yaml) has every chart repository this platform
+        # currently or prospectively depends on pre-added once, by hand,
+        # and keeps that state between runs; a GitHub-hosted runner starts
+        # with none of it and needs every repository added fresh, every
+        # run. Every classic (non-OCI) `repository:` URL is read straight
+        # out of every gitops/**/Chart.yaml (an OCI dependency --
+        # examples/inference's disagg-pd-llmd chart has one, under
+        # examples/, not gitops/ -- resolves directly from its own
+        # `oci://` reference with no local repository needed, and is
+        # deliberately not matched here), not a hand-typed list: this
+        # mirrors the same "derive from the tree, do not hand-type a set
+        # that drifts" rule gitops/tests/0.static.sh's own comments state
+        # for its fixture-chart and kubeconform-target loops, so a future
+        # add-on with its own new classic chart repository needs no
+        # matching edit here.
+        run: |
+          set -euo pipefail
+          # A real YAML parse (every dependencies[].repository field),
+          # not a grep/sed pattern on one quoting style: Chart.yaml is
+          # free to write this value single-quoted, unquoted, or with a
+          # trailing comment, all valid YAML a plain `grep -h '"https://'`
+          # would silently skip. pyyaml is pinned to the same version
+          # gitops/tests/0.static.sh's own PYTHON_YAML_VERSION defaults
+          # to, so this step and that script resolve the identical
+          # package.
+          #
+          # Written to a plain file, not read through `mapfile -t ... <
+          # <(...)`: a failure inside a process-substitution command (a
+          # malformed Chart.yaml the real `yaml.safe_load` above raises
+          # on, for example) does not propagate to the enclosing
+          # `mapfile`'s own exit status -- bash only ever sees whether
+          # `mapfile` itself could read the pipe, not why the writer
+          # stopped -- so a broken parse would have silently read as "0
+          # URLs found" under the version of this step that initially
+          # shipped on this pull request's own first push, never
+          # reaching the line below that is supposed to catch it. The
+          # `uv run` line below is now a plain redirection, so `set -e`
+          # catches its own exit status directly.
+          uv run --no-project -q --with "pyyaml==6.0.2" python3 - gitops \
+            > "${RUNNER_TEMP}/helm-repo-urls.txt" <<'PY'
+          import glob, sys, yaml
+          urls = set()
+          for path in glob.glob(f"{sys.argv[1]}/**/Chart.yaml", recursive=True):
+              with open(path, encoding="utf-8") as f:
+                  doc = yaml.safe_load(f) or {}
+              for dep in doc.get("dependencies", []) or []:
+                  repo = dep.get("repository", "")
+                  if repo.startswith("https://"):
+                      urls.add(repo)
+          for url in sorted(urls):
+              print(url)
+          PY
+          # `mapfile` here only ever reads an already-written, complete
+          # file (never a live process substitution), and the python
+          # script above printed one URL per line with none at all when
+          # the set is empty -- repo_urls has exactly as many elements as
+          # real URLs found, including zero, unlike an earlier version of
+          # this step (print("\n".join(...)) on an empty set still
+          # printed one blank line, so `mapfile` read one empty-string
+          # element, the `-gt 0` guard below passed anyway, and
+          # `helm repo add ci-repo-1 ""` failed under `set -e` -- caught
+          # by reasoning about the empty case, since this repository has
+          # exactly one classic chart repository today and a real run
+          # cannot currently exercise zero).
+          mapfile -t repo_urls < "${RUNNER_TEMP}/helm-repo-urls.txt"
+          echo "${#repo_urls[@]} classic chart repository URL(s) found under gitops/"
+          n=0
+          for url in "${repo_urls[@]}"; do
+            n=$((n + 1))
+            echo "helm repo add ci-repo-${n} ${url}"
+            helm repo add "ci-repo-${n}" "${url}"
+          done
+          if [[ "${#repo_urls[@]}" -gt 0 ]]; then
+            helm repo update
+          fi
+
+      - name: Run gitops/tests/0.static.sh
+        # Retries the whole script up to 3 times: a real run of this exact
+        # step on 2026-11-26 failed check_pinned_crds.py's and
+        # check_appproject_whitelist.py's own `helm template oci://
+        # public.ecr.aws/karpenter/...` calls with "429 toomanyrequests:
+        # Data limit exceeded" -- Amazon ECR Public's own anonymous-pull
+        # data quota, shared across every unauthenticated puller behind a
+        # GitHub-hosted runner's own IP range, not something this
+        # workflow controls and not a defect in the script. Authenticating
+        # to raise that quota needs real AWS credentials
+        # (`aws ecr-public get-login-password`), which this workflow does
+        # not have and must not add just to raise a public, anonymous
+        # rate limit. A fixed, unconditional retry (not "retry only on
+        # 429", which would need parsing this script's own mixed
+        # pass/fail output) is the same mitigation this exact error
+        # message's own ecosystem (container registries under shared CI
+        # IP ranges) commonly uses; three attempts with a growing pause
+        # converges in practice without masking a real, deterministic
+        # failure for more than a couple of minutes (the backoff is
+        # visible in the log either way).
+        run: |
+          set -euo pipefail
+          attempt=1
+          max_attempts=3
+          until bash gitops/tests/0.static.sh; do
+            rc=$?
+            if [[ "${attempt}" -ge "${max_attempts}" ]]; then
+              echo "FAIL gitops/tests/0.static.sh did not pass after ${attempt} attempt(s) (exit ${rc})"
+              exit "${rc}"
+            fi
+            sleep_seconds=$((attempt * 20))
+            echo "gitops/tests/0.static.sh failed on attempt ${attempt} (exit ${rc}); retrying in ${sleep_seconds}s"
+            sleep "${sleep_seconds}"
+            attempt=$((attempt + 1))
+          done
+
+  # ----------------------------------------------------------------------
+  inference-static:
+    name: examples/inference static checks
+    needs: changed-paths
+    if: needs.changed-paths.outputs.inference == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Helm (pinned, checksum-verified; same pin as gitops-static above and the EC2 test runner)
+        env:
+          HELM_VER: v3.22.1
+          HELM_SHA256: 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/helm.tgz" "https://get.helm.sh/helm-${HELM_VER}-linux-amd64.tar.gz"
+          got="$(sha256sum "${RUNNER_TEMP}/helm.tgz" | awk '{print $1}')"
+          [[ "${got}" == "${HELM_SHA256}" ]] || { echo "FAIL helm ${HELM_VER} checksum mismatch: got ${got}, want ${HELM_SHA256}"; exit 1; }
+          tar -xzf "${RUNNER_TEMP}/helm.tgz" -C "${RUNNER_TEMP}" "linux-amd64/helm"
+          sudo install -m 0755 "${RUNNER_TEMP}/linux-amd64/helm" /usr/local/bin/helm
+          helm version --short
+
+      - name: Install uv (pinned, checksum-verified; same pin as gitops-static above and the EC2 test runner)
+        env:
+          UV_VER: 0.13.9
+          UV_SHA256: a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/uv.tar.gz" \
+            "https://github.com/astral-sh/uv/releases/download/${UV_VER}/uv-x86_64-unknown-linux-gnu.tar.gz"
+          got="$(sha256sum "${RUNNER_TEMP}/uv.tar.gz" | awk '{print $1}')"
+          [[ "${got}" == "${UV_SHA256}" ]] || { echo "FAIL uv ${UV_VER} checksum mismatch: got ${got}, want ${UV_SHA256}"; exit 1; }
+          tar -xzf "${RUNNER_TEMP}/uv.tar.gz" -C "${RUNNER_TEMP}" "uv-x86_64-unknown-linux-gnu/uv"
+          sudo install -m 0755 "${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu/uv" /usr/local/bin/uv
+          uv --version
+
+      - name: Install shellcheck (pinned, checksum-verified; same pin as the EC2 test runner)
+        env:
+          SC_VER: v0.11.0
+          SC_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SC_VER}/shellcheck-${SC_VER}.linux.x86_64.tar.xz"
+          got="$(sha256sum "${RUNNER_TEMP}/shellcheck.tar.xz" | awk '{print $1}')"
+          [[ "${got}" == "${SC_SHA256}" ]] || { echo "FAIL shellcheck ${SC_VER} checksum mismatch: got ${got}, want ${SC_SHA256}"; exit 1; }
+          tar -xJf "${RUNNER_TEMP}/shellcheck.tar.xz" -C "${RUNNER_TEMP}" "shellcheck-${SC_VER}/shellcheck"
+          sudo install -m 0755 "${RUNNER_TEMP}/shellcheck-${SC_VER}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Run examples/inference/tests/0.static.sh
+        run: bash examples/inference/tests/0.static.sh
+
+  # ----------------------------------------------------------------------
+  training-static:
+    name: examples/training static checks
+    needs: changed-paths
+    if: needs.changed-paths.outputs.training == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Helm (pinned, checksum-verified; same pin as gitops-static above and the EC2 test runner)
+        env:
+          HELM_VER: v3.22.1
+          HELM_SHA256: 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/helm.tgz" "https://get.helm.sh/helm-${HELM_VER}-linux-amd64.tar.gz"
+          got="$(sha256sum "${RUNNER_TEMP}/helm.tgz" | awk '{print $1}')"
+          [[ "${got}" == "${HELM_SHA256}" ]] || { echo "FAIL helm ${HELM_VER} checksum mismatch: got ${got}, want ${HELM_SHA256}"; exit 1; }
+          tar -xzf "${RUNNER_TEMP}/helm.tgz" -C "${RUNNER_TEMP}" "linux-amd64/helm"
+          sudo install -m 0755 "${RUNNER_TEMP}/linux-amd64/helm" /usr/local/bin/helm
+          helm version --short
+
+      - name: Install uv (pinned, checksum-verified; same pin as gitops-static above and the EC2 test runner)
+        env:
+          UV_VER: 0.13.9
+          UV_SHA256: a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/uv.tar.gz" \
+            "https://github.com/astral-sh/uv/releases/download/${UV_VER}/uv-x86_64-unknown-linux-gnu.tar.gz"
+          got="$(sha256sum "${RUNNER_TEMP}/uv.tar.gz" | awk '{print $1}')"
+          [[ "${got}" == "${UV_SHA256}" ]] || { echo "FAIL uv ${UV_VER} checksum mismatch: got ${got}, want ${UV_SHA256}"; exit 1; }
+          tar -xzf "${RUNNER_TEMP}/uv.tar.gz" -C "${RUNNER_TEMP}" "uv-x86_64-unknown-linux-gnu/uv"
+          sudo install -m 0755 "${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu/uv" /usr/local/bin/uv
+          uv --version
+
+      - name: Install shellcheck (pinned, checksum-verified; same pin as the EC2 test runner)
+        env:
+          SC_VER: v0.11.0
+          SC_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SC_VER}/shellcheck-${SC_VER}.linux.x86_64.tar.xz"
+          got="$(sha256sum "${RUNNER_TEMP}/shellcheck.tar.xz" | awk '{print $1}')"
+          [[ "${got}" == "${SC_SHA256}" ]] || { echo "FAIL shellcheck ${SC_VER} checksum mismatch: got ${got}, want ${SC_SHA256}"; exit 1; }
+          tar -xJf "${RUNNER_TEMP}/shellcheck.tar.xz" -C "${RUNNER_TEMP}" "shellcheck-${SC_VER}/shellcheck"
+          sudo install -m 0755 "${RUNNER_TEMP}/shellcheck-${SC_VER}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Run examples/training/tests/0.static.sh
+        run: bash examples/training/tests/0.static.sh
+
+  # ----------------------------------------------------------------------
+  run-board-tests:
+    name: run-board unit tests
+    needs: changed-paths
+    if: needs.changed-paths.outputs.run_board == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install uv (pinned, checksum-verified; same pin as the EC2 test runner)
+        env:
+          UV_VER: 0.13.9
+          UV_SHA256: a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/uv.tar.gz" \
+            "https://github.com/astral-sh/uv/releases/download/${UV_VER}/uv-x86_64-unknown-linux-gnu.tar.gz"
+          got="$(sha256sum "${RUNNER_TEMP}/uv.tar.gz" | awk '{print $1}')"
+          [[ "${got}" == "${UV_SHA256}" ]] || { echo "FAIL uv ${UV_VER} checksum mismatch: got ${got}, want ${UV_SHA256}"; exit 1; }
+          tar -xzf "${RUNNER_TEMP}/uv.tar.gz" -C "${RUNNER_TEMP}" "uv-x86_64-unknown-linux-gnu/uv"
+          sudo install -m 0755 "${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu/uv" /usr/local/bin/uv
+          uv --version
+
+      - name: Run examples/tools/run-board/tests/run_tests.sh
+        run: bash examples/tools/run-board/tests/run_tests.sh
+
+  # ----------------------------------------------------------------------
+  # The one job meant to be set as a required status check (issue #53).
+  # Runs on every pull request regardless of which paths changed, and
+  # treats each of the six checks above as acceptable only if it
+  # succeeded or was skipped because its own area did not change -- never
+  # because `changed-paths` itself failed, which also leaves a
+  # downstream job's result as "skipped" and must not read as a pass.
+  static:
+    name: static
+    needs:
+      - changed-paths
+      - foundation-static
+      - identities-static
+      - gitops-static
+      - inference-static
+      - training-static
+      - run-board-tests
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # No checkout, no API call: this job only compares the other jobs' own
+    # recorded results (`needs.*.result`), already provided by the
+    # workflow run itself with no permission needed to read them.
+    permissions: {}
+    steps:
+      - name: Every selected check succeeded; everything else was legitimately skipped
+        env:
+          R_CHANGED_PATHS: ${{ needs.changed-paths.result }}
+          R_FOUNDATION: ${{ needs.foundation-static.result }}
+          R_IDENTITIES: ${{ needs.identities-static.result }}
+          R_GITOPS: ${{ needs.gitops-static.result }}
+          R_INFERENCE: ${{ needs.inference-static.result }}
+          R_TRAINING: ${{ needs.training-static.result }}
+          R_RUN_BOARD: ${{ needs.run-board-tests.result }}
+        run: |
+          set -euo pipefail
+          failures=0
+          # changed-paths itself must have actually succeeded: if it
+          # failed or was cancelled, every job below reads "skipped" too
+          # (a failed dependency skips its dependents, the exact same
+          # result a false `if:` produces), which must not pass here.
+          if [[ "${R_CHANGED_PATHS}" != "success" ]]; then
+            echo "FAIL changed-paths: ${R_CHANGED_PATHS}"
+            failures=$((failures + 1))
+          else
+            echo "PASS changed-paths: ${R_CHANGED_PATHS}"
+          fi
+          for pair in "foundation-static:${R_FOUNDATION}" "identities-static:${R_IDENTITIES}" \
+            "gitops-static:${R_GITOPS}" \
+            "inference-static:${R_INFERENCE}" "training-static:${R_TRAINING}" \
+            "run-board-tests:${R_RUN_BOARD}"; do
+            name="${pair%%:*}"
+            result="${pair#*:}"
+            if [[ "${result}" == "success" || "${result}" == "skipped" ]]; then
+              echo "PASS ${name}: ${result}"
+            else
+              echo "FAIL ${name}: ${result}"
+              failures=$((failures + 1))
+            fi
+          done
+          echo
+          if [[ "${failures}" -eq 0 ]]; then
+            echo "RESULT PASS: every selected static check passed"
+          else
+            echo "RESULT FAIL: ${failures} job(s) failed or were skipped for the wrong reason"
+            exit 1
+          fi
