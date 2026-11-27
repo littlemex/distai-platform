@@ -28,6 +28,18 @@ Each item under `## Changes` gives, for one decision: **What** changed,
 able to see from the pull request alone which other designs were considered
 and why this one was chosen.
 
+### Writing `## Alternatives Considered`
+
+This section is for the PR's major, cross-cutting decisions (architecture,
+which upstream project to depend on, where a capability lives, an interface
+shape) -- one table row per decision, with the options compared, each
+option's pros and cons, and why the shipped one was chosen. It never
+repeats what a `## Changes` item's own `Alternative` field already covers at
+that item's own scale; it is written only when a decision is bigger than
+any one `## Changes` item, or cuts across several of them. A PR with no
+decision at this level says so (`Not applicable; <why>`) instead of leaving
+an empty table.
+
 ### Duplicate-work checks
 
 Before opening an issue or a pull request, run these checks:
