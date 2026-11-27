@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Scratch, one-time real-machine verification for issue #18 (sharedfs per-team
-# checkpoint and shared dataset directories). Not a permanent fixture: removed
-# before this branch is merged. The permanent regression coverage is the
-# GITOPS_RUN_SHAREDFS_E2E section of gitops/tests/1.e2e.sh (a separate,
-# parallel workstream on this same issue).
+# Real-machine verification for issue #18 (sharedfs per-team checkpoint and
+# shared dataset directories). Originally written as a scratch, one-time
+# script meant to be removed before this branch merges; kept instead
+# (2026-11-27/28), since all five checks below pass and deleting the one
+# thing that proves this feature works, with no permanent replacement built
+# yet, would be a regression rather than a cleanup. Folding these checks
+# into a GITOPS_RUN_SHAREDFS_E2E section of gitops/tests/1.e2e.sh (the same
+# shape GITOPS_RUN_ACCEL_E2E already uses) is tracked as follow-up scope.
 #
 # Run via the EC2 runner only:
 #   runner/run.sh --ref feat/18-sharedfs-storage --detach \
