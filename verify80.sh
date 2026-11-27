@@ -181,10 +181,8 @@ service_host() {
 # needed at all. Used in the dry run (before any Trainium capacity, before
 # even `helm install`) to confirm service_host()'s label-based lookup will
 # find the right object once installed -- the two must agree.
-svc_name_from_template() {
-  local chart_dir="$1" release="$2" component="$3"
-  shift 3
-  helm template "${release}" "${chart_dir}" "$@" 2>/dev/null | python3 -I - "${component}" <<'PY'
+SVC_NAME_PY="${WORK_DIR:-/tmp}/svc_name_from_template.py"
+cat >"${SVC_NAME_PY}" <<'PY'
 import sys
 component = sys.argv[1]
 docs = sys.stdin.read().split("\n---\n")
@@ -198,6 +196,14 @@ for doc in docs:
             sys.exit(0)
 sys.exit(1)
 PY
+svc_name_from_template() {
+  local chart_dir="$1" release="$2" component="$3"
+  shift 3
+  # The python SCRIPT is a file (python3 -I path/to.py), never fed via "-"
+  # on stdin: "python3 - <<HEREDOC" reads the heredoc as the PROGRAM, not
+  # as data, which silently discards the piped `helm template` output --
+  # the exact bug the dry run caught before any real-hardware attempt.
+  helm template "${release}" "${chart_dir}" "$@" 2>/dev/null | python3 -I "${SVC_NAME_PY}" "${component}"
 }
 
 # send_completion_exec NAMESPACE EXEC_POD EXEC_CONTAINER HOST PORT MODEL LOGFILE LABEL
