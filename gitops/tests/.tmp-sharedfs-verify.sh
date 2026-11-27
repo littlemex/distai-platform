@@ -290,6 +290,38 @@ done
 # is actually usable (which needs the seed Job's own work done first),
 # so nothing after this line runs before that is true, regardless of
 # what the Argo CD loop above already reported.
+#
+# Found by this real-machine attempt (round 4, 2026-11-27): even after the
+# Argo CD loop above reports every Application (including `sharedfs`, which
+# owns these two CRDs) Synced and Healthy, the very next kubectl call here
+# failed outright with "error: the server doesn't have a resource type
+# \"fss\"" - not a timeout, an immediate resolution failure. Argo CD's own
+# Synced/Healthy status reflects that the CRD's own create/apply call
+# returned success, not that the CustomResourceDefinition has actually
+# finished establishing (status.conditions NamesAccepted/Established) and
+# propagated to every kube-apiserver behind the control plane's own load
+# balancer, nor that this process's own kubectl discovery cache (shared
+# across every kubectl call in this script via the same $HOME) has already
+# picked that up - a real, if short, race the Argo CD loop's own two
+# conditions do not cover. kubectl wait --for=condition=Established on the
+# CRD objects themselves blocks on the one condition that is actually true
+# right when this is safe; the short retry loop after it is a second,
+# independent guard against the discovery-cache half of the race (a CRD
+# reporting Established on the apiserver this call happens to hit does not
+# guarantee a client-side cache already populated from a different
+# apiserver has invalidated itself yet).
+log "waiting for the FilesystemShare/FilesystemShareDirectory CRDs to report Established"
+kubectl wait --for=condition=Established \
+  crd/filesystemshares.sharedfs.io crd/filesystemsharedirectories.sharedfs.io --timeout=120s
+DEADLINE=$(( $(date +%s) + 60 ))
+while ! kubectl get fss >/dev/null 2>&1; do
+  if [[ "$(date +%s)" -ge "${DEADLINE}" ]]; then
+    log "FAIL: kubectl still cannot resolve the fss (FilesystemShare) resource type 60s after the CRD reported Established"
+    kubectl get crd filesystemshares.sharedfs.io -o yaml >&2 || true
+    exit 1
+  fi
+  sleep 5
+done
 log "waiting for FilesystemShare objects to report Ready"
 kubectl wait --for=condition=Ready fss/checkpoints fss/datasets --timeout=300s
 
