@@ -5,8 +5,9 @@
 # gitops/bootstrap/sharedfs-image-publish.sh has run (both named here
 # because this entry's own overridableKeys below cannot express "required
 # from a specific source", only "a marker may set this path" - the
-# chart's own values.yaml `required` check is what actually fails loudly
-# if a cell's marker opts in before either exists).
+# chart's own templates/manager.yaml `required` check (values.yaml itself
+# only documents the requirement) is what actually fails loudly if a
+# cell's marker opts in before either exists).
 #
 # dependsOn deliberately omitted, the same reason dcgm-exporter's own
 # addon.yaml omits it for `prometheus`: this component's only real

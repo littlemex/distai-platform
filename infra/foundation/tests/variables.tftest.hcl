@@ -426,6 +426,36 @@ run "shared_fsx_lustre_scratch1_accepts_its_own_anchor_values" {
   }
 }
 
+run "shared_fsx_lustre_scratch1_accepts_1200" {
+  command = plan
+
+  variables {
+    shared_fsx_lustre = { deployment_type = "SCRATCH_1", storage_capacity_gib = 1200 }
+  }
+}
+
+run "shared_fsx_lustre_scratch1_accepts_2400" {
+  command = plan
+
+  variables {
+    shared_fsx_lustre = { deployment_type = "SCRATCH_1", storage_capacity_gib = 2400 }
+  }
+}
+
+run "shared_fsx_lustre_scratch1_rejects_a_throughput_value" {
+  command = plan
+
+  variables {
+    # per_unit_storage_throughput does not apply to SCRATCH_1 either; the
+    # validation requires it be left null for both SCRATCH_1 and
+    # SCRATCH_2, not only SCRATCH_2 (the only branch the earlier form of
+    # this test file exercised).
+    shared_fsx_lustre = { deployment_type = "SCRATCH_1", per_unit_storage_throughput = 50 }
+  }
+
+  expect_failures = [var.shared_fsx_lustre]
+}
+
 run "shared_fsx_lustre_scratch1_rejects_a_scratch2_only_value" {
   command = plan
 
@@ -490,6 +520,16 @@ run "shared_fsx_lustre_persistent1_rejects_missing_throughput" {
   expect_failures = [var.shared_fsx_lustre]
 }
 
+run "shared_fsx_lustre_persistent2_rejects_missing_throughput" {
+  command = plan
+
+  variables {
+    shared_fsx_lustre = { deployment_type = "PERSISTENT_2" }
+  }
+
+  expect_failures = [var.shared_fsx_lustre]
+}
+
 run "shared_fsx_lustre_persistent2_accepts_its_own_throughput_set" {
   command = plan
 
@@ -517,6 +557,18 @@ run "shared_fsx_lustre_scratch_types_reject_a_throughput_value" {
     # per_unit_storage_throughput does not apply to SCRATCH_1/SCRATCH_2 at
     # all; the validation requires it be left null for both.
     shared_fsx_lustre = { deployment_type = "SCRATCH_2", per_unit_storage_throughput = 125 }
+  }
+
+  expect_failures = [var.shared_fsx_lustre]
+}
+
+run "shared_fsx_lustre_rejects_capacity_below_the_minimum" {
+  command = plan
+
+  variables {
+    # 600 is below every deployment type's own minimum (1200) and is not
+    # 1200, 2400, nor a multiple of 3600/2400 for any branch.
+    shared_fsx_lustre = { deployment_type = "SCRATCH_2", storage_capacity_gib = 600 }
   }
 
   expect_failures = [var.shared_fsx_lustre]

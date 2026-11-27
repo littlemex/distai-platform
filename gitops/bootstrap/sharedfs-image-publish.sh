@@ -18,25 +18,31 @@
 #
 # Uses ko (github.com/ko-build/ko): it builds a Go binary straight into an
 # OCI image and pushes it over the registry HTTP API, with no Docker daemon
-# at all - this script needs to run on whatever machine a cell operator has
-# AWS and kubectl access from, and a Docker (or other container-build)
-# daemon is not something this script can assume is already installed or
-# that its own caller is willing to install. Go and ko are fetched here
-# instead, verified by checksum, into a throwaway temp directory this
-# script's own trap removes - never installed anywhere persistent, so
-# running this script leaves nothing behind on the machine it ran on
-# besides the image it published.
+# at all - a Docker (or other container-build) daemon is not something this
+# script can assume is already installed or that its own caller is willing
+# to install. Go and ko are fetched here instead, verified by checksum,
+# into a throwaway temp directory this script's own trap removes - never
+# installed anywhere persistent, so running this script leaves nothing
+# behind on the machine it ran on besides the image it published. This
+# does need a Linux/amd64 host specifically, not "whatever machine a cell
+# operator has" as an earlier version of this comment claimed: the Go
+# toolchain below is fetched as go${GO_VERSION}.linux-amd64.tar.gz
+# unconditionally, with no uname-based platform detection at all - the
+# same x86_64-only scoping this platform's own system node group already
+# has.
 #
 # Usage:
 #   sharedfs-image-publish.sh --ecr-repository-url URL --region REGION \
 #     --cluster-registration-namespace NAMESPACE [--commit SHA]
 #
-# Prerequisites: kubectl context pointed at the cell (checked below: the
-# cell-registration Secret bootstrap.sh itself writes must already exist
-# and, if it already names an ECR repository, must name this same one -
-# run this only right after bootstrap.sh, against the same context); an
-# AWS identity with ecr:GetAuthorizationToken and push permissions on the
-# named repository (it is not this script's job to grant it).
+# Prerequisites: a Linux/amd64 host with kubectl, aws, git, curl, sha256sum,
+# jq and tar; a kubectl context pointed at the cell (checked below: the
+# cell-registration Secret bootstrap.sh itself writes must already exist,
+# must carry a non-empty sharedfs-controller-ecr-repository-url annotation,
+# and that value must name this same --ecr-repository-url - run this only
+# right after bootstrap.sh, against the same context); an AWS identity with
+# ecr:GetAuthorizationToken and push permissions on the named repository
+# (it is not this script's job to grant it).
 
 set -euo pipefail
 
@@ -82,7 +88,7 @@ done
 
 [[ -n "${ECR_REPOSITORY_URL}" && -n "${REGION}" && -n "${ARGOCD_NAMESPACE}" ]] || usage
 
-for bin in kubectl aws git curl sha256sum jq; do
+for bin in kubectl aws git curl sha256sum jq tar; do
   command -v "${bin}" >/dev/null 2>&1 || { echo "prerequisite: ${bin} not found" >&2; exit 1; }
 done
 

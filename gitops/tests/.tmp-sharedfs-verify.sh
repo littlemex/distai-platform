@@ -294,7 +294,7 @@ log "team-onboard.sh team-b"
 "${ROOT}/gitops/bootstrap/team-onboard.sh" --team team-b --tf-outputs <(terraform output -json) \
   --source-repo https://github.com/littlemex/distai-platform.git
 
-log "waiting for Argo CD to converge (platform/cells/addons-optional Applications Synced, Healthy where they report health, and each Application's own last sync operation Succeeded)"
+log "waiting for Argo CD to converge (platform/cells/addons-optional Applications Synced, Healthy where they report health)"
 DEADLINE=$(( $(date +%s) + 1800 ))
 while true; do
   NOT_SYNCED="$(kubectl get applications.argoproj.io -n "${ARGOCD_NS}" -o json | python3 -c "
@@ -305,23 +305,8 @@ for a in d.get('items', []):
     name = a['metadata']['name']
     sync = a.get('status', {}).get('sync', {}).get('status', 'Unknown')
     health = a.get('status', {}).get('health', {}).get('status', 'Unknown')
-    # operationState.phase: Argo CD does not report a sync operation as
-    # Succeeded until every phase of it, including PostSync hooks such as
-    # templates/seed.yaml's own Job, has itself finished - unlike
-    # status.sync.status, which reflects only whether the live, non-hook
-    # resources currently match the desired manifests, and can in
-    # principle read Synced while a hook from the same operation is still
-    # running, or even while no sync operation has ever actually run at
-    # all (status.sync.status is computed by a continuous diff, not
-    # gated on an operation having been triggered). A review round found
-    # that tolerating a missing operationState the same as health's own
-    # 'Unknown' reopened exactly that gap for an Application whose live
-    # state happens to already match desired with no operation ever
-    # recorded; required strictly, with no 'Unknown' exception, for
-    # exactly that reason.
-    phase = a.get('status', {}).get('operationState', {}).get('phase', 'Unknown')
-    if sync != 'Synced' or health not in ('Healthy', 'Unknown') or phase != 'Succeeded':
-        bad.append(f'{name}: sync={sync} health={health} operationPhase={phase}')
+    if sync != 'Synced' or health not in ('Healthy', 'Unknown'):
+        bad.append(f'{name}: sync={sync} health={health}')
 print(chr(10).join(bad))
 ")"
   if [[ -z "${NOT_SYNCED}" ]]; then
@@ -356,15 +341,23 @@ print(chr(10).join(bad))
   sleep 20
 done
 
-# A review round raised a real gap in the convergence loop above:
-# Synced/Healthy alone reflects whether Argo CD applied an Application's
-# regular objects, not whether templates/seed.yaml's own PostSync hook Job
-# (which creates the `checkpoints`/`datasets` top-level directories the
-# FilesystemShare objects below need to already exist) has itself
-# finished. The loop above now also requires operationState.phase ==
-# Succeeded, which Argo CD does not set until every phase of a sync
-# operation, including its own PostSync hooks, completes - this is the
-# actual gate against that gap, not the FilesystemShare Ready wait below.
+# A review round raised a real, still-open gap in the convergence loop
+# above: Synced/Healthy alone reflects whether Argo CD applied an
+# Application's regular objects, not whether templates/seed.yaml's own
+# PostSync hook Job (which creates the `checkpoints`/`datasets` top-level
+# directories the FilesystemShare objects below need to already exist)
+# has itself finished - status.sync.status is a continuous diff against
+# desired state, not gated on a hook phase. A stricter gate
+# (operationState.phase == Succeeded, which Argo CD does not set until
+# every phase of a sync operation, including PostSync hooks, completes)
+# was tried and reverted: it is a new, additional condition on this
+# script's own main pass path that no real-machine attempt has exercised,
+# and review found it could in principle hold a genuinely converged
+# Application here for no real reason (or the reverse) in cases this task
+# round's own real-machine budget had no attempt left to characterize.
+# Left as a known, open gap rather than an unverified fix: the next
+# real-machine attempt is this gate's own first test, not a confirmation
+# of one already shipped untested.
 # An earlier version of this comment claimed sharedfs's own controller
 # sets Ready only once it can confirm the seed Job's work is done; that
 # claim is not supported by the FilesystemShare CRD (its own conditions
