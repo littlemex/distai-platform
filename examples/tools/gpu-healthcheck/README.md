@@ -134,30 +134,9 @@ isolate. A future PR that wires the intensive suite into a manual quarantine
 workflow (upstream's own `kubectl cordon` + Job-template pattern, unchanged)
 is where that number would actually get produced.
 
-One real number for `p5en.48xlarge`, measured directly (not through this
-tool's own `run.sh`, which has no code path to produce it): a plain,
-unconstrained `all_reduce_perf -b 8M -e 8G -f 2 -g 8` on a real 8x H200 node,
-`NCCL_ALGO` (NCCL's own collective-algorithm selection) left unset so NCCL
-picked it automatically, at the largest message size tested (8GB, the `-e`
-bound):
+One real number for `p5en.48xlarge`, measured directly (not through this tool's own `run.sh`, which has no code path to produce it): a plain, unconstrained `all_reduce_perf -b 8M -e 8G -f 2 -g 8` on a real 8x H200 node, `NCCL_ALGO` (NCCL's own collective-algorithm selection) left unset so NCCL picked it automatically. At the largest message size tested (8GB, the `-e` bound): out-of-place busbw 481.29 GB/s, in-place busbw 481.25 GB/s, `# Out of bounds values : 0 OK` on the run's own summary line, `# Avg bus bandwidth : 387.727` (out-of-place) across the full 8MB-8GB sweep.
 
-```text
-    size (B)   out-of-place busbw (GB/s)   in-place busbw (GB/s)
-  8589934592                     481.29                   481.25
-# Out of bounds values : 0 OK
-# Avg bus bandwidth    : 387.727  (full 8MB-8GB sweep, out-of-place)
-```
-
-This run did not set `NCCL_P2P_LEVEL`/`NCCL_NET` -- a separate pair of
-variables, unrelated to `NCCL_ALGO`, that upstream's own NVLink-only
-isolation sub-test uses to force NVLink-only and exclude the network path
-entirely. That sub-test's own threshold for `p5en.48xlarge` is 500 GB/s;
-`checks/5-nccl-allreduce.sh`'s separate, non-isolated floor for the same
-instance type is 800 GB/s. This run's own peak (481.29 GB/s) is below both,
-but neither upstream number is a claim this run can confirm or contradict:
-both are for a differently-configured run (the isolation sub-test's own
-`NCCL_P2P_LEVEL=NVL`/`NCCL_NET=Socket`, which this run did not set), not
-this one. Full evidence, including the complete sweep, in [issue #30](https://github.com/littlemex/distai-platform/issues/30#issuecomment-7210501445)'s own comment.
+`checks/5-nccl-allreduce.sh`'s own non-isolated floor for `p5en.48xlarge` is 800 GB/s, under the same, unconstrained configuration this run also used (no `NCCL_P2P_LEVEL`/`NCCL_NET` set on either side) -- so this run's own peak, 481.29 GB/s, is a real, comparable shortfall against that number, not explained away by a configuration difference; whether that means this node is degraded, this upstream threshold does not match this GPU generation's real ceiling, or something else, is not established by this round. The separate NVLink-only isolation sub-test's own threshold for the same instance type, 500 GB/s, is a different comparison and is not treated as one here: that sub-test forces `NCCL_P2P_LEVEL=NVL`/`NCCL_NET=Socket` to exclude the network path entirely, which this run did not set. Full evidence, including the complete sweep, in [issue #30](https://github.com/littlemex/distai-platform/issues/30#issuecomment-7210501445)'s own comment.
 
 ### Neuron is out of scope for this PR, on purpose (AGENTS.md section 5)
 
