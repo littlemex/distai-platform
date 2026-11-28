@@ -107,9 +107,10 @@ transport:
   # (python/sglang/srt/disaggregation/common/conn.py, every backend this
   # chart renders), that control-plane channel binds a second,
   # OS-assigned ephemeral port with no flag to pin it, and
-  # transport.backend=MOONCAKE appears to open a third, independent
-  # ephemeral port of its own (not independently traced inside
-  # kvcache-ai/Mooncake's own compiled layer). That NetworkPolicy now
+  # transport.backend=MOONCAKE opens a third, independent ephemeral port
+  # the same way unless the legacy MC_LEGACY_RPC_PORT_BINDING variable is
+  # set, which this chart does not set (see that template's own comment
+  # for the exact source line). That NetworkPolicy now
   # allows every port from the peer role instead of a fixed list, for
   # that reason, confirmed on real hardware with a CPU stand-in
   # reproduction (see that template's own comment for what was and was

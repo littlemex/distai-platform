@@ -14,17 +14,30 @@
   narrow port list. Read against sgl-project/sglang's own source (this
   chart's own SGLANG_BUILD_COMMIT): SGLang's own control-plane channel
   between prefill and decode (every PUT/GET in
-  python/sglang/srt/disaggregation/common/conn.py, carrying each role's
-  NIXL agent metadata or Mooncake session id, abort notices and
-  chunk-ready signals) binds a ZMQ PULL socket on an OS-assigned,
-  per-process-restart ephemeral port (get_zmq_socket_on_host ->
-  bind_to_random_port, python/sglang/srt/utils/network.py) -- present on
-  every prefill and every decode process, for every transport.backend
-  this chart renders, with no CLI flag or env var in this SGLang version
-  to pin it to a fixed value. transport.backend=MOONCAKE appears (from
-  its own call into kvcache-ai/Mooncake with rpc_port=0, the standard
-  "let the OS assign it" idiom, not independently traced inside that
-  library) to open a second, independent ephemeral port of its own. A
+  python/sglang/srt/disaggregation/common/conn.py's CommonKVManager,
+  carrying each role's NIXL agent metadata or Mooncake session id, abort
+  notices and chunk-ready signals) binds a ZMQ PULL socket on an
+  OS-assigned, per-process-restart ephemeral port
+  (CommonKVManager.__init__ -> get_zmq_socket_on_host ->
+  bind_to_random_port, python/sglang/srt/utils/network.py#L254-L287,
+  called with no min_port/max_port arguments) -- present on every prefill
+  and every decode process, for every transport.backend this chart
+  renders: both disaggregation/nixl/conn.py's NixlKVManager and
+  disaggregation/mooncake/conn.py's MooncakeKVManager subclass
+  CommonKVManager and call super().__init__(...) unconditionally before
+  any backend-specific setup, and both prefill.py and decode.py construct
+  whichever KVManager subclass transport.backend selects through the
+  same _init_kv_manager() path -- with no CLI flag or env var in this
+  SGLang version to pin that bind to a fixed value. transport.backend=MOONCAKE opens a second,
+  independent ephemeral port of its own the same way: kvcache-ai/Mooncake
+  @d936855's own transfer_engine_py.cpp (lines 450-458) calls
+  TransferEngine::init with rpc_port=0 -- "the last two params are
+  unused", in that file's own comment -- unless the legacy environment
+  variable MC_LEGACY_RPC_PORT_BINDING is set, which this chart does not
+  set. Mooncake's own legacy path shows a fixed port IS possible inside
+  that library; this chart's SGLang version exposes no equivalent flag
+  for its own default (non-legacy) ZMQ channel above, which is the one
+  that matters here. A
   NetworkPolicy that enumerates a fixed port list can never admit a port
   that does not exist until the process has already started, confirmed on
   real hardware with a CPU stand-in reproduction (RFC #37): the old,
@@ -44,6 +57,19 @@
   role may reach, never who counts as that role, so removing it widens
   which ports the peer role may use (including engine.port, previously
   router-only) without widening who the peer role is.
+
+  A fixed range wide enough to span the kernel's own ephemeral port
+  range (net.ipv4.ip_local_port_range, a Pod securityContext.sysctls
+  value Kubernetes allows setting per Pod) could, in principle, contain
+  whatever port bind_to_random_port actually picks -- this rule's old
+  defect was its narrowness, not an inherent impossibility of any fixed
+  range. That alternative is rejected on its own terms, not as
+  impossible: it would pin this ingress rule to a kernel default this
+  chart does not set, does not render, and has not confirmed is the same
+  across every node and image this chart runs on, for a range that is
+  already most of the usable port space -- a real cost for no real
+  narrowing, since the podSelector already does the scoping this rule
+  depends on either way.
   transport.ucx.tcpPortRange still exists and is still rendered into the
   engine's own environment (values.yaml), unchanged: it still fixes which
   ports NIXL's UCX backend actually uses, which still matters outside
