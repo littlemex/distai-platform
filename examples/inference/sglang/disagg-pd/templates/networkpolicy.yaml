@@ -9,16 +9,78 @@
   ingress rule names the router the same way vllm/disagg-pd names its
   proxy.
 
-  transport.backend=NIXL with sglangNixlBackend=UCX needs the same fixed,
-  narrow TCP port range as ../../vllm/disagg-pd's own networkpolicy.yaml
-  -- see that file's comment for why, and values.yaml's own
-  transport.ucx.tcpPortRange for the value.
+  RFC #37: the peer rule below used to list only transport.bootstrapPort
+  and, with sglangNixlBackend=UCX, transport.ucx.tcpPortRange -- a fixed,
+  narrow port list. Read against sgl-project/sglang's own source (this
+  chart's own SGLANG_BUILD_COMMIT): SGLang's own control-plane channel
+  between prefill and decode (every PUT/GET in
+  python/sglang/srt/disaggregation/common/conn.py's CommonKVManager,
+  carrying each role's NIXL agent metadata or Mooncake session id, abort
+  notices and chunk-ready signals) binds a ZMQ PULL socket on an
+  OS-assigned, per-process-restart ephemeral port
+  (CommonKVManager.__init__ -> get_zmq_socket_on_host ->
+  bind_to_random_port, python/sglang/srt/utils/network.py#L254-L287,
+  called with no min_port/max_port arguments) -- present on every prefill
+  and every decode process, for every transport.backend this chart
+  renders: both disaggregation/nixl/conn.py's NixlKVManager and
+  disaggregation/mooncake/conn.py's MooncakeKVManager subclass
+  CommonKVManager and call super().__init__(...) unconditionally before
+  any backend-specific setup, and both prefill.py and decode.py construct
+  whichever KVManager subclass transport.backend selects through the
+  same _init_kv_manager() path -- with no CLI flag or env var in this
+  SGLang version to pin that bind to a fixed value. transport.backend=MOONCAKE opens a second,
+  independent ephemeral port of its own the same way: kvcache-ai/Mooncake
+  @d936855's own transfer_engine_py.cpp (lines 450-458) calls
+  TransferEngine::init with rpc_port=0 -- "the last two params are
+  unused", in that file's own comment -- unless the legacy environment
+  variable MC_LEGACY_RPC_PORT_BINDING is set, which this chart does not
+  set. Mooncake's own legacy path shows a fixed port IS possible inside
+  that library; this chart's SGLang version exposes no equivalent flag
+  for its own default (non-legacy) ZMQ channel above, which is the one
+  that matters here. A
+  NetworkPolicy that enumerates a fixed port list can never admit a port
+  that does not exist until the process has already started, confirmed on
+  real hardware with a CPU stand-in reproduction (RFC #37): the old,
+  fixed-list rule blocks a plain TCP listener between the peer-labeled
+  stand-ins on a port the list does not name, and the podSelector-only
+  rule below admits it, while an unlabeled client and a same-named peer
+  from a different release both stay blocked throughout. One earlier real
+  round on this chart (two nodes, NIXL/LIBFABRIC, reported in this
+  chart's own README Status section) served real traffic successfully
+  under the old, narrower rule; whether NetworkPolicy enforcement was
+  actually verified on that round's own cluster was not recorded there
+  either, so that success does not establish the old rule was sufficient
+  -- this is left open, not reconciled, the same way the README's own
+  `kubectl get networkpolicy --all-namespaces` discrepancy is. Either way,
+  the podSelector, not the port list, is what should scope this ingress
+  to this release's own peer role; a port list can only narrow what that
+  role may reach, never who counts as that role, so removing it widens
+  which ports the peer role may use (including engine.port, previously
+  router-only) without widening who the peer role is.
+
+  A fixed range wide enough to span the kernel's own ephemeral port
+  range (net.ipv4.ip_local_port_range, a Pod securityContext.sysctls
+  value Kubernetes allows setting per Pod) could, in principle, contain
+  whatever port bind_to_random_port actually picks -- this rule's old
+  defect was its narrowness, not an inherent impossibility of any fixed
+  range. That alternative is rejected on its own terms, not as
+  impossible: it would pin this ingress rule to a kernel default this
+  chart does not set, does not render, and has not confirmed is the same
+  across every node and image this chart runs on, for a range that is
+  already most of the usable port space -- a real cost for no real
+  narrowing, since the podSelector already does the scoping this rule
+  depends on either way.
+  transport.ucx.tcpPortRange still exists and is still rendered into the
+  engine's own environment (values.yaml), unchanged: it still fixes which
+  ports NIXL's UCX backend actually uses, which still matters outside
+  this chart (a VPC security group, an external firewall); it no longer
+  has to be, and is not, read by this template.
 */}}
 ---
 # prefill and decode engines: the HTTP port (engine.port) only from this
-# release's own router, and the bootstrap port (transport.bootstrapPort,
-# SGLang's own PD handshake) only from the PEER role's own Pods.
-{{- $nixlUcx := and (eq $.Values.transport.backend "NIXL") (eq $.Values.transport.sglangNixlBackend "UCX") }}
+# release's own router; every port, with no port list, only from the
+# PEER role's own Pods (see the comment above for why a port list cannot
+# work here).
 {{- range $role := list "prefill" "decode" }}
 {{- $peer := ternary "decode" "prefill" (eq $role "prefill") }}
 ---
@@ -45,13 +107,6 @@ spec:
         - podSelector:
             matchLabels:
               {{- include "disagg.selector" (dict "root" $ "component" $peer) | nindent 14 }}
-      ports:
-        - port: {{ $.Values.transport.bootstrapPort }}
-        {{- if $nixlUcx }}
-        {{- $ucxParts := splitList "-" (toString (dig "ucx" "tcpPortRange" "" $.Values.transport)) }}
-        - port: {{ index $ucxParts 0 | atoi }}
-          endPort: {{ index $ucxParts 1 | atoi }}
-        {{- end }}
     {{- if and $.Values.metrics.enabled $.Values.networkPolicy.metricsScrapeFrom }}
     - from:
         {{- toYaml $.Values.networkPolicy.metricsScrapeFrom | nindent 8 }}
