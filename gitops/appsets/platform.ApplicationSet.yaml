@@ -54,12 +54,16 @@ spec:
           # `keepLegacyReleaseNames`, if that cell has such a file --
           # the Merge generator's own base generator (clusters, listed
           # first) keeps every one of its own rows even when nothing in
-          # the second generator matches it (confirmed against Argo
-          # CD's own documented Merge generator semantics: "the base
-          # generator's own elements are always kept... only non-base
-          # elements that match nothing in the base are discarded"), so
-          # a cell with no cell.yaml renders exactly as it did before
-          # this leg existed. mergeKeys: ["name"] needs a literal
+          # the second generator matches it. Confirmed against Argo
+          # CD's own documented Merge generator semantics ("the Merge
+          # generator combines parameters produced by the base (first)
+          # generator with matching parameter sets produced by
+          # subsequent generators... non-matching parameter sets are
+          # discarded" -- only a NON-base element with no match is
+          # dropped; a base element with no match keeps its own row
+          # unchanged), so a cell with no cell.yaml renders exactly as
+          # it did before this leg existed. mergeKeys: ["name"] needs a
+          # literal
           # `name:` field inside cell.yaml itself (self-declaring its
           # own cell name) -- a path-derived parameter cannot be a merge
           # key. revision is a fixed literal (`main`), not the per-cell

@@ -149,7 +149,7 @@ def check_cell_config_files(repo_root: str) -> None:
     """gitops/cells/<cell>/cell.yaml is new, optional, and the one input
     the merge generator in platform.ApplicationSet.yaml and
     addons-optional.ApplicationSet.yaml's own `mergeKeys: ["name"]`
-    depends on. Three ways this can go wrong, none of which a reader
+    depends on. Four ways this can go wrong, none of which a reader
     would notice just by looking at one file in isolation:
       - name: does not match the file's own directory -- the merge
         silently matches nothing, and the cell that thought it opted in
@@ -163,11 +163,28 @@ def check_cell_config_files(repo_root: str) -> None:
         errors on a duplicate merge key, which stops BOTH
         ApplicationSets reconciling, for every cell, not just the two
         with the clash.
+      - a key other than name/keepLegacyReleaseNames (#110/PR #116,
+        Fable 5.2 round 3): the Merge generator's own enrichment carries
+        every field of a matching row over the base generator's own row,
+        not only the merge key -- a future cell.yaml that (by mistake or
+        by a later PR) added a `server:`/`project:`/`metadata:` key would
+        silently override that SAME key on the cluster's own row,
+        including the per-cluster revision annotation the sibling
+        addon-files Git generator depends on. This script does not
+        itself execute the Merge generator to prove that override
+        direction; the allowlist below is the cheap, static way to make
+        sure no cell.yaml can ever test it.
     """
+    ALLOWED_CELL_CONFIG_KEYS = {"name", "keepLegacyReleaseNames"}
     seen_names: dict[str, str] = {}
     for path in sorted(glob.glob(os.path.join(repo_root, "gitops/cells/*/cell.yaml"))):
         cell_dir = os.path.basename(os.path.dirname(path))
         doc = load_addon(path)
+        extra_keys = set(doc) - ALLOWED_CELL_CONFIG_KEYS
+        check(f"{path}: has no key besides {sorted(ALLOWED_CELL_CONFIG_KEYS)}",
+              not extra_keys,
+              f"extra key(s) {sorted(extra_keys)} -- the merge generator would carry them onto the cluster's "
+              "own row too, silently overriding any same-named cluster field")
         name = doc.get("name")
         check(f"{path}: has a `name:` field equal to its own directory ({cell_dir!r})",
               name == cell_dir, f"name={name!r}")
@@ -608,6 +625,20 @@ def selftest() -> int:
             ok = False
         os.remove(os.path.join(cells_dir, "mismatch", "cell.yaml"))
         os.remove(os.path.join(cells_dir, "stringflag", "cell.yaml"))
+
+        os.makedirs(os.path.join(cells_dir, "extrakey"), exist_ok=True)
+        with open(os.path.join(cells_dir, "extrakey", "cell.yaml"), "w", encoding="utf-8") as f:
+            yaml.safe_dump({"name": "extrakey", "keepLegacyReleaseNames": True, "server": "https://evil.example"}, f)
+        before = len(FAILURES)
+        check_cell_config_files(os.path.join(workdir, "cellcfg"))
+        caught_extra = any("has no key besides" in f for f in FAILURES)
+        FAILURES.clear()
+        if caught_extra:
+            print("PASS selftest: a cell.yaml key outside the allowlist is caught")
+        else:
+            print("FAIL selftest: an extra cell.yaml key was NOT caught (checker is broken)")
+            ok = False
+        os.remove(os.path.join(cells_dir, "extrakey", "cell.yaml"))
 
         os.makedirs(os.path.join(cells_dir, "dupe-a"), exist_ok=True)
         os.makedirs(os.path.join(cells_dir, "dupe-b"), exist_ok=True)

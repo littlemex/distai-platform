@@ -326,11 +326,21 @@ keepLegacyReleaseNames: true
 `name:` must equal the cell's own directory exactly (it is the merge key
 the ApplicationSet generators join on; a mismatch opts the cell out
 silently, which `gitops/tests/check_object_name_length.py`'s own
-`check_cell_config_files()` catches statically). This file only takes
-effect once merged -- the generators that read it use a fixed `main`
-revision, not the per-cell revision a cell's own targetRevision may
-point at, so it cannot be tested from a feature branch a cell happens to
-track. With it set, `jobset`/`accel-neuron-device-plugin`/
+`check_cell_config_files()` catches statically). Only `name:` and
+`keepLegacyReleaseNames:` are accepted in this file -- the same check
+rejects any other key, since the merge generator carries every field of
+a matching `cell.yaml` row onto the cluster's own row, not only the
+merge key, and a future stray key could silently override a cluster
+field this platform depends on (its own revision annotation, among
+others). This file only takes effect once merged to `main` -- the
+generators that read it use a fixed `main` revision, not the per-cell
+revision a cell's own targetRevision may point at, so it cannot be
+tested from a feature branch a cell happens to track, **and a change
+committed to `main` takes effect on every cell immediately, including
+one still pinned to an older revision for everything else** -- adding
+or removing `keepLegacyReleaseNames` on `main` can trigger the rename
+on that cell the next time it reconciles, independent of when that
+cell's own revision pin is bumped. With it set, `jobset`/`accel-neuron-device-plugin`/
 `accel-neuron-dra` keep their pre-#110 `<cell>-<addon>` release name on
 that one cell, indefinitely; every other add-on on that same cell still
 gets the short name. `accel-neuron-device-plugin` still has #110's own

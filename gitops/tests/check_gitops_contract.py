@@ -362,7 +362,13 @@ def main(root: str) -> int:
                     merge_gen.get("mergeKeys") == ["name"],
                     f"got mergeKeys={merge_gen.get('mergeKeys')!r}",
                 )
-                enrich_children = merge_gen.get("generators", [])[1:]
+                merge_children = merge_gen.get("generators", [])
+                check(
+                    f"{rel}'s merge generator has exactly 2 children (clusters base, one enriching Git generator)",
+                    len(merge_children) == 2,
+                    f"got {len(merge_children)}",
+                )
+                enrich_children = merge_children[1:]
                 enrich_git = [c for c in enrich_children if "git" in c]
                 check(f"{rel}'s merge generator has exactly one enriching Git generator child", len(enrich_git) == 1)
                 if enrich_git:
@@ -373,6 +379,26 @@ def main(root: str) -> int:
                         any("cells/*/cell.yaml" in f.get("path", "") for f in enrich.get("files", []))
                         and bool(enrich.get("pathParamPrefix")),
                         f"got files={enrich.get('files')!r} pathParamPrefix={enrich.get('pathParamPrefix')!r}",
+                    )
+                    # #110/PR #116 (Fable 5.2 round 3): a Merge generator's
+                    # own children are evaluated independently, unlike a
+                    # Matrix's second child -- a templated revision here
+                    # (restoring the per-cluster annotation "for
+                    # consistency" with the sibling leg) would silently
+                    # fail to resolve for every cell, not just opted-in
+                    # ones. Locks in that this leg's own revision stays a
+                    # literal, never a template.
+                    enrich_revision = str(enrich.get("revision", ""))
+                    check(
+                        f"{rel}'s merge generator's own Git enrichment uses a literal revision, never a template "
+                        "(#110/PR #116: a Merge generator's own children cannot be templated from a sibling's row)",
+                        bool(enrich_revision) and "{{" not in enrich_revision,
+                        f"got revision={enrich_revision!r}",
+                    )
+                    check(
+                        f"{rel}'s merge generator's own Git enrichment repoURL matches the sibling addon-files Git generator",
+                        enrich.get("repoURL") == (git_children[0]["git"].get("repoURL") if git_children else None),
+                        f"got {enrich.get('repoURL')!r} vs sibling {git_children[0]['git'].get('repoURL') if git_children else None!r}",
                     )
             if git_children:
                 git = git_children[0]["git"]
