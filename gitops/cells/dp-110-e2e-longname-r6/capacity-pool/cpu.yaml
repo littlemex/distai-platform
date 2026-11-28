@@ -1,0 +1,17 @@
+# Verification-only cell for PR #116's own real-machine check of
+# cells.ApplicationSet.yaml's own new releaseName line (capacity-pool
+# is one of the three marker kinds it renders) -- copied from
+# gitops/cells/example-cell's own fixture, per that file's own "copy
+# this directory" comment. Not a real team's cell.
+addon: capacity-pool-cpu
+wave: capacity
+dir: gitops/charts/capacity-pool
+namespace: kube-system
+values:
+  pool:
+    name: cpu
+valuesFrom:
+  - helmKey: clusterName
+    param: name
+  - helmKey: nodeRole
+    annotationKey: distai.dev.annotations/karpenter-node-role
