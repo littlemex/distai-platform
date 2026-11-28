@@ -56,6 +56,22 @@
 #   oci://public.ecr.aws/neuron/neuron-helm-chart:1.11.2
 # confirmed 2026-11-19 (#28, Facts checked).
 addon: accel-neuron-device-plugin
+# #110 (full mechanism, breakpoints and namespaces in PR #116): this
+# chart's own two DaemonSets (neuron-device-plugin in kube-system,
+# node-problem-detector in this add-on's own namespace) keep a fixed
+# name regardless of release name, but their own spec.selector still
+# derives from it, and spec.selector is immutable -- so unlike the seven
+# add-ons #116 renames outright, changing this one's release name on an
+# already-synced cell would try to patch that immutable field instead of
+# a clean delete-and-recreate. pinReleaseNameToCell: true opts out;
+# #114 tracks this add-on's own still-latent, deliberately deferred bug.
+pinReleaseNameToCell: true
+# check_object_name_length.py's own known-deferred-bug exemption (not a
+# chart value, read only by that script): turns this add-on's expected
+# Helm release-name-too-long error into a NOTE instead of a static
+# FAIL, so this tracked, deliberately deferred limitation does not
+# block every unrelated PR.
+knownLatentBugIssue: 114
 # RFC #41 Decision 1: gitops/addons/ is delivered unconditionally to
 # every cell, no opt-out, and check_addon_tiers.py requires every
 # addon.yaml here to say so explicitly.

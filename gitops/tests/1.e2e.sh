@@ -159,6 +159,10 @@ set -euo pipefail
 : "${AWS_PROFILE:?export AWS_PROFILE}"
 : "${AWS_REGION:?export AWS_REGION}"
 : "${NAME:?export NAME (cell and cluster name)}"
+# #110/PR #116: below 12 characters, vigil-controller's own metrics
+# Service stays within 63 characters even under the pre-fix release
+# name, so the regression check added below would be meaningless.
+[[ "${#NAME}" -gt 11 ]] || { echo "FAIL NAME=${NAME} is only ${#NAME} characters; #110's vigil-controller regression check below needs more than 11 to be meaningful" >&2; exit 1; }
 : "${STATE_BUCKET:?export STATE_BUCKET}"
 : "${STATE_REGION:?export STATE_REGION}"
 : "${ADMIN_PRINCIPAL_ARN:?export ADMIN_PRINCIPAL_ARN (the principal running this test)}"
@@ -1114,6 +1118,7 @@ run_bootstrap() {
 APP_KARPENTER_CRD="${CLUSTER}-karpenter-crd"
 APP_KARPENTER="${CLUSTER}-karpenter"
 APP_KUEUE="${CLUSTER}-kueue"
+APP_VIGIL_CONTROLLER="${CLUSTER}-vigil-controller"
 APP_SMOKE="${CLUSTER}-smoke"
 app_synced() { [[ "$(app_sync "$1")" == "Synced" ]]; }
 app_not_synced() { [[ "$(app_sync "$1")" != "Synced" ]]; }
@@ -1720,6 +1725,14 @@ pass "${APP_KARPENTER} (controllers step, OCI chart oci://public.ecr.aws/karpent
 wait_until 900 15 "kueue Application Healthy and Synced" app_healthy_synced "${APP_KUEUE}" \
   || fail "${APP_KUEUE} did not reach Healthy+Synced: health=$(app_health "${APP_KUEUE}") sync=$(app_sync "${APP_KUEUE}")"
 pass "${APP_KUEUE} (controllers step) reached Healthy+Synced"
+
+# #110/PR #116: vigil-controller is the Application the original bug
+# actually broke on a real cell; nothing in this file checked its own
+# Sync status before this line, which is how that regression shipped
+# unnoticed.
+wait_until 900 15 "vigil-controller Application Healthy and Synced" app_healthy_synced "${APP_VIGIL_CONTROLLER}" \
+  || fail "${APP_VIGIL_CONTROLLER} did not reach Healthy+Synced: $(app_diagnostics "${APP_VIGIL_CONTROLLER}")"
+pass "${APP_VIGIL_CONTROLLER} (controllers step) reached Healthy+Synced -- #110 regression check"
 
 karpenter_launched_nodes="$(k get nodes -l karpenter.sh/nodepool --no-headers 2>/dev/null | wc -l | tr -d ' ')"
 [[ "${karpenter_launched_nodes}" -eq 0 ]] \

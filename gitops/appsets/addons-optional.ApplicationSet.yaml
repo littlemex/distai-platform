@@ -105,6 +105,14 @@ spec:
     spec:
       source:
         helm:
+          # Same fix and pinReleaseNameToCell escape hatch as
+          # platform.ApplicationSet.yaml's own releaseName line
+          # (#110/PR #116). jobset's own cell marker sets
+          # pinReleaseNameToCell: true for the same immutable-selector
+          # reason (gitops/addon-catalog/jobset/addon.yaml's own
+          # comment) even though its own object names stay fixed via
+          # fullnameOverride: jobset.
+          releaseName: "{{ if .pinReleaseNameToCell }}{{ .name }}-{{ .addon }}{{ else }}{{ .addon }}{{ end }}"
           {{- if .skipCrds }}
           skipCrds: true
           {{- end }}

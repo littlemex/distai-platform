@@ -111,6 +111,11 @@ spec:
     spec:
       source:
         helm:
+          # Same fix as platform.ApplicationSet.yaml's own releaseName
+          # line (#110/PR #116), unconditionally -- none of this file's
+          # own objects turned out to be release-name-derived, but the
+          # fix is applied here too for consistency. See PR #116.
+          releaseName: "{{ .addon }}"
           {{- if .values }}
           valuesObject:
             {{- toYaml .values | nindent 12 }}

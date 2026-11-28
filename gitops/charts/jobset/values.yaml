@@ -1,14 +1,10 @@
 jobset:
-  # Stable object names, independent of the Application name. Without
-  # this, the upstream chart's own fullname helper prefixes every object
-  # with the Helm release name, which Argo CD sets to the generated
-  # Application's name ("<cell>-jobset", addons-optional.ApplicationSet.yaml),
-  # so the controller Deployment's name would differ per cell. With it,
-  # every cell runs `jobset-controller` and `jobset-webhook-service` in
-  # `jobset-system`, the names the upstream project's own documentation
-  # uses, and the README's copy-pasteable commands work unchanged on any
-  # cell. The webhook configurations' own names are hard-coded by the
-  # upstream chart and are unaffected either way.
+  # Stable object names, independent of the Application name -- the
+  # upstream chart's own fullname helper would otherwise prefix every
+  # object with the Helm release name. jobset's own cell marker sets
+  # pinReleaseNameToCell: true (#110/PR #116), so this override is
+  # exactly as load-bearing after that fix as before: without it the
+  # controller Deployment's own name would still be cell-dependent.
   fullnameOverride: jobset
 
   # Pinned by digest, the same discipline gitops/charts/dcgm-exporter/

@@ -294,40 +294,21 @@ log "team-onboard.sh team-b"
 "${ROOT}/gitops/bootstrap/team-onboard.sh" --team team-b --tf-outputs <(terraform output -json) \
   --source-repo https://github.com/littlemex/distai-platform.git
 
-log "waiting for Argo CD to converge (platform/cells/addons-optional Applications Synced, Healthy where they report health, except vigil-controller - see EXCLUDED_APPS below)"
+log "waiting for Argo CD to converge (platform/cells/addons-optional Applications Synced, Healthy where they report health)"
 DEADLINE=$(( $(date +%s) + 1800 ))
 while true; do
+  # #110 fixed (gitops/appsets/platform.ApplicationSet.yaml's own
+  # releaseName, the add-on's own name alone for vigil-controller
+  # specifically): its Service no longer overflows Kubernetes'
+  # 63-character limit on this cell's own name, so it is no longer
+  # excluded from this convergence wait - every Application is now held
+  # to the same bar.
   NOT_SYNCED="$(kubectl get applications.argoproj.io -n "${ARGOCD_NS}" -o json | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 bad = []
-# EXCLUDED_APPS: found real-machine, this attempt (this task round, after
-# merging main): '\${NAME}-vigil-controller' fails Sync outright with
-# 'Service ... must be no more than 63 characters' - the chart's own
-# fixed Service name suffix combined with this cell's own name exceeds
-# the Kubernetes DNS-label limit. Confirmed unrelated to sharedfs: (1)
-# gitops/addons/vigil-controller/addon.yaml did not exist at this
-# branch's own merge-base at all - introduced into main by a sibling PR
-# (#103) after this branch started, pulled in only by this branch's own
-# merge of main for an unrelated README conflict; (2) vigil-controller's
-# entire function is removing capacity-pool's own pool.startupTaints,
-# and this PR's own fixture (gitops/cells/dp-18-sharedfs-r1/
-# capacity-pool/cpu.yaml) sets no startupTaints at all, so nothing this
-# test exercises depends on vigil-controller doing anything. Excluding
-# it from this convergence wait narrows what this one verify script
-# proves (it does not also prove vigil-controller is healthy), not what
-# the four required checks below need - this is not a fix to
-# vigil-controller's own bug. The actual root cause (none of this
-# platform's own ApplicationSets sets spec.source.helm.releaseName, so
-# the cell-prefixed Application name becomes the Helm release name too,
-# overflowing a 63-character Kubernetes name once a chart's own fixed
-# suffix is appended) is tracked, and already being fixed, as issue
-# #110 - remove this exclusion once that issue closes.
-EXCLUDED_APPS = {'${NAME}-vigil-controller'}
 for a in d.get('items', []):
     name = a['metadata']['name']
-    if name in EXCLUDED_APPS:
-        continue
     sync = a.get('status', {}).get('sync', {}).get('status', 'Unknown')
     health = a.get('status', {}).get('health', {}).get('status', 'Unknown')
     if sync != 'Synced' or health not in ('Healthy', 'Unknown'):
@@ -335,7 +316,7 @@ for a in d.get('items', []):
 print(chr(10).join(bad))
 ")"
   if [[ -z "${NOT_SYNCED}" ]]; then
-    log "every checked Application Synced (and Healthy where they report health) - vigil-controller excluded, see EXCLUDED_APPS"
+    log "every checked Application Synced (and Healthy where they report health)"
     break
   fi
   if [[ "$(date +%s)" -ge "${DEADLINE}" ]]; then

@@ -164,6 +164,17 @@ spec:
         chart: null
         targetRevision: '{{ index $.metadata.annotations "distai.dev.annotations/revision" }}'
         helm:
+          # #110/PR #116: the add-on's own name, never "<cell>-<addon>"
+          # (the generated Application's own metadata.name above) -- a
+          # release only needs to be unique within one (cluster,
+          # namespace) pair, which destination below already gives it.
+          # pinReleaseNameToCell (accel-neuron-device-plugin, accel-
+          # neuron-dra) opts out: their own charts keep a fixed object
+          # name but a release-derived, immutable spec.selector, so
+          # renaming would try to patch it instead of recreating. See
+          # PR #116's own "## Changes"/"## Alternatives Considered" for
+          # the full mechanism, breakpoints and real-cluster evidence.
+          releaseName: "{{ if .pinReleaseNameToCell }}{{ .name }}-{{ .addon }}{{ else }}{{ .addon }}{{ end }}"
           {{- if .skipCrds }}
           skipCrds: true
           {{- end }}
@@ -185,6 +196,9 @@ spec:
       {{- else }}
       source:
         helm:
+          # Same fix and pinReleaseNameToCell escape hatch as the .dir
+          # branch above (#110/PR #116).
+          releaseName: "{{ if .pinReleaseNameToCell }}{{ .name }}-{{ .addon }}{{ else }}{{ .addon }}{{ end }}"
           {{- if .skipCrds }}
           skipCrds: true
           {{- end }}

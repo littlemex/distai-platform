@@ -277,6 +277,59 @@ same five Karpenter CRDs (one as plain templates, one in a `crds/` folder
 skipped via `helm.skipCrds`), and a mismatched pair is exactly what the
 upgrade e2e's version-pair check exists to catch.
 
+### The Helm release name, and what upgrading an already-running cell past #110 does
+
+Every `gitops/appsets/*.ApplicationSet.yaml` sets
+`spec.source.helm.releaseName` to the add-on's own name alone for most
+add-ons (never `<cell>-<addon>`, the generated `Application`'s own
+`metadata.name`) -- [#110](https://github.com/littlemex/distai-platform/issues/110).
+Moving an already-synced cell's root `Application` from a revision
+before that fix to one after it renames every release-name-derived
+object for `karpenter`, `vigil-controller`, `kueue`,
+`accel-nvidia-device-plugin`, `accel-nvidia-dra` and both EFA advertisers
+-- seven add-ons in all (Argo CD prunes the old-named objects and
+creates the new-named ones, converging back to `Healthy`/`Synced` on its
+own -- see this fix's own pull request Test Results for which of these
+were exercised on a real cluster and how). `kueue`'s own
+admission webhooks (`Service`, both `WebhookConfiguration`s, and the
+`Secret` holding their TLS cert) rename together as part of that, and
+during the cutover, Pod creation in any namespace other than
+`kube-system`/`kueue-system` can fail with "no endpoints available for
+service" until the new `kueue-controller-manager` Pod comes up --
+self-healing, no action required, but doing the revision bump outside a
+period of heavy Pod churn avoids it mattering in practice.
+
+`jobset`, `accel-neuron-device-plugin` and `accel-neuron-dra` set
+`pinReleaseNameToCell: true` on their own `addon.yaml` (or cell marker
+file, for `jobset`) and keep the pre-#110 `<cell>-<addon>` release name
+unconditionally: their own pinned charts already keep fixed,
+release-name-independent object names, but still derive
+`spec.selector.matchLabels`' own `app.kubernetes.io/instance` from the
+release name, and `spec.selector` is immutable on a
+`Deployment`/`DaemonSet` -- changing their release name on an
+already-synced cell would try to patch that immutable field on the
+same, already-existing object instead of a clean delete-and-recreate.
+`accel-neuron-device-plugin` still has #110's own bug latently (its own
+release name exceeds Helm's 53-character cap once a cell name is 27
+characters or longer) but no cell today is that long;
+[#114](https://github.com/littlemex/distai-platform/issues/114) tracks
+the dedicated follow-up, and `knownLatentBugIssue` on its own
+`addon.yaml` is what keeps `gitops/tests/check_object_name_length.py`
+from failing the static suite on that already-tracked, deliberately
+deferred limitation.
+
+`cells.ApplicationSet.yaml` (capacity-pool, smoke and sharedfs-shares
+marker files) also newly sets this same `releaseName` -- unconditionally,
+with no `pinReleaseNameToCell` branch, since this check found none of
+its own rendered objects (`NodePool`/`EC2NodeClass`/`ResourceFlavor`,
+`ClusterQueue`/`LocalQueue`, or `sharedfs-controller`'s own hand-written
+`Deployment`/`Service`) derive their own `metadata.name` from the Helm
+release name at all -- each sets a fixed name from its own marker
+file's values or chart template directly, confirmed by rendering both
+release-name shapes and diffing. An already-running cell therefore sees
+no object churn there either way; only the add-ons named two paragraphs
+above actually rename anything.
+
 Current pins, confirmed against each chart's own OCI manifest on
 2026-11-19 (see each `addon.yaml` for the full citation and content
 digest - recorded for audit, since Argo CD's `Application` CRD has no

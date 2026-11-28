@@ -16,3 +16,7 @@ dir: gitops/charts/jobset
 namespace: jobset-system
 skipCrds: true
 wave: optional-1
+# #110: see gitops/addon-catalog/jobset/addon.yaml's own pinReleaseNameToCell
+# comment -- this is the field addons-optional.ApplicationSet.yaml
+# actually reads (the catalog entry is documentation only).
+pinReleaseNameToCell: true

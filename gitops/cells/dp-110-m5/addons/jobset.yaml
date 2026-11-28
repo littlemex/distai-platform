@@ -1,0 +1,14 @@
+# Disposable verification cell for PR #116's own real-machine migration
+# check only: lets jobset's controller Deployment actually exist on a
+# CPU-only cell (optional-pool, no capacity-pool needed -- see
+# gitops/charts/jobset/values.yaml's own placement comment) so its own
+# object identity across a #110 cutover can be asserted live, the same
+# way karpenter/kueue/vigil-controller/accel-* already are. Removed
+# after that verification; not a real team's cell.
+addon: jobset
+fromCatalog: jobset
+dir: gitops/charts/jobset
+namespace: jobset-system
+skipCrds: true
+wave: optional-1
+pinReleaseNameToCell: true
