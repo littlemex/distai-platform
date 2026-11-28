@@ -91,7 +91,7 @@ spec:
                         argocd.argoproj.io/secret-type: cluster
                 - git:
                     repoURL: https://github.com/littlemex/distai-platform.git
-                    revision: main
+                    revision: fix/110-helm-release-name # TEMPORARY for real-cluster verification only -- reverted to main before the final review round (Fable 5.2 round 3, item 1: main has no cell.yaml yet, so the opt-in path cannot be exercised before merge without this)
                     files:
                       - path: "gitops/cells/*/cell.yaml"
                     pathParamPrefix: cell
