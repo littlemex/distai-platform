@@ -6,7 +6,7 @@
 # thing that proves this feature works, with no permanent replacement built
 # yet, would be a regression rather than a cleanup. Folding these checks
 # into a GITOPS_RUN_SHAREDFS_E2E section of gitops/tests/1.e2e.sh (the same
-# shape GITOPS_RUN_ACCEL_E2E already uses) is tracked as follow-up scope.
+# shape GITOPS_RUN_ACCEL_E2E already uses) is filed as issue #113.
 #
 # Needs a Linux/amd64 host: gitops/bootstrap/sharedfs-image-publish.sh,
 # which this script calls, downloads a `go${GO_VERSION}.linux-amd64.tar.gz`
@@ -619,8 +619,8 @@ log "CHECK 3 PASS: both teams read the admin-seeded dataset; neither could write
 
 log "check 4: PVC creation by a team's own onboarding ServiceAccount matches the design (its own namespace only, never another team's)"
 # `kubectl auth can-i` exits 1 for a "no" answer, by its own documented
-# design - not a script-vs-kubectl-API error. Under set -e (this script's
-# own line 16), the second call below would abort the whole run right
+# design - not a script-vs-kubectl-API error. Under this script's own
+# set -e (near the top), the second call below would abort the whole run right
 # here on the correct, expected "no" answer, never reaching the grep that
 # is supposed to confirm it. `|| true` on each call keeps set -e from
 # firing on either answer; the grep immediately after is still what
@@ -655,4 +655,4 @@ grep -q "NotGranted" "${RESULTS_DIR}/check5-datasets-rw-pvc-events.log" && log "
 
 log "ALL CHECKS PASS"
 kubectl get filesystemshares.sharedfs.io -A | tee "${RESULTS_DIR}/final-fss-status.log"
-kubectl get fsd -A | tee "${RESULTS_DIR}/final-fsd-status.log"
+kubectl get filesystemsharedirectories.sharedfs.io -A | tee "${RESULTS_DIR}/final-fsd-status.log"
