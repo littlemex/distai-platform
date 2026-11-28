@@ -286,11 +286,16 @@ add-ons (never `<cell>-<addon>`, the generated `Application`'s own
 Moving an already-synced cell's root `Application` from a revision
 before that fix to one after it renames every release-name-derived
 object for `karpenter`, `vigil-controller`, `kueue`,
-`accel-nvidia-device-plugin`, `accel-nvidia-dra` and both EFA advertisers
--- seven add-ons in all (Argo CD prunes the old-named objects and
-creates the new-named ones, converging back to `Healthy`/`Synced` on its
-own -- see this fix's own pull request Test Results for which of these
-were exercised on a real cluster and how). `kueue`'s own
+`accel-nvidia-device-plugin`, `accel-nvidia-dra`, both EFA advertisers
+and `dcgm-exporter` -- eight add-ons in all, confirmed by rendering
+every add-on under both release-name shapes and diffing every rendered
+object (Argo CD prunes the old-named objects and creates the new-named
+ones, converging back to `Healthy`/`Synced` on its own -- see this
+fix's own pull request Test Results for which of these were exercised
+on a real cluster and how). No cell registered in this repository today
+has a `dcgm-exporter.yaml` marker, so this one renames nothing on a real
+cluster yet; the first cell that adopts it gets the post-#110 name from
+the start. `kueue`'s own
 admission webhooks (`Service`, both `WebhookConfiguration`s, and the
 `Secret` holding their TLS cert) rename together as part of that, and
 during the cutover, Pod creation in any namespace other than
@@ -322,13 +327,20 @@ deferred limitation.
 marker files) also newly sets this same `releaseName` -- unconditionally,
 with no `pinReleaseNameToCell` branch, since this check found none of
 its own rendered objects (`NodePool`/`EC2NodeClass`/`ResourceFlavor`,
-`ClusterQueue`/`LocalQueue`, or `sharedfs-controller`'s own hand-written
-`Deployment`/`Service`) derive their own `metadata.name` from the Helm
-release name at all -- each sets a fixed name from its own marker
-file's values or chart template directly, confirmed by rendering both
-release-name shapes and diffing. An already-running cell therefore sees
-no object churn there either way; only the add-ons named two paragraphs
-above actually rename anything.
+`ClusterQueue`/`LocalQueue`, or `sharedfs-shares`' own `PersistentVolume`/
+`PersistentVolumeClaim`/`FilesystemShare` objects) derive their own
+`metadata.name` from the Helm release name at all -- each sets a fixed
+name from its own marker file's values or chart template directly,
+confirmed by rendering both release-name shapes and diffing every
+rendered object. `sharedfs` (the cluster-wide `sharedfs-controller`
+chart, reached through `addons-optional.ApplicationSet.yaml`'s own
+`cells/*/addons/sharedfs.yaml` marker, not through
+`cells.ApplicationSet.yaml`) renders unchanged for the same reason: its
+own `Deployment`/`Service` get a fixed name from the chart template,
+never the release name. An already-running cell therefore sees no
+object churn from either `cells.ApplicationSet.yaml`'s own new line or
+`sharedfs`'s; only the eight add-ons named two paragraphs above actually
+rename anything.
 
 Current pins, confirmed against each chart's own OCI manifest on
 2026-11-19 (see each `addon.yaml` for the full citation and content

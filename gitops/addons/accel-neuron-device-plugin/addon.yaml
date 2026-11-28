@@ -60,7 +60,7 @@ addon: accel-neuron-device-plugin
 # chart's own two DaemonSets (neuron-device-plugin in kube-system,
 # node-problem-detector in this add-on's own namespace) keep a fixed
 # name regardless of release name, but their own spec.selector still
-# derives from it, and spec.selector is immutable -- so unlike the seven
+# derives from it, and spec.selector is immutable -- so unlike the eight
 # add-ons #116 renames outright, changing this one's release name on an
 # already-synced cell would try to patch that immutable field instead of
 # a clean delete-and-recreate. pinReleaseNameToCell: true opts out;
