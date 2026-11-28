@@ -44,6 +44,21 @@
 clusterResourceWhitelist:
   - group: ""
     kind: Namespace
+  - group: ""
+    kind: PersistentVolume
+    # #18: gitops/charts/sharedfs-shares renders one static PersistentVolume
+    # reserving the shared FSx for Lustre file system for the fs-admin
+    # namespace's own claim (sharedfs's own SourceUnreserved check).
+  - group: "sharedfs.io"
+    kind: FilesystemShare
+    # #18: gitops/charts/sharedfs-shares renders the checkpoints/datasets
+    # FilesystemShare instances; the CRD *definition* is already covered by
+    # the generic CustomResourceDefinition entry below.
+    # FilesystemShareDirectory (also sharedfs.io, also Cluster-scoped) is
+    # deliberately not here: the sharedfs controller creates these records
+    # itself at runtime (one per claimed directory), never an Argo
+    # CD-synced Application - the same "only what Argo CD itself writes"
+    # reasoning this file already applies to NodeClaim/StorageClass.
   - group: "admissionregistration.k8s.io"
     kind: MutatingWebhookConfiguration
   - group: "admissionregistration.k8s.io"
@@ -105,7 +120,21 @@ namespaceResourceWhitelist:
   - group: ""
     kind: ConfigMap
   - group: ""
+    kind: PersistentVolumeClaim
+    # #18: gitops/charts/sharedfs-shares' own fs-admin namespace reserves
+    # the shared PersistentVolume above with an ordinary PVC.
+  - group: ""
     kind: Pod
+  - group: "batch"
+    kind: Job
+    # #18: gitops/charts/sharedfs-shares' own templates/seed.yaml, a
+    # PostSync hook Job seeding the top-level checkpoints/datasets
+    # directories the FilesystemShare objects above need already exist.
+    # Found missing by a review round, not rendered-and-collected before
+    # this entry was added (check_appproject_whitelist.py now covers it
+    # the same way as every other kind here) - without it Argo CD
+    # rejects the Job outright as not permitted in this project, failing
+    # sharedfs-shares' own sync before the Job ever runs.
   - group: ""
     kind: Secret
   - group: ""

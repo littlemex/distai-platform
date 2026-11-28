@@ -1,0 +1,88 @@
+# #22 Decision 8's own concrete plan, adopted directly by #18: one
+# ReadWrite FilesystemShare per team's checkpoint directory
+# (path: "checkpoints/{namespace}", created automatically on first claim -
+# `provision` - never an admin hand-writing one PersistentVolume per
+# team), and one share for the shared, read-only dataset tree with a
+# second, ReadWrite grant for the admin namespace alone so an admin can
+# seed it (one share with two grants, not two shares - sharedfs's own
+# documented shape, README "the strongest mount the selected namespaces
+# may claim" per grant).
+#
+# `datasets` carries no `provision`: sharedfs's own CRD rejects
+# `provision` on any path with fewer than two segments ("provision needs
+# a path of two segments or more: the preparer mounts the parent
+# read-write, and the parent of a top-level directory is the whole file
+# system" - templates/crds.yaml in sharedfs-controller) - `datasets` is
+# exactly the single-segment case that rule exists to forbid, and
+# upstream's own README shows this exact path with no `provision` field
+# at all. `checkpoints/{namespace}` is two segments and keeps its own
+# `provision`, matching upstream's own other example. Found by code
+# review (2026-11-27, against sharedfs's own CRD and README - at the
+# time, the cluster that reproduced the symptom had already been torn
+# down): rendering `datasets` with `provision` set made the object's own
+# creation fail CRD admission on every sync attempt. Confirmed as the
+# actual cause, not merely the likely one, by attempt 7 (this task
+# round's own Test Results): with this fix in place, every Application
+# including gitops/charts/sharedfs-shares converged Synced and Healthy
+# for the first time across every attempt to date, with the
+# cross-ApplicationSet race this PR's Test Results first suspected never
+# recurring in any of the four further attempts that actually reached
+# this code (7, 9, 10, 11 - attempt 8 never generated this chart's own
+# Application at all, for an unrelated reason, so it does not count
+# either way).
+#
+# Both `checkpoints` and `datasets` are themselves top-level directories
+# whose own parent is the file system root - sharedfs's own README: "The
+# parent must already exist, be owned by root, and not be writable by
+# group or others," with no mechanism of its own to create that parent.
+# templates/seed.yaml creates both, once, before anything here needs
+# them to already exist.
+#
+# distai.dev/team (gitops/bootstrap/team-onboard.sh) is the one label
+# every team namespace carries, and the one no tenant can remove or
+# change the value of (gitops/bootstrap/team-namespace-guard.yaml's own
+# rules 1-2) - exactly the precondition sharedfs's own README states for
+# selecting a grant by namespace label at all ("tenants must not be able
+# to set the labels a grant selects on"). operator: Exists, not matching
+# a specific team name, so a newly onboarded team's checkpoint directory
+# and read access are both automatic, with no second PR per team.
+apiVersion: sharedfs.io/v1alpha1
+kind: FilesystemShare
+metadata:
+  name: checkpoints
+  labels:
+    app.kubernetes.io/name: sharedfs-shares
+spec:
+  persistentVolumeRef:
+    name: sharedfs-source
+  path: "checkpoints/{namespace}"
+  provision:
+    gid: 1000
+    mode: "2770"
+  grants:
+    - namespaceSelector:
+        matchExpressions:
+          - key: distai.dev/team
+            operator: Exists
+      access: ReadWrite
+---
+apiVersion: sharedfs.io/v1alpha1
+kind: FilesystemShare
+metadata:
+  name: datasets
+  labels:
+    app.kubernetes.io/name: sharedfs-shares
+spec:
+  persistentVolumeRef:
+    name: sharedfs-source
+  path: "datasets"
+  grants:
+    - namespaceSelector:
+        matchExpressions:
+          - key: distai.dev/team
+            operator: Exists
+      access: ReadOnly
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ .Values.adminNamespace }}
+      access: ReadWrite

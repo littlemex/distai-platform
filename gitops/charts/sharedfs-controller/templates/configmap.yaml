@@ -1,0 +1,14 @@
+# Ported from littlemex/sharedfs's own `kubectl kustomize config/default`
+# output at the pinned commit (see templates/crds.yaml's own header for the
+# full citation, the seven edits made from the literal render, and why each
+# one is safe). This file carries only the edits that are its own.
+
+
+apiVersion: v1
+data: {}
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-project-ids
+  namespace: sharedfs-system

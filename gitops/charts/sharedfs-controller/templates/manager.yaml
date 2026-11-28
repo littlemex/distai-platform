@@ -1,0 +1,148 @@
+# Ported from littlemex/sharedfs's own `kubectl kustomize config/default`
+# output at the pinned commit (see templates/crds.yaml's own header for the
+# full citation, the seven edits made from the literal render, and why each
+# one is safe). This file carries only the edits that are its own.
+
+
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/name: sharedfs
+    control-plane: controller-manager
+  name: sharedfs-controller-manager-metrics-service
+  namespace: sharedfs-system
+spec:
+  ports:
+  - name: https
+    port: 8443
+    protocol: TCP
+    targetPort: 8443
+  selector:
+    app.kubernetes.io/name: sharedfs
+    control-plane: controller-manager
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/name: sharedfs
+    control-plane: controller-manager
+  name: sharedfs-controller-manager
+  namespace: sharedfs-system
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sharedfs
+      control-plane: controller-manager
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        app.kubernetes.io/name: sharedfs
+        control-plane: controller-manager
+    spec:
+      containers:
+      - args:
+        - --metrics-bind-address=:8443
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        - --preparer-image={{ .Values.image }}
+        # No `command:` override here (upstream's own manifest sets
+        # `command: [/manager]`, matching its own Dockerfile that copies the
+        # built binary to that exact path). This image is built by
+        # gitops/bootstrap/sharedfs-image-publish.sh with `ko build ./cmd
+        # --bare`, not that Dockerfile; ko's own source
+        # (pkg/build/gobuild.go: `defaultAppFilename = "ko-app"`, `appDir :=
+        # "/ko-app"`) places the binary at /ko-app/cmd and sets the image's
+        # own ENTRYPOINT to that path directly - there is no /manager in
+        # this image at all. Overriding `command` to /manager would exec
+        # a path that does not exist (CrashLoopBackOff on every replica).
+        # `args` alone, applied to whatever ENTRYPOINT the image already
+        # carries, is correct for any image this platform's own publish
+        # script produces, and needs no change if ko's own binary-naming
+        # convention changes.
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        image: {{ required "sharedfs-controller.image is required (the self-published, per-cell image - see this chart's own README)" .Values.image | quote }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        name: manager
+        ports:
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts: []
+      priorityClassName: system-cluster-critical
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: sharedfs-controller-manager
+      terminationGracePeriodSeconds: 10
+      tolerations:
+      - effect: NoExecute
+        key: node.kubernetes.io/not-ready
+        operator: Exists
+        tolerationSeconds: 30
+      - effect: NoExecute
+        key: node.kubernetes.io/unreachable
+        operator: Exists
+        tolerationSeconds: 30
+      topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: sharedfs
+            control-plane: controller-manager
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+      volumes: []
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-controller-manager
+  namespace: sharedfs-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sharedfs
+      control-plane: controller-manager

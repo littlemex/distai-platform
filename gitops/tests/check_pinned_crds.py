@@ -67,6 +67,31 @@ def placeholder_values(addon_doc):
     values = dict(addon_doc.get("values") or {})
     for entry in addon_doc.get("valuesFrom", []) or []:
         set_path(values, entry["helmKey"], "pinned-crd-check-placeholder")
+    # #18: a bare gitops/addon-catalog/<name>/addon.yaml (never a cell
+    # marker) has no valuesFrom of its own at all -- only overridableKeys
+    # (RFC #41 Decision 3), naming a path a *marker* may set, with no
+    # value here either way. sharedfs is the first platform-optional
+    # catalog entry whose chart has no safe default for such a path at
+    # all (gitops/charts/sharedfs-controller's own image, required()-
+    # guarded, intentionally: see that chart's own values.yaml). Filling
+    # every overridableKeys path the same way valuesFrom's own paths are
+    # filled keeps this helper's one stated purpose - getting a
+    # required()-guarded chart past that guard for a static render with
+    # no live cluster - working for a catalog entry's own bare render,
+    # not only a cell marker's.
+    for entry in addon_doc.get("overridableKeys", []) or []:
+        # kind: object (dcgm-exporter's own dcgm-exporter.resources,
+        # .networkPolicy.allowedPeers) must get a placeholder Helm's own
+        # values-coalescing can merge as a table, never a bare string: an
+        # earlier version of this fix used the same string placeholder
+        # for every kind and broke dcgm-exporter's own render
+        # ("cannot overwrite table with non table for
+        # dcgm-exporter.dcgm-exporter.resources", found by this fix's own
+        # first real-machine-adjacent run) - {} merges into any map- or
+        # list-shaped default with no effect, the same "do nothing, just
+        # exist" role the string placeholder plays for kind: scalar.
+        placeholder = {} if entry.get("kind") == "object" else "pinned-crd-check-placeholder"
+        set_path(values, entry["path"], placeholder)
     return values
 
 

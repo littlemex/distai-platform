@@ -1,0 +1,286 @@
+# Ported from littlemex/sharedfs's own `kubectl kustomize config/default`
+# output at the pinned commit (see templates/crds.yaml's own header for the
+# full citation, the seven edits made from the literal render, and why each
+# one is safe). This file carries only the edits that are its own.
+
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-controller-manager
+  namespace: sharedfs-system
+---
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-preparer
+  namespace: sharedfs-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-leader-election-role
+  namespace: sharedfs-system
+rules:
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sharedfs-manager-role
+  namespace: sharedfs-system
+rules:
+- apiGroups:
+  - ""
+  resourceNames:
+  - sharedfs-project-ids
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sharedfs-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - sharedfs.io
+  resources:
+  - filesystemsharedirectories
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - sharedfs.io
+  resources:
+  - filesystemsharedirectories/finalizers
+  - filesystemshares/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - sharedfs.io
+  resources:
+  - filesystemsharedirectories/status
+  - filesystemshares/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - sharedfs.io
+  resources:
+  - filesystemshares
+  verbs:
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - storage.k8s.io
+  resources:
+  - csidrivers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - storage.k8s.io
+  resources:
+  - storageclasses
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sharedfs-metrics-auth-role
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sharedfs-metrics-reader
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-share-viewer
+rules:
+- apiGroups:
+  - sharedfs.io
+  resources:
+  - filesystemshares
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-leader-election-rolebinding
+  namespace: sharedfs-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sharedfs-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: sharedfs-controller-manager
+  namespace: sharedfs-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-manager-rolebinding
+  namespace: sharedfs-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sharedfs-manager-role
+subjects:
+- kind: ServiceAccount
+  name: sharedfs-controller-manager
+  namespace: sharedfs-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sharedfs-manager-role
+subjects:
+- kind: ServiceAccount
+  name: sharedfs-controller-manager
+  namespace: sharedfs-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sharedfs-metrics-auth-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sharedfs-metrics-auth-role
+subjects:
+- kind: ServiceAccount
+  name: sharedfs-controller-manager
+  namespace: sharedfs-system

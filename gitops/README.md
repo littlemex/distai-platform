@@ -21,7 +21,7 @@ gitops/
     root-application.yaml        # template bootstrap.sh applies
   appsets/
     platform.ApplicationSet.yaml # one Application per gitops/addons/*/addon.yaml
-    cells.ApplicationSet.yaml    # one Application per gitops/cells/<cell>/{capacity-pool,smoke}/*.yaml
+    cells.ApplicationSet.yaml    # one Application per gitops/cells/<cell>/{capacity-pool,smoke,sharedfs}/*.yaml
     addons-optional.ApplicationSet.yaml # one Application per gitops/cells/<cell>/addons/*.yaml
   addons/
     <name>/addon.yaml            # one platform-wide add-on: chart, version, wave, values (tier: core)
@@ -33,6 +33,7 @@ gitops/
     <cluster-name>/
       capacity-pool/*.yaml        # one parameter file per NodePool
       smoke/*.yaml                 # the admin-owned smoke ClusterQueue/LocalQueue
+      sharedfs/*.yaml               # this cell's static PersistentVolume + FilesystemShare objects (#18)
       addons/*.yaml                # one marker file per platform-optional component this cell opts into
 ```
 
@@ -244,10 +245,11 @@ separate `ApplicationSet` objects.
 | `platform` | `crds` (`karpenter-crd`, `jobset-crd`) | yes |
 | `platform` | `controllers` (`karpenter`, `kueue`, `optional-pool`, `vigil-controller`) | yes |
 | `platform` | `accelerators` (`accel-nvidia-device-plugin`, `accel-nvidia-dra`, `accel-neuron-device-plugin`, `accel-neuron-dra`, `accel-device-classes`, `accel-efa-device-plugin-nvidia`, `accel-efa-device-plugin-neuron`) | yes |
-| `platform` | `extras` | no - [#18](https://github.com/littlemex/distai-platform/issues/18)/[#23](https://github.com/littlemex/distai-platform/issues/23) |
+| `platform` | `extras` | no - [#23](https://github.com/littlemex/distai-platform/issues/23) ([#18](https://github.com/littlemex/distai-platform/issues/18) does not use this wave at all: sharedfs is platform-optional, not core - see the `addons-optional`/`cells` rows below) |
 | `cells` | `capacity` (`capacity-pool/*`, `smoke/*`) | yes |
+| `cells` | `sharedfs` (`sharedfs/*` -> `gitops/charts/sharedfs-shares`: the static PersistentVolume, its reserving PVC and the `checkpoints`/`datasets` `FilesystemShare` objects) | yes ([#18](https://github.com/littlemex/distai-platform/issues/18)) |
 | `cells` | `teams` | no - [#22](https://github.com/littlemex/distai-platform/issues/22) |
-| `addons-optional` | `optional-1`..`optional-4` (`cells/*/addons/*`; catalog entries `dcgm-exporter`, `jobset` - a `jobset` marker uses `optional-1`, since its one `dependsOn`, `jobset-crd`, is core and needs no earlier optional wave) | yes ([#41](https://github.com/littlemex/distai-platform/issues/41), [#34](https://github.com/littlemex/distai-platform/issues/34)) |
+| `addons-optional` | `optional-1`..`optional-4` (`cells/*/addons/*`; catalog entries `dcgm-exporter`, `jobset`, `sharedfs` - a `jobset`/`sharedfs` marker uses `optional-1`, since each one's own real dependency is either core (`jobset-crd`) or outside this mechanism entirely (`sharedfs`'s own aws-fsx-csi-driver EKS managed add-on, `infra/foundation`'s, not a `gitops/addons/`/`gitops/addon-catalog/` entry) and needs no earlier optional wave) | yes ([#41](https://github.com/littlemex/distai-platform/issues/41), [#34](https://github.com/littlemex/distai-platform/issues/34), [#18](https://github.com/littlemex/distai-platform/issues/18)) |
 
 ## Versioning
 
@@ -454,9 +456,11 @@ already uses for any other taint.
   `accelerator.methodLabel` and are delivered in the `accelerators` step
   below). Field-level detail is in
   [`charts/capacity-pool/README.md`](./charts/capacity-pool/README.md).
-- No team object, `sharedfs` or notifications add-on ships here (RFC #25
-  Decision 9); their steps exist in the RFC but have no `addon.yaml` yet,
-  so they generate nothing today.
+- No team object or notifications add-on ships here (RFC #25 Decision 9);
+  their steps exist in the RFC but have no `addon.yaml` yet, so they
+  generate nothing today. sharedfs (also named in that same Decision) now
+  does ship - [#18](https://github.com/littlemex/distai-platform/issues/18),
+  `gitops/addon-catalog/sharedfs` and `gitops/charts/sharedfs-shares`.
 - The DRA method (`accel-nvidia-dra`, `accel-neuron-dra`) is delivered and
   statically checked, but no dynamically provisioned `NodePool` initializes
   a DRA node (#19 E2, E4c); a static `NodePool` for DRA is

@@ -7,7 +7,7 @@ promises (#63, independent security-axis review pass, filed as "SA1"
 item 1).
 
 For every gitops/addons/<name>/addon.yaml, gitops/addon-catalog/<name>/
-addon.yaml, and gitops/cells/*/{capacity-pool,smoke}/*.yaml, `helm
+addon.yaml, and gitops/cells/*/{capacity-pool,smoke,sharedfs}/*.yaml, `helm
 template` it (registry chart or local `dir:`, matching what Argo CD
 itself does) with that file's own `values:` merged with `valuesFrom`'s
 own helmKey paths filled by an inert placeholder (the same technique
@@ -137,6 +137,9 @@ def main(root: str) -> int:
     cell_files = sorted(
         glob.glob(os.path.join(gitops, "cells", "*", "capacity-pool", "*.yaml"))
         + glob.glob(os.path.join(gitops, "cells", "*", "smoke", "*.yaml"))
+        # #18: cells.ApplicationSet.yaml's own new sharedfs glob, the same
+        # reason bootstrap.sh's own ADDON_NAMESPACES scan was extended.
+        + glob.glob(os.path.join(gitops, "cells", "*", "sharedfs", "*.yaml"))
     )
     all_files = addon_files + catalog_files + cell_files
     check(f"found at least one addon.yaml/cells parameter file to check (found {len(all_files)})", len(all_files) >= 1)

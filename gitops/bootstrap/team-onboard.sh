@@ -407,6 +407,18 @@ rules:
   - apiGroups: [""]
     resources: ["serviceaccounts", "configmaps", "pods", "services"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # persistentvolumeclaims (#18): a team claims sharedfs's checkpoints-rw/
+  # datasets-ro StorageClasses (gitops/charts/sharedfs-shares) with an
+  # ordinary PVC in its own namespace, the same way it already manages
+  # every other resource in this Role - no cluster-admin or GitOps step on
+  # its behalf. persistentvolumes is deliberately NOT here: a PVC is
+  # namespaced and this Role grants nothing outside ${TEAM}, but a
+  # PersistentVolume is cluster-scoped (the same reason this Role has no
+  # ClusterRole rule anywhere) - sharedfs's own controller, not a team,
+  # creates the PersistentVolume a granted claim binds to.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

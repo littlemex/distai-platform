@@ -199,6 +199,9 @@ fi
 
 mapfile -t cell_capacity_pool_files < <(find "${GITOPS_ROOT}/cells" -path '*/capacity-pool/*.yaml' 2>/dev/null | sort)
 mapfile -t cell_smoke_files < <(find "${GITOPS_ROOT}/cells" -path '*/smoke/*.yaml' 2>/dev/null | sort)
+# #18: cells/*/sharedfs/*.yaml, the new glob cells.ApplicationSet.yaml's own
+# sharedfs wave reads.
+mapfile -t cell_sharedfs_files < <(find "${GITOPS_ROOT}/cells" -path '*/sharedfs/*.yaml' 2>/dev/null | sort)
 if [[ "${#cell_capacity_pool_files[@]}" -ge 1 ]]; then
   echo "PASS at least one cells/*/capacity-pool/*.yaml exists"
 else
@@ -210,6 +213,18 @@ if [[ "${#cell_smoke_files[@]}" -ge 1 ]]; then
 else
   echo "FAIL no cells/*/smoke/*.yaml found"
   failures=$((failures + 1))
+fi
+# Not a FAIL like capacity-pool/smoke above: every cell has those two, but
+# sharedfs (#18) is optional per cell - only a cell whose
+# infra/foundation was applied with var.shared_fsx_lustre set has one.
+# This PR's own fixture (cells/dp-18-sharedfs-r1/sharedfs/) is why at
+# least one exists today, not a platform-wide requirement; a later PR
+# removing that fixture (or any cell's own sharedfs/*.yaml) with no
+# replacement must not fail every unrelated PR's static check.
+if [[ "${#cell_sharedfs_files[@]}" -ge 1 ]]; then
+  echo "INFO ${#cell_sharedfs_files[@]} cells/*/sharedfs/*.yaml file(s) found"
+else
+  echo "INFO no cells/*/sharedfs/*.yaml found (sharedfs is optional per cell - not a failure)"
 fi
 
 # ------------------------------------------------- 2. shellcheck, bash -n
@@ -495,6 +510,29 @@ if [[ "${#cell_smoke_files[@]}" -ge 1 ]]; then
       bash -c "'${HELM}' template smoke-e2e '${GITOPS_ROOT}/charts/smoke' -f '${SMOKE_VALUES}' > '${RENDERED_DIR}/smoke-${smoke_label}.yaml'"
   done
 fi
+if [[ "${#cell_sharedfs_files[@]}" -ge 1 ]]; then
+  run_check "helm lint charts/sharedfs-shares" "${HELM}" lint "${GITOPS_ROOT}/charts/sharedfs-shares"
+  for sfs_file in "${cell_sharedfs_files[@]}"; do
+    sfs_label="$(basename "$(dirname "$(dirname "${sfs_file}")")")-$(basename "${sfs_file}" .yaml)"
+    SFS_VALUES="${WORK_DIR}/sharedfs-shares-values-${sfs_label}.yaml"
+    extract_values "${sfs_file}" "${SFS_VALUES}"
+    # extract_values's own placeholder ("static-check-placeholder") is a
+    # plain string, correct for fsx.fileSystemId/dnsName/mountName (all
+    # quoted strings in gitops/charts/sharedfs-shares' own templates) but
+    # wrong for fsx.storageCapacityGib, which that chart's own
+    # templates/pv-pvc.yaml concatenates directly into a Kubernetes
+    # resource.Quantity ("{{ .Values.fsx.storageCapacityGib }}Gi") -
+    # "static-check-placeholderGi" is not a valid quantity and would fail
+    # kubeconform, not this chart's own helm template (Helm does no type
+    # checking). Every other extract_values() consumer in this script only
+    # ever feeds its placeholder into a plain string field, so this
+    # override is local to this one loop, not a change to extract_values()
+    # itself.
+    sed -i 's/storageCapacityGib: static-check-placeholder/storageCapacityGib: "1200"/' "${SFS_VALUES}"
+    run_check "helm template charts/sharedfs-shares (values from ${sfs_label}/$(basename "${sfs_file}"))" \
+      bash -c "'${HELM}' template sharedfs-shares-e2e '${GITOPS_ROOT}/charts/sharedfs-shares' -f '${SFS_VALUES}' > '${RENDERED_DIR}/sharedfs-shares-${sfs_label}.yaml'"
+  done
+fi
 
 # charts/accel-device-classes (#28) has no cell-specific values (one
 # cluster-scoped DeviceClass, nothing varies per cell) and no
@@ -721,6 +759,71 @@ kubeconform_targets=("${GITOPS_ROOT}/appsets/platform.ApplicationSet.yaml" "${GI
 while IFS= read -r -d '' rendered_file; do
   kubeconform_targets+=("${rendered_file}")
 done < <(find "${RENDERED_DIR}" -maxdepth 1 -name '*.yaml' -print0 | sort -z)
+
+# #18: kubeconform has no usable schema for anything in the sharedfs.io
+# group, for two different reasons that happen to produce the identical
+# "could not find schema for <Kind>" message:
+#   - the two CustomResourceDefinition *documents* themselves
+#     (filesystemsharedirectories.sharedfs.io, filesystemshares.sharedfs.io):
+#     kubeconform's own documented CRD handling (Readme.md,
+#     "CustomResourceDefinition (CRD) Support") tries to derive a usable
+#     schema from a CRD's own embedded openAPIV3Schema rather than
+#     validating the wrapping document against a generic
+#     apiextensions.k8s.io schema at all, and this conversion fails for
+#     these two specifically (confirmed on the runner, 2026-11-26: the
+#     only CRDs in this repository using x-kubernetes-validations this
+#     extensively, including a literal `self.__namespace__` field
+#     reference; every other CRD this repository renders - karpenter.sh,
+#     kueue.x-k8s.io - converts and validates cleanly, unchanged);
+#   - the FilesystemShare *instances* this platform's own
+#     gitops/charts/sharedfs-shares renders (checkpoints, datasets): a
+#     plain "no catalog entry for this group" case, the ordinary reason
+#     -skip exists at all - but every other CRD instance this repository
+#     renders (EC2NodeClass, NodePool, ResourceFlavor, ClusterQueue, ...)
+#     already is in datreeio/CRDs-catalog, so narrowing by the document's
+#     own Kind would still work for this one case alone.
+# kubeconform's own -skip flag matches a document's own wrapping Kind
+# (CustomResourceDefinition for every CRD *definition* this repository
+# renders, confirmed on the runner), not the kind a CRD itself defines, so
+# -skip CustomResourceDefinition would also skip every other CRD
+# definition this repository already renders successfully, silently
+# hiding a future regression in one this repository does not even author
+# (karpenter-crd, kueue) the day its own schema stops resolving - -skip
+# FilesystemShare alone would be precise (no other addon in this
+# repository ever renders that Kind), but using two different mechanisms
+# for what is really one fact ("sharedfs.io has no usable schema
+# anywhere") is harder to audit than filtering both cases the same way.
+# This loop removes exactly four documents (two CRD definitions, two
+# FilesystemShare instances) from whichever RENDERED_DIR files carry them,
+# by apiVersion/group rather than by filename, so it also covers any
+# future cell's own sharedfs-shares-<cell>.yaml - every other CRD and
+# instance's coverage is untouched. The four excluded documents are still
+# checked by `helm lint`/`helm template` (both already ran above) and,
+# authoritatively, by the Kubernetes API server accepting them on a real
+# cluster (AGENTS.md section 1: "terraform plan, unit tests and mocks are
+# supporting checks, not a real run" - this applies to kubeconform too).
+for i in "${!kubeconform_targets[@]}"; do
+  target="${kubeconform_targets[$i]}"
+  [[ "${target}" == "${RENDERED_DIR}"/*.yaml ]] || continue
+  FILTERED="${WORK_DIR}/kubeconform-filtered-$(basename "${target}")"
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" python3 - "${target}" "${FILTERED}" <<'PY'
+import sys
+import yaml
+src, dst = sys.argv[1], sys.argv[2]
+with open(src, encoding="utf-8") as f:
+    docs = [d for d in yaml.safe_load_all(f) if d is not None]
+def is_sharedfs_io_crd_definition(d):
+    return d.get("kind") == "CustomResourceDefinition" and str(d.get("metadata", {}).get("name", "")).endswith(".sharedfs.io")
+def is_sharedfs_io_instance(d):
+    return str(d.get("apiVersion", "")).startswith("sharedfs.io/")
+kept = [d for d in docs if not (is_sharedfs_io_crd_definition(d) or is_sharedfs_io_instance(d))]
+if len(kept) == len(docs):
+    sys.exit(0)  # nothing to filter in this file; leave the original target in place
+with open(dst, "w", encoding="utf-8") as f:
+    yaml.safe_dump_all(kept, f)
+PY
+  [[ -f "${FILTERED}" ]] && kubeconform_targets[i]="${FILTERED}"
+done
 
 run_check "kubeconform (${#kubeconform_targets[@]} file(s), k8s 1.37.0 + pinned CRD schemas)" \
   "${KUBECONFORM_BIN}" "${KUBECONFORM_ARGS[@]}" "${kubeconform_targets[@]}"

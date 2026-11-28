@@ -1,0 +1,14 @@
+apiVersion: v2
+name: sharedfs-shares
+description: >-
+  Per-cell static PersistentVolume, reserving PVC and FilesystemShare
+  objects for the shared FSx for Lustre file system (#18, #22 Decision 8).
+  Cell-specific (the file system's own identity), unlike
+  gitops/charts/sharedfs-controller, which every cell that opts into
+  sharedfs renders identically.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+home: https://github.com/littlemex/distai-platform
+sources:
+  - https://github.com/littlemex/distai-platform

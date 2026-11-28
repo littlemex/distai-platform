@@ -209,6 +209,116 @@ variable "tags" {
   nullable    = false
 }
 
+variable "shared_fsx_lustre" {
+  description = "Optional: create one shared FSx for Lustre file system for this cell (#18, #22 Decision 8): datasets, model weights and per-team checkpoint directories, delivered to tenants through the sharedfs controller (gitops/addon-catalog/sharedfs), never through Terraform's own state (gitops/README.md: Terraform's state graph never contains a Kubernetes object once a cell exists). null (the default) creates nothing -- fsx.tf's resources, the aws-fsx-csi-driver managed add-on and the sharedfs controller image's ECR repository all key off this being non-null, the same optional-capability shape as var.argocd. deployment_type SCRATCH_2 is this variable's own default: it is FSx's smallest real deployment type (no minimum capacity above 1200 GiB, no backup/replication machinery), chosen for this platform's own test cells (RFC #17/#22: 'the test cluster... may be destroyed and recreated'), not a production sizing recommendation -- a cell that needs PERSISTENT_1/PERSISTENT_2 (durability, higher baseline throughput) sets deployment_type explicitly. Lustre project quotas (sharedfs's own provision.quota) need Lustre 2.15; file_system_type_version below defaults to exactly that, for every deployment type, not only the one quotas need."
+  type = object({
+    deployment_type             = optional(string, "SCRATCH_2")
+    storage_capacity_gib        = optional(number, 1200)
+    per_unit_storage_throughput = optional(number)
+    # 2.15 (AWS's CreateFileSystem API reference: "recommended for all
+    # new file systems," supported on every Lustre deployment type) -
+    # not FSx's own implicit default, which is 2.10 except for
+    # PERSISTENT_2 (2.12, or 2.15 only with a metadata configuration
+    # mode set). Pinned explicitly rather than left at that default:
+    # this platform's own EKS worker nodes mount through the Lustre
+    # 2.15 client the aws-fsx-csi-driver's own image ships, and nothing
+    # here has confirmed a 2.15 client can mount a 2.10 server (FSx for
+    # Lustre's own client/server version-skew guarantees are narrower
+    # than "any client can mount any server") - real-machine confirmed in
+    # attempt 9 (this PR's own Test Results): a 2.15 file system mounted
+    # and served reads/writes through this platform's own CSI driver
+    # client with no mount error.
+    file_system_type_version = optional(string, "2.15")
+    # false (AWS's own CreateFileSystem default) unless set true: a
+    # PERSISTENT_1/PERSISTENT_2 file system takes a final backup on
+    # deletion unless this is set, and that is the safe default to keep
+    # for any cell this variable's own default did not already describe
+    # as disposable (this variable's own description above: SCRATCH_2,
+    # "chosen for this platform's own test cells... not a production
+    # sizing recommendation"). A cell whose own fixture is destroyed and
+    # recreated on every real-machine run sets this true explicitly
+    # (gitops/tests/.tmp-sharedfs-verify.sh's own terraform apply does -
+    # there is no infra/foundation/tests fixture for shared_fsx_lustre
+    # yet, a known gap this variable's own description does not claim is
+    # closed); nothing here defaults every cell, including a future
+    # PERSISTENT one, to the less-safe choice.
+    skip_final_backup = optional(bool, false)
+  })
+  default  = null
+  nullable = true
+
+  validation {
+    condition     = var.shared_fsx_lustre == null || contains(["SCRATCH_1", "SCRATCH_2", "PERSISTENT_1", "PERSISTENT_2"], var.shared_fsx_lustre.deployment_type)
+    error_message = "shared_fsx_lustre.deployment_type must be one of SCRATCH_1, SCRATCH_2, PERSISTENT_1, PERSISTENT_2 (the FSx for Lustre deployment types the aws_fsx_lustre_file_system resource accepts)."
+  }
+
+  # FSx for Lustre's own minimum/increment (AWS's CreateFileSystem API
+  # reference, StorageCapacity, fetched 2026-11-27 - an earlier version
+  # of this validation got both branches wrong and was corrected before
+  # being exercised against a storage_capacity_gib value that would have
+  # caught it, twice over - the first fix (2026-11-27) misread "increments
+  # of 3600" for SCRATCH_1 as continuing from the 2400 anchor already
+  # named in the same sentence (6000, 9600, ...), rather than as its own
+  # anchor (3600, 7200, ...); corrected against the FSx for Lustre User
+  # Guide's own per-storage-server unit for Scratch 1 (3.6 TiB,
+  # "Deployment and storage class options" page, IP addresses section),
+  # which only a whole-multiple-of-3600 reading matches): "For SCRATCH_2,
+  # PERSISTENT_2, and PERSISTENT_1 deployment types using SSD storage
+  # type, the valid values are 1200 GiB, 2400 GiB, and increments of 2400
+  # GiB" (this variable has no storage_type field at all - every file
+  # system it creates uses FSx's own SSD default - so the HDD-specific
+  # PERSISTENT_1 increments that same reference states do not apply
+  # here); "For SCRATCH_1 deployment type, valid values are 1200 GiB,
+  # 2400 GiB, and increments of 3600 GiB [i.e. 3600, 7200, ...]". This
+  # validation states that constraint so a bad value fails `terraform
+  # validate`/`plan`, not a 20-plus-minute `apply` against the real FSx
+  # API (this platform's own real-machine budget is counted in attempts,
+  # not retries of an avoidable input error).
+  validation {
+    condition = (
+      var.shared_fsx_lustre == null ||
+      (
+        var.shared_fsx_lustre.deployment_type == "SCRATCH_1"
+        ? (
+          contains([1200, 2400], var.shared_fsx_lustre.storage_capacity_gib) ||
+          (var.shared_fsx_lustre.storage_capacity_gib >= 3600 && var.shared_fsx_lustre.storage_capacity_gib % 3600 == 0)
+        )
+        : (
+          var.shared_fsx_lustre.storage_capacity_gib == 1200 ||
+          (var.shared_fsx_lustre.storage_capacity_gib >= 2400 && var.shared_fsx_lustre.storage_capacity_gib % 2400 == 0)
+        )
+      )
+    )
+    error_message = "shared_fsx_lustre.storage_capacity_gib must be 1200, 2400, or a multiple of 3600, for deployment_type SCRATCH_1; or 1200, or a multiple of 2400, for SCRATCH_2/PERSISTENT_1/PERSISTENT_2 (SSD - this variable has no storage_type field for the HDD-specific PERSISTENT_1 increments)."
+  }
+
+  # Per-deployment-type MB/s/TiB values (same AWS reference as above,
+  # PerUnitStorageThroughput): PERSISTENT_1 SSD accepts 50/100/200 only;
+  # PERSISTENT_2 SSD accepts 125/250/500/1000 only - an earlier version
+  # of this validation accepted either set for both types (silently
+  # wrong for a value like 125 on PERSISTENT_1, which InvalidPerUnit
+  # StorageThroughput would reject at apply), corrected here to check
+  # per type. Also required, not merely checked-if-set: the same AWS
+  # reference states this argument is "Required with PERSISTENT_1 and
+  # PERSISTENT_2 deployment types using an SSD or HDD storage class" -
+  # an earlier version of this validation let a PERSISTENT cell plan
+  # cleanly with this left null, deferring the real rejection
+  # (MissingFileSystemConfiguration or similar) to `apply`.
+  validation {
+    condition = (
+      var.shared_fsx_lustre == null ||
+      (
+        var.shared_fsx_lustre.deployment_type == "PERSISTENT_1"
+        ? (var.shared_fsx_lustre.per_unit_storage_throughput != null && contains([50, 100, 200], var.shared_fsx_lustre.per_unit_storage_throughput))
+        : var.shared_fsx_lustre.deployment_type == "PERSISTENT_2"
+        ? (var.shared_fsx_lustre.per_unit_storage_throughput != null && contains([125, 250, 500, 1000], var.shared_fsx_lustre.per_unit_storage_throughput))
+        : var.shared_fsx_lustre.per_unit_storage_throughput == null
+      )
+    )
+    error_message = "shared_fsx_lustre.per_unit_storage_throughput is required and must be one of 50, 100, 200 for deployment_type PERSISTENT_1 (SSD), or required and one of 125, 250, 500, 1000 for PERSISTENT_2 (SSD); it must be left null for SCRATCH_1/SCRATCH_2, which do not take this argument."
+  }
+}
+
 variable "test_invalid_karpenter_node_principal_arn" {
   type        = string
   default     = null

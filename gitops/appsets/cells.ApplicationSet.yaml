@@ -6,10 +6,31 @@
 # one all-matching cells/{{.name}}/**/*.yaml, so a stray file under a cell's
 # own directory never becomes an Application with no wave to sync in.
 #
-# This PR ships only the "capacity" step (capacity-pool + smoke); #22's
-# "teams" step and its own cells/<cluster-name>/teams/*.yaml glob are not
-# added here - adding the glob with no matching step would leave a team's
-# own Application generated but never synced.
+# #18 adds a third glob and RollingSync step, sharedfs
+# (cells/<cluster-name>/sharedfs/*.yaml -> gitops/charts/sharedfs-shares):
+# the same shape this file's own header already anticipated for #22's
+# future teams/*.yaml glob, added here first because #18 needed it first.
+# A separate step from "capacity", not folded into it: neither the static
+# PersistentVolume/FilesystemShare objects here nor capacity-pool/smoke's
+# own NodePool/ResourceFlavor depend on the other to exist at the object
+# level. RollingSync is still sequential, though: a "capacity" step that
+# never reaches its own success criteria DOES hold "sharedfs" back from
+# syncing at all, the same as it already holds back any step ordered
+# after it today - this PR accepts that coupling rather than removing it
+# (a parallel, unordered step shape is a bigger change to this file's own
+# RollingSync strategy than #18 needs). It is ordered after "capacity"
+# (not before) only as a stable, read top-to-bottom convention - gitops/addon-catalog/
+# sharedfs's own controller (a different ApplicationSet,
+# addons-optional.ApplicationSet.yaml) is this step's real GitOps
+# prerequisite (the FilesystemShare CustomResourceDefinition this step's
+# own objects need), and that dependency crosses ApplicationSet
+# boundaries, so it converges by retry (RFC #25 Decision 4), the same way
+# "capacity" already converges against "controllers" in
+# platform.ApplicationSet.yaml, not by this file's own step ordering.
+#
+# #22's own "teams" step and its own cells/<cluster-name>/teams/*.yaml
+# glob are still not added here - adding the glob with no matching step
+# would leave a team's own Application generated but never synced.
 #
 # Open question, not resolved here (#63, filed as #59 item 4): #22
 # Decision 1(c) separately specifies an Argo CD Application per team
@@ -43,6 +64,7 @@ spec:
               files:
                 - path: "gitops/cells/{{ .name }}/capacity-pool/*.yaml"
                 - path: "gitops/cells/{{ .name }}/smoke/*.yaml"
+                - path: "gitops/cells/{{ .name }}/sharedfs/*.yaml"
   # RFC #25 Decision 8: see platform.ApplicationSet.yaml.
   syncPolicy:
     preserveResourcesOnDeletion: true
@@ -54,6 +76,10 @@ spec:
             - key: distai.dev/wave
               operator: In
               values: ["capacity"]
+        - matchExpressions:
+            - key: distai.dev/wave
+              operator: In
+              values: ["sharedfs"]
   template:
     metadata:
       name: "{{ .name }}-{{ .addon }}"

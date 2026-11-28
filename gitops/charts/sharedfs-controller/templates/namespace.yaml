@@ -1,0 +1,32 @@
+# Ported from littlemex/sharedfs's own config/manager/manager.yaml at the
+# pinned commit (see templates/crds.yaml's own header for the full
+# citation): preparer pods run as UID 0 with only CAP_CHOWN, which Pod
+# Security "baseline" allows and "restricted" does not (sharedfs's own
+# README, "Install"); nothing else runs in this namespace. Rendered by the
+# chart itself, not left to the bare CreateNamespace=true Argo CD's own
+# syncOptions already set, the same reason gitops/charts/dcgm-exporter's
+# own templates/namespace.yaml does this: the label is there from the
+# first sync, not added by hand afterwards.
+#
+# Hardcoded to the literal "sharedfs-system", not templated to
+# {{ .Release.Namespace }} the way dcgm-exporter's own namespace.yaml is:
+# this chart's own policy.yaml hardcodes
+# "system:serviceaccount:sharedfs-system:sharedfs-controller-manager" and
+# "claimRef.namespace in ['sharedfs-system', 'sharedfs-quota']" as literal
+# strings inside CEL expressions ported byte-for-byte from upstream (see
+# templates/crds.yaml's own header, point 2) - those strings do not read
+# any Helm value, so templating only this one field would silently diverge
+# from them the moment a cell's own addon-catalog marker set a different
+# namespace. gitops/addon-catalog/sharedfs/addon.yaml's own namespace field
+# is the same literal, so this is never actually a second place the value
+# could drift from in practice; it is written as a literal here to make
+# that true by construction, not by two files happening to agree.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sharedfs-system
+  labels:
+    app.kubernetes.io/name: sharedfs
+    app.kubernetes.io/managed-by: helm
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: baseline

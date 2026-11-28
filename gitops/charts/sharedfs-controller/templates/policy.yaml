@@ -1,0 +1,192 @@
+# Ported from littlemex/sharedfs's own `kubectl kustomize config/default`
+# output at the pinned commit (see templates/crds.yaml's own header for the
+# full citation, the seven edits made from the literal render, and why each
+# one is safe). This file carries only the edits that are its own.
+
+
+apiVersion: v1
+data:
+  preparerRepository: {{ index (splitList "@" .Values.image) 0 }}
+  # Empty, not .Values.image's own repository: quota pods are not
+  # delivered by this PR at all (#18's own "Deferred to a follow-up"
+  # note) - no image was ever built or published for that role. Setting
+  # this to the controller's own repository would let the admission
+  # guard below (line ~84, `c.image.split('@')[0] == params.data.
+  # quotaRepository`) admit a sfs-quota-* pod running the controller's
+  # own image, widening what that one image is trusted to do if a
+  # FilesystemShare ever sets provision.quota, which nothing this PR
+  # renders does. An empty string never equals a real image's own
+  # repository component, so the guard refuses every quota pod outright
+  # until a real quota image exists and this value is wired to it.
+  quotaRepository: ""
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-guard
+  namespace: sharedfs-system
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-controller-guard-claims
+spec:
+  failurePolicy: Fail
+  matchConditions:
+  - expression: request.userInfo.username == 'system:serviceaccount:sharedfs-system:sharedfs-controller-manager'
+    name: by-controller
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - DELETE
+      resources:
+      - persistentvolumeclaims
+  validations:
+  - expression: |-
+      request.operation == 'DELETE' ?
+
+        (oldObject.metadata.name.startsWith('sfs-prep-') || oldObject.metadata.name.startsWith('sfs-quota-') ||
+         (has(oldObject.spec.volumeName) && oldObject.spec.volumeName.startsWith('sfs-'))) :
+        (object.metadata.namespace in ['sharedfs-system', 'sharedfs-quota'] &&
+         (object.metadata.name.startsWith('sfs-prep-') || object.metadata.name.startsWith('sfs-quota-')) &&
+         object.spec.volumeName == object.metadata.name)
+    message: the sharedfs controller may only create its internal claims, bound by
+      name to their volume, and delete claims bound to sharedfs volumes
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-controller-guard-pods
+spec:
+  failurePolicy: Fail
+  matchConditions:
+  - expression: request.userInfo.username == 'system:serviceaccount:sharedfs-system:sharedfs-controller-manager'
+    name: by-controller
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      resources:
+      - pods
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  validations:
+  - expression: |-
+      (object.metadata.namespace == 'sharedfs-system' && object.metadata.name.startsWith('sfs-prep-') &&
+
+        object.spec.containers.all(c, c.image.split('@')[0] == params.data.preparerRepository &&
+          c.securityContext.capabilities.add.all(a, a == 'CHOWN'))) ||
+      (object.metadata.namespace == 'sharedfs-quota' && object.metadata.name.startsWith('sfs-quota-') &&
+
+        object.spec.containers.all(c, c.image.split('@')[0] == params.data.quotaRepository &&
+          c.securityContext.capabilities.add.all(a, a == 'SYS_ADMIN')))
+    message: the sharedfs controller may only run its preparer and quota pods, from
+      the configured repositories, with their capabilities
+  - expression: |-
+      object.spec.containers.size() == 1 && object.spec.containers.all(c, c.image.contains('@sha256:') &&
+
+        has(c.securityContext) && has(c.securityContext.capabilities) &&
+        has(c.securityContext.capabilities.drop) && c.securityContext.capabilities.drop.exists(d, d == 'ALL') &&
+        !(has(c.securityContext.privileged) && c.securityContext.privileged) &&
+        has(c.securityContext.allowPrivilegeEscalation) && !c.securityContext.allowPrivilegeEscalation) &&
+      !(has(object.spec.hostNetwork) && object.spec.hostNetwork) && !(has(object.spec.hostPID) && object.spec.hostPID) && !(has(object.spec.hostIPC) && object.spec.hostIPC) && has(object.spec.securityContext) && has(object.spec.securityContext.seccompProfile) && object.spec.securityContext.seccompProfile.type == 'RuntimeDefault' && !has(object.spec.initContainers) && !has(object.spec.ephemeralContainers) && has(object.spec.automountServiceAccountToken) && !object.spec.automountServiceAccountToken && has(object.spec.volumes) && object.spec.volumes.size() == 1 && object.spec.volumes.all(v, has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName == object.metadata.name) && !has(object.spec.securityContext.sysctls) && object.spec.containers.all(c, !has(c.command) && !has(c.env) && !has(c.envFrom) &&
+
+        has(c.args) && c.args.size() > 0 && c.args[0] in ['prepare-directory', 'set-quota'] &&
+        has(c.securityContext.readOnlyRootFilesystem) && c.securityContext.readOnlyRootFilesystem &&
+        (!has(c.securityContext.seccompProfile) || c.securityContext.seccompProfile.type == 'RuntimeDefault') &&
+        !has(c.securityContext.procMount) && !has(c.securityContext.appArmorProfile) &&
+        !has(c.securityContext.seLinuxOptions) && !has(c.securityContext.windowsOptions) &&
+        !has(c.lifecycle) && !has(c.livenessProbe) && !has(c.readinessProbe) && !has(c.startupProbe)) &&
+      object.spec.restartPolicy == 'Never' && has(object.spec.activeDeadlineSeconds) && object.spec.activeDeadlineSeconds <= 600
+    message: a task pod must be one container by digest running the controller's binary
+      (no command, a task argument, no environment, no hooks or probes), never restarted,
+      with a deadline, dropping all other capabilities, without privilege, host namespaces,
+      sysctls or a token, read-only root, RuntimeDefault seccomp, mounting only its
+      own internal claim
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-controller-guard-volumes
+spec:
+  failurePolicy: Fail
+  matchConditions:
+  - expression: request.userInfo.username == 'system:serviceaccount:sharedfs-system:sharedfs-controller-manager'
+    name: by-controller
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      - DELETE
+      resources:
+      - persistentvolumes
+  validations:
+  - expression: |-
+      request.operation == 'DELETE' ? oldObject.metadata.name.startsWith('sfs-') : (object.metadata.name.startsWith('sfs-') && has(object.spec.csi) &&
+
+       object.spec.csi.driver in ['fsx.csi.aws.com', 'fsx.openzfs.csi.aws.com'] &&
+       object.spec.csi.volumeHandle.startsWith('sharedfs:') &&
+       has(object.spec.claimRef) && has(object.spec.claimRef.uid) &&
+       ((!object.metadata.name.startsWith('sfs-prep-') && !object.metadata.name.startsWith('sfs-quota-')) ||
+        (object.spec.claimRef.namespace in ['sharedfs-system', 'sharedfs-quota'] && object.spec.claimRef.name == object.metadata.name)))
+    message: 'the sharedfs controller may only create, change and delete its own CSI
+      volumes: supported drivers, named sfs-*, with a sharedfs handle, reserved for
+      a claim by UID'
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-controller-guard-claims
+spec:
+  policyName: sharedfs-controller-guard-claims
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-controller-guard-pods
+spec:
+  paramRef:
+    name: sharedfs-guard
+    namespace: sharedfs-system
+    parameterNotFoundAction: Deny
+  policyName: sharedfs-controller-guard-pods
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-controller-guard-volumes
+spec:
+  policyName: sharedfs-controller-guard-volumes
+  validationActions:
+  - Deny

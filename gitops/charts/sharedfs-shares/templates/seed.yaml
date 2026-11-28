@@ -1,0 +1,108 @@
+# Creates the top-level `checkpoints` and `datasets` directories
+# templates/filesystemshares.yaml's own two FilesystemShare objects need
+# to already exist as their parent, on a file system that starts out
+# completely empty. sharedfs's own README states the precondition
+# ("the parent must already exist, be owned by root, and not be writable
+# by group or others") but ships no mechanism to satisfy it - this is
+# the one piece of this chart's own objects that is not a direct render
+# of something sharedfs documents, because nothing else does it.
+#
+# Found missing by code review against sharedfs's own README (at the time,
+# no real-machine attempt had reached this code yet - attempt 9, this PR's
+# own Test Results, since confirmed this Job runs, both top-level
+# directories get created, and both teams' own per-namespace directories
+# provision successfully against them): the
+# `datasets` FilesystemShare's own `provision` field made that object
+# fail CRD admission outright (fixed - see templates/filesystemshares.yaml's
+# own header comment); `checkpoints/{namespace}` passes admission but its
+# own provisioning would still fail at runtime against an unseeded file
+# system, since `checkpoints` itself is the directory this Job creates,
+# not something `provision` creates on its own (`provision` creates only
+# the final path segment, assuming its parent already exists).
+#
+# An Argo CD PostSync hook, not PreSync: this Job needs sharedfs-source
+# (pv-pvc.yaml, a plain Sync-phase resource of this same Application) to
+# already be Bound before it can mount it at all - a PreSync hook runs
+# before the Sync phase even starts, so on a brand-new Application it
+# would stay Pending on a PVC that does not exist yet, forever (no
+# attribute here forces Argo CD to create that PVC first, and nothing
+# about a PreSync hook waits for it either). PostSync only runs once
+# every regular resource in this sync, including that PVC, is already
+# applied and healthy, which is exactly the ordering this Job needs -
+# the FilesystemShare objects do not themselves need this directory to
+# exist to apply successfully (CRD admission does not check the live
+# file system at all), only to provision successfully later, so running
+# this after them costs nothing. activeDeadlineSeconds and backoffLimit
+# together bound how long a stuck attempt (for example, a PVC that
+# somehow never actually mounts) can block the next sync, rather than
+# hanging indefinitely. hook-delete-policy: BeforeHookCreation,HookSucceeded
+# - HookSucceeded alone only removes a successful run, leaving a failed
+# Job of this same fixed name in place forever and blocking every later
+# sync from creating its replacement (Argo CD's own documented default,
+# BeforeHookCreation, only applies when no delete policy is set at all -
+# once one is set, only the policies actually listed apply); both
+# together let this Job retry cleanly after any outcome.
+#
+# mkdir -p is naturally idempotent: re-running this hook on a file
+# system that already has both directories changes nothing. chown/chmod
+# are reasserted every run regardless, so a directory any other process
+# ever touched is reset to the state sharedfs's own precondition
+# requires, rather than skipped because it merely exists.
+#
+# Security context mirrors sharedfs's own preparer pods exactly
+# (README: "It runs as UID 0 with only CAP_CHOWN" - every other
+# capability dropped, no service account token, RuntimeDefault seccomp
+# per the admission policy's own general requirement for task pods):
+# the same elevated-but-narrow privilege this platform already accepts
+# for sharedfs's own controller-created pods, not a wider one, and the
+# reason gitops/charts/sharedfs-shares' own namespace.yaml sets this
+# namespace's Pod Security to baseline rather than restricted.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sharedfs-seed-top-level-dirs
+  namespace: {{ .Values.adminNamespace }}
+  labels:
+    app.kubernetes.io/name: sharedfs-shares
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sharedfs-shares
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: seed
+          image: public.ecr.aws/docker/library/busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              for d in checkpoints datasets; do
+                mkdir -p "/mnt/${d}"
+                chown 0:0 "/mnt/${d}"
+                chmod 0755 "/mnt/${d}"
+              done
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+          volumeMounts:
+            - name: fsx-root
+              mountPath: /mnt
+      volumes:
+        - name: fsx-root
+          persistentVolumeClaim:
+            claimName: sharedfs-source

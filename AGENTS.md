@@ -138,7 +138,7 @@ judgment alone.
 
 | Directory | Contents |
 | --- | --- |
-| `infra/foundation/` | Terraform root for one cell: VPC, EKS cluster, system node group, Karpenter IAM and interruption queue, optional Argo CD capability. Tests under `tests/`, helper scripts under `scripts/` |
+| `infra/foundation/` | Terraform root for one cell: VPC, EKS cluster, system node group, Karpenter IAM and interruption queue, optional Argo CD capability, optional shared FSx for Lustre file system plus its container registry (#18). Tests under `tests/`, helper scripts under `scripts/` |
 | `gitops/` | Manifests and Helm charts the managed Argo CD capability delivers to cells: `bootstrap/` (run once per cell), `appsets/` (the three `ApplicationSet`s), `addons/` (core add-ons, delivered unconditionally), `addon-catalog/` (platform-optional/workload catalog entries, never read by an `ApplicationSet` directly), `charts/` (shared chart templates), `cells/<cluster-name>/` (per-cell parameter files, including `addons/` marker files that opt a cell into a catalog entry). Layout and ordering in [`gitops/README.md`](./gitops/README.md); mechanism in [#25](https://github.com/littlemex/distai-platform/issues/25)/[#41](https://github.com/littlemex/distai-platform/issues/41) |
 | `docs/workshop/` | Hands-on workshop chapters, English and Japanese |
 | `docs/deep-dives/` | Self-contained explainer pages `NNNNN-<slug>.html` (numbered from `00000`), English and Japanese |

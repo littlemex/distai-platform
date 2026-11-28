@@ -1,0 +1,21 @@
+# Admin-only namespace reserving the shared FSx for Lustre file system's
+# static PersistentVolume (sharedfs's own README, "Install": "a namespace
+# only admins use"). baseline, not restricted: templates/seed.yaml runs
+# here (the only namespace holding a PVC that mounts the file system
+# root, pv-pvc.yaml's own sharedfs-source) to create the top-level
+# `checkpoints`/`datasets` directories sharedfs's own FilesystemShare
+# `provision` mechanism assumes already exist ("the parent must already
+# exist, be owned by root, and not be writable by group or others" - no
+# mechanism of its own creates that parent). Creating a root-owned
+# directory needs the same UID 0 + CAP_CHOWN (every other capability
+# dropped) sharedfs's own preparer pods already use, which "restricted"
+# Pod Security forbids and "baseline" allows - the same reason
+# gitops/charts/sharedfs-controller's own templates/namespace.yaml sets
+# sharedfs-system to baseline instead of restricted.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.adminNamespace }}
+  labels:
+    app.kubernetes.io/name: sharedfs-shares
+    pod-security.kubernetes.io/enforce: baseline

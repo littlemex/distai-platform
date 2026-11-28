@@ -1,0 +1,59 @@
+# Ported from littlemex/sharedfs's own `kubectl kustomize config/default`
+# output at the pinned commit (see templates/crds.yaml's own header for the
+# full citation, the seven edits made from the literal render, and why each
+# one is safe).
+#
+# A second NetworkPolicy below, sharedfs-controller-metrics-deny-by-default,
+# is NOT ported from upstream: upstream's own optional
+# config/network-policy/allow-metrics-traffic.yaml is commented out of
+# config/default/kustomization.yaml by default, so the controller's own
+# metrics port (8443) ships with no NetworkPolicy of its own at all -
+# reachable from any pod that can reach this namespace once this cluster's
+# NetworkPolicy enforcement is on, same as every other add-on's own gap
+# gitops/README.md's "NetworkPolicy defaults" section already documents
+# (dcgm-exporter was "the first add-on to follow" that convention; this is
+# the second). Modeled on dcgm-exporter's own networkPolicy.allowedPeers
+# values key: empty by default (no peer allowed), overridable per cell.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-preparer-deny-all
+  namespace: sharedfs-system
+spec:
+  podSelector:
+    matchExpressions:
+    - key: sharedfs.io/internal
+      operator: Exists
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/name: sharedfs
+  name: sharedfs-controller-metrics-deny-by-default
+  namespace: sharedfs-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sharedfs
+      control-plane: controller-manager
+  policyTypes:
+  - Ingress
+{{- if .Values.networkPolicy.allowedPeers }}
+  ingress:
+  - from:
+      {{- toYaml .Values.networkPolicy.allowedPeers | nindent 6 }}
+    ports:
+      - port: 8443
+        protocol: TCP
+{{- else }}
+  ingress: []
+{{- end }}

@@ -7,6 +7,14 @@ locals {
       "kube-proxy"             = "v1.37.0-eksbuild.39"
       "eks-pod-identity-agent" = "v1.4.1-eksbuild.3"
       "coredns"                = "v1.14.7-eksbuild.35"
+      # Optional (fsx.tf, gated on var.shared_fsx_lustre != null), kept in
+      # this same per-Kubernetes-version map for one reason only this
+      # add-on needs: like coredns, its version is pinned per
+      # kubernetes_version here, not re-pinned per cell. Confirmed against
+      # this account's own `aws eks describe-addon-versions --addon-name
+      # aws-fsx-csi-driver --kubernetes-version 1.37`, 2026-11-26: this is
+      # the add-on's own default version for 1.37.
+      "aws-fsx-csi-driver" = "v1.11.0-eksbuild.1"
     }
   }
 
