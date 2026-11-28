@@ -107,8 +107,7 @@ def check_applicationset_releasename_config(repo_root: str) -> None:
             continue
         want_text = expected_lines[0]
         # A raw substring count over the whole file would also match the
-        # identical text sitting inert inside a comment (round-2 review
-        # finding) -- real review-worthy if this check ever found that:
+        # identical text sitting inert inside a comment -- real review-worthy if this check ever found that:
         # a revert that only deletes the live templatePatch line while
         # leaving a comment that happens to quote it verbatim would still
         # pass. Only a line that, once its leading whitespace is
@@ -232,24 +231,20 @@ def check_addon_file(path: str, repo_root: str, workdir: str) -> None:
         if cmd is None:
             return  # dir_chart_cmd already recorded the FAIL
     else:
-        # core addons with neither chart: nor dir: (karpenter-netpol,
-        # kueue-netpol, jobset-crd, accel-device-classes) render no Helm
-        # release of their own upstream chart kind here -- every one of
-        # them ships only fixed, hand-written object names, confirmed by
-        # reading every template under their own gitops/charts/<name>/
-        # templates/, never release-name-derived, so there is nothing
-        # for this check to render. Printed explicitly (not a silent
-        # return) so this script's own output accounts for every
-        # gitops/addons/*/addon.yaml and gitops/addon-catalog/*/
-        # addon.yaml it read, rather than leaving a gap a reader cannot
-        # tell apart from a bug that skipped a file by accident.
-        print(f"NOTE {path}: no chart: or dir: (fixed, hand-written object names) -- not rendered")
+        # Defensive only: check_gitops_contract.py's own "has exactly
+        # one of 'chart' or 'dir'" invariant means no addon.yaml in this
+        # repository today can actually reach this branch (confirmed:
+        # every gitops/addons/*/addon.yaml sets one or the other).
+        # Printed explicitly rather than a silent return, so a future
+        # addon.yaml shape this script has not seen yet is visible in
+        # its own output instead of silently skipped.
+        print(f"NOTE {path}: no chart: or dir: (nothing for this script to render) -- not rendered")
         return
     rendered, err = render(cmd, workdir, values, f"{addon}-{os.path.basename(os.path.dirname(path))}")
     if rendered is None:
         known_issue = addon_doc.get("knownLatentBugIssue")
-        # round-2 review finding: exempting *any* helm template failure
-        # once knownLatentBugIssue is set would also turn a real,
+        # exempting *any* helm template failure once knownLatentBugIssue
+        # is set would also turn a real,
         # different bug (a chart registry outage, a template syntax
         # error from a future chart bump) into a silent NOTE -- scoped
         # to the one expected error message this add-on's own deferred
@@ -265,20 +260,26 @@ def check_addon_file(path: str, repo_root: str, workdir: str) -> None:
     check_rendered_names(f"{path} (release {release!r})", rendered)
 
 
-def check_cell_marker_file(path: str, repo_root: str, workdir: str) -> None:
+def check_cell_marker_file(path: str, repo_root: str, workdir: str, *, cells_applicationset_sourced: bool) -> None:
     """Two different marker-file shapes, both addon.yaml-shaped (addon:/
-    dir:/namespace:/values:/valuesFrom:), both covered by
-    expected_release_name() the same way:
-    gitops/cells/<cell>/{capacity-pool,smoke,sharedfs}/*.yaml, rendered by
+    dir:/namespace:/values:/valuesFrom:): gitops/cells/<cell>/
+    {capacity-pool,smoke,sharedfs}/*.yaml, rendered by
     cells.ApplicationSet.yaml, whose own releaseName has no
-    pinReleaseNameToCell branch at all (capacity-pool, smoke and
-    sharedfs-shares never had #110's bug or the immutable-selector risk,
-    so a marker file setting that field would have no effect there
-    either way); and gitops/cells/<cell>/addons/*.yaml, rendered by
-    addons-optional.ApplicationSet.yaml, whose releaseName DOES branch on
-    it -- jobset's own marker file sets pinReleaseNameToCell: true for
-    exactly that reason (see gitops/addon-catalog/jobset/addon.yaml's own
-    comment)."""
+    pinReleaseNameToCell branch at all; and gitops/cells/<cell>/
+    addons/*.yaml, rendered by addons-optional.ApplicationSet.yaml, whose
+    releaseName DOES branch on it (jobset's own marker sets it for
+    exactly that reason). cells_applicationset_sourced tells
+    expected_release_name() which shape this file actually is, rather
+    than reading pinReleaseNameToCell the same way for both and silently
+    disagreeing with cells.ApplicationSet.yaml's own unconditional
+    template if a capacity-pool/smoke/sharedfs marker ever set it."""
+    if cells_applicationset_sourced:
+        addon_doc = load_addon(path)
+        if addon_doc.get("pinReleaseNameToCell"):
+            check(f"{path}: does not set pinReleaseNameToCell", False,
+                  "cells.ApplicationSet.yaml's own releaseName has no pinReleaseNameToCell branch -- "
+                  "setting this field here has no effect and would mislead a reader into thinking it does")
+            return
     check_addon_file(path, repo_root, workdir)
 
 
@@ -304,12 +305,14 @@ def main(repo_root: str) -> int:
         # addons-optional.ApplicationSet.yaml's own one -- the real
         # per-cell marker files every platform-optional add-on (jobset,
         # dcgm-exporter, sharedfs) is actually rendered from.
-        cell_files = sorted(glob.glob(os.path.join(repo_root, "gitops/cells/*/capacity-pool/*.yaml")))
-        cell_files += sorted(glob.glob(os.path.join(repo_root, "gitops/cells/*/smoke/*.yaml")))
-        cell_files += sorted(glob.glob(os.path.join(repo_root, "gitops/cells/*/sharedfs/*.yaml")))
-        cell_files += sorted(glob.glob(os.path.join(repo_root, "gitops/cells/*/addons/*.yaml")))
-        for path in cell_files:
-            check_cell_marker_file(path, repo_root, workdir)
+        cells_appset_files = sorted(glob.glob(os.path.join(repo_root, "gitops/cells/*/capacity-pool/*.yaml")))
+        cells_appset_files += sorted(glob.glob(os.path.join(repo_root, "gitops/cells/*/smoke/*.yaml")))
+        cells_appset_files += sorted(glob.glob(os.path.join(repo_root, "gitops/cells/*/sharedfs/*.yaml")))
+        for path in cells_appset_files:
+            check_cell_marker_file(path, repo_root, workdir, cells_applicationset_sourced=True)
+        addons_optional_files = sorted(glob.glob(os.path.join(repo_root, "gitops/cells/*/addons/*.yaml")))
+        for path in addons_optional_files:
+            check_cell_marker_file(path, repo_root, workdir, cells_applicationset_sourced=False)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -455,8 +458,8 @@ def selftest() -> int:
 
         # expected_release_name(): pinReleaseNameToCell true gets the
         # cell-prefixed name back; false (or absent, the default) gets
-        # the add-on's own name alone. round-2 review's own S2 finding --
-        # this round-trips the one piece of main() logic the renders
+        # the add-on's own name alone -- this round-trips the one piece of
+        # main() logic the renders
         # above never exercise on their own (they pass the computed
         # release name straight into helm template, never checking what
         # was computed before that).
@@ -471,9 +474,8 @@ def selftest() -> int:
 
         # check_applicationset_releasename_config(): a file whose only
         # occurrence of the expected text is inside a "#"-prefixed
-        # comment must NOT count as a live occurrence (round-2 review's
-        # own S1 finding -- a raw substring count over the whole file
-        # would pass this).
+        # comment must NOT count as a live occurrence -- a raw substring
+        # count over the whole file would wrongly pass this.
         fake_appset = os.path.join(workdir, "fake.ApplicationSet.yaml")
         with open(fake_appset, "w", encoding="utf-8") as f:
             f.write('        # releaseName: "{{ .addon }}"\n        otherField: "x"\n')
@@ -495,10 +497,9 @@ def selftest() -> int:
             ok = False
 
         # knownLatentBugIssue exempts only the one expected Helm error
-        # substring, never an unrelated helm template failure (round-2
-        # review's own B7 finding) -- through check_addon_file() itself,
-        # not a hand-duplicated copy of its own condition (round-3
-        # review's own finding: an earlier version of this selftest
+        # substring, never an unrelated helm template failure -- through
+        # check_addon_file() itself, not a hand-duplicated copy of its
+        # own condition (an earlier version of this selftest
         # re-evaluated the same if-statement standalone, so it would
         # keep passing even if check_addon_file()'s own real exemption
         # logic were reverted to "exempt any failure").
