@@ -1,0 +1,18 @@
+# Verification-only cell for PR #116's own real-machine check of the
+# addons-optional.ApplicationSet.yaml releaseName template's own
+# pinReleaseNameToCell branch for jobset (the one thing this PR's own
+# Caveats flagged as not verified on a real cluster): lets jobset's
+# controller Deployment actually exist on a CPU-only cell
+# (optional-pool, no capacity-pool needed -- see
+# gitops/charts/jobset/values.yaml's own placement comment) so the live
+# Application's own spec.source.helm.releaseName can be read back and
+# checked against <cell>-jobset directly, the same technique already
+# used for capacity-pool-cpu/smoke in this PR's own Part C. Kept (not
+# removed) so the check stays reproducible; not a real team's cell.
+addon: jobset
+fromCatalog: jobset
+dir: gitops/charts/jobset
+namespace: jobset-system
+skipCrds: true
+wave: optional-1
+pinReleaseNameToCell: true
