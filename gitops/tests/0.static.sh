@@ -910,6 +910,25 @@ run_check "object-name length (check_object_name_length.py, #110)" \
   "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
   python3 "${SCRIPT_DIR}/check_object_name_length.py" "${REPO_ROOT}"
 
+# --------------------------------------- 8c. release-name object identity (#110)
+#
+# #110/PR #116: the selector-safety half of the same regression guard.
+# check_object_name_length.py (8b above) and the classification table
+# posted to issue #110 only compare rendered object names; neither can
+# catch a fixed name sitting next to a release-derived selector (an
+# immutable field Argo CD cannot patch). This renders every add-on twice
+# -- the pre-#110 release name and this fix's own release name, including
+# the three pinned add-ons rendered at the identical name twice via the
+# real expected_release_name(), not skipped -- and fails on that one
+# pattern. --selftest runs first against synthetic fixtures.
+run_check "release-name object identity self-test (check_release_name_object_identity.py --selftest, #110)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_release_name_object_identity.py" --selftest
+
+run_check "release-name object identity (check_release_name_object_identity.py, #110)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_release_name_object_identity.py" "${REPO_ROOT}"
+
 # --------------------------------------- 9. EFA network-interface layout
 #
 # Issue #50: gitops/charts/capacity-pool/tools/render-network-interfaces.py
