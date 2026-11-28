@@ -66,6 +66,14 @@
 #      and without that add-on's own declared values, and the rendered
 #      output checked directly (check_startup_taint_renders.py; same
 #      network requirement as 7 above).
+#   8b. issue #110: the three gitops/appsets/*.ApplicationSet.yaml files
+#      are checked to actually carry the releaseName template this issue's
+#      fix depends on, then every add-on is `helm template`-d fresh with
+#      the exact release name that gives Helm for it and the longest cell
+#      name infra/foundation/variables.tf allows, and every rendered
+#      Service/Namespace name (the two kinds Kubernetes itself caps at 63
+#      characters) checked against that limit (check_object_name_length.py;
+#      same network requirement as 7 above).
 #   4c. issue #34: the jobset-crd/jobset add-on pair's own shape
 #      (check_jobset_addon.py; --network for the upstream-CRD drift check,
 #      the wrapper render and the pinned Kueue integrations list), and
@@ -884,6 +892,42 @@ run_check "platform AppProject whitelist (check_appproject_whitelist.py)" \
 run_check "startup-taint renders (check_startup_taint_renders.py, #96)" \
   "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
   python3 "${SCRIPT_DIR}/check_startup_taint_renders.py" "${REPO_ROOT}"
+
+# --------------------------------------- 8b. object-name length (#110)
+#
+# #110/PR #116: regression guard for the Helm release-name fix (full
+# mechanism and real-cluster breakpoints in the PR's own "## Changes").
+# Checks the three ApplicationSet files carry the releaseName template
+# the fix depends on, then renders every add-on at the longest allowed
+# cell name and fails on any Service/Namespace past 63 characters.
+# --selftest runs first against synthetic fixtures, never this
+# repository's own charts.
+run_check "object-name length self-test (check_object_name_length.py --selftest, #110)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_object_name_length.py" --selftest
+
+run_check "object-name length (check_object_name_length.py, #110)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_object_name_length.py" "${REPO_ROOT}"
+
+# --------------------------------------- 8c. release-name object identity (#110)
+#
+# #110/PR #116: the selector-safety half of the same regression guard.
+# check_object_name_length.py (8b above) and the classification table
+# posted to issue #110 only compare rendered object names; neither can
+# catch a fixed name sitting next to a release-derived selector (an
+# immutable field Argo CD cannot patch). This renders every add-on twice
+# -- the pre-#110 release name and this fix's own release name, including
+# the three pinned add-ons rendered at the identical name twice via the
+# real expected_release_name(), not skipped -- and fails on that one
+# pattern. --selftest runs first against synthetic fixtures.
+run_check "release-name object identity self-test (check_release_name_object_identity.py --selftest, #110)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_release_name_object_identity.py" --selftest
+
+run_check "release-name object identity (check_release_name_object_identity.py, #110)" \
+  "${UV}" run --no-project -q --with "pyyaml==${PYTHON_YAML_VERSION}" \
+  python3 "${SCRIPT_DIR}/check_release_name_object_identity.py" "${REPO_ROOT}"
 
 # --------------------------------------- 9. EFA network-interface layout
 #

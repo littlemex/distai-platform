@@ -1,0 +1,15 @@
+# #110/PR #116. Opts this verification-only cell into
+# keepLegacyReleaseNames, the only field this file carries today, read
+# by the merge generator in gitops/appsets/platform.ApplicationSet.yaml
+# and gitops/appsets/addons-optional.ApplicationSet.yaml (mergeKeys:
+# ["name"] -- name below must equal this directory exactly, checked by
+# gitops/tests/check_object_name_length.py's own
+# check_cell_config_files()). Combined with jobset's own
+# selectorDerivesFromReleaseName (gitops/cells/dp-110-jobsetpin-r1/
+# addons/jobset.yaml), this is what keeps jobset's own release name at
+# the legacy <cell>-jobset shape on this one cell, proving the opt-in
+# path works on a real cluster -- the one thing this PR's own Caveats
+# flagged as unverified before this round. Not a real team's cell; kept
+# for the check to stay reproducible.
+name: dp-110-jobsetpin-r1
+keepLegacyReleaseNames: true

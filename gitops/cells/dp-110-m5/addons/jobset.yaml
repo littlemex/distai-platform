@@ -1,0 +1,16 @@
+# Verification-only cell for PR #116's own real-machine migration test
+# (gitops/tests/ has no committed script of its own for that test; see
+# the PR's own Test Plan): lets jobset's controller Deployment actually
+# exist on a CPU-only cell (optional-pool, no capacity-pool needed --
+# see gitops/charts/jobset/values.yaml's own placement comment) so its
+# own object identity under the fix commit can be checked live, the
+# same way dp-34-jobset-r1 exists for issue #34's own e2e test. Kept
+# (not removed) so that Test Plan stays reproducible; not a real team's
+# cell.
+addon: jobset
+fromCatalog: jobset
+dir: gitops/charts/jobset
+namespace: jobset-system
+skipCrds: true
+wave: optional-1
+selectorDerivesFromReleaseName: true

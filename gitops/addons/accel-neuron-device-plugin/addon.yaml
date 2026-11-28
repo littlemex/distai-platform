@@ -56,6 +56,32 @@
 #   oci://public.ecr.aws/neuron/neuron-helm-chart:1.11.2
 # confirmed 2026-11-19 (#28, Facts checked).
 addon: accel-neuron-device-plugin
+# #110 (full mechanism, breakpoints and namespaces in PR #116): this
+# chart's own two DaemonSets (neuron-device-plugin in kube-system,
+# node-problem-detector in this add-on's own namespace) keep a fixed
+# name regardless of release name, but their own spec.selector still
+# derives from it, and spec.selector is immutable -- so unlike an add-on
+# without this fact set, changing this one's release name on an
+# already-synced cell would try to patch that immutable field instead of
+# a clean delete-and-recreate. selectorDerivesFromReleaseName: true is
+# the fact that keeps this add-on at its pre-#110 release name, but only
+# on a cell whose own gitops/cells/<cell>/cell.yaml also sets
+# keepLegacyReleaseNames: true -- a cell that never sets that field (the
+# default, every cell today) gets this add-on's own short name, closing
+# #114 below for good on every such cell. A cell upgrading past this fix
+# that DOES already run this add-on (or accel-neuron-dra, or jobset) and
+# wants to avoid the rename must add its own cell.yaml before, or in the
+# same sync as, bumping its own revision past this commit -- adding it
+# afterward does not undo a rename that already happened.
+selectorDerivesFromReleaseName: true
+# check_object_name_length.py's own known-deferred-bug exemption (not a
+# chart value, read only by that script): turns this add-on's expected
+# Helm release-name-too-long error into a NOTE instead of a static
+# FAIL, so this tracked, deliberately deferred limitation does not
+# block every unrelated PR. Only reachable on a cell that sets
+# keepLegacyReleaseNames: true and whose own name is 27 characters or
+# longer -- no cell registered in this repository today does either.
+knownLatentBugIssue: 114
 # RFC #41 Decision 1: gitops/addons/ is delivered unconditionally to
 # every cell, no opt-out, and check_addon_tiers.py requires every
 # addon.yaml here to say so explicitly.

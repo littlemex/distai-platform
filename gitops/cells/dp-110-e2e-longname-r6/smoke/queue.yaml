@@ -1,0 +1,11 @@
+# Verification-only cell for PR #116's own real-machine check of
+# cells.ApplicationSet.yaml's own new releaseName line (smoke is one
+# of the three marker kinds it renders) -- copied from
+# gitops/cells/example-cell's own fixture. Not a real team's cell.
+addon: smoke
+wave: capacity
+dir: gitops/charts/smoke
+namespace: distai-smoke
+values:
+  clusterQueue:
+    resourceFlavor: cpu

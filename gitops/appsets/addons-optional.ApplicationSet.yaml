@@ -39,10 +39,26 @@ spec:
   generators:
     - matrix:
         generators:
-          - clusters:
-              selector:
-                matchLabels:
-                  argocd.argoproj.io/secret-type: cluster
+          # #110/PR #116: same merge as platform.ApplicationSet.yaml's
+          # own first leg, and the same reasons (its own header comment)
+          # for a fixed revision and pathParamPrefix: cell here --
+          # enriches a cluster's own row with gitops/cells/<cell>/
+          # cell.yaml's own `keepLegacyReleaseNames` when that file
+          # exists, keeping every cell's own row (including every cell
+          # with no cell.yaml) either way.
+          - merge:
+              mergeKeys: ["name"]
+              generators:
+                - clusters:
+                    selector:
+                      matchLabels:
+                        argocd.argoproj.io/secret-type: cluster
+                - git:
+                    repoURL: https://github.com/littlemex/distai-platform.git
+                    revision: fix/110-helm-release-name # TEMPORARY for real-cluster verification only -- reverted to main before the final review round (Fable 5.2 round 3, item 1: main has no cell.yaml yet, so the opt-in path cannot be exercised before merge without this)
+                    files:
+                      - path: "gitops/cells/*/cell.yaml"
+                    pathParamPrefix: cell
           - git:
               repoURL: https://github.com/littlemex/distai-platform.git
               revision: '{{ index .metadata.annotations "distai.dev.annotations/revision" }}'
@@ -105,6 +121,17 @@ spec:
     spec:
       source:
         helm:
+          # Same fix and selectorDerivesFromReleaseName/
+          # keepLegacyReleaseNames escape hatch as
+          # platform.ApplicationSet.yaml's own releaseName line
+          # (#110/PR #116). jobset's own cell marker sets
+          # selectorDerivesFromReleaseName: true for the same
+          # immutable-selector reason (gitops/addon-catalog/jobset/
+          # addon.yaml's own comment) even though its own object names
+          # stay fixed via fullnameOverride: jobset -- the cell keeps the
+          # legacy name only if that SAME cell's own cell.yaml also sets
+          # keepLegacyReleaseNames: true.
+          releaseName: "{{ if and .selectorDerivesFromReleaseName .keepLegacyReleaseNames }}{{ .name }}-{{ .addon }}{{ else }}{{ .addon }}{{ end }}"
           {{- if .skipCrds }}
           skipCrds: true
           {{- end }}

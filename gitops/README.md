@@ -277,6 +277,114 @@ same five Karpenter CRDs (one as plain templates, one in a `crds/` folder
 skipped via `helm.skipCrds`), and a mismatched pair is exactly what the
 upgrade e2e's version-pair check exists to catch.
 
+### The Helm release name, `keepLegacyReleaseNames`, and what upgrading an already-running cell past #110 does
+
+Every `gitops/appsets/*.ApplicationSet.yaml` sets
+`spec.source.helm.releaseName` to the add-on's own name alone for every
+add-on, on every cell, with **no exception at all for a cell that has
+never set `keepLegacyReleaseNames`** (never `<cell>-<addon>`, the
+generated `Application`'s own `metadata.name`) --
+[#110](https://github.com/littlemex/distai-platform/issues/110). This is
+true today for every cell registered in this repository, and for every
+cell created from here on: a brand new cell never gets the legacy name
+for anything.
+
+Moving an already-synced cell's root `Application` from a revision
+before this fix to one after it, with that cell's own
+`keepLegacyReleaseNames` still absent, renames every release-name-derived
+object for `karpenter`, `vigil-controller`, `kueue`,
+`accel-nvidia-device-plugin`, `accel-nvidia-dra`, both EFA advertisers,
+`dcgm-exporter`, and (if that cell ever registers one) `jobset` -- up to
+nine add-ons, confirmed by rendering every add-on under both
+`keepLegacyReleaseNames` shapes and diffing every rendered object (Argo
+CD prunes the old-named objects and creates the new-named ones,
+converging back to `Healthy`/`Synced` on its own -- see this fix's own
+pull request Test Results for which of these were exercised on a real
+cluster and how). No cell registered in this repository today has a
+`dcgm-exporter.yaml` marker, so this one renames nothing on a real
+cluster yet. `kueue`'s own admission webhooks (`Service`, both
+`WebhookConfiguration`s, and the `Secret` holding their TLS cert) rename
+together as part of that, and during the cutover, Pod creation in any
+namespace other than `kube-system`/`kueue-system` can fail with "no
+endpoints available for service" until the new
+`kueue-controller-manager` Pod comes up -- self-healing, no action
+required, but doing the revision bump outside a period of heavy Pod
+churn avoids it mattering in practice.
+
+**If a cell is already running any of `jobset`, `accel-neuron-device-plugin`
+or `accel-neuron-dra` from before this fix, and you do not want those
+three recreated, add `cell.yaml` *before, or in the same sync as*,
+bumping that cell's own revision past this commit** -- adding it
+afterward does not undo a rename that already happened. The new file is
+`gitops/cells/<your-cell>/cell.yaml`:
+
+```yaml
+name: <your-cell>
+keepLegacyReleaseNames: true
+```
+
+`name:` must equal the cell's own directory exactly (it is the merge key
+the ApplicationSet generators join on; a mismatch opts the cell out
+silently, which `gitops/tests/check_object_name_length.py`'s own
+`check_cell_config_files()` catches statically). Only `name:` and
+`keepLegacyReleaseNames:` are accepted in this file -- the same check
+rejects any other key, since the merge generator carries every field of
+a matching `cell.yaml` row onto the cluster's own row, not only the
+merge key, and a future stray key could silently override a cluster
+field this platform depends on (its own revision annotation, among
+others). This file only takes effect once merged to `main` -- the
+generators that read it use a fixed `main` revision, not the per-cell
+revision a cell's own targetRevision may point at, so it cannot be
+tested from a feature branch a cell happens to track, **and a change
+committed to `main` takes effect on every cell immediately, including
+one still pinned to an older revision for everything else** -- adding
+or removing `keepLegacyReleaseNames` on `main` can trigger the rename
+on that cell the next time it reconciles, independent of when that
+cell's own revision pin is bumped. With it set, `jobset`/`accel-neuron-device-plugin`/
+`accel-neuron-dra` keep their pre-#110 `<cell>-<addon>` release name on
+that one cell, indefinitely; every other add-on on that same cell still
+gets the short name. `accel-neuron-device-plugin` still has #110's own
+bug latently on a cell that sets this flag, once that cell's own name is
+27 characters or longer (no cell doing so today is that long);
+[#114](https://github.com/littlemex/distai-platform/issues/114) tracks
+the dedicated follow-up, and `knownLatentBugIssue` on its own
+`addon.yaml` is what keeps the static suite from failing on that
+already-tracked, deliberately deferred limitation.
+
+**To stop deferring and let the three add-ons rename on your own
+schedule**, delete `keepLegacyReleaseNames` (or the whole `cell.yaml`)
+and let the cell sync once more -- the same one-time, self-healing
+rename every other add-on already goes through, now on your own cell,
+at a time of your choosing, never forced by this repository.
+`selectorDerivesFromReleaseName: true` on `accel-neuron-device-plugin`'s
+and `accel-neuron-dra`'s own `addon.yaml`, and on every `jobset` cell
+marker, is a separate, permanent FACT about those three charts (their
+own object name stays fixed by `fullnameOverride`/a hand-written
+template, but their own `spec.selector` is release-name-derived and
+immutable) -- it never changes per cell, and removing it would be
+incorrect regardless of `keepLegacyReleaseNames`.
+
+`cells.ApplicationSet.yaml` (capacity-pool, smoke and sharedfs-shares
+marker files) also sets this same `releaseName` -- unconditionally, with
+no `keepLegacyReleaseNames` branch at all (and no merge generator: none
+of its own add-ons have `selectorDerivesFromReleaseName`, so it never
+needed this), since this check found none of its own rendered objects
+(`NodePool`/`EC2NodeClass`/`ResourceFlavor`, `ClusterQueue`/`LocalQueue`,
+or `sharedfs-shares`' own `PersistentVolume`/`PersistentVolumeClaim`/
+`FilesystemShare` objects) derive their own `metadata.name` from the
+Helm release name at all -- each sets a fixed name from its own marker
+file's values or chart template directly, confirmed by rendering both
+release-name shapes and diffing every rendered object. `sharedfs` (the
+cluster-wide `sharedfs-controller` chart, reached through
+`addons-optional.ApplicationSet.yaml`'s own `cells/*/addons/sharedfs.yaml`
+marker, not through `cells.ApplicationSet.yaml`) renders unchanged for
+the same reason: its own `Deployment`/`Service` get a fixed name from
+the chart template, never the release name. An already-running cell
+therefore sees no object churn from either `cells.ApplicationSet.yaml`'s
+own line or `sharedfs`'s; only the add-ons named two paragraphs above
+actually rename anything, and only on a cell that never sets
+`keepLegacyReleaseNames`.
+
 Current pins, confirmed against each chart's own OCI manifest on
 2026-11-19 (see each `addon.yaml` for the full citation and content
 digest - recorded for audit, since Argo CD's `Application` CRD has no
