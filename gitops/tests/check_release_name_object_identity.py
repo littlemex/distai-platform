@@ -166,7 +166,26 @@ def render_both(path: str, repo_root: str, workdir: str) -> tuple[str, str, str 
         known_issue = addon_doc.get("knownLatentBugIssue")
         known_hit_legacy = bool(err_legacy) and cnl.KNOWN_LATENT_BUG_ERROR_SUBSTRING in err_legacy
         known_hit_true = bool(err_keep_true) and cnl.KNOWN_LATENT_BUG_ERROR_SUBSTRING in err_keep_true
-        if known_issue and (known_hit_legacy or known_hit_true):
+        if known_hit_legacy and out_keep_true is not None:
+            # An add-on WITHOUT selectorDerivesFromReleaseName whose own
+            # legacy (unconditional, worst-case-cell-prefixed) release
+            # name already exceeded Helm's 53-character cap on its own
+            # (accel-nvidia-device-plugin, both EFA advertisers): this
+            # fix's own short release name -- unconditional for these,
+            # since they never set the fact, regardless of
+            # keepLegacyReleaseNames -- is what makes the add-on
+            # renderable past that worst-case cell length at all. Not
+            # the deferred #114 case (that one still fails at
+            # keep_legacy=True too, below); nothing to compare either
+            # way; reported as NOTE, not a failure.
+            print(f"NOTE {path}: the legacy release name {release_legacy!r} itself exceeded Helm's "
+                  f"53-character cap at the worst-case cell name; this fix's own short release name "
+                  f"{release_keep_true!r} (unconditional for this add-on, which never sets "
+                  f"selectorDerivesFromReleaseName) renders fine regardless of keepLegacyReleaseNames -- "
+                  f"selector comparison needs a legacy render to diff against and is skipped here, not "
+                  f"a failure")
+            return None
+        if known_issue and known_hit_true:
             # accel-neuron-device-plugin's own case: release_legacy and
             # release_keep_true are the SAME cell-prefixed string (this
             # add-on's own selectorDerivesFromReleaseName makes
