@@ -10,11 +10,14 @@ addon: jobset
 # #110/PR #116: fullnameOverride: jobset keeps this add-on's own object
 # names fixed, but its spec.selector still derives from the release
 # name and is immutable -- same reason as accel-neuron-device-plugin's
-# own pinReleaseNameToCell. addons-optional.ApplicationSet.yaml reads
-# this field from each cell's own marker file, not from this catalog
-# entry; kept here in sync anyway (dir/namespace/skipCrds convention
-# above).
-pinReleaseNameToCell: true
+# own selectorDerivesFromReleaseName. A cell keeps jobset at this
+# legacy name only if that SAME cell's own gitops/cells/<cell>/cell.yaml
+# also sets keepLegacyReleaseNames: true -- the default is the short
+# name, same as every other add-on. addons-optional.ApplicationSet.yaml
+# reads this field from each cell's own marker file, not from this
+# catalog entry; kept here in sync anyway (dir/namespace/skipCrds
+# convention above).
+selectorDerivesFromReleaseName: true
 tier: platform-optional
 dir: gitops/charts/jobset
 # The upstream chart's own documented install namespace.

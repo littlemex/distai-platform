@@ -45,11 +45,12 @@
 # Chart source: see accel-neuron-device-plugin/addon.yaml.
 addon: accel-neuron-dra
 # #110/PR #116: same immutable-selector reason as accel-neuron-device-
-# plugin's own pinReleaseNameToCell, but this add-on's own release name
-# never exceeds Helm's 53-character cap at all (49 at the longest
-# allowed cell name) -- so unlike its sibling there is no bug to defer,
-# only the immutable-selector risk to avoid.
-pinReleaseNameToCell: true
+# plugin's own selectorDerivesFromReleaseName, but this add-on's own
+# release name never exceeds Helm's 53-character cap at all (49 at the
+# longest allowed cell name) -- so unlike its sibling there is no bug to
+# defer, only the immutable-selector risk to avoid on a cell whose own
+# cell.yaml sets keepLegacyReleaseNames: true.
+selectorDerivesFromReleaseName: true
 # RFC #41 Decision 1: gitops/addons/ is delivered unconditionally to
 # every cell, no opt-out, and check_addon_tiers.py requires every
 # addon.yaml here to say so explicitly.

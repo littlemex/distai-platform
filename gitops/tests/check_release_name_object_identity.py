@@ -13,14 +13,16 @@ immutable, so Argo CD would try, and fail, to patch it on an already-
 existing object instead of a clean delete-and-recreate.
 
 This script renders every core add-on and every real per-cell marker file
-twice -- once at the pre-#110 release name every cell used unconditionally
-(the longest allowed cell name, worst case), once at the release name this
-fix's own `expected_release_name()` (imported from
-check_object_name_length.py, never re-derived) gives it today -- and
-compares, template by template (joined by each document's own
-`# Source: <chart>/templates/...` comment, which names the chart's own
-template file and is therefore stable across a release-name change, unlike
-`metadata.name` itself, the one field this comparison exists to watch):
+twice, at the longest allowed cell name -- once with `keepLegacyReleaseNames`
+false (every new cell's own default, and every cell registered in this
+repository today), once with it true (what an already-running cell opts
+into by setting that field in its own `gitops/cells/<cell>/cell.yaml`) --
+via the real `expected_release_name()` (imported from
+check_object_name_length.py, never re-derived), and compares, template by
+template (joined by each document's own `# Source: <chart>/templates/...`
+comment, which names the chart's own template file and is therefore stable
+across a release-name change, unlike `metadata.name` itself, the one field
+this comparison exists to watch):
 
   - `metadata.name`
   - for Deployment/DaemonSet/StatefulSet: `spec.selector.matchLabels`
@@ -29,13 +31,15 @@ template file and is therefore stable across a release-name change, unlike
 FAILs only on the one dangerous pattern: a selector that changed while the
 object's own name did not (an immutable-field patch Argo CD cannot make).
 A name that changed together with its own selector is a clean rename
-(expected for the eight add-ons #110 actually renames) and is reported as
-INFO, not a failure. For the three `pinReleaseNameToCell`-excluded add-ons,
-the pre-#110 and post-#110 release names are identical by this fix's own
-formula, so this script renders the SAME release name twice via the real
-`expected_release_name()` call (not skipped, not assumed) and reports the
-resulting zero-diff explicitly, rather than exempting them from rendering
-the way an earlier, uncommitted classification table did.
+(expected for the eight add-ons without `selectorDerivesFromReleaseName`,
+on a cell that flips `keepLegacyReleaseNames`) and is reported as INFO, not
+a failure. For an add-on whose own `selectorDerivesFromReleaseName` is
+false or absent (every add-on except `accel-neuron-device-plugin`,
+`accel-neuron-dra` and `jobset`), both renders use the identical release
+name regardless of `keepLegacyReleaseNames`, so this script renders the
+SAME release name twice via the real `expected_release_name()` call (not
+skipped, not assumed) and reports the resulting zero-diff explicitly,
+rather than exempting them from rendering.
 
 Usage: check_release_name_object_identity.py <repo_root>
        check_release_name_object_identity.py --selftest
@@ -65,14 +69,6 @@ def check(label: str, condition: bool, reason: str = "") -> None:
         msg = f"FAIL {label}" + (f": {reason}" if reason else "")
         print(msg)
         FAILURES.append(msg)
-
-
-def old_release_name(addon: str) -> str:
-    """Every cell's own pre-#110 behavior, unconditionally -- the
-    cell-prefixed name every gitops/appsets/*.ApplicationSet.yaml gave
-    Helm before this fix, for every add-on, with no pinReleaseNameToCell
-    branch at all (that branch did not exist on main)."""
-    return f"{cnl.WORST_CASE_CELL_NAME}-{addon}"
 
 
 def parse_sourced_docs(rendered: str) -> dict[str, list[dict]]:
@@ -112,18 +108,20 @@ def selector_of(doc: dict) -> dict | None:
     return None
 
 
-def render_both(path: str, repo_root: str, workdir: str) -> tuple[str, dict, str, str | None, str, str | None] | None:
-    """Returns (addon, doc, old_release, old_rendered_or_None, new_release,
-    new_rendered_or_None), or None if this file has nothing to render
+def render_both(path: str, repo_root: str, workdir: str) -> tuple[str, str, str | None, str, str | None] | None:
+    """Returns (addon, release_false, rendered_false_or_None, release_true,
+    rendered_true_or_None), or None if this file has nothing to render
     (same "no chart:/dir:" exemption check_object_name_length.py's own
-    check_addon_file() applies)."""
+    check_addon_file() applies). release_false/release_true are this
+    add-on's own release name with the cell's own keepLegacyReleaseNames
+    false/true respectively, via the real expected_release_name()."""
     addon_doc = cnl.load_addon(path)
     addon = addon_doc.get("addon")
     if not addon:
         check(f"{path}: has an `addon:` field", False, "missing")
         return None
-    old_release = old_release_name(addon)
-    new_release = cnl.expected_release_name(addon, addon_doc)
+    release_false = cnl.expected_release_name(addon, addon_doc, False)
+    release_true = cnl.expected_release_name(addon, addon_doc, True)
     values = cnl.placeholder_values_worst_case(addon_doc)
 
     def build_cmd(release: str):
@@ -133,103 +131,93 @@ def render_both(path: str, repo_root: str, workdir: str) -> tuple[str, dict, str
             return cnl.dir_chart_cmd(release, addon_doc, repo_root, path)
         return None
 
-    cmd_old = build_cmd(old_release)
-    if cmd_old is None:
+    cmd_false = build_cmd(release_false)
+    if cmd_false is None:
         print(f"NOTE {path}: no chart:/dir: (nothing to render) -- not compared")
         return None
-    out_old, err_old = cnl.render(cmd_old, workdir, values, f"{addon}-old-selector")
-    cmd_new = build_cmd(new_release)
-    out_new, err_new = cnl.render(cmd_new, workdir, values, f"{addon}-new-selector")
-    if out_old is None or out_new is None:
+    out_false, err_false = cnl.render(cmd_false, workdir, values, f"{addon}-false-selector")
+    cmd_true = build_cmd(release_true)
+    out_true, err_true = cnl.render(cmd_true, workdir, values, f"{addon}-true-selector")
+    if out_false is None or out_true is None:
         known_issue = addon_doc.get("knownLatentBugIssue")
-        known_hit_old = bool(err_old) and cnl.KNOWN_LATENT_BUG_ERROR_SUBSTRING in err_old
-        known_hit_new = bool(err_new) and cnl.KNOWN_LATENT_BUG_ERROR_SUBSTRING in err_new
-        if known_issue and (known_hit_old or known_hit_new) and (out_new is not None or known_hit_new):
-            # accel-neuron-device-plugin's own case: pinned, so old and
-            # new are the SAME cell-prefixed release name, and both fail
-            # identically at the worst-case cell length -- the exact,
-            # already-tracked, deliberately deferred limitation
+        known_hit_false = bool(err_false) and cnl.KNOWN_LATENT_BUG_ERROR_SUBSTRING in err_false
+        known_hit_true = bool(err_true) and cnl.KNOWN_LATENT_BUG_ERROR_SUBSTRING in err_true
+        if known_issue and known_hit_true and out_false is not None:
+            # accel-neuron-device-plugin's own case: a short, 26-character
+            # name (keep_legacy=False, every new cell's own default)
+            # renders fine; the SAME add-on at keep_legacy=True (an
+            # already-running cell that opted in) still hits Helm's own
+            # 53-character cap past a 26-character cell name -- the
+            # exact, already-tracked, deliberately deferred limitation
             # check_object_name_length.py's own exemption also matches
-            # on. Nothing to compare either way (no successful render on
-            # either side); reported as NOTE, not a failure.
-            print(f"NOTE {path}: pre-#110 release name {old_release!r} exceeds Helm's 53-character cap "
-                  f"(deferred, see #{known_issue}); post-fix release name is {new_release!r} "
-                  f"({'identical, fails the same way (pinned)' if old_release == new_release else 'renders'}) -- "
-                  f"selector comparison needs a successful render on both sides and is skipped here, not a failure")
+            # on, now scoped to only the cells that opt in. No selector
+            # comparison is possible without a successful render on both
+            # sides; reported as NOTE, not a failure.
+            print(f"NOTE {path}: keepLegacyReleaseNames=true release name {release_true!r} exceeds Helm's "
+                  f"53-character cap at the worst-case cell name (deferred, see #{known_issue}); "
+                  f"keepLegacyReleaseNames=false release name {release_false!r} renders fine -- selector "
+                  f"comparison needs a successful render on both sides and is skipped here, not a failure")
             return None
-        if err_old and cnl.KNOWN_LATENT_BUG_ERROR_SUBSTRING in err_old and out_new is not None:
-            # Not exempted via knownLatentBugIssue, but the same real,
-            # pre-existing fact: the pre-#110, always-cell-prefixed
-            # release name already overflowed Helm's own cap for this
-            # add-on at the worst-case cell name, independent of any one
-            # object's own name -- this fix's own short release name is
-            # what makes this add-on renderable at the worst case at
-            # all. No selector comparison is possible without an old
-            # render to diff against; reported as INFO, not a failure.
-            print(f"INFO {path}: the pre-#110 release name {old_release!r} itself exceeds Helm's "
-                  f"53-character cap at the worst-case cell name -- this fix's own short release "
-                  f"name {new_release!r} is what makes this add-on renderable at that cell length "
-                  f"at all, independent of any one object's own name. Selector comparison needs "
-                  f"both renders and is not possible here.")
-            return None
-        check(f"{path}: both release names render", False, f"old_err={err_old!r} new_err={err_new!r}")
+        check(f"{path}: both keepLegacyReleaseNames shapes render", False,
+              f"false_err={err_false!r} true_err={err_true!r}")
         return None
-    return addon, addon_doc, old_release, out_old, new_release, out_new
+    return addon, release_false, out_false, release_true, out_true
 
 
-def compare_and_report(path: str, addon: str, old_release: str, out_old: str, new_release: str, out_new: str) -> None:
-    old_docs = parse_sourced_docs(out_old)
-    new_docs = parse_sourced_docs(out_new)
-    keys = sorted(set(old_docs) | set(new_docs))
+def compare_and_report(path: str, addon: str, release_false: str, out_false: str, release_true: str,
+                        out_true: str) -> None:
+    false_docs = parse_sourced_docs(out_false)
+    true_docs = parse_sourced_docs(out_true)
+    keys = sorted(set(false_docs) | set(true_docs))
     renamed_count = 0
     unchanged_count = 0
     violations: list[str] = []
     for key in keys:
-        old_list = old_docs.get(key, [])
-        new_list = new_docs.get(key, [])
-        for old_doc, new_doc in zip(old_list, new_list):
-            old_name = (old_doc.get("metadata") or {}).get("name", "")
-            new_name = (new_doc.get("metadata") or {}).get("name", "")
-            old_sel = selector_of(old_doc)
-            new_sel = selector_of(new_doc)
-            if old_sel is None and new_sel is None:
+        false_list = false_docs.get(key, [])
+        true_list = true_docs.get(key, [])
+        for false_doc, true_doc in zip(false_list, true_list):
+            false_name = (false_doc.get("metadata") or {}).get("name", "")
+            true_name = (true_doc.get("metadata") or {}).get("name", "")
+            false_sel = selector_of(false_doc)
+            true_sel = selector_of(true_doc)
+            if false_sel is None and true_sel is None:
                 continue
-            name_changed = old_name != new_name
-            selector_changed = old_sel != new_sel
+            name_changed = false_name != true_name
+            selector_changed = false_sel != true_sel
             if name_changed:
                 renamed_count += 1
             else:
                 unchanged_count += 1
             if (not name_changed) and selector_changed:
                 violations.append(
-                    f"{key}: {old_doc.get('kind')} {old_name!r} kept its own name across "
-                    f"{old_release!r} -> {new_release!r} but its own selector changed "
-                    f"({old_sel!r} -> {new_sel!r}) -- Argo CD cannot patch an immutable "
-                    f"selector; this is the exact hazard #110's own pinReleaseNameToCell "
-                    f"exists to avoid"
+                    f"{key}: {false_doc.get('kind')} {false_name!r} kept its own name across "
+                    f"keepLegacyReleaseNames {release_false!r} -> {release_true!r} but its own selector "
+                    f"changed ({false_sel!r} -> {true_sel!r}) -- Argo CD cannot patch an immutable "
+                    f"selector; this is the exact hazard selectorDerivesFromReleaseName exists to avoid"
                 )
     check(
-        f"{path} (addon {addon!r}, {old_release!r} -> {new_release!r}): no selector-bearing object "
-        f"kept its own name while its own selector changed",
+        f"{path} (addon {addon!r}, keepLegacyReleaseNames false={release_false!r} true={release_true!r}): "
+        f"no selector-bearing object kept its own name while its own selector changed",
         not violations,
         "; ".join(violations),
     )
-    if old_release == new_release:
-        print(f"INFO {path}: {addon!r} is pinned -- rendered the identical release name "
-              f"{old_release!r} twice via expected_release_name(), {renamed_count + unchanged_count} "
-              f"selector-bearing object(s) compared, 0 could differ by construction (same input)")
+    if release_false == release_true:
+        print(f"INFO {path}: {addon!r} does not set selectorDerivesFromReleaseName (or keepLegacyReleaseNames "
+              f"never changes its own release name) -- rendered the identical release name {release_false!r} "
+              f"twice via expected_release_name(), {renamed_count + unchanged_count} selector-bearing "
+              f"object(s) compared, 0 could differ by construction (same input)")
     else:
-        print(f"INFO {path}: {addon!r} -- {renamed_count} selector-bearing object(s) renamed (name and "
-              f"selector both changed, expected), {unchanged_count} kept their own name "
-              f"(name and selector both held, or no selector present)")
+        print(f"INFO {path}: {addon!r} -- {renamed_count} selector-bearing object(s) renamed between "
+              f"keepLegacyReleaseNames false and true (name and selector both changed, expected), "
+              f"{unchanged_count} kept their own name (name and selector both held, or no selector present)")
 
 
 def check_file(path: str, repo_root: str, workdir: str) -> None:
     result = render_both(path, repo_root, workdir)
     if result is None:
         return
-    addon, _addon_doc, old_release, out_old, new_release, out_new = result
-    compare_and_report(path, addon, old_release, out_old, new_release, out_new)
+    addon, release_false, out_false, release_true, out_true = result
+    compare_and_report(path, addon, release_false, out_false, release_true, out_true)
 
 
 def main(repo_root: str) -> int:
@@ -332,20 +320,21 @@ def selftest() -> int:
     """Proves this checker (a) catches the exact hazard it exists for --
     a fixed object name next to a release-derived selector -- (b) does
     not flag a clean rename where both the name and the selector change
-    together, and (c) does not flag a pinned add-on rendered at the same
-    release name twice. All three against synthetic fixture charts, never
-    this repository's own real ones."""
+    together, and (c) does not flag an add-on rendered at the identical
+    release name twice (selectorDerivesFromReleaseName absent). All
+    three against synthetic fixture charts, never this repository's own
+    real ones."""
     ok = True
     workdir = tempfile.mkdtemp(prefix="check-release-name-object-identity-selftest-")
     try:
         hazard_dir = _write_chart(os.path.join(workdir, "hazard-chart"), _SELFTEST_TEMPLATE_HAZARD)
-        out_old, err_old = cnl.render(["helm", "template", "aaaa-selftest-hazard", hazard_dir, "-n", "default"], workdir, {}, "hazard-old")
-        out_new, err_new = cnl.render(["helm", "template", "selftest-hazard", hazard_dir, "-n", "default"], workdir, {}, "hazard-new")
-        if out_old is None or out_new is None:
-            print(f"FAIL selftest: hazard fixture did not render: {err_old!r} {err_new!r}")
+        out_false, err_false = cnl.render(["helm", "template", "selftest-hazard", hazard_dir, "-n", "default"], workdir, {}, "hazard-false")
+        out_true, err_true = cnl.render(["helm", "template", "aaaa-selftest-hazard", hazard_dir, "-n", "default"], workdir, {}, "hazard-true")
+        if out_false is None or out_true is None:
+            print(f"FAIL selftest: hazard fixture did not render: {err_false!r} {err_true!r}")
             return 1
         before = len(FAILURES)
-        compare_and_report("hazard-fixture", "selftest-hazard", "aaaa-selftest-hazard", out_old, "selftest-hazard", out_new)
+        compare_and_report("hazard-fixture", "selftest-hazard", "selftest-hazard", out_false, "aaaa-selftest-hazard", out_true)
         caught = len(FAILURES) > before
         FAILURES.clear()
         if caught:
@@ -355,13 +344,13 @@ def selftest() -> int:
             ok = False
 
         rename_dir = _write_chart(os.path.join(workdir, "rename-chart"), _SELFTEST_TEMPLATE_SAFE_RENAME)
-        out_old, err_old = cnl.render(["helm", "template", "aaaa-selftest-rename", rename_dir, "-n", "default"], workdir, {}, "rename-old")
-        out_new, err_new = cnl.render(["helm", "template", "selftest-rename", rename_dir, "-n", "default"], workdir, {}, "rename-new")
-        if out_old is None or out_new is None:
-            print(f"FAIL selftest: rename fixture did not render: {err_old!r} {err_new!r}")
+        out_false, err_false = cnl.render(["helm", "template", "selftest-rename", rename_dir, "-n", "default"], workdir, {}, "rename-false")
+        out_true, err_true = cnl.render(["helm", "template", "aaaa-selftest-rename", rename_dir, "-n", "default"], workdir, {}, "rename-true")
+        if out_false is None or out_true is None:
+            print(f"FAIL selftest: rename fixture did not render: {err_false!r} {err_true!r}")
             return 1
         before = len(FAILURES)
-        compare_and_report("rename-fixture", "selftest-rename", "aaaa-selftest-rename", out_old, "selftest-rename", out_new)
+        compare_and_report("rename-fixture", "selftest-rename", "selftest-rename", out_false, "aaaa-selftest-rename", out_true)
         false_positive = len(FAILURES) > before
         FAILURES.clear()
         if not false_positive:
@@ -380,9 +369,10 @@ def selftest() -> int:
         false_positive = len(FAILURES) > before
         FAILURES.clear()
         if not false_positive:
-            print("PASS selftest: the identical release name rendered twice (the pinned shape) is not flagged")
+            print("PASS selftest: the identical release name rendered twice (no selectorDerivesFromReleaseName "
+                  "effect) is not flagged")
         else:
-            print("FAIL selftest: a pinned add-on's own zero-diff render was wrongly flagged")
+            print("FAIL selftest: a zero-diff render was wrongly flagged")
             ok = False
     finally:
         import shutil

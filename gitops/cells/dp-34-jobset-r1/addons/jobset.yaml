@@ -16,7 +16,11 @@ dir: gitops/charts/jobset
 namespace: jobset-system
 skipCrds: true
 wave: optional-1
-# #110: see gitops/addon-catalog/jobset/addon.yaml's own pinReleaseNameToCell
-# comment -- this is the field addons-optional.ApplicationSet.yaml
-# actually reads (the catalog entry is documentation only).
-pinReleaseNameToCell: true
+# #110: see gitops/addon-catalog/jobset/addon.yaml's own
+# selectorDerivesFromReleaseName comment -- this is the field
+# addons-optional.ApplicationSet.yaml actually reads (the catalog entry
+# is documentation only). This cell's own gitops/cells/dp-34-jobset-r1/
+# cell.yaml does not exist, so keepLegacyReleaseNames is absent here --
+# this cell gets jobset's own short release name, the same as every
+# other add-on, not the legacy <cell>-jobset name.
+selectorDerivesFromReleaseName: true

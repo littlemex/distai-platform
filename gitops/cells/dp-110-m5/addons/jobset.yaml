@@ -13,4 +13,4 @@ dir: gitops/charts/jobset
 namespace: jobset-system
 skipCrds: true
 wave: optional-1
-pinReleaseNameToCell: true
+selectorDerivesFromReleaseName: true
