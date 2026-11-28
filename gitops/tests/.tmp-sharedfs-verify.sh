@@ -294,7 +294,7 @@ log "team-onboard.sh team-b"
 "${ROOT}/gitops/bootstrap/team-onboard.sh" --team team-b --tf-outputs <(terraform output -json) \
   --source-repo https://github.com/littlemex/distai-platform.git
 
-log "waiting for Argo CD to converge (platform/cells/addons-optional Applications Synced, Healthy where they report health)"
+log "waiting for Argo CD to converge (platform/cells/addons-optional Applications Synced, Healthy where they report health, except vigil-controller - see EXCLUDED_APPS below)"
 DEADLINE=$(( $(date +%s) + 1800 ))
 while true; do
   NOT_SYNCED="$(kubectl get applications.argoproj.io -n "${ARGOCD_NS}" -o json | python3 -c "
@@ -330,7 +330,7 @@ for a in d.get('items', []):
 print(chr(10).join(bad))
 ")"
   if [[ -z "${NOT_SYNCED}" ]]; then
-    log "all Applications Synced (and Healthy where they report health)"
+    log "every checked Application Synced (and Healthy where they report health) - vigil-controller excluded, see EXCLUDED_APPS"
     break
   fi
   if [[ "$(date +%s)" -ge "${DEADLINE}" ]]; then
