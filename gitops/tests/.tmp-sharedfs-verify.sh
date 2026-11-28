@@ -317,8 +317,12 @@ bad = []
 # it from this convergence wait narrows what this one verify script
 # proves (it does not also prove vigil-controller is healthy), not what
 # the four required checks below need - this is not a fix to
-# vigil-controller's own bug, tracked as issue #112: remove this
-# exclusion once that issue closes.
+# vigil-controller's own bug. The actual root cause (none of this
+# platform's own ApplicationSets sets spec.source.helm.releaseName, so
+# the cell-prefixed Application name becomes the Helm release name too,
+# overflowing a 63-character Kubernetes name once a chart's own fixed
+# suffix is appended) is tracked, and already being fixed, as issue
+# #110 - remove this exclusion once that issue closes.
 EXCLUDED_APPS = {'${NAME}-vigil-controller'}
 for a in d.get('items', []):
     name = a['metadata']['name']
