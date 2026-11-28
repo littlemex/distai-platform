@@ -655,4 +655,4 @@ grep -q "NotGranted" "${RESULTS_DIR}/check5-datasets-rw-pvc-events.log" && log "
 
 log "ALL CHECKS PASS"
 kubectl get filesystemshares.sharedfs.io -A | tee "${RESULTS_DIR}/final-fss-status.log"
-kubectl get filesystemsharedirectories.sharedfs.io -A | tee "${RESULTS_DIR}/final-fsd-status.log"
+kubectl get fsd -A | tee "${RESULTS_DIR}/final-fsd-status.log"
