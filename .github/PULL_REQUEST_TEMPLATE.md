@@ -8,6 +8,22 @@
 
 -
 
+## Alternatives Considered
+
+<!--
+One row per major, cross-cutting decision this PR makes (architecture,
+which upstream project to depend on, where a capability lives, an interface
+shape) -- not one row per file, per commit, or per small decision already
+covered item-by-item under "## Changes" (that section's own "Alternative"
+field stays local to the one item it is attached to). If this PR makes no
+decision at this level, replace the table with a single line:
+"Not applicable; <why>".
+-->
+
+| Decision | Options compared | Pros / cons | Why this one |
+| --- | --- | --- | --- |
+|  |  |  |  |
+
 ## Test Plan
 
 <!-- Describe how you tested these changes -->

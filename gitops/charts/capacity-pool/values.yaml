@@ -82,6 +82,31 @@ pool:
   # by hand: see tools/README.md (#50).
   networkInterfaces: []
 
+  # Optional NodePool.spec.template.spec.startupTaints (#96), as a plain
+  # list of {key, value, effect} -- a direct pass-through, like
+  # pool.limits/pool.disruption above, not a value derived from any other
+  # field. Empty by default: no behavior change for a pool that does not
+  # set this. Rendered on the NodePool only; never mirrored as a
+  # ResourceFlavor toleration the way accelerator.taint/tenancy.teamTaint
+  # are (capacity-pool.taints below) -- a startup taint is a
+  # node-readiness gate every Pod eventually tolerates once something
+  # external removes it, not a tenancy or accelerator-class scheduling
+  # boundary Kueue needs to admit against.
+  #
+  # The taint key itself is an operational convention, not a per-pool
+  # choice: this platform runs exactly one node-readiness controller
+  # (gitops/addons/vigil-controller) watching exactly one key,
+  # distai.dev/startup-not-ready, so every pool that opts in uses that
+  # same key. Every DaemonSet a pool with this set actually depends on
+  # for a real workload Pod to run correctly (its accelerator
+  # device-plugin advertiser today; a future CSI driver) must tolerate
+  # the same key explicitly, or it never gets scheduled either and the
+  # taint only ever comes off at vigil-controller's own timeout -- see
+  # gitops/addons/accel-nvidia-device-plugin, accel-neuron-device-plugin,
+  # accel-efa-device-plugin-nvidia and accel-efa-device-plugin-neuron's
+  # own addon.yaml for the ones that already do.
+  startupTaints: []
+
 # Used only when pool.capacityType is "reserved": renders
 # EC2NodeClass.spec.capacityReservationSelectorTerms as one term
 # [{tags, instanceMatchCriteria}]. Reservations are selected by tag, not by

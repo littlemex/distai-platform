@@ -1,0 +1,565 @@
+#!/usr/bin/env bash
+# End-to-end test of the identities layer (issue #8) on a real AWS account.
+#
+# infra/identities has no resources of its own to stand on: an
+# aws_eks_pod_identity_association needs an already-existing EKS cluster
+# with the eks-pod-identity-agent add-on, which only infra/foundation
+# creates. This script therefore applies infra/foundation first, exactly as
+# an operator must (README.md), then applies infra/identities on top - the
+# same "main's own layer, then this pull request's layer" order the pull
+# request's own migration claim rests on - and checks only what
+# infra/identities itself contributes:
+#
+#   1. a role hand-created outside Terraform (standing in for an add-on
+#      identity set up by hand before this issue, per #8's own Motivation)
+#      is imported into infra/identities with no replacement, and its
+#      trust policy and permissions are tightened to this layer's own
+#      declared shape by the very next apply;
+#   2. a Pod whose ServiceAccount has a declared entry gets AWS credentials
+#      scoped to exactly that entry's own s3 prefix: it can read inside the
+#      prefix, cannot read outside it (same bucket), and cannot write at
+#      all (no write = true declared);
+#   3. a second entry with write = true can additionally write inside its
+#      own prefix, and still cannot touch the first entry's prefix;
+#   4. a Pod whose ServiceAccount has no declared entry at all gets no
+#      credentials - AccessDenied by construction, not by a shared role's
+#      policy;
+#   5. removing one entry and re-applying deletes only that entry's own
+#      role and association, leaves every other entry untouched, and never
+#      re-plans infra/foundation (this script never calls terraform against
+#      infra/foundation again after its first apply);
+#   6. terraform destroy of infra/identities, then of infra/foundation;
+#      nothing of either layer is left (IAM roles by name and by a tag
+#      sweep scoped to this layer's own derived-name prefix, the
+#      disposable S3 bucket, the cell's VPC).
+#
+# Every check prints PASS or FAIL. The script exits non-zero on the first
+# failed step and always attempts to destroy what it created (EXIT trap).
+#
+# Required environment (export before running):
+#   AWS_PROFILE, AWS_REGION, NAME, STATE_BUCKET, STATE_REGION,
+#   ADMIN_PRINCIPAL_ARN, MY_CIDR
+# Optional environment:
+#   TERRAFORM (terraform), E2E_WORK_DIR (mktemp -d),
+#   E2E_KEEP_ON_FAILURE (0), E2E_LEFTOVER_GRACE_SECONDS (300)
+set -euo pipefail
+
+: "${AWS_PROFILE:?export AWS_PROFILE}"
+: "${AWS_REGION:?export AWS_REGION}"
+: "${NAME:?export NAME (cell and cluster name)}"
+: "${STATE_BUCKET:?export STATE_BUCKET}"
+: "${STATE_REGION:?export STATE_REGION}"
+: "${ADMIN_PRINCIPAL_ARN:?export ADMIN_PRINCIPAL_ARN (the principal running this test)}"
+: "${MY_CIDR:?export MY_CIDR (CIDR allowed to reach the API endpoint)}"
+export AWS_PROFILE AWS_REGION
+
+TERRAFORM="${TERRAFORM:-terraform}"
+E2E_KEEP_ON_FAILURE="${E2E_KEEP_ON_FAILURE:-0}"
+E2E_LEFTOVER_GRACE_SECONDS="${E2E_LEFTOVER_GRACE_SECONDS:-300}"
+
+# Pinned by digest: public.ecr.aws does not return a Docker-Content-Digest
+# header (same as infra/foundation/tests/README.md's own NetworkPolicy
+# image), so the digest below is the sha256 of the manifest-list response
+# body for aws-cli/aws-cli:2.36.10, fetched through ECR Public's anonymous
+# token service and confirmed stable across two independent fetches.
+AWS_CLI_IMAGE="public.ecr.aws/aws-cli/aws-cli@sha256:1ce4fd2ea9b640019af76a94e91adeed901d20363b4bb2ed095b45c75e5565cc"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IDENTITIES_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+FOUNDATION_ROOT="$(cd "${IDENTITIES_ROOT}/../foundation" && pwd)"
+WORK_DIR="${E2E_WORK_DIR:-$(mktemp -d)}"
+mkdir -p "${WORK_DIR}"
+export KUBECONFIG="${WORK_DIR}/kubeconfig"
+export TF_IN_AUTOMATION=1
+
+FOUNDATION_STATE_KEY="distai-platform/${AWS_REGION}/${NAME}/foundation"
+IDENTITIES_STATE_KEY="distai-platform/${AWS_REGION}/${NAME}/identities"
+RUN_ID="e2e-$(date -u +%Y%m%d%H%M%S)"
+TEST_TAG_KEY="distai-platform-e2e"
+TEST_NAMESPACE="identities-e2e"
+LEGACY_ROLE_NAME="${NAME}-legacy-imagebuilder"
+BUCKET="${NAME}-identities-e2e-${RUN_ID#e2e-}"
+
+FOUNDATION_APPLIED=0
+LEGACY_ROLE_CREATED=0
+BUCKET_CREATED=0
+IDENTITIES_APPLIED=0
+IDENTITIES_DESTROYED=0
+FOUNDATION_DESTROYED=0
+FAILED_STEP=""
+
+# shellcheck source=e2e-lib.sh
+# shellcheck disable=SC1091 # SCRIPT_DIR is computed at runtime; shellcheck cannot follow it statically (same info-level notice infra/foundation/tests/3.tenancy-primitive.sh and 4.argocd-impersonation.sh already carry and suppress the same way)
+source "${SCRIPT_DIR}/e2e-lib.sh"
+
+# Plain wrappers, deliberately with no -var-file baked in: init, output,
+# state list and show -json all reject a -var-file flag outright (and
+# applying an already-saved plan file must not repeat the variables that
+# plan already captured), so each call site below adds -var-file itself,
+# only on the apply/plan/destroy/import calls that both need and accept it.
+tff() { "${TERRAFORM}" -chdir="${FOUNDATION_ROOT}" "$@"; }
+tfi() { "${TERRAFORM}" -chdir="${IDENTITIES_ROOT}" "$@"; }
+
+cleanup() {
+  local rc=$?
+  set +e
+  if [[ "${IDENTITIES_APPLIED}" -eq 1 && "${IDENTITIES_DESTROYED}" -eq 0 ]]; then
+    if [[ "${E2E_KEEP_ON_FAILURE}" == "1" ]]; then
+      info "E2E_KEEP_ON_FAILURE=1: leaving infra/identities in place"
+    else
+      info "cleanup: destroying infra/identities"
+      kubectl delete namespace "${TEST_NAMESPACE}" --ignore-not-found --timeout=60s >/dev/null 2>&1
+      if ! tfi destroy -var-file="${IDENTITIES_TFVARS}" -auto-approve > "${WORK_DIR}/cleanup-identities-destroy.log" 2>&1; then
+        log "FAIL cleanup: terraform destroy infra/identities failed; see ${WORK_DIR}/cleanup-identities-destroy.log, or remove it by hand with:"
+        log "${TERRAFORM} -chdir=${IDENTITIES_ROOT} -var-file=${IDENTITIES_TFVARS} destroy"
+      fi
+    fi
+  fi
+  if [[ "${BUCKET_CREATED}" -eq 1 ]]; then
+    info "cleanup: emptying and deleting the disposable bucket ${BUCKET}"
+    if ! { aws s3 rm "s3://${BUCKET}" --recursive && aws s3api delete-bucket --bucket "${BUCKET}"; } > "${WORK_DIR}/cleanup-bucket.log" 2>&1; then
+      log "FAIL cleanup: could not remove bucket ${BUCKET}; see ${WORK_DIR}/cleanup-bucket.log"
+    fi
+  fi
+  if [[ "${LEGACY_ROLE_CREATED}" -eq 1 ]]; then
+    aws iam list-attached-role-policies --role-name "${LEGACY_ROLE_NAME}" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null \
+      | tr '\t' '\n' | grep -v '^$' | while read -r p; do aws iam detach-role-policy --role-name "${LEGACY_ROLE_NAME}" --policy-arn "${p}" >/dev/null 2>&1; done
+    if ! aws iam delete-role --role-name "${LEGACY_ROLE_NAME}" > "${WORK_DIR}/cleanup-legacy-role.log" 2>&1; then
+      log "FAIL cleanup: could not delete role ${LEGACY_ROLE_NAME}; see ${WORK_DIR}/cleanup-legacy-role.log, or remove it by hand with:"
+      log "aws iam delete-role --role-name ${LEGACY_ROLE_NAME}"
+    fi
+  fi
+  if [[ "${FOUNDATION_APPLIED}" -eq 1 && "${FOUNDATION_DESTROYED}" -eq 0 ]]; then
+    if [[ "${E2E_KEEP_ON_FAILURE}" == "1" ]]; then
+      info "E2E_KEEP_ON_FAILURE=1: leaving infra/foundation (the cell) in place; destroy by hand with:"
+      info "${TERRAFORM} -chdir=${FOUNDATION_ROOT} -var-file=${FOUNDATION_TFVARS} destroy"
+    else
+      info "cleanup: destroying infra/foundation"
+      if ! tff destroy -var-file="${FOUNDATION_TFVARS}" -auto-approve > "${WORK_DIR}/cleanup-foundation-destroy.log" 2>&1; then
+        log "FAIL cleanup: terraform destroy infra/foundation failed; see ${WORK_DIR}/cleanup-foundation-destroy.log, or remove it by hand with:"
+        log "${TERRAFORM} -chdir=${FOUNDATION_ROOT} -var-file=${FOUNDATION_TFVARS} destroy"
+      fi
+    fi
+  fi
+  if [[ -n "${FAILED_STEP}" ]]; then
+    log "FAIL step: ${FAILED_STEP}"
+  fi
+  exit "${rc}"
+}
+trap cleanup EXIT
+
+# -------------------------------------------------------------- 0. preflight
+
+require_bin "${TERRAFORM}"
+require_bin aws
+require_bin kubectl
+aws sts get-caller-identity >/dev/null || fail "preflight: AWS credentials are not valid"
+pass "preflight: tools present, credentials valid"
+info "run ${RUN_ID}, work dir ${WORK_DIR}"
+
+# -------------------------------------------------- 1. foundation (main's own)
+
+FOUNDATION_TFVARS="${WORK_DIR}/foundation.tfvars.json"
+cat >"${FOUNDATION_TFVARS}" <<JSON
+{
+  "name": "${NAME}",
+  "region": "${AWS_REGION}",
+  "endpoint_public_access_cidrs": ["${MY_CIDR}"],
+  "admin_principal_arns": ["${ADMIN_PRINCIPAL_ARN}"],
+  "tags": {"${TEST_TAG_KEY}": "${RUN_ID}"}
+}
+JSON
+
+tff init -input=false \
+  -backend-config="bucket=${STATE_BUCKET}" \
+  -backend-config="key=${FOUNDATION_STATE_KEY}" \
+  -backend-config="region=${STATE_REGION}" \
+  -backend-config="use_lockfile=true" \
+  || fail "terraform init infra/foundation (key ${FOUNDATION_STATE_KEY})"
+pass "terraform init infra/foundation, key ${FOUNDATION_STATE_KEY}"
+
+# terraform state list exits 0 with empty output for an empty state; for a
+# backend with no state object at all yet it prints "No state file was
+# found!" to stderr and exits non-zero (same as
+# infra/foundation/tests/1.e2e.sh's own equivalent check) - also "empty".
+if ! existing_state="$(tff state list 2>&1)"; then
+  [[ "${existing_state}" == *"No state file"* ]] || fail "terraform state list (foundation): ${existing_state}"
+  existing_state=""
+fi
+[[ -z "${existing_state}" ]] || fail "foundation state already has resources, refusing to apply over it: $(tr '\n' ' ' <<<"${existing_state}")"
+pass "state at key ${FOUNDATION_STATE_KEY} has no resources before apply"
+
+FOUNDATION_APPLIED=1
+foundation_start="$(date +%s)"
+tff apply -var-file="${FOUNDATION_TFVARS}" -auto-approve || fail "terraform apply infra/foundation"
+pass "terraform apply infra/foundation ($(($(date +%s) - foundation_start))s)"
+
+CLUSTER_NAME="$(tff output -raw cluster_name)"
+tff output -raw cluster_certificate_authority_data >/dev/null || fail "foundation output cluster_certificate_authority_data missing"
+aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --kubeconfig "${KUBECONFIG}" >/dev/null \
+  || fail "aws eks update-kubeconfig"
+wait_until 180 10 "kubectl reaches the cluster" kubectl get nodes >/dev/null 2>&1 \
+  || fail "kubectl did not reach the cluster through the access entry within 180s"
+pass "kubectl reaches the cluster through the access entry"
+two_ready_nodes() {
+  [[ "$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l | tr -d ' ')" -ge 2 ]]
+}
+wait_until 600 15 "two Ready system nodes" two_ready_nodes || fail "two Ready system nodes did not appear"
+pass "two Ready system nodes"
+agent_status="$(aws eks describe-addon --cluster-name "${CLUSTER_NAME}" --addon-name eks-pod-identity-agent --query 'addon.status' --output text 2>&1)" \
+  || fail "describe-addon eks-pod-identity-agent: ${agent_status}"
+[[ "${agent_status}" == "ACTIVE" ]] || fail "eks-pod-identity-agent is ${agent_status}, not ACTIVE"
+pass "eks-pod-identity-agent is ACTIVE"
+
+kubectl create namespace "${TEST_NAMESPACE}" || fail "create namespace ${TEST_NAMESPACE}"
+kubectl create serviceaccount reader -n "${TEST_NAMESPACE}" || fail "create serviceaccount reader"
+kubectl create serviceaccount writer -n "${TEST_NAMESPACE}" || fail "create serviceaccount writer"
+kubectl create serviceaccount undeclared -n "${TEST_NAMESPACE}" || fail "create serviceaccount undeclared"
+pass "test namespace and three ServiceAccounts created (reader, writer, undeclared)"
+
+# ------------------------------------------- 2. a hand-rolled identity exists
+
+# Stands in for issue #8's own Motivation (the ALB controller, an image
+# builder, OpenZFS, an MCP server): a role created by hand before this
+# mechanism existed, with a loose trust policy (no RequestTag conditions -
+# any Pod Identity session in the account could assume it, not only one
+# namespace/service account) and a broad managed policy.
+LEGACY_TRUST_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"pods.eks.amazonaws.com"},"Action":["sts:AssumeRole","sts:TagSession"]}]}'
+aws iam create-role --role-name "${LEGACY_ROLE_NAME}" \
+  --assume-role-policy-document "${LEGACY_TRUST_POLICY}" \
+  --tags "Key=${TEST_TAG_KEY},Value=${RUN_ID}" >/dev/null \
+  || fail "create-role ${LEGACY_ROLE_NAME} (simulated hand-rolled identity)"
+LEGACY_ROLE_CREATED=1
+aws iam attach-role-policy --role-name "${LEGACY_ROLE_NAME}" --policy-arn arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess >/dev/null \
+  || fail "attach-role-policy AmazonS3ReadOnlyAccess to ${LEGACY_ROLE_NAME}"
+legacy_role_arn="$(aws iam get-role --role-name "${LEGACY_ROLE_NAME}" --query Role.Arn --output text)"
+pass "simulated a pre-existing, hand-rolled identity: ${LEGACY_ROLE_NAME} (loose trust policy, AmazonS3ReadOnlyAccess attached directly)"
+
+# -------------------------------------------- 3. a disposable S3 bucket
+
+if [[ "${AWS_REGION}" == "us-east-1" ]]; then
+  aws s3api create-bucket --bucket "${BUCKET}" >/dev/null || fail "create-bucket ${BUCKET}"
+else
+  aws s3api create-bucket --bucket "${BUCKET}" --create-bucket-configuration "LocationConstraint=${AWS_REGION}" >/dev/null \
+    || fail "create-bucket ${BUCKET}"
+fi
+BUCKET_CREATED=1
+aws s3api put-bucket-tagging --bucket "${BUCKET}" --tagging "TagSet=[{Key=${TEST_TAG_KEY},Value=${RUN_ID}}]" >/dev/null \
+  || fail "tag bucket ${BUCKET}"
+echo "ok" | aws s3 cp - "s3://${BUCKET}/allowed/ok.txt" || fail "seed s3://${BUCKET}/allowed/ok.txt"
+echo "secret" | aws s3 cp - "s3://${BUCKET}/other/secret.txt" || fail "seed s3://${BUCKET}/other/secret.txt"
+pass "disposable bucket ${BUCKET} created and seeded (allowed/ok.txt, other/secret.txt)"
+
+# --------------------------------------- 4. init infra/identities, import, apply
+
+tfi init -input=false \
+  -backend-config="bucket=${STATE_BUCKET}" \
+  -backend-config="key=${IDENTITIES_STATE_KEY}" \
+  -backend-config="region=${STATE_REGION}" \
+  -backend-config="use_lockfile=true" \
+  || fail "terraform init infra/identities (key ${IDENTITIES_STATE_KEY})"
+pass "terraform init infra/identities, key ${IDENTITIES_STATE_KEY}"
+
+if ! existing_identities_state="$(tfi state list 2>&1)"; then
+  [[ "${existing_identities_state}" == *"No state file"* ]] || fail "terraform state list (identities): ${existing_identities_state}"
+  existing_identities_state=""
+fi
+[[ -z "${existing_identities_state}" ]] || fail "identities state already has resources, refusing to apply over it: $(tr '\n' ' ' <<<"${existing_identities_state}")"
+pass "state at key ${IDENTITIES_STATE_KEY} has no resources before apply"
+
+write_identities_tfvars() {
+  # $1: 1 to include the writer entry, 0 to omit it (the removal step).
+  local include_writer="$1"
+  cat >"${IDENTITIES_TFVARS}" <<JSON
+{
+  "cluster_name": "${CLUSTER_NAME}",
+  "region": "${AWS_REGION}",
+  "tags": {"${TEST_TAG_KEY}": "${RUN_ID}"},
+  "platform_identities": {
+    "legacy-imagebuilder": {
+      "namespace": "${TEST_NAMESPACE}",
+      "service_account": "reader",
+      "role_name": "${LEGACY_ROLE_NAME}",
+      "s3": [{"bucket": "${BUCKET}", "prefixes": ["allowed/"]}]
+    }$([[ "${include_writer}" -eq 1 ]] && cat <<JSON2
+,
+    "writer": {
+      "namespace": "${TEST_NAMESPACE}",
+      "service_account": "writer",
+      "s3": [{"bucket": "${BUCKET}", "prefixes": ["writer-area/"], "write": true}]
+    }
+JSON2
+)
+  }
+}
+JSON
+}
+
+IDENTITIES_TFVARS="${WORK_DIR}/identities.tfvars.json"
+write_identities_tfvars 1
+
+# Import first: the plan must tighten legacy-imagebuilder's permissions and
+# trust policy in place, never replace it (the role ARN this test's own pod
+# will use must be the one created above, not a new one).
+tfi import -input=false -var-file="${IDENTITIES_TFVARS}" "aws_iam_role.entry[\"legacy-imagebuilder\"]" "${LEGACY_ROLE_NAME}" \
+  || fail "terraform import of the hand-rolled role into infra/identities"
+pass "imported the hand-rolled role ${LEGACY_ROLE_NAME} as platform_identities[\"legacy-imagebuilder\"]"
+
+import_plan="${WORK_DIR}/import.plan"
+tfi plan -input=false -var-file="${IDENTITIES_TFVARS}" -out="${import_plan}" || fail "terraform plan after import"
+plan_json="$(tfi show -json "${import_plan}")"
+role_action="$(printf '%s' "${plan_json}" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for rc in d.get('resource_changes', []):
+    if rc['address'] == 'aws_iam_role.entry[\"legacy-imagebuilder\"]':
+        print(','.join(rc['change']['actions']))
+")"
+[[ "${role_action}" == "update" ]] || fail "importing the legacy role must plan an in-place update, got: ${role_action:-<not found>}"
+pass "import plan: aws_iam_role.entry[\"legacy-imagebuilder\"] is an in-place update (no replacement) - the pre-existing role is reused, not recreated"
+
+IDENTITIES_APPLIED=1
+tfi apply -input=false -auto-approve "${import_plan}" || fail "terraform apply infra/identities (import + two new entries)"
+pass "terraform apply infra/identities (legacy-imagebuilder tightened in place, writer created)"
+
+role_arn_after="$(aws iam get-role --role-name "${LEGACY_ROLE_NAME}" --query Role.Arn --output text)"
+[[ "${role_arn_after}" == "${legacy_role_arn}" ]] || fail "legacy role ARN changed after import+apply (${legacy_role_arn} -> ${role_arn_after}); it must stay the same role"
+pass "legacy-imagebuilder's role ARN is unchanged by the migration (${role_arn_after})"
+still_has_broad_policy="$(aws iam list-attached-role-policies --role-name "${LEGACY_ROLE_NAME}" --query "AttachedPolicies[?PolicyArn=='arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess']" --output text)"
+[[ -z "${still_has_broad_policy}" ]] || fail "AmazonS3ReadOnlyAccess is still attached after apply; the migration must remove it (it is not declared in platform_identities)"
+pass "the broad, hand-attached AmazonS3ReadOnlyAccess policy is gone; only the entry's own scoped inline policy remains"
+
+migrated_trust_policy="$(aws iam get-role --role-name "${LEGACY_ROLE_NAME}" --query Role.AssumeRolePolicyDocument --output json)"
+printf '%s' "${migrated_trust_policy}" | grep -q "aws:RequestTag/kubernetes-namespace" \
+  || fail "legacy-imagebuilder's trust policy after apply has no namespace RequestTag condition; it was not actually tightened to this layer's own shape: ${migrated_trust_policy}"
+printf '%s' "${migrated_trust_policy}" | grep -q "aws:RequestTag/kubernetes-service-account" \
+  || fail "legacy-imagebuilder's trust policy after apply has no service-account RequestTag condition; it was not actually tightened to this layer's own shape: ${migrated_trust_policy}"
+pass "legacy-imagebuilder's trust policy is replaced by this layer's own scoped shape (RequestTag conditions present), not left at its hand-rolled, unscoped original"
+
+# --------------------------------------------- 5. pods and credential checks
+
+apply_test_pod() {
+  local name="$1" sa="$2"
+  cat <<YAML | kubectl apply -f - || fail "apply test pod ${name}"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${name}
+  namespace: ${TEST_NAMESPACE}
+spec:
+  serviceAccountName: ${sa}
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 0
+  tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists
+  containers:
+    - name: aws-cli
+      image: ${AWS_CLI_IMAGE}
+      command: ["/bin/sh", "-c", "sleep 3600"]
+YAML
+}
+
+pod_running() {
+  [[ "$(kubectl get pod "$1" -n "${TEST_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null)" == Running ]]
+}
+
+# True once EKS Pod Identity's own mutating webhook has injected the
+# container-credentials environment variable into this Pod's spec. This
+# is set once, at Pod admission time, from whether the Pod's own
+# ServiceAccount already had an association *at that moment* - it never
+# appears later on an already-created Pod, so a Pod missing it must be
+# recreated, not retried in place.
+pod_has_creds_env() {
+  local v
+  v="$(kubectl get pod "$1" -n "${TEST_NAMESPACE}" \
+    -o jsonpath='{.spec.containers[0].env[?(@.name=="AWS_CONTAINER_CREDENTIALS_FULL_URI")].name}' 2>/dev/null)"
+  [[ "${v}" == "AWS_CONTAINER_CREDENTIALS_FULL_URI" ]]
+}
+
+# apply_test_pod reader/writer/undeclared, then, for reader and writer
+# only (the two with a declared association), wait for the credentials
+# env var - recreating the Pod, not retrying a call against the same one,
+# on every attempt that still lacks it. The env var is set by the
+# mutating webhook at admission time, independent of the Pod's own
+# runtime phase, so this checks it without waiting for Running first;
+# once it is present, the Pod is still waited for Running once before
+# returning, since every caller needs that for its own next step
+# (`kubectl exec`).
+#
+# EKS Pod Identity associations are eventually consistent (AWS's own
+# documentation: "potential delays of several seconds after API calls");
+# this layer's own apply, just above, created the associations these
+# Pods use. On a real run of an earlier form of this exact step, the
+# very first Pod created right after that apply failed its first
+# credentialed call with "Unable to locate credentials" - the SDK's own
+# wording for having found no credential source to try at all, which is
+# consistent with (not directly confirmed by an inspection of that Pod's
+# own spec, which that run did not capture) the env var never having
+# been injected in the first place. A single Pod's own env, once set at
+# creation, does not change afterward, so retrying a call against that
+# same Pod could not have helped; recreating it after the association
+# has propagated is this version's own fix for that symptom.
+wait_for_creds_env() {
+  local name="$1" sa="$2" start now attempt=0
+  start="$(date +%s)"
+  while true; do
+    if pod_has_creds_env "${name}"; then
+      wait_until 360 5 "pod ${name} Running (credentials env var already present)" pod_running "${name}" \
+        || fail "pod ${name} has the Pod Identity credentials env var but never reached Running"
+      return 0
+    fi
+    now="$(date +%s)"
+    if ((now - start >= 90)); then
+      return 1
+    fi
+    attempt=$((attempt + 1))
+    info "pod ${name} has no AWS_CONTAINER_CREDENTIALS_FULL_URI yet (attempt ${attempt}, $((now - start))s elapsed); recreating"
+    kubectl delete pod "${name}" -n "${TEST_NAMESPACE}" --wait --timeout=60s --grace-period=0 --force >/dev/null 2>&1
+    apply_test_pod "${name}" "${sa}"
+    sleep 5
+  done
+}
+
+apply_test_pod reader reader
+apply_test_pod writer writer
+apply_test_pod undeclared undeclared
+for p in reader writer undeclared; do
+  if ! wait_until 360 5 "pod ${p} Running" pod_running "${p}"; then
+    kubectl describe pod "${p}" -n "${TEST_NAMESPACE}" || true
+    fail "pod ${p} did not reach Running within 360s"
+  fi
+done
+pass "reader, writer and undeclared pods are Running"
+
+for pair in "reader:reader" "writer:writer"; do
+  name="${pair%%:*}"
+  sa="${pair#*:}"
+  wait_for_creds_env "${name}" "${sa}" \
+    || fail "pod ${name} never had AWS_CONTAINER_CREDENTIALS_FULL_URI injected within 90s, even after being recreated - its own Pod Identity association never propagated in time"
+done
+pass "reader and writer both have the Pod Identity credentials environment variable injected"
+
+kexec() { kubectl exec -i -n "${TEST_NAMESPACE}" "$1" -- "${@:2}"; }
+
+kexec reader aws s3 cp "s3://${BUCKET}/allowed/ok.txt" - >/dev/null \
+  || fail "reader could not read s3://${BUCKET}/allowed/ok.txt (its own declared prefix)"
+pass "reader reads inside its own declared prefix (allowed/)"
+
+if kexec reader aws s3 cp "s3://${BUCKET}/other/secret.txt" - >/dev/null 2>"${WORK_DIR}/reader-other.err"; then
+  fail "reader could read s3://${BUCKET}/other/secret.txt, outside its declared prefix - scoping is not working"
+fi
+grep -qi "AccessDenied\|Forbidden" "${WORK_DIR}/reader-other.err" || fail "reader's denied read did not fail with AccessDenied/Forbidden: $(cat "${WORK_DIR}/reader-other.err")"
+pass "reader is denied reading other/secret.txt, outside its own declared prefix, in the same bucket"
+
+if echo "no" | kexec reader aws s3 cp - "s3://${BUCKET}/allowed/should-fail.txt" >/dev/null 2>"${WORK_DIR}/reader-write.err"; then
+  fail "reader (write not declared) could write to s3://${BUCKET}/allowed/, read-only-unless-write-declared is not working"
+fi
+grep -qi "AccessDenied\|Forbidden" "${WORK_DIR}/reader-write.err" || fail "reader's denied write did not fail with AccessDenied/Forbidden: $(cat "${WORK_DIR}/reader-write.err")"
+pass "reader is denied writing, because its own entry does not declare write = true"
+
+echo "written" | kexec writer aws s3 cp - "s3://${BUCKET}/writer-area/new.txt" \
+  || fail "writer could not write s3://${BUCKET}/writer-area/new.txt (its own declared prefix, write = true)"
+pass "writer writes inside its own declared prefix (writer-area/), because its own entry declares write = true"
+
+if kexec writer aws s3 cp "s3://${BUCKET}/allowed/ok.txt" - >/dev/null 2>"${WORK_DIR}/writer-other.err"; then
+  fail "writer could read s3://${BUCKET}/allowed/ok.txt, outside its own declared prefix - scoping is not working"
+fi
+grep -qi "AccessDenied\|Forbidden" "${WORK_DIR}/writer-other.err" || fail "writer's denied cross-prefix read did not fail with AccessDenied/Forbidden: $(cat "${WORK_DIR}/writer-other.err")"
+pass "writer is denied touching reader's own prefix (allowed/); each entry's role is scoped to only its own declared resources"
+
+pod_has_creds_env undeclared \
+  && fail "the undeclared ServiceAccount's pod has AWS_CONTAINER_CREDENTIALS_FULL_URI injected; no Pod Identity association exists for it, so this env var must never appear"
+if kexec undeclared aws sts get-caller-identity >/dev/null 2>"${WORK_DIR}/undeclared.err"; then
+  fail "the undeclared ServiceAccount's pod obtained AWS credentials; an undeclared workload must get none at all"
+fi
+grep -qi "Unable to locate credentials" "${WORK_DIR}/undeclared.err" \
+  || fail "the undeclared ServiceAccount's pod failed for a reason other than having no credentials at all: $(cat "${WORK_DIR}/undeclared.err")"
+pass "the undeclared ServiceAccount's pod has no credentials environment variable and gets no AWS credentials at all - AccessDenied by construction, not a transient failure"
+
+# --------------------------------- 6. remove one entry, re-apply, check scope
+
+write_identities_tfvars 0
+removal_plan="${WORK_DIR}/removal.plan"
+tfi plan -input=false -var-file="${IDENTITIES_TFVARS}" -out="${removal_plan}" || fail "terraform plan removing the writer entry"
+removal_json="$(tfi show -json "${removal_plan}")"
+removal_actions="$(printf '%s' "${removal_json}" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for rc in d.get('resource_changes', []):
+    print(rc['address'], ','.join(rc['change']['actions']))
+")"
+printf '%s\n' "${removal_actions}" | grep -q 'writer.*delete' || fail "removal plan does not delete the writer entry's own resources: ${removal_actions}"
+printf '%s\n' "${removal_actions}" | grep -v 'writer' | grep -qv 'no-op' && {
+  non_writer_changed="$(printf '%s\n' "${removal_actions}" | grep -v 'writer' | grep -v 'no-op' || true)"
+  [[ -z "${non_writer_changed}" ]] || fail "removing the writer entry planned a change to a non-writer resource: ${non_writer_changed}"
+}
+pass "removing the writer entry plans only that entry's own role, policy and Pod Identity association"
+
+tfi apply -input=false -auto-approve "${removal_plan}" || fail "terraform apply removing the writer entry"
+no_role_left "${NAME}-identity-writer" || fail "the writer entry's own IAM role still exists after removal"
+pass "the writer entry's own role is gone after removal"
+legacy_role_arn_after_removal="$(aws iam get-role --role-name "${LEGACY_ROLE_NAME}" --query Role.Arn --output text)"
+[[ "${legacy_role_arn_after_removal}" == "${legacy_role_arn}" ]] || fail "removing the writer entry changed the untouched legacy-imagebuilder entry's own role"
+pass "the untouched legacy-imagebuilder entry's own role is unaffected by removing a different entry"
+
+kexec reader aws s3 cp "s3://${BUCKET}/allowed/ok.txt" - >/dev/null \
+  || fail "reader lost its own, still-declared access after an unrelated entry was removed"
+pass "reader's own access is unaffected by removing the writer entry"
+
+# ---------------------------------------------- 7. teardown and leftover sweep
+
+kubectl delete namespace "${TEST_NAMESPACE}" --timeout=60s || fail "delete test namespace"
+pass "test namespace deleted"
+
+identities_destroy_start="$(date +%s)"
+tfi destroy -input=false -var-file="${IDENTITIES_TFVARS}" -auto-approve || fail "terraform destroy infra/identities"
+IDENTITIES_DESTROYED=1
+pass "terraform destroy infra/identities ($(($(date +%s) - identities_destroy_start))s)"
+
+no_role_left "${LEGACY_ROLE_NAME}" || fail "legacy-imagebuilder's role (now Terraform-managed, under its own pre-existing name via role_name) still exists after destroy"
+# Only now, after confirming the role is actually gone: the legacy role
+# is Terraform-managed since the import (under its own real name via
+# role_name), so a successful destroy above already removed it, and the
+# EXIT trap's own cleanup must not then also try to delete it by hand
+# and report a spurious failure (NoSuchEntity) on an otherwise fully
+# successful run. Resetting this flag before the check above would mean
+# a failed check (the role somehow still existing) leaves the trap with
+# nothing left to remove it either.
+LEGACY_ROLE_CREATED=0
+pass "no identity role tagged for this run remains, by name (legacy-imagebuilder)"
+# Scoped to "<NAME>-identity-" (this layer's own derived-name convention),
+# not plain NAME: infra/foundation's own roles (for example
+# "<NAME>-karpenter-node") carry the identical tag and still exist at
+# this point in the script (infra/foundation is destroyed afterward,
+# below) - a plain-NAME prefix would also match those and read as "a
+# tagged role still exists" on an otherwise successful run.
+wait_until "${E2E_LEFTOVER_GRACE_SECONDS}" 10 "no IAM role tagged ${TEST_TAG_KEY}=${RUN_ID} under ${NAME}-identity-" no_role_tagged_for_run "${NAME}-identity-" \
+  || fail "an IAM role under ${NAME}-identity- tagged ${TEST_TAG_KEY}=${RUN_ID} still exists after destroy"
+pass "no identities-layer IAM role still carries this run's own tag"
+assoc_left="$(aws eks list-pod-identity-associations --cluster-name "${CLUSTER_NAME}" --namespace "${TEST_NAMESPACE}" --query 'associations' --output text 2>&1)"
+[[ -z "${assoc_left}" || "${assoc_left}" == "None" ]] || fail "Pod Identity associations remain for namespace ${TEST_NAMESPACE}: ${assoc_left}"
+pass "no Pod Identity association remains for the test namespace"
+
+aws s3 rm "s3://${BUCKET}" --recursive >/dev/null || fail "empty the disposable bucket before delete"
+aws s3api delete-bucket --bucket "${BUCKET}" || fail "delete the disposable bucket"
+BUCKET_CREATED=0
+wait_until 60 5 "disposable bucket gone" no_bucket_left "${BUCKET}" || fail "disposable bucket ${BUCKET} still exists"
+pass "disposable bucket ${BUCKET} removed"
+
+vpc_id="$(tff output -raw vpc_id 2>/dev/null || true)"
+
+foundation_destroy_start="$(date +%s)"
+tff destroy -var-file="${FOUNDATION_TFVARS}" -auto-approve || fail "terraform destroy infra/foundation"
+FOUNDATION_DESTROYED=1
+pass "terraform destroy infra/foundation ($(($(date +%s) - foundation_destroy_start))s)"
+
+if [[ -n "${vpc_id}" ]]; then
+  vpc_check="$(aws_text aws ec2 describe-vpcs --vpc-ids "${vpc_id}" --query 'Vpcs[0].VpcId' --output text)" \
+    || fail "checking whether VPC ${vpc_id} still exists: ${vpc_check}"
+  [[ -z "${vpc_check}" || "${vpc_check}" == "None" ]] || fail "VPC ${vpc_id} still exists after infra/foundation destroy"
+fi
+pass "the cell's VPC is gone (infra/foundation's own destroy and leftover sweep is exercised and proved separately by its own 1.e2e.sh; this script re-checks only that the VPC it stood up is actually gone)"
+
+echo
+echo "RESULT PASS: all checks passed (run ${RUN_ID}, work dir ${WORK_DIR})"

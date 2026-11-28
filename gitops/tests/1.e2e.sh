@@ -409,6 +409,44 @@ print(FS.join([phase, message, retry_count, has_sync_result, resources_summary, 
 '
 }
 
+# app_diagnostics APP: everything a reviewer would ask for after a
+# "did not reach Synced/Healthy" failure, gathered before this script's
+# own fail()-triggered teardown destroys the cluster. Added after two
+# separate real runs (2026-11-26, issue #87), each against a different
+# commit of this same branch, each failed this exact class of check at a
+# different Application, with nothing but health/sync status to go on --
+# not enough to tell a real defect in this platform from a transient one
+# (API throttling, a slow OCI/Helm chart pull, Argo CD's own
+# reconciliation lag), and the cluster was already gone by the time
+# anyone looked. Printed, not asserted on: this is diagnostic output for
+# a human or a later grep, never a pass/fail signal itself.
+#
+# Covers: health/sync status, operationState/conditions (via
+# app_operation_state, same single-snapshot-read guarantee), this
+# Application's own Kubernetes Events, and the managed Argo CD
+# capability's component pods -- best-effort, since the EKS managed
+# capability does not expose every internal object a self-managed Argo
+# CD install would (confirmed separately: platform.ApplicationSet's own
+# status.applicationStatus reads empty on this capability, gitops/README.md's
+# own Ordering section); a `kubectl get pods` with nothing matching is
+# itself diagnostic (it means the capability does not run its control
+# plane as namespace-visible pods here), not a script bug, so this
+# never fails on that being empty.
+app_diagnostics() {
+  local app="$1"
+  local events pods repo_logs controller_logs
+  events="$(k get events -n "${ARGOCD_NS}" \
+    --field-selector "involvedObject.name=${app},involvedObject.kind=Application" \
+    --sort-by='.lastTimestamp' \
+    -o jsonpath='{range .items[*]}{.reason}:{.message}|{end}' 2>&1)"
+  pods="$(k get pods -n "${ARGOCD_NS}" -o custom-columns=NAME:.metadata.name,STATUS:.status.phase --no-headers 2>&1 | tr '\n' ';')"
+  repo_logs="$(k logs -n "${ARGOCD_NS}" -l app.kubernetes.io/name=argocd-repo-server --tail=80 --all-containers 2>&1 | tr '\n' ' ')"
+  controller_logs="$(k logs -n "${ARGOCD_NS}" -l app.kubernetes.io/name=argocd-application-controller --tail=80 --all-containers 2>&1 | tr '\n' ' ')"
+  printf 'health=%s sync=%s operationState=[%s] events=[%s] argocd_pods=[%s] repo-server_logs=[%s] application-controller_logs=[%s]' \
+    "$(app_health "${app}")" "$(app_sync "${app}")" "$(app_operation_state "${app}")" \
+    "${events}" "${pods}" "${repo_logs}" "${controller_logs}"
+}
+
 # job_node NS JOB: prints the node name the Job's pod is bound to, or
 # fails if none is bound yet. "|", never " ", between nodeName and phase:
 # awk's default whitespace-splitting strips a line's leading blank before
@@ -1280,7 +1318,7 @@ run_bootstrap --revision "${PRISTINE_KUEUE_BROKEN_BRANCH}" \
   || fail "bootstrap.sh --revision ${PRISTINE_KUEUE_BROKEN_BRANCH}"
 
 wait_until 300 10 "karpenter-crd Application reaches Synced" app_synced "${APP_KARPENTER_CRD}" \
-  || fail "${APP_KARPENTER_CRD} did not reach Synced (sync=$(app_sync "${APP_KARPENTER_CRD}")) after fixing its own version"
+  || fail "${APP_KARPENTER_CRD} did not reach Synced after fixing its own version: $(app_diagnostics "${APP_KARPENTER_CRD}")"
 k get crd nodepools.karpenter.sh -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null | grep -q True \
   || fail "nodepools.karpenter.sh CRD is not Established even though ${APP_KARPENTER_CRD} reports Synced"
 # karpenter-crd's own CRDs (EC2NodeClass, NodePool) now exist. The
@@ -1473,14 +1511,14 @@ pass "pristine: fixing only karpenter-crd (now Established) does not unblock cap
 run_bootstrap --revision "${GITOPS_REVISION}" \
   || fail "bootstrap.sh (restoring --revision ${GITOPS_REVISION} after the pristine A/B/C experiment)"
 wait_until 300 10 "kueue Application reaches Synced" app_synced "${APP_KUEUE}" \
-  || fail "${APP_KUEUE} did not reach Synced (sync=$(app_sync "${APP_KUEUE}")) after restoring --revision"
+  || fail "${APP_KUEUE} did not reach Synced after restoring --revision: $(app_diagnostics "${APP_KUEUE}")"
 # Same reasoning as capacity-pool in stage B: kueue's own CRDs
 # (ResourceFlavor, ClusterQueue, ...) are also brand new here, and a
 # single refresh does not reliably outlast Argo CD's own sync-retry
 # backoff from the earlier failed attempts -- refresh on every poll.
 smoke_synced_refreshing() { hard_refresh_app "${APP_SMOKE}"; app_synced "${APP_SMOKE}"; }
 wait_until 600 15 "smoke Application reaches Synced" smoke_synced_refreshing \
-  || fail "${APP_SMOKE} did not reach Synced (sync=$(app_sync "${APP_SMOKE}")) after restoring --revision"
+  || fail "${APP_SMOKE} did not reach Synced after restoring --revision: $(app_diagnostics "${APP_SMOKE}")"
 # Closes the loop on stage B's own observation: capacity-pool's
 # Application stayed OutOfSync there specifically because its
 # ResourceFlavor object needed kueue's still-broken CRD; now that kueue
@@ -1488,7 +1526,7 @@ wait_until 600 15 "smoke Application reaches Synced" smoke_synced_refreshing \
 # should finally reach Synced.
 capacity_pool_synced_refreshing() { hard_refresh_app "${APP_CAPACITY_POOL}"; app_synced "${APP_CAPACITY_POOL}"; }
 wait_until 300 15 "capacity-pool Application reaches Synced" capacity_pool_synced_refreshing \
-  || fail "${APP_CAPACITY_POOL} did not reach Synced (sync=$(app_sync "${APP_CAPACITY_POOL}")) once both karpenter-crd and kueue were fixed"
+  || fail "${APP_CAPACITY_POOL} did not reach Synced once both karpenter-crd and kueue were fixed: $(app_diagnostics "${APP_CAPACITY_POOL}")"
 pass "restored --revision to ${GITOPS_REVISION}: kueue converges on its own (no refresh needed -- it never tried and failed to sync earlier in this sequence, so it has no cached discovery failure to invalidate); capacity-pool (now including ResourceFlavor) and the smoke ClusterQueue/LocalQueue converge once told to recheck (hard refresh), consistent with each having already tried and failed to sync in stage A/B while kueue's own CRDs did not exist yet, caching that failure until told otherwise -- this is not a claim that any brand-new CRD in general needs a refresh (2.upgrade.sh's own capacity-pool converges with no refresh call anywhere in that script, because its CRDs exist from that cell's own first bootstrap onward and it never cached a failed attempt against them), nor that either Application here converges unattended; this cell's first-ever bootstrap sequence is complete"
 
 # ------------------------------------------------- 4. first bootstrap
@@ -1729,9 +1767,9 @@ pass "${APP_KARPENTER_CRD}'s spec.syncPolicy.automated carries no allowEmpty -- 
 # -------------------------------------------------------------- 10. capacity
 
 wait_until 900 15 "capacity-pool Application Healthy and Synced" app_healthy_synced "${APP_CAPACITY_POOL}" \
-  || fail "${APP_CAPACITY_POOL} did not reach Healthy+Synced: health=$(app_health "${APP_CAPACITY_POOL}") sync=$(app_sync "${APP_CAPACITY_POOL}")"
+  || fail "${APP_CAPACITY_POOL} did not reach Healthy+Synced: $(app_diagnostics "${APP_CAPACITY_POOL}") resources=[$(k get nodepool,ec2nodeclass,resourceflavor -A -o wide 2>&1 | tr '\n' ' ')]"
 wait_until 900 15 "smoke Application Healthy and Synced" app_healthy_synced "${APP_SMOKE}" \
-  || fail "${APP_SMOKE} did not reach Healthy+Synced: health=$(app_health "${APP_SMOKE}") sync=$(app_sync "${APP_SMOKE}")"
+  || fail "${APP_SMOKE} did not reach Healthy+Synced: $(app_diagnostics "${APP_SMOKE}")"
 pass "${APP_CAPACITY_POOL} and ${APP_SMOKE} (capacity step) reached Healthy+Synced"
 
 # Issue #41: optional-pool is a fourth core add-on (gitops/addons/,
@@ -1815,7 +1853,7 @@ check_accel_layer1() {
   local cell="$1" nodepool="$2" advertiser_addon="$3" other_addon="$4" label="$5" resource="$6" image="$7" probe="$8"
   local app="${cell}-${advertiser_addon}" other_app="${cell}-${other_addon}"
   local label_jp="${label//./\\.}" resource_jp="${resource//./\\.}"
-  local advertiser_ns other_ns wave np_label node node_label allocatable probe_out count pods_on_node node_capacity_type instance_type karpenter_log_file karpenter_log_pid accel_pod_trace_file accel_pod_trace_pid
+  local advertiser_ns other_ns wave np_label node node_label allocatable probe_out count pods_on_node node_capacity_type instance_type karpenter_log_file karpenter_log_pid accel_pod_trace_file accel_pod_trace_pid accel_nodeclaim_lookup accel_nodeclaim
 
   # Criterion 5: the accelerators step's device-plugin release is
   # Healthy+Synced before anything is asserted about it.
@@ -2007,6 +2045,64 @@ print(len(doc) if isinstance(doc, list) else -1)
   pass "node ${node} runs ${app}'s advertiser (${advertiser_ns}) and no DaemonSet pod of ${other_app} (${other_ns})"
 
   k delete namespace "${ACCEL_TEST_NS}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+
+  # Deleting the namespace only removes this check's own Pod; the node
+  # Karpenter launched for it would otherwise stay until that NodePool's
+  # own disruption.consolidateAfter elapses (this fixture's gpu/trn pools
+  # set it to 15m -- gitops/cells/dp-a19-gpu-r3/capacity-pool/gpu.yaml,
+  # gitops/cells/dp-a19-trn-r3/capacity-pool/trn.yaml -- specifically so a
+  # real multi-gigabyte verification image is never evicted mid-pull on a
+  # freshly launched node, a defect this script's own header traces to a
+  # real run). Step 14b-b, which runs on the GPU cell roughly 15-20
+  # minutes after this function returns, asserts zero
+  # karpenter.k8s.aws/instance-gpu-manufacturer=nvidia nodes before it
+  # launches its own disposable one; relying on that 15m window to have
+  # elapsed by then is a race, not a guarantee, so this check's own
+  # NodeClaim is deleted outright below instead: this probe pod is the
+  # only workload this function itself put on the node, so there is no
+  # image-pull window of this function's own to protect once the probe
+  # above has already run on it. (Some other workload -- the admin smoke
+  # canary, step 11 on the GPU cell -- does later land on and keep alive
+  # a node from the same NodePool; that is handled separately, right
+  # after step 14 is done needing it, not here -- see that release's own
+  # comment, above step 14b-a, and #87.)
+  #
+  # Fired with --wait=false, not waited on here: a real run (2026-11-26,
+  # issue #87) showed this exact delete, issued with a blocking
+  # --wait=true --timeout=300s, had not confirmed within that 300s, and a
+  # leftover NVIDIA node was still observed by step 14b-b's own
+  # precondition ~24 minutes later -- that run's own fail() message
+  # printed only a node count, not a name, so whether that leftover node
+  # was this one is not confirmed, only that this delete's own
+  # client-side wait was not long enough to say either way. kubectl's own
+  # --wait timeout only stops the client from blocking; it says nothing
+  # about how long the server-side cordon/drain/terminate actually takes
+  # for a real EC2 instance, so waiting here at all buys step 14b-b
+  # nothing concrete -- it only delays this function's own return. Step
+  # 14b-b's own precondition now waits and retries instead (see its own
+  # comment) -- that is the one place this actually needs to be true by.
+  # Captured as two steps, like nvidia_node_names in step 14b-b: under
+  # this script's own set -euo pipefail, a bare
+  # `x="$(cmd1 | cmd2)"` with no guard aborts the whole script with no
+  # message the instant cmd1 fails (an API hiccup, not "no NodeClaims"),
+  # which is exactly the hazard that check's own comment already warns
+  # about -- the same guard belongs here too.
+  accel_nodeclaim=""
+  if accel_nodeclaim_lookup="$(k get nodeclaims -o jsonpath='{range .items[*]}{.status.nodeName}{"="}{.metadata.name}{"\n"}{end}' 2>&1)"; then
+    accel_nodeclaim="$(echo "${accel_nodeclaim_lookup}" | awk -F= -v n="${node}" '$1==n{print $2}')"
+    if [[ -n "${accel_nodeclaim}" ]]; then
+      local accel_delete_out
+      if accel_delete_out="$(k delete nodeclaim "${accel_nodeclaim}" --ignore-not-found --wait=false 2>&1)"; then
+        info "requested deletion of NodeClaim ${accel_nodeclaim} (this check's own node ${node}); not waiting for it here, see step 14b-b"
+      else
+        info "kubectl delete nodeclaim ${accel_nodeclaim} (this check's own node ${node}) was rejected; its node may still be observed at step 14b-b: ${accel_delete_out}"
+      fi
+    else
+      info "no NodeClaim found for node ${node} (already gone, nothing to delete)"
+    fi
+  else
+    info "kubectl get nodeclaims failed while looking up this check's own node ${node} -- nothing deleted here, only consolidation will remove it: ${accel_nodeclaim_lookup}"
+  fi
 }
 
 if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
@@ -2817,6 +2913,73 @@ ec2nodeclasses_after="$(k get ec2nodeclasses -o jsonpath='{.items[*].metadata.na
 [[ "$(k get ec2nodeclass "${NODECLASS}" -o jsonpath='{.metadata.creationTimestamp}')" == "${NODECLASS_CREATED}" ]] \
   || fail "EC2NodeClass ${NODECLASS}'s creationTimestamp changed -- it was deleted and recreated, not re-adopted"
 pass "re-running bootstrap.sh re-adopted the same NodePool and EC2NodeClass (unchanged creationTimestamps), not a duplicate"
+# This is where step 14 (acceptance criterion 7, second half, the
+# deliberate full teardown/re-adopt test above and the re-adoption check
+# just above this line) is actually done with CANARY_NODE/CANARY_INSTANCE_ID:
+# nothing after this point in step 14 reads either variable.
+
+if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
+  # #87's second, previously-open hypothesis, confirmed here by reading
+  # the code and the cell's own fixture, not guessed: this cell's
+  # capacity-pool NodePool (${NODEPOOL}) is backed by
+  # karpenter.k8s.aws/instance-family in [g7, g6e, g5]
+  # (cells/dp-a19-gpu-r3/capacity-pool/gpu.yaml), so every node it
+  # launches -- including the one Kueue just admitted step 11's canary
+  # Job onto, and that step 14 above needed kept alive to prove the
+  # orphan/re-adopt survived with a real running instance -- carries
+  # karpenter.k8s.aws/instance-gpu-manufacturer=nvidia. That is the exact
+  # label both dcgm-exporter's own chart (values.yaml's nodeSelector) and
+  # step 14b-b's "zero NVIDIA nodes" precondition key on. Nothing before
+  # this point ever deleted that node, so step 14b-b's precondition was
+  # never actually starting from zero on this cell once step 11's canary
+  # had landed on an NVIDIA-labeled node -- independent of, and in
+  # addition to, the candidate cause addressed above for
+  # check_accel_layer1's own probe node (what that one's own real run
+  # showed is only that its delete did not confirm within 300s; whether
+  # the leftover node it actually saw was that probe node is not
+  # confirmed). A real run (#88 Run A) with this release and that other
+  # change both applied -- never run separately, and with this block a
+  # few lines earlier than it now sits -- reached and passed step
+  # 14b-b's full sequence cleanly, the first time since #87 opened.
+  #
+  # Released here, right after the line above that marks step 14 done
+  # needing it, not tolerated in step 14b's checks: an earlier version of
+  # this fix excluded this specific node from step 14b-b's precondition
+  # alone, and review found it incomplete -- the very next check (step
+  # 14b-b's own dcgm_desired == 0 assertion) makes the same "zero NVIDIA
+  # nodes" assumption and would still fail for the same reason, moving
+  # the failure a few lines down rather than fixing it. Deleting the node
+  # outright makes both of step 14b-b's assumptions actually true instead
+  # of teaching every downstream check to carve out one more exception.
+  # Guarded into the same three outcomes check_accel_layer1 already
+  # distinguishes (found and delete accepted, found but delete rejected,
+  # lookup itself failed), fired with --wait=false: step 14b-b's own
+  # existing up-to-600s wait_until and nvidia_node_leftover_diagnostics
+  # already absorb and would diagnose this node's termination tail the
+  # same way they do check_accel_layer1's, so no second wait is added
+  # here. Step 15 (destroy) still needs its own running Karpenter
+  # instance from this NODEPOOL to prove the foundation's teardown guard
+  # -- a fresh one is submitted there instead (see step 15 below), since
+  # that need belongs to step 15 alone, not to keeping this node alive
+  # across all of step 14b for it.
+  k delete job canary -n "${SMOKE_NS}" --ignore-not-found --wait=false >/dev/null 2>&1 \
+    || fail "kubectl delete job ${SMOKE_NS}/canary (releasing step 14's own canary node before step 14b needs zero NVIDIA nodes)"
+  if canary_nc_lookup="$(k get nodeclaims -o jsonpath='{range .items[*]}{.status.nodeName}{"="}{.metadata.name}{"\n"}{end}' 2>&1)"; then
+    canary_nc_name="$(echo "${canary_nc_lookup}" | awk -F= -v n="${CANARY_NODE}" '$1==n{print $2}')"
+    if [[ -n "${canary_nc_name}" ]]; then
+      if canary_nc_delete_out="$(k delete nodeclaim "${canary_nc_name}" --ignore-not-found --wait=false 2>&1)"; then
+        info "requested deletion of NodeClaim ${canary_nc_name} (step 14's own canary node ${CANARY_NODE}); not waiting for it here, see step 14b-b"
+      else
+        info "kubectl delete nodeclaim ${canary_nc_name} (step 14's own canary node ${CANARY_NODE}) was rejected; its node may still be observed at step 14b-b: ${canary_nc_delete_out}"
+      fi
+    else
+      info "no NodeClaim found for step 14's own canary node ${CANARY_NODE} (already gone, nothing to delete)"
+    fi
+  else
+    info "kubectl get nodeclaims failed while looking up step 14's own canary node ${CANARY_NODE} -- nothing deleted here, only consolidation or step 14b-b's own wait will catch it: ${canary_nc_lookup}"
+  fi
+  pass "requested release of step 14's own canary Job and (if found) its NodeClaim for node ${CANARY_NODE}, ahead of step 14b-b's zero-NVIDIA-node precondition"
+fi
 
 # ---------------- 14b. platform-optional add-on: dcgm-exporter (issue #41)
 #
@@ -3031,11 +3194,75 @@ pass "no Application ${APP_DCGM} exists at ${NO_DCGM_REVISION} (no ${DCGM_MARKER
 # guard would let abort the script with no message. Capturing kubectl
 # alone first, guarded, keeps that failure distinguishable from a
 # genuine zero-node answer.
-nvidia_node_names="$(k get nodes -l karpenter.k8s.aws/instance-gpu-manufacturer=nvidia -o name 2>&1)" \
-  || fail "kubectl get nodes -l karpenter.k8s.aws/instance-gpu-manufacturer=nvidia failed: ${nvidia_node_names}"
-nvidia_nodes="$(echo "${nvidia_node_names}" | grep -c . || true)"
-[[ "${nvidia_nodes}" -eq 0 ]] \
-  || fail "${nvidia_nodes} NVIDIA node(s) already exist before step 14b-c launches one; 14b-b's zero-matched-node expectation would not hold"
+#
+# Waited and retried, not a single-shot check: a real run (2026-11-26)
+# failed this exact precondition with a leftover NVIDIA node present,
+# 15-20+ minutes after check_accel_layer1 requested deletion of its own
+# disposable node's NodeClaim -- kubectl's own --wait=true --timeout=300s
+# on that delete only bounds how long the *client* blocks, not how long
+# Karpenter's real cordon/drain/terminate sequence takes on an actual EC2
+# instance, so check_accel_layer1 no longer waits on it at all (fired
+# with --wait=false instead, see its own comment). 600s is a judgment
+# call, not a proven-sufficient number -- that run never showed any node
+# actually finish terminating, and did not record which node its own
+# leftover count was (that run's own fail message printed only a count,
+# no name). A second, independent source of a leftover NVIDIA node on
+# this cell (the admin smoke canary, step 11, lands on this same
+# NodePool and was never deleted before this script's own final
+# cleanup()) is now released separately, right after step 14 is done
+# needing it (see that release's own comment, above step 14b-a) --
+# resolved there, not here, so this precondition's own job stays
+# "wait out whatever termination tail either source leaves behind", with
+# nvidia_node_leftover_diagnostics below showing, by name, which source
+# it was on any future failure.
+nvidia_node_names=""
+nvidia_node_lookup_error=""
+zero_nvidia_nodes() {
+  local out
+  if out="$(k get nodes -l karpenter.k8s.aws/instance-gpu-manufacturer=nvidia -o name 2>&1)"; then
+    nvidia_node_names="${out}"
+    nvidia_node_lookup_error=""
+  else
+    nvidia_node_lookup_error="${out}"
+    return 1
+  fi
+  [[ "$(echo "${nvidia_node_names}" | grep -c .)" -eq 0 ]]
+}
+# nvidia_node_leftover_diagnostics: for each leftover node, its matching
+# NodeClaim's deletionTimestamp/finalizers/conditions (a non-nil
+# deletionTimestamp with a stuck finalizer means Karpenter has been
+# trying and failing to finish the drain, not merely taking a while), the
+# pods still bound to it (a non-evictable pod or a restrictive
+# PodDisruptionBudget would show up here), and the node's own Events.
+# Only ever called after zero_nvidia_nodes's own lookup last succeeded
+# (see the fail() call below), so nvidia_node_names here is always a real
+# node list, never error text to word-split.
+nvidia_node_leftover_diagnostics() {
+  local node_name short_name nc_lookup nc_name
+  for node_name in ${nvidia_node_names}; do
+    short_name="${node_name#node/}"
+    if nc_lookup="$(k get nodeclaims -o jsonpath='{range .items[*]}{.status.nodeName}{"="}{.metadata.name}{"\n"}{end}' 2>&1)"; then
+      nc_name="$(echo "${nc_lookup}" | awk -F= -v n="${short_name}" '$1==n{print $2}')"
+    else
+      nc_name=""
+      printf 'nodeclaim_lookup_failed=[%s] ' "${nc_lookup}"
+    fi
+    printf 'node=%s nodeclaim=[%s] ' "${short_name}" "${nc_name}"
+    if [[ -n "${nc_name}" ]]; then
+      printf 'nodeclaim_status=[%s] ' "$(k get nodeclaim "${nc_name}" -o jsonpath='deletionTimestamp={.metadata.deletionTimestamp} finalizers={.metadata.finalizers} conditions={.status.conditions}' 2>&1)"
+    fi
+    printf 'pods=[%s] events=[%s] ' \
+      "$(k get pods -A --field-selector "spec.nodeName=${short_name}" -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}:{.status.phase}|{end}' 2>&1)" \
+      "$(k get events -A --field-selector "involvedObject.name=${short_name}" --sort-by='.lastTimestamp' -o jsonpath='{range .items[*]}{.reason}:{.message}|{end}' 2>&1)"
+  done
+}
+if ! wait_until 600 15 "zero NVIDIA nodes before step 14b-c launches one" zero_nvidia_nodes; then
+  if [[ -n "${nvidia_node_lookup_error}" ]]; then
+    fail "kubectl get nodes -l karpenter.k8s.aws/instance-gpu-manufacturer=nvidia failed on the last poll before timeout: ${nvidia_node_lookup_error}"
+  else
+    fail "NVIDIA node precondition for step 14b-c not met within 600s: ${nvidia_node_names} -- $(nvidia_node_leftover_diagnostics)"
+  fi
+fi
 run_bootstrap --revision "${ADD_DCGM_REVISION}" || fail "bootstrap.sh --revision ${ADD_DCGM_REVISION}"
 wait_until 300 10 "dcgm-exporter Application generated from its marker file" app_exists "${APP_DCGM}" \
   || fail "no Application ${APP_DCGM} appeared at ${ADD_DCGM_REVISION} (addons-optional ApplicationSet did not generate it)"
@@ -3517,6 +3744,27 @@ report_leftovers() {
   return "${bad}"
 }
 
+if [[ "${GITOPS_RUN_ACCEL_E2E}" == "1" ]]; then
+  # Step 14b above released step 11's own canary Job and node once step
+  # 14 was done needing it (so step 14b-b could start from a genuine
+  # zero NVIDIA nodes). This step's own proof below -- a real running
+  # Karpenter-launched instance from ${NODEPOOL}, confirmed terminated
+  # only by terraform destroy itself -- needs one of its own, so a fresh
+  # one is submitted here: the same canary.yaml this run already
+  # rendered for step 11 (same SMOKE_NS/SMOKE_LOCALQUEUE/accelerator
+  # resource request, if any), reusing the Job name now that step 14's
+  # own canary and its Workload are gone.
+  k apply -f "${WORK_DIR}/canary.yaml" || fail "kubectl apply the step 15 teardown-guard canary Job"
+  wait_until 300 10 "Kueue admits the step 15 teardown-guard canary Job" canary_admitted \
+    || fail "step 15 teardown-guard canary Job was never admitted (still suspended): $(k get job canary -n "${SMOKE_NS}" -o jsonpath='{.status}')"
+  wait_until 900 15 "a node launches for the step 15 teardown-guard canary Job" canary_running_on_node \
+    || fail "step 15 teardown-guard canary Job's pod never got a node: $(k get nodeclaims -o wide 2>&1)"
+  CANARY_NODE="$(canary_node)"
+  CANARY_INSTANCE_ID="$(instance_of_node "${CANARY_NODE}")"
+  [[ -n "${CANARY_INSTANCE_ID}" ]] || fail "could not resolve an instance ID for the step 15 teardown-guard canary's node ${CANARY_NODE}"
+  pass "step 15's own teardown-guard canary Job launched a fresh Karpenter node (${CANARY_NODE}, instance ${CANARY_INSTANCE_ID})"
+fi
+
 k delete job canary -n "${SMOKE_NS}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
 
 running_karpenter="$(aws ec2 describe-instances \
@@ -3636,10 +3884,31 @@ JSON
   TRN_APP_CAPACITY_POOL="${APP_CAPACITY_POOL}"
   trn wait_until 1200 15 "Trainium capacity-pool Application Healthy and Synced" app_healthy_synced "${TRN_APP_CAPACITY_POOL}" \
     || fail "${TRN_APP_CAPACITY_POOL} did not reach Healthy+Synced: health=$(trn app_health "${TRN_APP_CAPACITY_POOL}") sync=$(trn app_sync "${TRN_APP_CAPACITY_POOL}")"
-  mapfile -t trn_nodepools < <(trn k get nodepools -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$')
-  [[ "${#trn_nodepools[@]}" -eq 1 ]] || fail "expected exactly 1 NodePool on the Trainium cell, found ${#trn_nodepools[@]}: ${trn_nodepools[*]:-none}"
+  # The platform's optional-pool ApplicationSet renders on every cell,
+  # the Trainium one included, the same way step 10's own optional-pool
+  # discovery above (APP_OPTIONAL_POOL/OPTIONAL_NODEPOOL) already
+  # discovers and excludes it for the GPU cell -- confirmed by a
+  # real run (2026-11-26): without this exclusion, the Trainium cell
+  # reports 2 NodePools (optional-pool and this cell's own), failing the
+  # "exactly 1" assertion below the first time a run reached this step
+  # since the optional-pool add-on landed (#46, merged 2026-11-25); the
+  # 2026-11-22 pass predates #46 and is not a counter-example. Discovered
+  # the same way (the Application's own status.resources), not hardcoded
+  # as a literal "optional-pool" string.
+  trn_app_optional_pool="${TRN_CLUSTER}-optional-pool"
+  trn app_exists "${trn_app_optional_pool}" \
+    || fail "Application ${trn_app_optional_pool} does not exist on the Trainium cell -- the platform ApplicationSet never generated it from addons/optional-pool/addon.yaml"
+  trn wait_until 900 15 "optional-pool Application Healthy and Synced (Trainium cell)" app_healthy_synced "${trn_app_optional_pool}" \
+    || fail "${trn_app_optional_pool} did not reach Healthy+Synced: health=$(trn app_health "${trn_app_optional_pool}") sync=$(trn app_sync "${trn_app_optional_pool}")"
+  mapfile -t trn_optional_nodepools < <(trn app_owned_names "${trn_app_optional_pool}" NodePool)
+  [[ "${#trn_optional_nodepools[@]}" -eq 1 ]] \
+    || fail "expected Application ${trn_app_optional_pool} to own exactly 1 NodePool on the Trainium cell, found ${#trn_optional_nodepools[@]}: ${trn_optional_nodepools[*]:-none}"
+  TRN_OPTIONAL_NODEPOOL="${trn_optional_nodepools[0]}"
+  mapfile -t trn_nodepools < <(trn k get nodepools -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v '^$' | grep -vxF "${TRN_OPTIONAL_NODEPOOL}")
+  [[ "${#trn_nodepools[@]}" -eq 1 ]] \
+    || fail "expected exactly 1 NodePool on the Trainium cell besides optional-pool's ${TRN_OPTIONAL_NODEPOOL}, found ${#trn_nodepools[@]}: ${trn_nodepools[*]:-none}"
   TRN_NODEPOOL="${trn_nodepools[0]}"
-  pass "${TRN_APP_CAPACITY_POOL} reached Healthy+Synced; exactly one NodePool (${TRN_NODEPOOL}) on the Trainium cell"
+  pass "${TRN_APP_CAPACITY_POOL} reached Healthy+Synced; exactly one capacity NodePool (${TRN_NODEPOOL}) on the Trainium cell besides optional-pool's own (${TRN_OPTIONAL_NODEPOOL})"
 
   # ------------------------------ 18. Trainium cell: accelerators (#28)
   #

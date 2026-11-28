@@ -153,6 +153,7 @@ def render(raw, with_queue):
         "__NAMESPACE__": "gpu-healthcheck",
         "__INSTANCE_TYPE__": "g6e.12xlarge",
         "__BASE_IMAGE__": "nvcr.io/nvidia/cloud-native/dcgm:3.3.7-1-ubuntu22.04",
+        "__SUITE_ARGS__": "--suite lightweight",
     }.items():
         text = text.replace(tok, val)
     text = "\n".join(l for l in text.splitlines() if not l.startswith("#"))
