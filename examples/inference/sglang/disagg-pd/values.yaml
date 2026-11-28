@@ -93,19 +93,25 @@ transport:
   # The router learns it from the prefill pods' sglang.ai/bootstrap-port
   # annotation.
   bootstrapPort: 8998
-  # Only read with backend=NIXL, sglangNixlBackend=UCX -- the same
-  # NIXL+UCX backend the vLLM charts use, so the same gap applies here:
-  # NIXL's UCX backend builds its UCX worker config with ucp_config_read()
-  # using prefix "NIXL" (ai-dynamo/nixl @52df750's src/plugins/ucx/config.cpp),
+  # Only read with backend=NIXL, sglangNixlBackend=UCX. NIXL's UCX
+  # backend builds its UCX worker config with ucp_config_read() using
+  # prefix "NIXL" (ai-dynamo/nixl @52df750's src/plugins/ucx/config.cpp),
   # which falls back to the plain UCX_<X> variable this chart sets below
   # when NIXL_UCX_<X> is unset. UCX_TCP_PORT_RANGE ("<first>-<last>",
-  # openucx/ucx @bcf0a63's src/uct/tcp/tcp_iface.c PORT_RANGE entry) fixes the TCP
-  # port UCX's own TCP transport listens on for the actual KV connection,
-  # instead of an unpredictable OS-picked ephemeral port a default-deny
-  # NetworkPolicy can never name in advance. See
-  # ../../vllm/disagg-pd/values.yaml's own transport.ucx.tcpPortRange
-  # comment for the full reasoning (why a real range, why this specific
-  # block).
+  # openucx/ucx @bcf0a63's src/uct/tcp/tcp_iface.c PORT_RANGE entry) fixes
+  # the TCP port UCX's own TCP transport listens on for the actual KV
+  # connection, instead of an unpredictable OS-picked ephemeral port.
+  # RFC #37 (same-node round, confirmed on real hardware against SGLang's
+  # own source): this value does NOT make the chart's own NetworkPolicy
+  # (templates/networkpolicy.yaml) able to name an exact port list for
+  # the prefill<->decode rule, because SGLang's own control-plane channel
+  # (python/sglang/srt/disaggregation/common/conn.py, every backend)
+  # binds a second, OS-assigned ephemeral port with no flag to pin it,
+  # and transport.backend=MOONCAKE opens a third, independent ephemeral
+  # port of its own -- that NetworkPolicy now allows every port from the
+  # peer role instead of a fixed list, for that reason. This value still
+  # matters outside this chart, wherever a port needs to be nameable (a
+  # VPC security group, an external firewall).
   ucx:
     tcpPortRange: "20000-20063"
 

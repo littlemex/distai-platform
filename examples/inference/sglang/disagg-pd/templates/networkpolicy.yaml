@@ -9,16 +9,37 @@
   ingress rule names the router the same way vllm/disagg-pd names its
   proxy.
 
-  transport.backend=NIXL with sglangNixlBackend=UCX needs the same fixed,
-  narrow TCP port range as ../../vllm/disagg-pd's own networkpolicy.yaml
-  -- see that file's comment for why, and values.yaml's own
-  transport.ucx.tcpPortRange for the value.
+  RFC #37, same-node round (confirmed on real hardware): the peer rule
+  below used to list only transport.bootstrapPort and, with
+  sglangNixlBackend=UCX, transport.ucx.tcpPortRange -- a fixed, narrow
+  port list. That list was never enough. SGLang's own control-plane
+  channel between prefill and decode (every PUT/GET in
+  python/sglang/srt/disaggregation/common/conn.py, carrying each role's
+  NIXL agent metadata or Mooncake session id, abort notices and
+  chunk-ready signals) binds a ZMQ PULL socket on an OS-assigned,
+  per-process-restart ephemeral port (get_zmq_socket_on_host ->
+  bind_to_random_port, python/sglang/srt/utils/network.py) -- present on
+  every prefill and every decode process, for every transport.backend
+  this chart renders, with no CLI flag or env var in this SGLang version
+  to pin it to a fixed value. transport.backend=MOONCAKE opens a second,
+  independent ephemeral port of its own (TransferEngine::init with
+  rpc_port=0, confirmed against kvcache-ai/Mooncake's own source). A
+  NetworkPolicy that enumerates a fixed port list can never admit a port
+  that does not exist until the process has already started, so the only
+  correct rule here is "no port restriction, bound to the podSelector
+  already above" -- it is the podSelector, not the port list, that keeps
+  this ingress scoped to this release's own peer role and nobody else.
+  transport.ucx.tcpPortRange still exists and is still rendered into the
+  engine's own environment (values.yaml), unchanged: it still fixes which
+  ports NIXL's UCX backend actually uses, which still matters outside
+  this chart (a VPC security group, an external firewall); it no longer
+  has to be, and is not, read by this template.
 */}}
 ---
 # prefill and decode engines: the HTTP port (engine.port) only from this
-# release's own router, and the bootstrap port (transport.bootstrapPort,
-# SGLang's own PD handshake) only from the PEER role's own Pods.
-{{- $nixlUcx := and (eq $.Values.transport.backend "NIXL") (eq $.Values.transport.sglangNixlBackend "UCX") }}
+# release's own router; every port, with no port list, only from the
+# PEER role's own Pods (see the comment above for why a port list cannot
+# work here).
 {{- range $role := list "prefill" "decode" }}
 {{- $peer := ternary "decode" "prefill" (eq $role "prefill") }}
 ---
@@ -45,13 +66,6 @@ spec:
         - podSelector:
             matchLabels:
               {{- include "disagg.selector" (dict "root" $ "component" $peer) | nindent 14 }}
-      ports:
-        - port: {{ $.Values.transport.bootstrapPort }}
-        {{- if $nixlUcx }}
-        {{- $ucxParts := splitList "-" (toString (dig "ucx" "tcpPortRange" "" $.Values.transport)) }}
-        - port: {{ index $ucxParts 0 | atoi }}
-          endPort: {{ index $ucxParts 1 | atoi }}
-        {{- end }}
     {{- if and $.Values.metrics.enabled $.Values.networkPolicy.metricsScrapeFrom }}
     - from:
         {{- toYaml $.Values.networkPolicy.metricsScrapeFrom | nindent 8 }}
