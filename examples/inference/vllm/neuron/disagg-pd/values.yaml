@@ -221,9 +221,10 @@ engine:
   # aggregated chart's own pod reached `Ready` with this UID and
   # engine.skipEfaAffinity (below) applied, meaning the readiness probe's
   # own HTTP health check passed against the running server -- this
-  # disaggregated chart itself was never installed on real hardware (see
-  # README, Known issues), and no dedicated log line confirming the device
-  # open itself was captured in either chart's case.
+  # disaggregated chart's own pods have been installed but never reached
+  # `Running` on real hardware (see README, Known issues, #111), and no
+  # dedicated log line confirming the device open itself was captured in
+  # either chart's case.
   # fsGroup is defense-in-depth for a PersistentVolumeClaim override of
   # cacheVolume/compileCacheVolume (README, Known issues): some
   # provisioners/access modes hand back a volume owned by a group other
@@ -262,11 +263,11 @@ engine:
   # single error message, "EFA affinity is a CPU performance optimization,
   # not a correctness requirement; set NEURON_SKIP_EFA_AFFINITY=1 to skip
   # it on instances without EFA", the plugin's own named fix). This
-  # disaggregated chart was never itself installed on real hardware in
-  # any attempt (README, Known issues), so whether an EC2NodeClass that
-  # does set pool.networkInterfaces to a real EFA interface on
-  # trn2.3xlarge changes this lookup's own outcome for the role that
-  # requests one remains an open, real-hardware question. true (default)
+  # disaggregated chart's own pods have been installed but never reached
+  # `Running` on real hardware (README, Known issues, #111), so whether an
+  # EC2NodeClass that does set pool.networkInterfaces to a real EFA
+  # interface on trn2.3xlarge changes this lookup's own outcome for the
+  # role that requests one remains an open, real-hardware question. true (default)
   # sets NEURON_SKIP_EFA_AFFINITY=1; false renders no such variable at all
   # (unset, the plugin's own default), not an explicit "0" whose parsing
   # was not checked against the plugin's own source. Set false only once a

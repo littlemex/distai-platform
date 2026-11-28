@@ -18,6 +18,15 @@ WARNING: model.name is empty; the engines exit until it is set.
 
 NOTE: placement.tolerations is empty. A Neuron pool tainted aws.amazon.com/neuron=true:NoSchedule (this platform's capacity-pool shape) admits no engine pod until it is set.
 {{- end }}
+{{- if and (not .Values.proxy.nodeSelector) (not .Values.proxy.tolerations) }}
+
+NOTE: proxy.nodeSelector and proxy.tolerations are both empty (the default). The proxy requests
+no Neuron device on purpose, but it still needs *some* node with no NoSchedule taint it does not
+tolerate -- if every node in this cell is tainted (a Neuron pool, or this platform's own
+CriticalAddonsOnly system node group), the proxy Pod stays Pending indefinitely. Confirmed on real
+hardware (#80, #111): set proxy.nodeSelector/proxy.tolerations to match a node that actually
+exists in this cell before relying on the default.
+{{- end }}
 
 Check where the roles landed:
   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }} -o wide
