@@ -317,7 +317,8 @@ bad = []
 # it from this convergence wait narrows what this one verify script
 # proves (it does not also prove vigil-controller is healthy), not what
 # the four required checks below need - this is not a fix to
-# vigil-controller's own bug, which belongs to its own PR/issue.
+# vigil-controller's own bug, tracked as issue #112: remove this
+# exclusion once that issue closes.
 EXCLUDED_APPS = {'${NAME}-vigil-controller'}
 for a in d.get('items', []):
     name = a['metadata']['name']
