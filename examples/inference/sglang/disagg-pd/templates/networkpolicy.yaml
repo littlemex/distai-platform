@@ -9,11 +9,11 @@
   ingress rule names the router the same way vllm/disagg-pd names its
   proxy.
 
-  RFC #37, same-node round (confirmed on real hardware): the peer rule
-  below used to list only transport.bootstrapPort and, with
-  sglangNixlBackend=UCX, transport.ucx.tcpPortRange -- a fixed, narrow
-  port list. That list was never enough. SGLang's own control-plane
-  channel between prefill and decode (every PUT/GET in
+  RFC #37: the peer rule below used to list only transport.bootstrapPort
+  and, with sglangNixlBackend=UCX, transport.ucx.tcpPortRange -- a fixed,
+  narrow port list. Read against sgl-project/sglang's own source (this
+  chart's own SGLANG_BUILD_COMMIT): SGLang's own control-plane channel
+  between prefill and decode (every PUT/GET in
   python/sglang/srt/disaggregation/common/conn.py, carrying each role's
   NIXL agent metadata or Mooncake session id, abort notices and
   chunk-ready signals) binds a ZMQ PULL socket on an OS-assigned,
@@ -21,14 +21,29 @@
   bind_to_random_port, python/sglang/srt/utils/network.py) -- present on
   every prefill and every decode process, for every transport.backend
   this chart renders, with no CLI flag or env var in this SGLang version
-  to pin it to a fixed value. transport.backend=MOONCAKE opens a second,
-  independent ephemeral port of its own (TransferEngine::init with
-  rpc_port=0, confirmed against kvcache-ai/Mooncake's own source). A
+  to pin it to a fixed value. transport.backend=MOONCAKE appears (from
+  its own call into kvcache-ai/Mooncake with rpc_port=0, the standard
+  "let the OS assign it" idiom, not independently traced inside that
+  library) to open a second, independent ephemeral port of its own. A
   NetworkPolicy that enumerates a fixed port list can never admit a port
-  that does not exist until the process has already started, so the only
-  correct rule here is "no port restriction, bound to the podSelector
-  already above" -- it is the podSelector, not the port list, that keeps
-  this ingress scoped to this release's own peer role and nobody else.
+  that does not exist until the process has already started, confirmed on
+  real hardware with a CPU stand-in reproduction (RFC #37): the old,
+  fixed-list rule blocks a plain TCP listener between the peer-labeled
+  stand-ins on a port the list does not name, and the podSelector-only
+  rule below admits it, while an unlabeled client and a same-named peer
+  from a different release both stay blocked throughout. One earlier real
+  round on this chart (two nodes, NIXL/LIBFABRIC, reported in this
+  chart's own README Status section) served real traffic successfully
+  under the old, narrower rule; whether NetworkPolicy enforcement was
+  actually verified on that round's own cluster was not recorded there
+  either, so that success does not establish the old rule was sufficient
+  -- this is left open, not reconciled, the same way the README's own
+  `kubectl get networkpolicy --all-namespaces` discrepancy is. Either way,
+  the podSelector, not the port list, is what should scope this ingress
+  to this release's own peer role; a port list can only narrow what that
+  role may reach, never who counts as that role, so removing it widens
+  which ports the peer role may use (including engine.port, previously
+  router-only) without widening who the peer role is.
   transport.ucx.tcpPortRange still exists and is still rendered into the
   engine's own environment (values.yaml), unchanged: it still fixes which
   ports NIXL's UCX backend actually uses, which still matters outside

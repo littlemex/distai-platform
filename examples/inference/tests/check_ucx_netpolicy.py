@@ -2,17 +2,23 @@
 four prefill/decode disaggregation charts (vllm/disagg-pd, vllm/disagg-pd-llmd,
 sglang/disagg-pd, sglang/disagg-pd-llmd).
 
-RFC #37 exception for sglang/disagg-pd: confirmed against sgl-project/sglang's own source
-(the chart's pinned SGLANG_BUILD_COMMIT) and on real hardware, SGLang's own control-plane
-channel between prefill and decode (every backend this chart renders, not only UCX) binds an
-OS-assigned ephemeral TCP port with no flag to pin it in this SGLang version, and
-transport.backend=MOONCAKE opens a second ephemeral port of its own -- a fixed port list
-can never name a port that does not exist until the engine process has started. That chart's
-own peer-to-peer ingress rule therefore admits every port from the peer role (podSelector
-only, no port list at all), checked by `check_chart(..., peer_ports_unrestricted=True)`
-below instead of the port/endPort match this docstring otherwise describes. The other three
-charts still use the fixed-port-list contract this docstring describes; whether they have
-the same underlying gap was not examined by this fix.
+RFC #37 exception for sglang/disagg-pd: read against sgl-project/sglang's own source (the
+chart's pinned SGLANG_BUILD_COMMIT), SGLang's own control-plane channel between prefill and
+decode (every backend this chart renders, not only UCX) binds an OS-assigned ephemeral TCP
+port with no flag to pin it in this SGLang version, and transport.backend=MOONCAKE appears
+to open a second ephemeral port of its own -- a fixed port list can never name a port that
+does not exist until the engine process has started. A CPU stand-in reproduction confirmed
+on real hardware that the old, fixed-list rule blocks a plain TCP listener between the
+peer-labeled stand-ins on a port the list did not name, and that the podSelector-only rule
+below admits it without widening who counts as the peer role; it did not confirm this with
+the real SGLang engine itself, and does not reconcile one earlier real round on this chart
+that served real traffic under the old, narrower rule (see this chart's own
+templates/networkpolicy.yaml comment). That chart's own peer-to-peer ingress rule therefore
+admits every port from the peer role (podSelector only, no port list at all), checked by
+`check_chart(..., peer_ports_unrestricted=True)` below instead of the port/endPort match this
+docstring otherwise describes. The other three charts still use the fixed-port-list contract
+this docstring describes; whether they have the same underlying gap was not examined by this
+fix.
 
 NIXL's UCX backend (confirmed against ai-dynamo/nixl @52df750's src/plugins/ucx/config.cpp
 and openucx/ucx @bcf0a63's src/uct/tcp/tcp_iface.c) opens a TCP listener for the actual KV
@@ -205,9 +211,11 @@ def peer_rule_has_no_ports(docs, role):
     (ingress_rules_from_peer) that carries no "ports" key at all (matches every port) --
     sglang/disagg-pd's own fix (RFC #37): SGLang's control-plane channel between prefill and
     decode binds an OS-assigned ephemeral port no fixed port list could ever name, so the
-    podSelector alone -- not a port list -- is what scopes this rule. False if the role's own
-    NetworkPolicy was not rendered, if no rule is scoped to exactly the peer role, or if that
-    rule still carries a "ports" key (the pre-fix shape)."""
+    podSelector alone -- not a port list -- is what scopes this rule. False if a NetworkPolicy
+    for this role was rendered but no rule scoped to exactly the peer role has an unrestricted
+    "ports" key (every matching rule still carries a "ports" key, the pre-fix shape, or no rule
+    is scoped to exactly the peer role at all). None if this role's own NetworkPolicy was not
+    rendered at all (the caller must check for None separately from False)."""
     nps = netpol_for_role(docs, role)
     if not nps:
         return None
@@ -316,6 +324,10 @@ def check_chart(helm, name, chart, ucx_sets, default_sets, extra_default_cases=(
                   "every port (no port list -- see RFC #37: SGLang's own control-plane channel "
                   "binds an OS-assigned ephemeral port no fixed list could ever name)",
                   unrestricted is True, repr(unrestricted))
+            check(f"{name}: UCX selected: this chart's own default port range {first}-{last} "
+                  "does not appear anywhere in the document (the peer rule carries no port "
+                  "list at all, so it has nothing left to name)",
+                  not has_range_rendered_anywhere(udocs, first, last))
         else:
             rendered = range_rendered_from_peer(udocs, role, first, last)
             check(f"{name}: {role}'s own NetworkPolicy renders an ingress port range {first}-{last} "
@@ -346,7 +358,19 @@ def check_chart(helm, name, chart, ucx_sets, default_sets, extra_default_cases=(
                 rendered = range_rendered_from_peer(cdocs, role, custom_first, custom_last)
                 check(f"{name}: a non-default tcpPortRange is honored on {role}'s own NetworkPolicy "
                       "(not a hardcoded default)", rendered is True, repr(rendered))
-        if not peer_ports_unrestricted:
+        if peer_ports_unrestricted:
+            # Whole-document defense in depth: peer_rule_has_no_ports already proved each role's
+            # own peer-scoped rule carries no ports key at all, so neither the default nor the
+            # custom range can appear there; this additionally scans every NetworkPolicy object
+            # in the render (the router's own rule included) for either value, in case a future
+            # edit reintroduces a port list somewhere this check does not otherwise look.
+            check(f"{name}: a non-default tcpPortRange does not render the chart's own default "
+                  f"{first}-{last} anywhere in the document either",
+                  not has_range_rendered_anywhere(cdocs, first, last))
+            check(f"{name}: a non-default tcpPortRange does not render {custom_first}-{custom_last} "
+                  "anywhere in the document either (no port list carries it, by design)",
+                  not has_range_rendered_anywhere(cdocs, custom_first, custom_last))
+        else:
             check(f"{name}: a non-default tcpPortRange does NOT also render the chart's own default "
                   f"{first}-{last} anywhere", not has_range_rendered_anywhere(cdocs, first, last))
 

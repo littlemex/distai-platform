@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 # Chart dependencies fetched by `helm dependency build` (pinned in Chart.lock).
 vllm/*/charts/
+sglang/*/charts/

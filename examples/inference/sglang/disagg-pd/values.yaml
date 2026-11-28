@@ -101,17 +101,21 @@ transport:
   # openucx/ucx @bcf0a63's src/uct/tcp/tcp_iface.c PORT_RANGE entry) fixes
   # the TCP port UCX's own TCP transport listens on for the actual KV
   # connection, instead of an unpredictable OS-picked ephemeral port.
-  # RFC #37 (same-node round, confirmed on real hardware against SGLang's
-  # own source): this value does NOT make the chart's own NetworkPolicy
+  # RFC #37: this value does NOT make the chart's own NetworkPolicy
   # (templates/networkpolicy.yaml) able to name an exact port list for
-  # the prefill<->decode rule, because SGLang's own control-plane channel
-  # (python/sglang/srt/disaggregation/common/conn.py, every backend)
-  # binds a second, OS-assigned ephemeral port with no flag to pin it,
-  # and transport.backend=MOONCAKE opens a third, independent ephemeral
-  # port of its own -- that NetworkPolicy now allows every port from the
-  # peer role instead of a fixed list, for that reason. This value still
-  # matters outside this chart, wherever a port needs to be nameable (a
-  # VPC security group, an external firewall).
+  # the prefill<->decode rule, because, read against SGLang's own source
+  # (python/sglang/srt/disaggregation/common/conn.py, every backend this
+  # chart renders), that control-plane channel binds a second,
+  # OS-assigned ephemeral port with no flag to pin it, and
+  # transport.backend=MOONCAKE appears to open a third, independent
+  # ephemeral port of its own (not independently traced inside
+  # kvcache-ai/Mooncake's own compiled layer). That NetworkPolicy now
+  # allows every port from the peer role instead of a fixed list, for
+  # that reason, confirmed on real hardware with a CPU stand-in
+  # reproduction (see that template's own comment for what was and was
+  # not reconciled). This value still matters outside this chart,
+  # wherever a port needs to be nameable (a VPC security group, an
+  # external firewall).
   ucx:
     tcpPortRange: "20000-20063"
 
