@@ -326,18 +326,54 @@ def main(root: str) -> int:
                 continue
             matrix_found = True
             children = matrix.get("generators", [])
-            check(f"{rel}'s matrix generator has exactly 2 children (Cluster, Git file) (decision 2)", len(children) == 2, f"got {len(children)}")
-            cluster_children = [c for c in children if "clusters" in c]
+            check(f"{rel}'s matrix generator has exactly 2 children (Cluster [or #110/PR #116's merge wrapping one], Git file) (decision 2)", len(children) == 2, f"got {len(children)}")
+            # #110/PR #116: platform.ApplicationSet.yaml and
+            # addons-optional.ApplicationSet.yaml both wrap their own
+            # Cluster generator in a merge generator (base: clusters,
+            # enriched by an optional gitops/cells/*/cell.yaml lookup
+            # for keepLegacyReleaseNames) -- still one Cluster generator
+            # overall, just nested one level under merge. A plain
+            # clusters: child (cells.ApplicationSet.yaml, which never
+            # needed this) is still accepted directly.
+            direct_cluster_children = [c for c in children if "clusters" in c]
+            merge_cluster_children = [
+                c for c in children
+                if "merge" in c and c["merge"].get("generators") and "clusters" in c["merge"]["generators"][0]
+            ]
+            cluster_children = direct_cluster_children + merge_cluster_children
             git_children = [c for c in children if "git" in c]
-            check(f"{rel}'s matrix generator has one Cluster generator child", len(cluster_children) == 1)
+            check(f"{rel}'s matrix generator has one Cluster generator child (directly, or as a merge generator's own base)", len(cluster_children) == 1)
             check(f"{rel}'s matrix generator has one Git generator child", len(git_children) == 1)
             if cluster_children:
-                sel = cluster_children[0]["clusters"].get("selector", {}).get("matchLabels", {})
+                cluster_gen = (
+                    cluster_children[0]["clusters"] if cluster_children[0] in direct_cluster_children
+                    else cluster_children[0]["merge"]["generators"][0]["clusters"]
+                )
+                sel = cluster_gen.get("selector", {}).get("matchLabels", {})
                 check(
                     f"{rel}'s Cluster generator selects argocd.argoproj.io/secret-type: cluster (decision 2 -- excludes the built-in in-cluster entry)",
                     sel.get("argocd.argoproj.io/secret-type") == "cluster",
                     f"got matchLabels={sel!r}",
                 )
+            if merge_cluster_children:
+                merge_gen = merge_cluster_children[0]["merge"]
+                check(
+                    f"{rel}'s merge generator keys on name (#110/PR #116: gitops/cells/*/cell.yaml's own keepLegacyReleaseNames join)",
+                    merge_gen.get("mergeKeys") == ["name"],
+                    f"got mergeKeys={merge_gen.get('mergeKeys')!r}",
+                )
+                enrich_children = merge_gen.get("generators", [])[1:]
+                enrich_git = [c for c in enrich_children if "git" in c]
+                check(f"{rel}'s merge generator has exactly one enriching Git generator child", len(enrich_git) == 1)
+                if enrich_git:
+                    enrich = enrich_git[0]["git"]
+                    check(
+                        f"{rel}'s merge generator's own Git enrichment reads gitops/cells/*/cell.yaml with pathParamPrefix set "
+                        "(#110/PR #116: avoids colliding with the sibling addon-files Git generator's own path.* params)",
+                        any("cells/*/cell.yaml" in f.get("path", "") for f in enrich.get("files", []))
+                        and bool(enrich.get("pathParamPrefix")),
+                        f"got files={enrich.get('files')!r} pathParamPrefix={enrich.get('pathParamPrefix')!r}",
+                    )
             if git_children:
                 git = git_children[0]["git"]
                 check(f"{rel}'s Git generator has a 'files' list (a file generator, never a directory generator) (decisions 2/3)", bool(git.get("files")))

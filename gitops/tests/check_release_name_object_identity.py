@@ -13,16 +13,18 @@ immutable, so Argo CD would try, and fail, to patch it on an already-
 existing object instead of a clean delete-and-recreate.
 
 This script renders every core add-on and every real per-cell marker file
-twice, at the longest allowed cell name -- once with `keepLegacyReleaseNames`
-false (every new cell's own default, and every cell registered in this
-repository today), once with it true (what an already-running cell opts
-into by setting that field in its own `gitops/cells/<cell>/cell.yaml`) --
-via the real `expected_release_name()` (imported from
-check_object_name_length.py, never re-derived), and compares, template by
-template (joined by each document's own `# Source: <chart>/templates/...`
-comment, which names the chart's own template file and is therefore stable
-across a release-name change, unlike `metadata.name` itself, the one field
-this comparison exists to watch):
+twice, at the longest allowed cell name -- once at the legacy release name
+every cell used unconditionally before #110 and this whole PR existed
+(`<cell>-<addon>`, what a real, already-running cell actually has deployed
+today, regardless of this PR), once at the release name
+`expected_release_name()` (imported from check_object_name_length.py,
+never re-derived) gives the SAME add-on with `keepLegacyReleaseNames` true
+-- the shape an already-running cell gets if it opts in via its own
+`gitops/cells/<cell>/cell.yaml` -- and compares, template by template
+(joined by each document's own `# Source: <chart>/templates/...` comment,
+which names the chart's own template file and is therefore stable across
+a release-name change, unlike `metadata.name` itself, the one field this
+comparison exists to watch):
 
   - `metadata.name`
   - for Deployment/DaemonSet/StatefulSet: `spec.selector.matchLabels`
@@ -32,14 +34,22 @@ FAILs only on the one dangerous pattern: a selector that changed while the
 object's own name did not (an immutable-field patch Argo CD cannot make).
 A name that changed together with its own selector is a clean rename
 (expected for the eight add-ons without `selectorDerivesFromReleaseName`,
-on a cell that flips `keepLegacyReleaseNames`) and is reported as INFO, not
-a failure. For an add-on whose own `selectorDerivesFromReleaseName` is
-false or absent (every add-on except `accel-neuron-device-plugin`,
-`accel-neuron-dra` and `jobset`), both renders use the identical release
-name regardless of `keepLegacyReleaseNames`, so this script renders the
-SAME release name twice via the real `expected_release_name()` call (not
-skipped, not assumed) and reports the resulting zero-diff explicitly,
-rather than exempting them from rendering.
+which get the short name under `keepLegacyReleaseNames: true` exactly as
+they would without it -- that flag only protects the three add-ons that
+actually have the fact set) and is reported as INFO, not a failure. For
+`accel-neuron-device-plugin`, `accel-neuron-dra` and `jobset`, opting in
+(`keepLegacyReleaseNames: true`) must reproduce the identical legacy
+release name -- this script renders that SAME release name twice via the
+real `expected_release_name()` call (not skipped, not assumed) and
+reports the resulting zero-diff explicitly, proving the opt-in path is a
+true no-op for an already-running cell's own objects.
+
+This script never compares against `keepLegacyReleaseNames: false` (a
+brand new cell's own default): a fresh install establishes its own name
+and selector together, with no pre-existing object to migrate from, so
+there is nothing for THIS script's own hazard to apply to there -- that
+shape only needs the length check `check_object_name_length.py` already
+runs for it.
 
 Usage: check_release_name_object_identity.py <repo_root>
        check_release_name_object_identity.py --selftest
@@ -108,20 +118,34 @@ def selector_of(doc: dict) -> dict | None:
     return None
 
 
+def legacy_release_name(addon: str) -> str:
+    """Every cell's own actual, real-world release name before #110 and
+    this whole PR existed, unconditionally -- what an already-running
+    cell has deployed today, regardless of whether it ever opts into
+    keepLegacyReleaseNames. Not the same function as
+    check_object_name_length.py's own expected_release_name(): that one
+    computes what THIS PR's own template gives an add-on now; this one
+    is the fixed historical fact every add-on's release name actually
+    was before any of this existed."""
+    return f"{cnl.WORST_CASE_CELL_NAME}-{addon}"
+
+
 def render_both(path: str, repo_root: str, workdir: str) -> tuple[str, str, str | None, str, str | None] | None:
-    """Returns (addon, release_false, rendered_false_or_None, release_true,
-    rendered_true_or_None), or None if this file has nothing to render
-    (same "no chart:/dir:" exemption check_object_name_length.py's own
-    check_addon_file() applies). release_false/release_true are this
-    add-on's own release name with the cell's own keepLegacyReleaseNames
-    false/true respectively, via the real expected_release_name()."""
+    """Returns (addon, release_legacy, rendered_legacy_or_None,
+    release_keep_true, rendered_keep_true_or_None), or None if this file
+    has nothing to render (same "no chart:/dir:" exemption
+    check_object_name_length.py's own check_addon_file() applies).
+    release_legacy is what this add-on's release name actually was
+    before #110; release_keep_true is what expected_release_name() gives
+    it now with the cell's own keepLegacyReleaseNames true -- the shape
+    an already-running cell gets if it opts in."""
     addon_doc = cnl.load_addon(path)
     addon = addon_doc.get("addon")
     if not addon:
         check(f"{path}: has an `addon:` field", False, "missing")
         return None
-    release_false = cnl.expected_release_name(addon, addon_doc, False)
-    release_true = cnl.expected_release_name(addon, addon_doc, True)
+    release_legacy = legacy_release_name(addon)
+    release_keep_true = cnl.expected_release_name(addon, addon_doc, True)
     values = cnl.placeholder_values_worst_case(addon_doc)
 
     def build_cmd(release: str):
@@ -131,93 +155,94 @@ def render_both(path: str, repo_root: str, workdir: str) -> tuple[str, str, str 
             return cnl.dir_chart_cmd(release, addon_doc, repo_root, path)
         return None
 
-    cmd_false = build_cmd(release_false)
-    if cmd_false is None:
+    cmd_legacy = build_cmd(release_legacy)
+    if cmd_legacy is None:
         print(f"NOTE {path}: no chart:/dir: (nothing to render) -- not compared")
         return None
-    out_false, err_false = cnl.render(cmd_false, workdir, values, f"{addon}-false-selector")
-    cmd_true = build_cmd(release_true)
-    out_true, err_true = cnl.render(cmd_true, workdir, values, f"{addon}-true-selector")
-    if out_false is None or out_true is None:
+    out_legacy, err_legacy = cnl.render(cmd_legacy, workdir, values, f"{addon}-legacy-selector")
+    cmd_keep_true = build_cmd(release_keep_true)
+    out_keep_true, err_keep_true = cnl.render(cmd_keep_true, workdir, values, f"{addon}-keeptrue-selector")
+    if out_legacy is None or out_keep_true is None:
         known_issue = addon_doc.get("knownLatentBugIssue")
-        known_hit_false = bool(err_false) and cnl.KNOWN_LATENT_BUG_ERROR_SUBSTRING in err_false
-        known_hit_true = bool(err_true) and cnl.KNOWN_LATENT_BUG_ERROR_SUBSTRING in err_true
-        if known_issue and known_hit_true and out_false is not None:
-            # accel-neuron-device-plugin's own case: a short, 26-character
-            # name (keep_legacy=False, every new cell's own default)
-            # renders fine; the SAME add-on at keep_legacy=True (an
-            # already-running cell that opted in) still hits Helm's own
-            # 53-character cap past a 26-character cell name -- the
-            # exact, already-tracked, deliberately deferred limitation
-            # check_object_name_length.py's own exemption also matches
-            # on, now scoped to only the cells that opt in. No selector
-            # comparison is possible without a successful render on both
-            # sides; reported as NOTE, not a failure.
-            print(f"NOTE {path}: keepLegacyReleaseNames=true release name {release_true!r} exceeds Helm's "
-                  f"53-character cap at the worst-case cell name (deferred, see #{known_issue}); "
-                  f"keepLegacyReleaseNames=false release name {release_false!r} renders fine -- selector "
-                  f"comparison needs a successful render on both sides and is skipped here, not a failure")
+        known_hit_legacy = bool(err_legacy) and cnl.KNOWN_LATENT_BUG_ERROR_SUBSTRING in err_legacy
+        known_hit_true = bool(err_keep_true) and cnl.KNOWN_LATENT_BUG_ERROR_SUBSTRING in err_keep_true
+        if known_issue and (known_hit_legacy or known_hit_true):
+            # accel-neuron-device-plugin's own case: release_legacy and
+            # release_keep_true are the SAME cell-prefixed string (this
+            # add-on's own selectorDerivesFromReleaseName makes
+            # expected_release_name() return the legacy name at
+            # keep_legacy=True too), so both renders fail identically at
+            # the worst-case cell length -- the exact, already-tracked,
+            # deliberately deferred limitation check_object_name_length.py's
+            # own exemption also matches on. Nothing to compare either
+            # way; reported as NOTE, not a failure.
+            print(f"NOTE {path}: release name {release_legacy!r} (legacy) / {release_keep_true!r} "
+                  f"(keepLegacyReleaseNames=true) exceeds Helm's 53-character cap at the worst-case cell "
+                  f"name (deferred, see #{known_issue}) -- selector comparison needs a successful render "
+                  f"on both sides and is skipped here, not a failure")
             return None
-        check(f"{path}: both keepLegacyReleaseNames shapes render", False,
-              f"false_err={err_false!r} true_err={err_true!r}")
+        check(f"{path}: both the legacy release name and the keepLegacyReleaseNames=true release name render",
+              False, f"legacy_err={err_legacy!r} keep_true_err={err_keep_true!r}")
         return None
-    return addon, release_false, out_false, release_true, out_true
+    return addon, release_legacy, out_legacy, release_keep_true, out_keep_true
 
 
-def compare_and_report(path: str, addon: str, release_false: str, out_false: str, release_true: str,
-                        out_true: str) -> None:
-    false_docs = parse_sourced_docs(out_false)
-    true_docs = parse_sourced_docs(out_true)
-    keys = sorted(set(false_docs) | set(true_docs))
+def compare_and_report(path: str, addon: str, release_legacy: str, out_legacy: str, release_keep_true: str,
+                        out_keep_true: str) -> None:
+    legacy_docs = parse_sourced_docs(out_legacy)
+    keep_true_docs = parse_sourced_docs(out_keep_true)
+    keys = sorted(set(legacy_docs) | set(keep_true_docs))
     renamed_count = 0
     unchanged_count = 0
     violations: list[str] = []
     for key in keys:
-        false_list = false_docs.get(key, [])
-        true_list = true_docs.get(key, [])
-        for false_doc, true_doc in zip(false_list, true_list):
-            false_name = (false_doc.get("metadata") or {}).get("name", "")
-            true_name = (true_doc.get("metadata") or {}).get("name", "")
-            false_sel = selector_of(false_doc)
-            true_sel = selector_of(true_doc)
-            if false_sel is None and true_sel is None:
+        legacy_list = legacy_docs.get(key, [])
+        keep_true_list = keep_true_docs.get(key, [])
+        for legacy_doc, keep_true_doc in zip(legacy_list, keep_true_list):
+            legacy_name = (legacy_doc.get("metadata") or {}).get("name", "")
+            keep_true_name = (keep_true_doc.get("metadata") or {}).get("name", "")
+            legacy_sel = selector_of(legacy_doc)
+            keep_true_sel = selector_of(keep_true_doc)
+            if legacy_sel is None and keep_true_sel is None:
                 continue
-            name_changed = false_name != true_name
-            selector_changed = false_sel != true_sel
+            name_changed = legacy_name != keep_true_name
+            selector_changed = legacy_sel != keep_true_sel
             if name_changed:
                 renamed_count += 1
             else:
                 unchanged_count += 1
             if (not name_changed) and selector_changed:
                 violations.append(
-                    f"{key}: {false_doc.get('kind')} {false_name!r} kept its own name across "
-                    f"keepLegacyReleaseNames {release_false!r} -> {release_true!r} but its own selector "
-                    f"changed ({false_sel!r} -> {true_sel!r}) -- Argo CD cannot patch an immutable "
-                    f"selector; this is the exact hazard selectorDerivesFromReleaseName exists to avoid"
+                    f"{key}: {legacy_doc.get('kind')} {legacy_name!r} kept its own name across legacy "
+                    f"release name {release_legacy!r} -> keepLegacyReleaseNames=true release name "
+                    f"{release_keep_true!r} but its own selector changed ({legacy_sel!r} -> {keep_true_sel!r}) "
+                    f"-- Argo CD cannot patch an immutable selector; this is the exact hazard "
+                    f"selectorDerivesFromReleaseName/keepLegacyReleaseNames exists to avoid"
                 )
     check(
-        f"{path} (addon {addon!r}, keepLegacyReleaseNames false={release_false!r} true={release_true!r}): "
+        f"{path} (addon {addon!r}, legacy={release_legacy!r} keepLegacyReleaseNames=true={release_keep_true!r}): "
         f"no selector-bearing object kept its own name while its own selector changed",
         not violations,
         "; ".join(violations),
     )
-    if release_false == release_true:
-        print(f"INFO {path}: {addon!r} does not set selectorDerivesFromReleaseName (or keepLegacyReleaseNames "
-              f"never changes its own release name) -- rendered the identical release name {release_false!r} "
-              f"twice via expected_release_name(), {renamed_count + unchanged_count} selector-bearing "
-              f"object(s) compared, 0 could differ by construction (same input)")
+    if release_legacy == release_keep_true:
+        print(f"INFO {path}: {addon!r} -- keepLegacyReleaseNames=true reproduces the identical legacy "
+              f"release name {release_legacy!r} (selectorDerivesFromReleaseName is true for this add-on), "
+              f"{renamed_count + unchanged_count} selector-bearing object(s) compared, 0 could differ by "
+              f"construction (same input) -- opting in is a true no-op for an already-running cell")
     else:
-        print(f"INFO {path}: {addon!r} -- {renamed_count} selector-bearing object(s) renamed between "
-              f"keepLegacyReleaseNames false and true (name and selector both changed, expected), "
-              f"{unchanged_count} kept their own name (name and selector both held, or no selector present)")
+        print(f"INFO {path}: {addon!r} does not set selectorDerivesFromReleaseName -- {renamed_count} "
+              f"selector-bearing object(s) renamed from the legacy release name even with "
+              f"keepLegacyReleaseNames=true (name and selector both changed, expected: that flag only "
+              f"protects the add-ons with the fact set), {unchanged_count} kept their own name")
 
 
 def check_file(path: str, repo_root: str, workdir: str) -> None:
     result = render_both(path, repo_root, workdir)
     if result is None:
         return
-    addon, release_false, out_false, release_true, out_true = result
-    compare_and_report(path, addon, release_false, out_false, release_true, out_true)
+    addon, release_legacy, out_legacy, release_keep_true, out_keep_true = result
+    compare_and_report(path, addon, release_legacy, out_legacy, release_keep_true, out_keep_true)
 
 
 def main(repo_root: str) -> int:
