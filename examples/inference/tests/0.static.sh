@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Static checks for examples/inference/ (vLLM prefill/decode disaggregation
 # reference with its proxy and with the llm-d router, its aggregated
-# baseline, and the shared scorer, load driver and dashboard): no AWS
+# baseline, their Neuron counterparts under vllm/neuron/, and the shared
+# scorer, load driver and dashboard): no AWS
 # credentials needed, no cluster needed. Needs network access to fetch the
 # pinned llm-d router chart dependency and the pinned upstream schemas.
 #
@@ -16,7 +17,9 @@
 #   5. kubeconform of the rendered charts and of load-job.yaml against
 #      pinned upstream schemas, including the Gateway API and Gateway API
 #      Inference Extension CRD schemas for vllm/disagg-pd-llmd;
-#   6. the placement/transport values contract (test_placement_transport.sh);
+#   6. the placement/transport values contract (test_placement_transport.sh),
+#      and its Neuron counterpart for vllm/neuron/{disagg-pd,agg-baseline}
+#      (test_neuron_placement_transport.sh);
 #   7. the UCX dynamic-port NetworkPolicy contract, on all four disaggregation
 #      charts (check_ucx_netpolicy.py);
 #   8. the Grafana dashboard (check_dashboard.py);
@@ -60,6 +63,8 @@ AGG="${INFERENCE_ROOT}/vllm/agg-baseline"
 SGLANG_DISAGG="${INFERENCE_ROOT}/sglang/disagg-pd"
 SGLANG_AGG="${INFERENCE_ROOT}/sglang/agg-baseline"
 SGLANG_LLMD="${INFERENCE_ROOT}/sglang/disagg-pd-llmd"
+NEURON_DISAGG="${INFERENCE_ROOT}/vllm/neuron/disagg-pd"
+NEURON_AGG="${INFERENCE_ROOT}/vllm/neuron/agg-baseline"
 SCORER="${INFERENCE_ROOT}/_shared/scorer"
 LOAD="${INFERENCE_ROOT}/_shared/load-replay"
 DASHBOARD="${INFERENCE_ROOT}/_shared/dashboards/vllm-pd.json"
@@ -116,6 +121,12 @@ required_files=(
   "vllm/agg-baseline/Chart.yaml"
   "vllm/agg-baseline/values.yaml"
   "vllm/agg-baseline/README.md"
+  "vllm/neuron/disagg-pd/Chart.yaml"
+  "vllm/neuron/disagg-pd/values.yaml"
+  "vllm/neuron/disagg-pd/README.md"
+  "vllm/neuron/agg-baseline/Chart.yaml"
+  "vllm/neuron/agg-baseline/values.yaml"
+  "vllm/neuron/agg-baseline/README.md"
   "sglang/disagg-pd/Chart.yaml"
   "sglang/disagg-pd/values.yaml"
   "sglang/disagg-pd/README.md"
@@ -212,9 +223,16 @@ run_check "score.py unit tests (unittest, stdlib only)" \
 
 # ------------------------------------------- 4. helm lint, helm template
 
-for chart in "${DISAGG}" "${AGG}" "${LLMD}" "${SGLANG_DISAGG}" "${SGLANG_AGG}" "${SGLANG_LLMD}"; do
+for chart in "${DISAGG}" "${AGG}" "${LLMD}" "${SGLANG_DISAGG}" "${SGLANG_AGG}" "${SGLANG_LLMD}" \
+  "${NEURON_DISAGG}" "${NEURON_AGG}"; do
   rel="${chart#"${INFERENCE_ROOT}"/}"
-  [[ -f "${chart}/Chart.yaml" ]] || continue
+  # Every chart in this list is required (section 1); a missing one is a
+  # FAIL here too, naming the path, so the lint/template step it skips is
+  # visible rather than silently absent from the output.
+  if [[ ! -f "${chart}/Chart.yaml" ]]; then
+    fail "helm lint/template ${rel}: ${rel}/Chart.yaml not found under examples/inference/"
+    continue
+  fi
   # A chart with a Chart.lock depends on another chart (disagg-pd-llmd on
   # llm-d's router chart): fetch exactly the locked version first.
   if [[ -f "${chart}/Chart.lock" ]]; then
@@ -380,6 +398,12 @@ if [[ -f "${DISAGG}/Chart.yaml" && -f "${AGG}/Chart.yaml" && -f "${LLMD}/Chart.y
 else
   fail "placement/transport values contract: a chart is missing"
 fi
+
+# The checker itself reports a missing Neuron chart as a FAIL naming its
+# path, so it runs whether or not the charts exist.
+run_check "Neuron placement/transport values contract (vllm/neuron)" \
+  env HELM="${HELM}" UV="${UV}" PYTHON_YAML_VERSION="${PYTHON_YAML_VERSION}" \
+  bash "${SCRIPT_DIR}/test_neuron_placement_transport.sh"
 
 # ---------------------------------------- 7. UCX NetworkPolicy contract
 

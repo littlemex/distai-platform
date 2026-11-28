@@ -1,0 +1,156 @@
+# One Deployment of vLLM engines on Neuron, each running prefill and decode
+# itself. vLLM's own scheduler defaults are kept on purpose: they are the
+# aggregated baseline, so no scheduler flag is set here. Same value names as
+# the NVIDIA chart ../../agg-baseline wherever the concept is the same.
+
+image:
+  # Same image as the Neuron disagg-pd chart, so a comparison changes the
+  # layout only. See ../disagg-pd/values.yaml for what the image carries.
+  repository: public.ecr.aws/neuron/pytorch-inference-vllm-neuronx
+  tag: 0.29.0.1.2.0-neuronx-py314-sdk2.33.1-ubuntu26.04
+  # Confirmed against the registry's own v2 manifest API (Docker-Content-Digest
+  # header on a GET of this exact tag, 2026-11-26) -- a metadata-only query,
+  # the same thing `docker manifest inspect`/`crane digest` do, not a layer
+  # pull. Single-platform manifest (this image is not a multi-arch index).
+  digest: "sha256:7e44e4f610c37bd0db785154d9ce44d78deafcadd0cd3a04e3dd6ca8b6eb8a88"
+  pullPolicy: IfNotPresent
+
+model:
+  # Hugging Face model repository id. No default: the engine refuses to start
+  # (with a message saying so) until it is set.
+  name: ""
+  # Commit or tag of the model repository; pin it for any measurement.
+  revision: ""
+  servedModelName: ""
+  hfTokenSecret:
+    name: ""
+    key: token
+
+accelerator:
+  # One unit is one whole Neuron device, not one NeuronCore; see
+  # ../disagg-pd/values.yaml for why this platform requests devices.
+  resourceName: aws.amazon.com/neuron
+  # NeuronCores per device (4 on Trainium2 at the default logical NeuronCore
+  # setting). Each engine requests ceil(neuronCoresPerEngine /
+  # coresPerDevice) devices.
+  coresPerDevice: 4
+
+engine:
+  replicas: 1
+  # Tensor parallel degree in NeuronCores. Devices this release requests =
+  # replicas x ceil(neuronCoresPerEngine / accelerator.coresPerDevice).
+  # NEURON_VISIBLE_DEVICES is never set (../disagg-pd/values.yaml).
+  neuronCoresPerEngine: 1
+  port: 8000
+  # Nodes the engines may run on. Empty: any node with the accelerator. To
+  # compare with disagg-pd on the same hardware, select the same nodes, for
+  # example {"karpenter.sh/nodepool": "trn-prefill"}.
+  nodeSelector: {}
+  # This platform's Neuron capacity pools are tainted
+  # aws.amazon.com/neuron=true:NoSchedule; set the matching toleration
+  # (README, Prerequisites).
+  tolerations: []
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+  extraArgs: []
+  extraEnv: []
+  shmSizeLimit: 16Gi
+  # Model download cache (HF_HOME=/cache/huggingface).
+  cacheVolume:
+    emptyDir: {}
+  # Compile cache at /compile-cache (VLLM_CACHE_ROOT), Neuron-only. emptyDir
+  # re-traces and recompiles on every pod restart. A PersistentVolumeClaim
+  # override needs replicas: 1 (every replica of this one Deployment shares
+  # the same Pod template and so the same claim name -- a multi-attach
+  # failure for any access mode that is not many-writer, the same reason
+  # ../disagg-pd/values.yaml splits this field per role instead of sharing
+  # it across prefill and decode) or a multi-attach access mode such as an
+  # EFS-backed ReadWriteMany claim. A PVC override must also set emptyDir
+  # to null explicitly (Helm deep-merges a values-file map into the
+  # chart's default map, so leaving emptyDir: {} in place renders a volume
+  # carrying both sources, which the API server rejects).
+  compileCacheVolume:
+    emptyDir: {}
+  startupTimeoutSeconds: 1800
+  # Non-root, the same UID/GID as the NVIDIA chart, although this image has
+  # no account for it; the template sets HOME and USER for that reason (see
+  # ../disagg-pd/values.yaml, engine.podSecurityContext). fsGroup is
+  # defense-in-depth for a PersistentVolumeClaim override of cacheVolume/
+  # compileCacheVolume: some provisioners/access
+  # modes hand back a volume owned by a group other than 0, which UID 2000
+  # (group 0 via runAsGroup) could not then write to without it. It is not
+  # what fixes the default `emptyDir` configuration: a real kubelet
+  # (confirmed with a local kind cluster, no Trainium needed -- `kubectl
+  # exec ... stat -c "%U:%G %a" /cache` on a pod with this exact
+  # securityContext and no fsGroup) creates a plain `emptyDir` (no PVC
+  # override) as `root:root` mode `0777`, already writable by any UID regardless of
+  # group -- an earlier round's own container-only reproduction (a bind
+  # mount on a plain Docker host, not a real kubelet) wrongly suggested
+  # `0755`, because a bind-mounted host directory inherits the host's own
+  # umask instead of the kubelet's own emptyDir creation mode. This chart's
+  # real crash loop on real hardware (#80) was never a cache-permission
+  # problem; see engine.skipEfaAffinity below for the actual, confirmed
+  # cause.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 2000
+    runAsGroup: 0
+    fsGroup: 0
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+  # Confirmed on real hardware (#80, trn2.3xlarge, ap-southeast-4): the
+  # plugin's own vllm_neuron.utils.hardware_config.get_efa_interface_from_bdf
+  # looks up an EFA network interface co-located with the Neuron device's
+  # own PCI address for a CPU-affinity optimization at engine startup --
+  # observed, in this one traceback, to run even though this chart's pod
+  # never requests an EFA device at all -- and raises RuntimeError,
+  # not a soft warning, when none exists ("No EFA device found at
+  # /sys/bus/pci/devices/.../infiniband ... This is expected on instances
+  # without EFA"). trn2.3xlarge's default network interface (no
+  # pool.networkInterfaces override, this chart's own Prerequisites) has
+  # no EFA device at that PCI address, so the engine crashed during its
+  # own startup, before ever reaching a listening state, every time this
+  # was reached on real hardware. true (default) sets
+  # NEURON_SKIP_EFA_AFFINITY=1, which the plugin's own error message names
+  # as the fix ("not a correctness requirement"). Set false only once a
+  # node with a real, co-located EFA device for this Neuron device is
+  # confirmed on real hardware, to get the affinity optimization back;
+  # false renders no such variable at all (unset, the plugin's own
+  # default), rather than an explicit "0" whose parsing was not checked
+  # against the plugin's own source.
+  skipEfaAffinity: true
+
+# ClusterIP: reachable only from inside the cluster. vLLM has no
+# authentication of its own here.
+service:
+  type: ClusterIP
+  port: 8000
+
+metrics:
+  # Adds the vllm-metrics=true pod label and the prometheus.io/* annotations
+  # that the "vllm" scrape job in examples/inference/_shared/dashboards/
+  # scrape-configs.yaml selects on.
+  enabled: true
+
+networkPolicy:
+  # Default deny, name the exception (#63): the same policy as
+  # ../../agg-baseline.
+  enabled: true
+  metricsScrapeFrom: []
+
+# Skeleton only, the same shape as ../../agg-baseline/values.yaml's own
+# kvCacheTier: "gpu-only" (no kv-transfer-config at all) is the default and
+# the only mode with any evidence behind it; local/remote render
+# LMCacheMPConnector alone and are unverified on Neuron in every respect
+# (../disagg-pd/values.yaml, kvCacheTier).
+kvCacheTier:
+  mode: gpu-only
+  lmcache:
+    mpServerEndpoint: ""
+    extraConfig: {}

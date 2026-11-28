@@ -49,7 +49,7 @@ Transport is explicit. With `transport.backend=LIBFABRIC` (the default), both ro
 | Nodes that can pull `vllm/vllm-openai` from Docker Hub and model weights from Hugging Face | The image and the weights are downloaded at start |
 | `kubectl` and Helm 3.8 or later on your workstation | Installing the chart |
 
-GPU only: neither the vLLM Neuron plugin nor NeuronX Distributed Inference ships a disaggregated prefill/decode path today, so this chart has no Neuron variant.
+GPU only. The AWS Trainium counterpart, on the vLLM Neuron plugin, is [`../neuron/disagg-pd/`](../neuron/disagg-pd/).
 
 ## Deploy
 

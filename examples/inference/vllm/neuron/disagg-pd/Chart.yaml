@@ -1,0 +1,16 @@
+apiVersion: v2
+name: vllm-neuron-disagg-pd
+description: >-
+  vLLM prefill/decode disaggregated serving on AWS Trainium with the vLLM
+  Neuron plugin: a prefill Deployment and a decode Deployment that move the
+  KV cache with NIXL over libfabric/EFA, behind a small proxy that sends each
+  request to prefill first and then streams the answer from decode. Prefill
+  and decode never share a node by default.
+type: application
+version: 0.1.0
+appVersion: "0.29.0.1.2.0"
+home: https://github.com/littlemex/distai-platform
+sources:
+  - https://github.com/littlemex/distai-platform
+  - https://github.com/vllm-project/vllm-neuron
+  - https://awsdocs-neuron.readthedocs-hosted.com/en/latest/release-notes/components/vllm-neuron.html
