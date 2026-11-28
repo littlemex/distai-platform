@@ -133,7 +133,7 @@ cleanup() {
   # "absent" from the AWS-documented not-found signature for that API,
   # reporting anything else as UNKNOWN for a human to investigate rather
   # than as ok. `set +e`/`set -e` bracket this block: this script's own
-  # set -e (line 16) would otherwise abort the whole sweep (skipping every
+  # set -e (this script's own, near the top) would otherwise abort the whole sweep (skipping every
   # check after the first failure) the moment any one call's own exit
   # status is read directly, rather than let each check run to completion
   # and report its own result.
@@ -599,8 +599,8 @@ EOF
   kubectl logs "pod/ds-reader-${team}" -n "${team}" | tee "${RESULTS_DIR}/check3-${team}-dataset-read.log"
   grep -q "shared-dataset-content" "${RESULTS_DIR}/check3-${team}-dataset-read.log" || { log "CHECK 3 FAIL: ${team} could not read the shared dataset"; exit 1; }
   # "Read-only file system" specifically, not also "Permission denied":
-  # templates/seed.yaml (the B1 fix) creates datasets as root:root 0755,
-  # not group-writable, so a non-root team pod's write would get
+  # templates/seed.yaml creates datasets as root:root 0755 (no `provision`,
+  # so no group-write bit), so a non-root team pod's write would get
   # "Permission denied" from the directory's own raw unix mode alone,
   # whether or not the datasets-ro mount itself actually enforces
   # read-only access at all - that reading would make this assertion

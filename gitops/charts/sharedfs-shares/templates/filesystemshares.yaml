@@ -26,7 +26,10 @@
 # including gitops/charts/sharedfs-shares converged Synced and Healthy
 # for the first time across every attempt to date, with the
 # cross-ApplicationSet race this PR's Test Results first suspected never
-# recurring in three further attempts (7, 8, 9) against this fix.
+# recurring in any of the four further attempts that actually reached
+# this code (7, 9, 10, 11 - attempt 8 never generated this chart's own
+# Application at all, for an unrelated reason, so it does not count
+# either way).
 #
 # Both `checkpoints` and `datasets` are themselves top-level directories
 # whose own parent is the file system root - sharedfs's own README: "The
